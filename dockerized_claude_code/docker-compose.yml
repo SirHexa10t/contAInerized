@@ -1,0 +1,23 @@
+services:
+  claude-code:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+    container_name: claude-code_${AGENT_NAME}
+    stdin_open: true   # -i (interactive)
+    tty: true          # -t (allocate pseudo-TTY)
+    volumes:
+      - ${AI_WORKSPACE:-/ai_workspace}:/workspace
+      - ${AGENT_STATE}:/home/claude/.claude
+      - ${CREDENTIALS_FILE}:/home/claude/.claude.json
+    environment:
+      - TERM                # improves(?) terminal display colors
+      - CLAUDE_MODEL
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+      - CLAUDE_CODE_ENABLE_THINKING
+      # - ANTHROPIC_API_KEY   # Inherited from host shell — no value needed here
+    # Optional: restrict network access for extra isolation
+    # network_mode: none
+     
