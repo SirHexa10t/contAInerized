@@ -56,27 +56,25 @@ def sync_state(agent_dir):
 
 
 def ensure_image():
-    """Rebuild the image if it doesn't exist."""
-    result = subprocess.run(
-        ["docker", "compose", "images", "-q"], capture_output=True, text=True  # returns image IDs if built
-    )
-    if not result.stdout.strip():
-        print("  Building image...")
-        ret = subprocess.call(["docker", "compose", "build"])  # streams output to terminal
-        if ret != 0:
-            sys.exit(ret)
+    """Rebuild the image"""
+    # result = subprocess.run(["docker", "compose", "images", "-q"], capture_output=True, text=True)  # returns image IDs if built
+    print("  Building image...")
+    ret = subprocess.call(["docker", "compose", "build"])  # streams output to terminal
+    if ret != 0:
+        sys.exit(ret)
 
 
 def launch(agent_dir):
     """Set env vars, ensure image exists, and exec docker compose."""
     os.environ["HOST_UID"] = str(os.getuid())
-    os.environ.update(parse_conf(agent_dir))
     os.environ["AGENT_STATE"] = str(sync_state(agent_dir))
     os.environ["AGENT_NAME"] = agent_dir.name
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
+    conf = parse_conf(agent_dir) 
+    os.environ.update(conf)  # load agent configurations
     ensure_image()
     print(f"\033]0;Claude Code — {agent_dir.name}\007", end="", flush=True)  # set terminal window title
-    cmd = ["docker", "compose", "run", "--rm", "-it", "claude-code"] + sys.argv[1:]
+    cmd = ["docker", "compose", "run", "--rm", "-it"] + [item for key in conf for item in ("-e", key)] + ["claude-code",] + sys.argv[1:]
     sys.exit(subprocess.call(cmd))  # exit with docker's return code
 
 

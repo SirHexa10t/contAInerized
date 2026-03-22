@@ -22,7 +22,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 ENV PATH="/home/claude/.local/bin:$PATH"
 ENV DISABLE_AUTOUPDATER=1
+ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV USE_BUILTIN_RIPGREP=0
 
 WORKDIR /workspace
 ENTRYPOINT ["claude"]
+

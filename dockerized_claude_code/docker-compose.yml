@@ -14,10 +14,6 @@ services:
       - ${CREDENTIALS_FILE}:/home/claude/.claude.json
     environment:
       - TERM                # improves(?) terminal display colors
-      - CLAUDE_MODEL
-      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
-      - CLAUDE_CODE_ENABLE_THINKING
-      # - ANTHROPIC_API_KEY   # Inherited from host shell — no value needed here
     # Optional: restrict network access for extra isolation
     # network_mode: none
      

@@ -1,0 +1,94 @@
+
+Claude-Code Commands:
+    https://code.claude.com/docs/en/overview
+
+
+
+Shortcuts                                                                                                         
+  ! for bash mode                                                                                                                                                              
+  / for commands                                                                                                                                                               
+  @ for file paths                                                                                                                                                             
+  & for background                                                                                                                                                             
+  /btw for side question                                                                                                                                                         
+                                                                                                                                                                               
+  double tap esc to clear input   
+  shift + tab to auto-accept edits
+  ctrl + o for verbose output     
+  ctrl + t to toggle tasks        
+  backslash (\) + return (⏎) for newline                         
+
+  ctrl + shift + - to undo       
+  ctrl + z to suspend            
+  ctrl + v to paste images       
+  meta + p to switch model       
+  meta + o to toggle fast mode 
+  ctrl + s to stash prompt       
+  ctrl + g to edit in $EDITOR                                                                 
+        
+                                                                 
+Commands                           
+    /add-dir             Add a new working directory                                                                                  
+    /agents              Manage agent configurations                                                                                  
+    /branch              Create a branch of the current conversation at this point                                                    
+    /btw                 Ask a quick side question without interrupting the main conversation                                         
+    /chrome              Claude in Chrome (Beta) settings                                                                             
+    /clear               Clear conversation history and free up context                                                               
+    /color               Set the prompt bar color for this session                                                                    
+    /compact             Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]
+    /config              Open config panel                                                                                            
+    /context             Visualize current context usage as a colored grid                                                            
+    /copy                Copy Claude's last response to clipboard (or /copy N for the Nth-latest)                                     
+    /cost                Show the total cost and duration of the current session                                                      
+    /diff                View uncommitted changes and per-turn diffs                                                                  
+    /doctor              Diagnose and verify your Claude Code installation and settings                                               
+    /effort              Set effort level for model usage                                                                             
+    /exit                Exit the REPL                                                                                                
+    /export              Export the current conversation to a file or clipboard                                                       
+    /fast                Toggle fast mode (Opus 4.6 only)                                                                             
+    /help                Show help and available commands                                                                             
+    /hooks               View hook configurations for tool events                                                                     
+    /ide                 Manage IDE integrations and show status                                                                      
+    /init                Initialize a new CLAUDE.md file with codebase documentation                                                  
+    /insights            Generate a report analyzing your Claude Code sessions                                                        
+    /install-github-app  Set up Claude GitHub Actions for a repository                                                                
+    /install-slack-app   Install the Claude Slack app                                                                                 
+    /login               Switch Anthropic accounts                                                                                    
+    /logout              Sign out from your Anthropic account                                                                         
+    /mcp                 Manage MCP servers                                                                                           
+    /memory              Edit Claude memory files                                                                                     
+    /mobile              Show QR code to download the Claude mobile app                                                               
+    /model               Set the AI model for Claude Code (currently Opus 4.6)                                                        
+    /permissions         Manage allow & deny tool permission rules                                                                    
+    /plan                Enable plan mode or view the current session plan                                                            
+    /plugin              Manage Claude Code plugins                                                                                   
+    /pr-comments         Get comments from a GitHub pull request                                                                      
+    /release-notes       View release notes                                                                                           
+    /reload-plugins      Activate pending plugin changes in the current session                                                       
+    /rename              Rename the current conversation                                                                              
+    /resume              Resume a previous conversation                                                                               
+    /review              Review a pull request                                                                                        
+    /rewind              Restore the code and/or conversation to a previous point                                                     
+    /sandbox             ⚠ sandbox disabled (⏎ to configure)                                                                          
+    /security-review     Complete a security review of the pending changes on the current branch                                      
+    /skills              List available skills                                                                                        
+    /stats               Show your Claude Code usage statistics and activity                                                          
+    /status              Show Claude Code status including version, model, account, API connectivity, and tool statuses               
+    /statusline          Set up Claude Code's status line UI                                                                          
+    /stickers            Order Claude Code stickers                                                                                   
+    /tasks               List and manage background tasks                                                                             
+    /terminal-setup      Install Shift+Enter key binding for newlines                                                                 
+    /theme               Change the theme                                                                                             
+    /upgrade             Upgrade to Max for higher rate limits and more Opus                                                          
+    /usage               Show plan usage limits                                                                                       
+    /vim                 Toggle between Vim and Normal editing modes                                   
+
+
+Custom-Commands
+    /batch              Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR. (bundled)
+    /claude-api         Build apps with the Claude API or Anthropic SDK.…                                  
+    /debug              Enable debug logging for this session and help diagnose issues (bundled)               
+    /loop               Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m) (bundled)
+    /simplify           Review changed code for reuse, quality, and efficiency, then fix any issues found. (bundled)
+    /update-config      Use this skill to configure the Claude Code harness via settings.json. Automated behaviors ("from now on when X", "each time X", "whenever X", "before/after X") require hooks configured in settings.json - the harness executes t…
+    
+    
