@@ -1,81 +1,102 @@
 #!/usr/bin/env python3
-import os, sys, subprocess
+import os, sys, subprocess, shutil
 from pathlib import Path
 from pick import pick  # pip install pick
 from dotenv import dotenv_values  # pip install python-dotenv
 
 PROJECT = Path(__file__).resolve().parent
-AGENTS = PROJECT / "agents"
+AGENTS_DIR = PROJECT / "agents"
 WORKSPACE = "/ai_workspace"
 
+DEFAULT_CONF = AGENTS_DIR / "default.conf"
+MD_EXT = ".md"
+CONF_EXT = ".conf"
 AGENTS_STATE = Path.home() / ".claude-agents"
 CREDENTIALS_FILE = AGENTS_STATE / "claude.json"
 
-claude_md = lambda d: d / "CLAUDE.md"
-agent_conf = lambda d: d / "agent.conf"
-state_dir = lambda d: AGENTS_STATE / d.name
+agent_md = lambda name: AGENTS_DIR / f"{name}{MD_EXT}"
+agent_conf = lambda name: AGENTS_DIR / f"{name}{CONF_EXT}"
+state_dir = lambda name: AGENTS_STATE / name
+state_md = lambda name: state_dir(name) / "CLAUDE.md"
+state_history = lambda name: state_dir(name) / "history.jsonl"
 
 
 def discover_agents():
-    """List all agent directories under agents/."""
-    agents = sorted(p for p in AGENTS.iterdir() if p.is_dir())
+    """List all agent names by finding .md files in agents/."""
+    agents = sorted(
+        p.stem for p in AGENTS_DIR.glob(f"*{MD_EXT}")
+        if p.stem != "default"
+    )
     if not agents:
-        sys.exit("No agents found. Copy the template first:\n  cp -r template/ agents/<n>")
+        sys.exit("No agents found. Create an .md file in agents/.")
     return agents
 
 
-def agent_label(agent_dir):
+def agent_label(name):
     """Format 'name — heading' for the selection menu."""
-    claude_md_path = claude_md(agent_dir)
-    if claude_md_path.exists():
-        heading = claude_md_path.read_text().splitlines()[0].lstrip("# ").strip()  # first line sans markdown heading
-        return f"{agent_dir.name} — {heading}"
-    return agent_dir.name
+    md = agent_md(name)
+    if md.exists():
+        heading = md.read_text().splitlines()[0].lstrip("# ").strip()
+        return f"{name} — {heading}"
+    return name
 
 
 def select_agent(agents):
-    """Show an interactive picker and return the chosen agent directory."""
+    """Show an interactive picker and return the chosen agent name."""
     labels = [agent_label(a) for a in agents]
-    _, idx = pick(labels, "Select an agent:", indicator="→")  # arrow-key menu
+    _, idx = pick(labels, "Select an agent:", indicator="→")
     return agents[idx]
 
 
-def parse_conf(agent_dir):
-    """Parse all key=value pairs from agent.conf into a dict."""
-    return dotenv_values(agent_conf(agent_dir))
+def parse_conf(name):
+    """Load default.conf, then overlay agent-specific .conf if it exists."""
+    conf = dotenv_values(DEFAULT_CONF) if DEFAULT_CONF.exists() else {}
+    override = agent_conf(name)
+    if override.exists():
+        conf.update(dotenv_values(override))
+    return conf
 
 
-def sync_state(agent_dir):
-    """Copy CLAUDE.md into the persistent state dir where auth tokens live."""
-    sd = state_dir(agent_dir)
+def sync_state(name):
+    """Copy the agent .md as CLAUDE.md into the persistent state dir."""
+    sd = state_dir(name)
+    if state_history(name).exists():
+        _, idx = pick(["No", "Yes"], "History found. Clear it?", indicator="→")
+        if idx == 1:
+            shutil.rmtree(sd)
     sd.mkdir(parents=True, exist_ok=True)
-    (claude_md(sd)).write_text(claude_md(agent_dir).read_text())
+
+    state_md(name).write_text(agent_md(name).read_text())
     if not CREDENTIALS_FILE.exists():
         CREDENTIALS_FILE.write_text("{}")
     return sd
 
 
 def ensure_image():
-    """Rebuild the image"""
-    # result = subprocess.run(["docker", "compose", "images", "-q"], capture_output=True, text=True)  # returns image IDs if built
+    """Rebuild the image."""
     print("  Building image...")
-    ret = subprocess.call(["docker", "compose", "build"])  # streams output to terminal
+    ret = subprocess.call(["docker", "compose", "build"])
     if ret != 0:
         sys.exit(ret)
 
 
-def launch(agent_dir):
+def launch(name):
     """Set env vars, ensure image exists, and exec docker compose."""
     os.environ["HOST_UID"] = str(os.getuid())
-    os.environ["AGENT_STATE"] = str(sync_state(agent_dir))
-    os.environ["AGENT_NAME"] = agent_dir.name
+    os.environ["AGENT_STATE"] = str(sync_state(name))
+    os.environ["AGENT_NAME"] = name
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
-    conf = parse_conf(agent_dir) 
-    os.environ.update(conf)  # load agent configurations
+    conf = parse_conf(name)
+    os.environ.update(conf)
     ensure_image()
-    print(f"\033]0;Claude Code — {agent_dir.name}\007", end="", flush=True)  # set terminal window title
-    cmd = ["docker", "compose", "run", "--rm", "-it"] + [item for key in conf for item in ("-e", key)] + ["claude-code",] + sys.argv[1:]
-    sys.exit(subprocess.call(cmd))  # exit with docker's return code
+    print(f"\033]0;Claude Code — {name}\007", end="", flush=True)
+    cmd = (
+        ["docker", "compose", "run", "--rm", "-it"]
+        + [item for key in conf for item in ("-e", key)]
+        + ["claude-code"]
+        + sys.argv[1:]
+    )
+    sys.exit(subprocess.call(cmd))
 
 
 if __name__ == "__main__":
