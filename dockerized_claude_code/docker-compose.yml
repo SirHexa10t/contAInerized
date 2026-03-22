@@ -1,6 +1,6 @@
 services:
   claude-code:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
       args:
@@ -16,4 +16,4 @@ services:
       - TERM                # improves(?) terminal display colors
     # Optional: restrict network access for extra isolation
     # network_mode: none
-     
+
