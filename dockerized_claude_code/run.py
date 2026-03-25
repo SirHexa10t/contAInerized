@@ -12,13 +12,14 @@ DEFAULT_CONF = AGENTS_DIR / "default.conf"
 MD_EXT = ".md"
 CONF_EXT = ".conf"
 AGENTS_STATE = Path.home() / ".claude-agents"
-CREDENTIALS_FILE = AGENTS_STATE / "claude.json"
+ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
+CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
 
 agent_md = lambda name: AGENTS_DIR / f"{name}{MD_EXT}"
 agent_conf = lambda name: AGENTS_DIR / f"{name}{CONF_EXT}"
 state_dir = lambda name: AGENTS_STATE / name
-state_md = lambda name: state_dir(name) / "CLAUDE.md"
-state_history = lambda name: state_dir(name) / "history.jsonl"
+state_md = lambda name: state_dir(name) / "CLAUDE.md"           # custom agent instructions
+state_history = lambda name: state_dir(name) / "history.jsonl"  # indicator of past session
 
 
 def discover_agents():
@@ -67,6 +68,8 @@ def sync_state(name):
     sd.mkdir(parents=True, exist_ok=True)
 
     state_md(name).write_text(agent_md(name).read_text())
+    if not ACCOUNT_FILE.exists():
+        ACCOUNT_FILE.write_text("{}")
     if not CREDENTIALS_FILE.exists():
         CREDENTIALS_FILE.write_text("{}")
     return sd
@@ -80,11 +83,13 @@ def ensure_image():
         sys.exit(ret)
 
 
-def launch(name):
+def launch():
     """Set env vars, ensure image exists, and exec docker compose."""
+    name = select_agent(discover_agents())
     os.environ["HOST_UID"] = str(os.getuid())
     os.environ["AGENT_STATE"] = str(sync_state(name))
     os.environ["AGENT_NAME"] = name
+    os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
     conf = parse_conf(name)
     os.environ.update(conf)
@@ -101,5 +106,4 @@ def launch(name):
 
 if __name__ == "__main__":
     assert Path(WORKSPACE).is_dir(), f"Error: {WORKSPACE} does not exist."
-    selected = select_agent(discover_agents())
-    launch(selected)
+    launch()

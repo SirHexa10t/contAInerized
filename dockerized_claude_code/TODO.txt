@@ -1,3 +1,0 @@
-
-* resolve login issue when switching between Opus, and Haiku (such as in use by Agent "golem")
-

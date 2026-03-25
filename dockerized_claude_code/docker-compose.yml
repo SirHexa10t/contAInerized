@@ -11,7 +11,8 @@ services:
     volumes:
       - ${AI_WORKSPACE:-/ai_workspace}:/workspace
       - ${AGENT_STATE}:/home/claude/.claude
-      - ${CREDENTIALS_FILE}:/home/claude/.claude.json
+      - ${ACCOUNT_FILE}:/home/claude/.claude.json  # same onboarding info for all agents
+      - ${CREDENTIALS_FILE}:/home/claude/.claude/.credentials.json  # same api-token info for all agents
     environment:
       - TERM                # improves(?) terminal display colors
     # Optional: restrict network access for extra isolation
