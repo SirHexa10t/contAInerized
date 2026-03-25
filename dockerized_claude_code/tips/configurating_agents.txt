@@ -1,0 +1,7 @@
+
+# Don't set the following config, it would ignore your credentials; it's not meant for CLI use.
+CLAUDE_CODE_SIMPLE=1
+
+
+
+
