@@ -1,0 +1,33 @@
+
+switch between agents mid-session
+=================================
+It's possible to switch between agents mid-session, but only if they have the same settings (in .conf files)
+
+Claude Code supports custom commands in .claude/commands/. You could create a /switch command that overwrites the active CLAUDE.md with a different agent's instructions. Claude Code re-reads CLAUDE.md as context refreshes, so the new
+persona would take effect.
+
+1. Mount the agents/ directory into the container (it's not currently mounted).
+2. Create a command file like .claude/commands/switch.md that instructs Claude to:
+- List available .md files in the mounted agents dir
+- Ask which one to switch to
+- Overwrite the active CLAUDE.md with that agent's content
+
+Such a feature wasn't developed because the conf limitation is too big.
+
+
+
+
+Extra agent features (through extra agent files)
+====================
+Custom slash commands (.claude/commands/*.md) — Give each agent its own toolkit of commands. A reviewer agent gets /checklist, a researcher gets /deep-dive, etc. These are just markdown prompt templates.
+
+MCP servers (.claude/settings.json → mcpServers) — This is the big one. You can give agents access to entirely different tools: a database agent gets a Postgres MCP server, a researcher gets a web-search MCP, a DevOps agent gets a      
+Kubernetes MCP. This fundamentally changes what the agent can do, not just how it thinks.                                                                                                                                                   
+
+Hooks (settings.json → hooks) — Shell commands that fire before/after tool calls. One agent could auto-lint after every edit, another could block destructive bash commands, another could log all file changes for audit.                  
+
+Tool permissions (settings.json → allow/deny) — Restrict what tools an agent can use. A read-only reviewer agent could be denied Write, Edit, and Bash. A dangerous "yolo" agent could have everything allowed.                             
+
+.claudeignore — Control what files each agent can see. A frontend agent ignores backend code, a security agent sees everything.  
+
+
