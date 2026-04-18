@@ -13,6 +13,8 @@ services:
       - ${AGENT_STATE}:/home/claude/.claude
       - ${ACCOUNT_FILE}:/home/claude/.claude.json  # same onboarding info for all agents
       - ${CREDENTIALS_FILE}:/home/claude/.claude/.credentials.json  # same api-token info for all agents
+      - ./custom_commands:/home/claude/.claude/commands:ro          # shared slash commands for all agents
+      - ${AI_WORKSPACE:-/ai_workspace}/.claude_summary:/home/claude/.claude/projects/-workspace/memory/MEMORY.md  # shared project summary
     environment:
       - TERM                # improves(?) terminal display colors
     # Optional: restrict network access for extra isolation

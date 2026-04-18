@@ -34,6 +34,16 @@ All agent state is written to `~/.claude-agents/`:
     <various_files>       # History and management of AI Agent
 ```
 
+## Custom Commands
+
+Custom slash commands are available to all agents. To use one, type its name during a session:
+
+| Command | Description |
+|---------|-------------|
+| `/write-summary` | Analyzes the project and writes a structured summary to `.claude_summary` in the workspace. On subsequent runs, updates the existing summary rather than rewriting from scratch. The summary is automatically loaded into future sessions. |
+
+Commands are stored in `custom_commands/` and mounted read-only into every agent's environment.
+
 ## Adding an Agent
 
 1. Create `agents/<name>.md` — this becomes the agent's `CLAUDE.md` (its system instructions).

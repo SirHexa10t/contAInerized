@@ -13,7 +13,7 @@ RUN mkdir -p /workspace
 ARG HOST_UID
 RUN useradd -m -s /bin/bash -u ${HOST_UID} claude \
     && chown -R claude:claude /workspace \
-    && mkdir -p /home/claude/.claude \
+    && mkdir -p /home/claude/.claude/projects/-workspace/memory \
     && chown -R claude:claude /home/claude/.claude
 
 USER claude

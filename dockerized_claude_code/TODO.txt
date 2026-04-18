@@ -1,3 +1,8 @@
 Add "skills"?
     I want to specifically add the option to dump context (or whatever you'd call the acquaitence with the project's layout and conditions) into a file
     So there should be a command that updates such a file (creates it, if it doesn't exist), and a command that reads it.
+
+Integrate tips from this video:    
+    You've Been Using AI the Hard Way (Use This Instead)
+    https://www.youtube.com/watch?v=MsQACpcuTkU
+

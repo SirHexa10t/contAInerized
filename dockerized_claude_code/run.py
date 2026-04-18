@@ -11,9 +11,11 @@ WORKSPACE = "/ai_workspace"
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
 MD_EXT = ".md"
 CONF_EXT = ".conf"
+COMPOSE_FILE = PROJECT / "docker-compose.yml"
 AGENTS_STATE = Path.home() / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
+SUMMARY_FILE = Path(WORKSPACE) / ".claude_summary"
 
 state_dir = lambda name: AGENTS_STATE / name
 state_md = lambda name: state_dir(name) / "CLAUDE.md"           # custom agent instructions
@@ -59,13 +61,15 @@ def sync_state(name, md_path):
         ACCOUNT_FILE.write_text("{}")
     if not CREDENTIALS_FILE.exists():
         CREDENTIALS_FILE.write_text("{}")
+    if not SUMMARY_FILE.exists():
+        SUMMARY_FILE.write_text("")
     return sd
 
 
 def ensure_image():
     """Rebuild the image."""
     print("  Building image...")
-    ret = subprocess.call(["docker", "compose", "build"])
+    ret = subprocess.call(["docker", "compose", "-f", str(COMPOSE_FILE), "build"])
     if ret != 0:
         sys.exit(ret)
 
@@ -83,7 +87,7 @@ def launch():
     ensure_image()
     print(f"\033]0;Claude Code — {name}\007", end="", flush=True)
     cmd = (
-        ["docker", "compose", "run", "--rm", "-it"]
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
         + [item for key in conf for item in ("-e", key)]
         + ["claude-code"]
         + sys.argv[1:]

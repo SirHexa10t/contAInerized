@@ -1,0 +1,93 @@
+- [Project Summary](#project-summary) — AI-generated overview of purpose, structure, stack, and current state
+
+---
+
+## Project Summary
+
+### Purpose
+
+A launcher and orchestrator for pre-configured Claude Code agents. Each agent runs Claude Code CLI inside a Docker container with its own model, parameters, and system instructions, while sharing authentication, workspace, and custom slash commands. The user selects an agent from an interactive terminal menu and is dropped into a Claude Code session.
+
+### Tech Stack
+
+- **Python 3** — launcher script (`run.py`)
+- **Docker + Docker Compose** — containerized Claude Code environments (Debian bookworm-slim base)
+- **Claude Code CLI** — installed inside the container via `claude.ai/install.sh`
+- **Python deps**: `pick` (interactive terminal picker), `python-dotenv` (`.conf` file parsing)
+
+### Project Structure
+
+```
+run.py                  — entry point: agent picker → Docker launcher
+Dockerfile              — builds Claude Code container image
+docker-compose.yml      — service definition, volume mounts for state/auth/commands
+agents/
+  default.conf          — default env vars (Opus, max effort, thinking on)
+  <name>.md             — agent system instructions (becomes CLAUDE.md in container)
+  <name>.conf           — optional per-agent env var overrides
+custom_commands/
+  write-summary.md      — /write-summary slash command (project summary generator)
+tips/                   — user-facing documentation files
+TODO.txt                — feature backlog
+```
+
+### Architecture
+
+`run.py` discovers agents by globbing `agents/*.md`, displays them via `pick`, loads the matching `.conf` (falling back to `default.conf`), syncs state to `~/.claude-agents/<name>/`, builds the Docker image, and execs `docker compose run`. The container mounts:
+
+- `/ai_workspace` → `/workspace` (shared work directory)
+- `~/.claude-agents/<name>/` → `/home/claude/.claude` (per-agent state)
+- Shared `.claude.json` and `.credentials.json` (one-time OAuth, reused by all agents)
+- `custom_commands/` → read-only slash commands
+- `.claude_summary` → agent's `MEMORY.md` (shared project context across agents)
+
+### Agents (shipped)
+
+| Agent | Model | Role |
+|-------|-------|------|
+| `golem` | Haiku 4.5, low effort, no thinking | Minimal fast assistant |
+| `researcher` | Opus 4.6, max effort, tool search | Thorough documentation researcher |
+| `strict-reviewer` | Opus 4.6 (defaults) | Severity-based code reviewer |
+| `refactorer` | Opus 4.6 (defaults) | Perfectionist refactoring advisor |
+| `poet` | Sonnet 4.5, medium effort | Dramatic literary-styled coder |
+| `dockerized-claude-code-improver` | Opus 4.6 (defaults) | Meta-agent for improving this project |
+
+### Conventions and Patterns
+
+- Agent `.md` first line must be `# Title` — the picker extracts it as the display label.
+- Per-agent `.conf` fully replaces `default.conf` (no merging). Omitting `.conf` falls back to defaults.
+- `default.conf` doubles as a reference of all supported Claude Code env vars (commented).
+- Workspace must exist at `/ai_workspace` on the host (or be symlinked).
+- No test suite. No git repo in the workspace.
+
+### Current State
+
+- `TODO.txt` tracks two items: a planned "skills" feature for project context dumping (partially addressed by `/write-summary`), and tips to integrate from a YouTube video on AI usage.
+- Dockerfile recently updated to pre-create `projects/-workspace/memory/` so the `.claude_summary` bind mount lands in a claude-owned directory (previously Docker created it as root, blocking sibling file creation). Requires image rebuild to take effect.
+- No CI, no tests, no linting. The project is a personal productivity tool in active use.
+
+### File Manifest
+
+| File | Modified (epoch) | Modified (human) |
+|------|-----------------|------------------|
+| custom_commands/write-summary.md | 1776485468.8299086750 | Sat Apr 18 04:11:08 2026 |
+| TODO.txt | 1776484148.9302451070 | Sat Apr 18 03:49:08 2026 |
+| Dockerfile | 1776484098.7277556750 | Sat Apr 18 03:48:18 2026 |
+| README.md | 1776483588.4081740690 | Sat Apr 18 03:39:48 2026 |
+| docker-compose.yml | 1776483292.5561407190 | Sat Apr 18 03:34:52 2026 |
+| run.py | 1776483270.5016054290 | Sat Apr 18 03:34:30 2026 |
+| tips/program_expansion.txt | 1774460937.8407643790 | Wed Mar 25 17:48:57 2026 |
+| agents/golem.conf | 1774431167.7587499560 | Wed Mar 25 09:32:47 2026 |
+| tips/configurating_agents.txt | 1774431084.0108572940 | Wed Mar 25 09:31:24 2026 |
+| tips/login.txt | 1774424528.5225492420 | Wed Mar 25 07:42:08 2026 |
+| agents/poet.md | 1774207589.7181400100 | Sun Mar 22 19:26:29 2026 |
+| agents/poet.conf | 1774204944.6190803520 | Sun Mar 22 18:42:24 2026 |
+| agents/researcher.conf | 1774200720.9169213350 | Sun Mar 22 17:32:00 2026 |
+| agents/researcher.md | 1774199498.7066044590 | Sun Mar 22 17:11:38 2026 |
+| agents/golem.md | 1774198572.8618436960 | Sun Mar 22 16:56:12 2026 |
+| tips/chat_syntax.txt | 1774196909.2160668870 | Sun Mar 22 16:28:29 2026 |
+| agents/strict-reviewer.md | 1774196909.2150668750 | Sun Mar 22 16:28:29 2026 |
+| .dockerignore | 1774196909.2150668750 | Sun Mar 22 16:28:29 2026 |
+| agents/refactorer.md | 1774196909.2140668620 | Sun Mar 22 16:28:29 2026 |
+| agents/dockerized-claude-code-improver.md | 1774196909.2130668500 | Sun Mar 22 16:28:29 2026 |
+| agents/default.conf | 1774196909.2120668370 | Sun Mar 22 16:28:29 2026 |
