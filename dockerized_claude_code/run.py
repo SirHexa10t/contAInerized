@@ -18,34 +18,30 @@ CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
 DEFAULT_WORKSPACE = os.environ.get("AI_WORKSPACE", "/ai_workspace")
 
-state_dir = lambda name: AGENTS_STATE / name
-state_md = lambda name: state_dir(name) / "CLAUDE.md"           # custom agent instructions
-state_history = lambda name: state_dir(name) / "history.jsonl"  # indicator of past session
+SESSION_SEP = "__"
+state_dir = lambda agent, session: AGENTS_STATE / f"{agent}{SESSION_SEP}{session}"
+state_md = lambda agent, session: state_dir(agent, session) / "CLAUDE.md"
 
 
-def select_agent():
-    """Discover agents, show interactive picker, return (name, md_path)."""
-    agents = tuple(sorted(
-        (p.stem, p) for p in AGENTS_DIR.glob(f"*{MD_EXT}")
-        if p.stem != "default"
-    ))
-    if not agents:
-        sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
-    width = max(len(name) for name, _ in agents)
-    labels = [
-        f"{name:<{width}} — {path.read_text().splitlines()[0].lstrip('# ').strip()}"
-        for name, path in agents
-    ]
-    _, idx = pick(labels, "Select an agent:", indicator="→")
-    return agents[idx]
+def list_instances(agent):
+    """Return session suffixes for existing {agent}__* state dirs, sorted."""
+    prefix = f"{agent}{SESSION_SEP}"
+    if not AGENTS_STATE.exists():
+        return []
+    return sorted(
+        d.name[len(prefix):] for d in AGENTS_STATE.iterdir()
+        if d.is_dir() and d.name.startswith(prefix)
+    )
 
 
-def parse_conf(md_path):
-    """Load agent-specific .conf, falling back to default.conf only if none exists."""
-    override = md_path.with_suffix(CONF_EXT)
-    if override.exists():
-        return dotenv_values(override)
-    return dotenv_values(DEFAULT_CONF) if DEFAULT_CONF.exists() else {}
+def list_all_instances():
+    """Return every `{agent}__{session}` dir under AGENTS_STATE, sorted."""
+    if not AGENTS_STATE.exists():
+        return []
+    return sorted(
+        d.name for d in AGENTS_STATE.iterdir()
+        if d.is_dir() and SESSION_SEP in d.name
+    )
 
 
 def load_workspace_map():
@@ -61,39 +57,118 @@ def save_workspace_map(mapping):
     AGENT_WORKSPACE_MAP_FILE.write_text(pformat(mapping) + "\n")
 
 
-def resolve_workspace(name):
-    """Return workspace path for agent. Prompt whenever the agent has no mapping
-    entry (even if state already exists); exit on invalid existing mapping.
-    Writes the resolved absolute path into the map file."""
-    mapping = load_workspace_map()
-    if name in mapping:
-        path = mapping[name]
-        if not Path(path).is_dir():
-            sys.exit(
-                f"Workspace for '{name}' is not a valid directory: {path}\n"
-                f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
-            )
-        return path
+def parse_conf(md_path):
+    """Load agent-specific .conf, falling back to default.conf only if none exists."""
+    override = md_path.with_suffix(CONF_EXT)
+    if override.exists():
+        return dotenv_values(override)
+    return dotenv_values(DEFAULT_CONF) if DEFAULT_CONF.exists() else {}
+
+
+def select_agent():
+    """Combined picker: new-agent rows, continue-instance rows, and a delete submenu.
+    Returns (agent, md_path, session_or_None, workspace_or_None)."""
+    MARKER_NEW = "✨ Create"
+    MARKER_CONT= " 🏷️ Cont."
+    MARKER_DEL = "⚠️ DELETE‼️"
     while True:
-        entered = input(f"Workspace path for '{name}' [{DEFAULT_WORKSPACE}]: ").strip() or DEFAULT_WORKSPACE
+        agents = tuple(sorted(
+            (p.stem, p) for p in AGENTS_DIR.glob(f"*{MD_EXT}")
+            if p.stem != "default"
+        ))
+        if not agents:
+            sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
+
+        width = max(len(name) for name, _ in agents)
+        mapping = load_workspace_map()
+
+        entries = []
+        for name, path in agents:
+            desc = path.read_text().splitlines()[0].lstrip("# ").strip()
+            entries.append((
+                f"{MARKER_NEW}  {name:<{width}} — {desc}",
+                ("new", name, path, None, None),
+            ))
+            for session in list_instances(name):
+                full = f"{name}{SESSION_SEP}{session}"
+                entries.append((
+                    f"{MARKER_CONT}      {full}",
+                    ("cont", name, path, session, mapping.get(full)),
+                ))
+
+        entries.append((
+            f"{MARKER_DEL}  (Move onto deletions menu)",
+            ("delete",),
+        ))
+
+        _, idx = pick([e[0] for e in entries], "Select an agent:", indicator="→")
+        action = entries[idx][1]
+
+        if action[0] == "delete":
+            delete_menu()
+            continue
+        _, name, path, session, workspace = action
+        return name, path, session, workspace
+
+
+def delete_menu():
+    """Flat picker over every `{agent}__{session}` dir. Confirms each deletion;
+    stays on this screen until the user picks Back."""
+    MARKER_DLET = "🗑 DELETE"
+    MARKER_BACK = "🚪  Back"
+    while True:
+        instances = list_all_instances()
+        entries = [(f"{MARKER_DLET}  {i}", i) for i in instances]
+        entries.append((f"{MARKER_BACK}  (Move back to Agent Selection)", None))
+
+        _, idx = pick(
+            [e[0] for e in entries], "‼️ DELETE AGENT INSTANCES ‼️", indicator="→"
+        )
+        target = entries[idx][1]
+
+        if target is None:
+            return
+        if input(f"Deleting '{target}' — Are you sure? [y/N]: ").strip().lower() != "y":
+            continue
+        shutil.rmtree(AGENTS_STATE / target)
+        mapping = load_workspace_map()
+        if target in mapping:
+            del mapping[target]
+            save_workspace_map(mapping)
+
+
+def prompt_workspace(agent):
+    """Prompt for a workspace path; Enter uses DEFAULT_WORKSPACE. Returns resolved absolute path."""
+    while True:
+        entered = input(
+            f"Workspace path for new '{agent}' instance [{DEFAULT_WORKSPACE}]: "
+        ).strip() or DEFAULT_WORKSPACE
         resolved = str(Path(entered).expanduser().resolve())
         if Path(resolved).is_dir():
-            mapping[name] = resolved
-            save_workspace_map(mapping)
             return resolved
         print(f"Not a directory: {resolved}")
 
 
-def sync_state(name, md_path):
-    """Copy the agent .md as CLAUDE.md into the persistent state dir."""
-    sd = state_dir(name)
-    if state_history(name).exists():
-        _, idx = pick(["No", "Yes"], "History found. Clear it?", indicator="→")
-        if idx == 1:
-            shutil.rmtree(sd)
-    (sd / "projects" / "-workspace" / "memory").mkdir(parents=True, exist_ok=True)
+def prompt_session(agent, workspace):
+    """Prompt for a session suffix; default = last segment of the workspace path.
+    Rejects collisions with existing `{agent}__{suffix}` state dirs."""
+    default = Path(workspace).name
+    while True:
+        suffix = input(f"Session suffix for '{agent}' [{default}]: ").strip() or default
+        if not suffix:
+            print("Session suffix cannot be empty.")
+            continue
+        if state_dir(agent, suffix).exists():
+            print(f"Session '{agent}{SESSION_SEP}{suffix}' already exists. Pick another name.")
+            continue
+        return suffix
 
-    state_md(name).write_text(md_path.read_text())
+
+def sync_state(agent, session, md_path):
+    """Copy the agent .md as CLAUDE.md into the persistent state dir."""
+    sd = state_dir(agent, session)
+    (sd / "projects" / "-workspace" / "memory").mkdir(parents=True, exist_ok=True)
+    state_md(agent, session).write_text(md_path.read_text())
     if not ACCOUNT_FILE.exists():
         ACCOUNT_FILE.write_text("{}")
     if not CREDENTIALS_FILE.exists():
@@ -110,19 +185,37 @@ def ensure_image():
 
 
 def launch():
-    """Set env vars, ensure image exists, and exec docker compose."""
-    name, md_path = select_agent()
-    workspace = resolve_workspace(name)
+    """Pick/build a session, resolve workspace, sync state, exec docker compose."""
+    agent, md_path, session, workspace = select_agent()
+
+    if workspace is None:
+        workspace = prompt_workspace(agent)
+    elif not Path(workspace).is_dir():
+        sys.exit(
+            f"Workspace for '{agent}{SESSION_SEP}{session}' is not a valid directory: {workspace}\n"
+            f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
+        )
+
+    if session is None:
+        session = prompt_session(agent, workspace)
+
+    full = f"{agent}{SESSION_SEP}{session}"
+    mapping = load_workspace_map()
+    if mapping.get(full) != workspace:
+        mapping[full] = workspace
+        save_workspace_map(mapping)
+
     os.environ["HOST_UID"] = str(os.getuid())
-    os.environ["AGENT_STATE"] = str(sync_state(name, md_path))
-    os.environ["AGENT_NAME"] = name
+    os.environ["AGENT_STATE"] = str(sync_state(agent, session, md_path))
+    os.environ["AGENT_NAME"] = agent
+    os.environ["AGENT_SESSION"] = session
     os.environ["AI_WORKSPACE"] = workspace
     os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
     conf = parse_conf(md_path)
     os.environ.update(conf)
     ensure_image()
-    print(f"\033]0;Claude Code — {name}\007", end="", flush=True)
+    print(f"\033]0;Claude Code — {full}\007", end="", flush=True)
     cmd = (
         ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
         + [item for key in conf for item in ("-e", key)]
