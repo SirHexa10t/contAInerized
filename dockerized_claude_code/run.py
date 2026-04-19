@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-import os, sys, subprocess, shutil
+import os, sys, subprocess, shutil, ast
 from pathlib import Path
+from pprint import pformat
 from pick import pick  # pip install pick
 from dotenv import dotenv_values  # pip install python-dotenv
 
 PROJECT = Path(__file__).resolve().parent
 AGENTS_DIR = PROJECT / "agents"
-WORKSPACE = "/ai_workspace"
 
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
 MD_EXT = ".md"
@@ -15,7 +15,8 @@ COMPOSE_FILE = PROJECT / "docker-compose.yml"
 AGENTS_STATE = Path.home() / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
-SUMMARY_FILE = Path(WORKSPACE) / ".claude_summary"
+AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
+DEFAULT_WORKSPACE = os.environ.get("AI_WORKSPACE", "/ai_workspace")
 
 state_dir = lambda name: AGENTS_STATE / name
 state_md = lambda name: state_dir(name) / "CLAUDE.md"           # custom agent instructions
@@ -47,6 +48,42 @@ def parse_conf(md_path):
     return dotenv_values(DEFAULT_CONF) if DEFAULT_CONF.exists() else {}
 
 
+def load_workspace_map():
+    """Parse agent_workspace_map.txt as a Python dict literal."""
+    if not AGENT_WORKSPACE_MAP_FILE.exists():
+        return {}
+    content = AGENT_WORKSPACE_MAP_FILE.read_text().strip()
+    return ast.literal_eval(content) if content else {}
+
+
+def save_workspace_map(mapping):
+    AGENTS_STATE.mkdir(parents=True, exist_ok=True)
+    AGENT_WORKSPACE_MAP_FILE.write_text(pformat(mapping) + "\n")
+
+
+def resolve_workspace(name):
+    """Return workspace path for agent. Prompt whenever the agent has no mapping
+    entry (even if state already exists); exit on invalid existing mapping.
+    Writes the resolved absolute path into the map file."""
+    mapping = load_workspace_map()
+    if name in mapping:
+        path = mapping[name]
+        if not Path(path).is_dir():
+            sys.exit(
+                f"Workspace for '{name}' is not a valid directory: {path}\n"
+                f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
+            )
+        return path
+    while True:
+        entered = input(f"Workspace path for '{name}' [{DEFAULT_WORKSPACE}]: ").strip() or DEFAULT_WORKSPACE
+        resolved = str(Path(entered).expanduser().resolve())
+        if Path(resolved).is_dir():
+            mapping[name] = resolved
+            save_workspace_map(mapping)
+            return resolved
+        print(f"Not a directory: {resolved}")
+
+
 def sync_state(name, md_path):
     """Copy the agent .md as CLAUDE.md into the persistent state dir."""
     sd = state_dir(name)
@@ -75,9 +112,11 @@ def ensure_image():
 def launch():
     """Set env vars, ensure image exists, and exec docker compose."""
     name, md_path = select_agent()
+    workspace = resolve_workspace(name)
     os.environ["HOST_UID"] = str(os.getuid())
     os.environ["AGENT_STATE"] = str(sync_state(name, md_path))
     os.environ["AGENT_NAME"] = name
+    os.environ["AI_WORKSPACE"] = workspace
     os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
     conf = parse_conf(md_path)
@@ -94,5 +133,4 @@ def launch():
 
 
 if __name__ == "__main__":
-    assert Path(WORKSPACE).is_dir(), f"Error: {WORKSPACE} does not exist."
     launch()

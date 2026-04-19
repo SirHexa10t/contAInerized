@@ -6,6 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     ripgrep \
+    python3 \
+    python3-pip \
+    python3-venv \
+    build-essential \
+    pkg-config \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace
@@ -18,9 +24,13 @@ RUN useradd -m -s /bin/bash -u ${HOST_UID} claude \
 
 USER claude
 
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-ENV PATH="/home/claude/.local/bin:$PATH"
+ENV PATH="/home/claude/.cargo/bin:/home/claude/.local/bin:$PATH"
 ENV DISABLE_AUTOUPDATER=1
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV USE_BUILTIN_RIPGREP=0

@@ -2,3 +2,26 @@ Integrate tips from this video:
     You've Been Using AI the Hard Way (Use This Instead)
     https://www.youtube.com/watch?v=MsQACpcuTkU
 
+Sort offered AI agents by their model (descending)
+
+Managing sessions:
+After choosing an AI agent:
+    no agent instance: name the new session (default is the model's name)
+    agent instance(s) found: 3 choices; delete, continue, new (name it)
+
+    So the naming part would always come up...
+    The folder-name would be ${agent_name}__${user-picked-name}, so that they'll always be discoverable by the agent name as a prefix
+    
+    Remember to modify the status line
+    
+
+Move the README.md instructions from the project-making agent to a new action: write-readme
+
+
+Maybe create local (user's) configurations, which would bind agents to different addresses as AI-agent workspaces (so we won't always use /ai_workspace)
+    Store the workspace path within agent instance's folder?
+    Or maybe store reference to agent's name in project?
+
+
+Auto-resume session on rerun of same agent
+

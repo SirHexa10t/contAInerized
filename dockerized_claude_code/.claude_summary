@@ -4,15 +4,15 @@
 
 ### Purpose
 
-A launcher for pre-made Claude Code agents running in isolated Docker containers. Each agent has distinct instructions, model, and parameters, but they share OAuth credentials, workspace, and slash commands. Eliminates the friction of re-authenticating and re-configuring Claude Code per persona.
+A launcher for pre-made Claude Code agents running in isolated Docker containers. Each agent has distinct instructions, model, and parameters, but shares OAuth credentials, workspace, slash commands, status-line, and memory pointer. Eliminates the friction of re-authenticating and re-configuring Claude Code per persona.
 
 ### Tech Stack
 
 - Python 3 (single-file launcher, ~100 lines, no packaging)
 - Docker + Docker Compose (one container per launched agent)
-- Debian Bookworm slim base image; Claude Code CLI installed via `claude.ai/install.sh`
-- Python deps: `pick` (TUI picker), `python-dotenv` (parse `.conf` files)
-- `ripgrep` installed via apt; container forces system `rg` via `USE_BUILTIN_RIPGREP=0`
+- Debian Bookworm slim base; Claude Code CLI installed via `claude.ai/install.sh`
+- Python deps on host: `pick` (TUI picker), `python-dotenv` (parse `.conf` files)
+- Inside image: `ripgrep` (forced via `USE_BUILTIN_RIPGREP=0`), `git`, `curl`, plus a build toolchain — Rust via `rustup`, `uv` for Python, `python3-pip`/`venv`, `build-essential`, `pkg-config`, `libssl-dev` — so agents can compile native deps
 - No tests, no CI, no lockfile
 
 ### Project Structure
@@ -20,14 +20,19 @@ A launcher for pre-made Claude Code agents running in isolated Docker containers
 ```
 /workspace/
   run.py                 # Entry point: picks agent, syncs state, runs docker compose
-  Dockerfile             # Non-root claude user (matches HOST_UID), pre-creates memory dir
-  docker-compose.yml     # One service (claude-code). Bind-mounts workspace + state
+  Dockerfile             # Non-root claude user (matches HOST_UID); installs Rust+uv+build toolchain
+  docker-compose.yml     # One service (claude-code). Bind-mounts workspace + state + settings + memory
   README.md              # User-facing docs
-  TODO.txt               # Open ideas (skills/context-dump command; tips from a YT video)
+  TODO.txt               # Open ideas (multi-instance sessions; /write-readme extraction; per-user workspace paths)
   .dockerignore          # Single '*' — build context is empty; nothing copied into image
   agents/                # Agent definitions (<name>.md = CLAUDE.md; <name>.conf = env)
   custom_commands/       # Shared /slash commands mounted read-only into every agent
     write-summary.md     # Prompt for the command that produced this file
+  settings/              # Shared Claude Code settings (bind-mounted ro)
+    settings.json        # Registers statusLine.command
+    statusline.sh        # Bash fallback: prints CLAUDE.md's first heading in cyan
+  memory/
+    MEMORY.md            # Auto-loaded every turn; pointer to /workspace/.claude_summary
   tips/                  # Plain-text notes (chat syntax, login, stats, config gotchas)
 ```
 
@@ -44,29 +49,17 @@ A launcher for pre-made Claude Code agents running in isolated Docker containers
 
 `agents/default.conf` = `claude-opus-4-7` + `CLAUDE_CODE_EFFORT_LEVEL=max` + thinking on. Used only when an agent has no own `.conf`.
 
-### Workflow
-
-End-user flow — what happens when someone runs the launcher:
-
-1. `./run.py` (with optional trailing args, which forward to `claude` inside the container via the Dockerfile's `ENTRYPOINT ["claude"]`).
-2. `pick` shows a menu of agents labelled by each `.md` file's first-line heading; user selects one.
-3. If prior `history.jsonl` exists for that agent, the user is asked whether to wipe it before launch.
-4. `docker compose build` runs (cached after the first time — adds a second or two).
-5. A fresh `claude-code_<agent>` container starts interactively; `/workspace` is bind-mounted to the host's `AI_WORKSPACE`, and the selected agent's `.md` becomes `CLAUDE.md` inside the container.
-6. User interacts with Claude Code. Agent state (history, auto-memory, settings) accumulates under `~/.claude-agents/<agent>/` on the host.
-7. On exit, `--rm` removes the container but state persists. Next launch of the same agent resumes with that state intact; shared OAuth means no re-login across agents.
-
-**Adding an agent**: drop `agents/<name>.md` (its first heading becomes the picker label and the status-line title) and optionally `agents/<name>.conf` for env overrides; it appears in the picker on next launch.
-
 ### Architecture
 
-`run.py` is the whole control plane — one file, five functions invoked in order by `launch()`:
+End-user entry point: `./run.py` (with optional trailing args, which forward to `claude` inside the container via the Dockerfile's `ENTRYPOINT ["claude"]`). `run.py` is the whole control plane — five functions invoked in order by `launch()`:
 
-1. `select_agent()` (`run.py:25`) — globs `agents/*.md` (excluding `default`), shows `pick` menu.
-2. `parse_conf()` (`run.py:42`) — loads `<name>.conf` if present, else `default.conf`. **Per-agent `.conf` fully replaces `default.conf` — not merged.** Agent configs must re-declare any default keys they still want.
-3. `sync_state()` (`run.py:50`) — creates `~/.claude-agents/<name>/projects/-workspace/memory/` (one `mkdir -p`), optionally clears `history.jsonl`, copies the agent's `.md` to `CLAUDE.md`, touches shared `.claude.json` / `.credentials.json` / workspace `.claude_summary`.
-4. `ensure_image()` (`run.py:69`) — runs `docker compose build` unconditionally on every launch (cached).
-5. `launch()` (`run.py:77`) — exports env vars (`HOST_UID`, `AGENT_STATE`, `AGENT_NAME`, `ACCOUNT_FILE`, `CREDENTIALS_FILE`, plus everything from the conf), then execs `docker compose run --rm -it claude-code` — forwarding each conf key via `-e KEY` flags, and passing any extra CLI args through to `claude` inside the container.
+1. `select_agent()` (`run.py:25`) — globs `agents/*.md` (excluding `default`), shows `pick` menu labelled by each file's first heading.
+2. `sync_state()` (`run.py:50`) — prompts to wipe `history.jsonl` if prior session exists; creates `~/.claude-agents/<name>/projects/-workspace/memory/`; copies the agent's `.md` to `CLAUDE.md`; touches shared `.claude.json` and `.credentials.json` if absent.
+3. `parse_conf()` (`run.py:42`) — loads `<name>.conf` if present, else `default.conf`. **Per-agent `.conf` fully replaces `default.conf` — not merged.** Agent configs must re-declare any default keys they still want.
+4. `ensure_image()` (`run.py:67`) — runs `docker compose build` unconditionally on every launch (cached).
+5. `launch()` (`run.py:75`) — exports env vars (`HOST_UID`, `AGENT_STATE`, `AGENT_NAME`, `ACCOUNT_FILE`, `CREDENTIALS_FILE`, plus conf keys), sets the terminal title, then execs `docker compose run --rm -it claude-code` — forwarding each conf key via `-e KEY` flags, and passing any extra CLI args through to `claude`.
+
+On exit, `--rm` removes the container but state persists under `~/.claude-agents/<agent>/`. Next launch of the same agent resumes; shared OAuth means no re-login across agents.
 
 **Bind mounts** (`docker-compose.yml:11`):
 
@@ -74,53 +67,60 @@ End-user flow — what happens when someone runs the launcher:
 - `~/.claude-agents/<name>/` → `/home/claude/.claude` (per-agent state)
 - `~/.claude-agents/.claude.json` → `/home/claude/.claude.json` (shared account info)
 - `~/.claude-agents/.credentials.json` → `/home/claude/.claude/.credentials.json` (shared OAuth)
-- `./custom_commands` → `/home/claude/.claude/commands:ro` (shared slash commands)
-- `${AI_WORKSPACE}/memory/MEMORY.md` → `/home/claude/.claude/projects/-workspace/memory/MEMORY.md` (pointer file — auto-loaded every turn; references `/workspace/.claude_summary` for project details, which is loaded on demand via `Read`)
+- `./custom_commands/` → `/home/claude/.claude/commands:ro` (shared slash commands)
+- `./settings/statusline.sh` → `/home/claude/.claude/statusline.sh:ro` (shared status-line script)
+- `./settings/settings.json` → `/home/claude/.claude/settings.json:ro` (registers the status-line script + any shared settings)
+- `./memory/MEMORY.md` → `/home/claude/.claude/projects/-workspace/memory/MEMORY.md:ro` (pointer file — auto-loaded every turn; references `/workspace/.claude_summary`, loaded on demand via `Read`)
+
+**Adding an agent**: drop `agents/<name>.md` (first heading becomes picker label + status-line title) and optionally `agents/<name>.conf` for env overrides; it appears in the picker on next launch.
 
 ### Conventions and Patterns
 
-- Agent instructions are plain markdown; the first line is a `#` heading used both as the picker label and (via `statusline.sh`) as the in-session status-line title.
+- Agent instructions are plain markdown; the first line is a `#` heading used both as the picker label and (via `settings/statusline.sh`) as the in-session status-line title.
 - **Env-var config is layered — edit the right layer or your change won't do what you think:**
-  - **Dockerfile `ENV` + `apt install`** (baked into the image, applies to every agent): `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `USE_BUILTIN_RIPGREP=0` (paired with `ripgrep` from apt). Changing these needs a rebuild.
+  - **Dockerfile `ENV` + `apt install`** (baked into the image, applies to every agent): `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `USE_BUILTIN_RIPGREP=0` (paired with `ripgrep` from apt), plus `PATH` extensions for `~/.cargo/bin` and `~/.local/bin`. Changing these needs a rebuild.
   - **`agents/default.conf`** (fallback for agents without their own `.conf`): `ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_ENABLE_THINKING`. File also carries a long annotated reference of every supported CLI env var.
   - **`agents/<name>.conf`** (per-agent, dotenv-style, fully replaces default — not merged): any key the CLI understands. Each key is passed as `-e KEY` on `docker compose run`.
-- Container runs as user `claude` with UID matching the host (`HOST_UID` build arg from `run.py:80`), so bind-mounted files stay host-writable.
-- `.dockerignore` is `*` — the build context sends nothing; everything inside the image comes from apt + the installer script. Don't add `COPY` instructions expecting workspace files.
-- Memory-mount parent `/home/claude/.claude/projects/-workspace/memory/` is pre-created in `Dockerfile:16` with `chown claude:claude` so the `MEMORY.md` bind mount lands on a claude-owned dir (Docker would otherwise root-own an auto-created parent).
+  - **`settings/settings.json`** (shared across agents, read-only bind mount): currently registers `statusLine.command` only; add shared Claude Code settings here rather than in any agent `.md`.
+- Container runs as user `claude` with UID matching the host (`HOST_UID` build arg from `run.py:78`), so bind-mounted files stay host-writable.
+- `.dockerignore` is `*` — the build context sends nothing; everything inside the image comes from apt + installer scripts. Don't add `COPY` instructions expecting workspace files.
+- Memory-mount parent `/home/claude/.claude/projects/-workspace/memory/` is pre-created in `Dockerfile:22` with `chown claude:claude` so the `MEMORY.md` bind mount lands on a claude-owned dir (Docker would otherwise root-own an auto-created parent).
 
 ### Known Issues
 
 - **No tests, no CI, no lockfile.** Nothing guards against regressions; behavioral breakage propagates silently.
 - **Per-agent `.conf` fully replaces `default.conf`** (`run.py:42-47`) — creating a new agent's `.conf` silently drops every default. Documented under Conventions but remains a live footgun.
-- **Unconditional `docker compose build` on every launch** (`run.py:69-74`) — adds a second or two even when nothing changed; no image-exists check.
-- **`/workspace/memory/MEMORY.md` is not auto-created.** The bind mount (`docker-compose.yml:17`) will fail on fresh setups where the file is missing; `run.py` no longer touches it.
+- **Unconditional `docker compose build` on every launch** (`run.py:67-72`) — adds a second or two even when nothing changed; no image-exists check.
 - **No `/switch` slash command for mid-session agent changes.** `tips/configurating_agents.txt` notes this would require matching `.conf` files between source and target; currently unimplemented.
 - **`sync_state()` overwrites `CLAUDE.md` on every launch** (`run.py:59`) — any in-container edits to `CLAUDE.md` are discarded on the next run.
 
 ### Current State
 
-- `TODO.txt` — open ideas: a "skills" / context-dump command (partially fulfilled by `/write-summary`) and tips to absorb from a referenced YouTube video.
-- `tips/configurating_agents.txt` — mid-session agent switching only works if the `.conf` matches; no `/switch` command exists.
+- `TODO.txt` open ideas: (a) sort agents by model descending in the picker; (b) multi-instance sessions per agent — name at launch, pick between delete/continue/new, folder layout `${agent}__${session}`; (c) extract README-writing from `project-starter` into a dedicated `/write-readme` command; (d) user-local configs that map each agent to a distinct workspace path instead of always `/ai_workspace`; (e) absorb tips from a referenced YouTube video.
+- `tips/configurating_agents.txt` — mid-session agent switching only works if `.conf` matches; no `/switch` command exists.
 - `tips/login.txt` — OAuth must match the target account type; credits don't cross API vs Pro vs Team.
-- `tips/stats.txt` — cheat sheet of monitoring commands: `/cost` (API-user $), `/stats` (subscription usage patterns), `/usage` (5h/7d rate-limit headroom), `/context` (window usage + bloat flags), `/status` (at-a-glance). Also lists status-line JSON fields the harness pipes to `statusLine.command` stdin — directly relevant to the deferred jq work below.
+- `tips/stats.txt` — cheat sheet of monitoring commands (`/cost`, `/stats`, `/usage`, `/context`, `/status`) and the status-line JSON fields the harness pipes to `statusLine.command` stdin (`.model.display_name`, `.context_window.used_percentage`, `.cost.*`, `.rate_limits.{five_hour,seven_day}.used_percentage`).
 - `tips/program_expansion.txt` — warns that `CLAUDE_CODE_SIMPLE=1` breaks CLI usage (ignores credentials); do not set it.
-- **Deferred work — rich `jq`-powered status line.** Blocked on adding `jq` to `Dockerfile:3-9`'s `apt-get install`. Current fallback is `~/.claude/statusline.sh` (prints `CLAUDE.md`'s first heading) registered via `~/.claude/settings.json`. Container has no JSON parser on PATH, and the harness pipes session-state JSON to `statusLine.command`'s stdin (fields of interest: `.model.display_name`, `.context_window.used_percentage`, `.cost.total_cost_usd`, `.cost.total_duration_ms`, `.rate_limits.{five_hour,seven_day}.used_percentage`). Once `jq` is available, swap the script body for a `pick() { jq -r "$1 // \"?\"" ; }` pattern over the cached stdin.
+- **Deferred — rich `jq`-powered status line.** Blocked on adding `jq` to the Dockerfile apt list. `settings/statusline.sh` currently drains the JSON stdin with `cat > /dev/null` and prints only `CLAUDE.md`'s first heading; once `jq` is available, swap the body for a `pick() { jq -r "$1 // \"?\"" ; }` pattern over the cached stdin.
 
 ### File Manifest
 
 | File | Modified (epoch) | Modified (human) |
 |------|-----------------|------------------|
+| TODO.txt | 1776578602.5817340100 | Sun Apr 19 06:03:22 2026 |
+| Dockerfile | 1776572018.1846096770 | Sun Apr 19 04:13:38 2026 |
+| docker-compose.yml | 1776571454.4561477710 | Sun Apr 19 04:04:14 2026 |
+| settings/settings.json | 1776566569.1167724840 | Sun Apr 19 02:42:49 2026 |
+| settings/statusline.sh | 1776566333.3440280720 | Sun Apr 19 02:38:53 2026 |
+| custom_commands/write-summary.md | 1776565162.1179953950 | Sun Apr 19 02:19:22 2026 |
+| memory/MEMORY.md | 1776564169.8772269760 | Sun Apr 19 02:02:49 2026 |
+| run.py | 1776564070.7247639660 | Sun Apr 19 02:01:10 2026 |
 | tips/stats.txt | 1776560155.0707398480 | Sun Apr 19 00:55:55 2026 |
-| custom_commands/write-summary.md | 1776559598.6023110470 | Sun Apr 19 00:46:38 2026 |
-| run.py | 1776556716.5875817330 | Sat Apr 18 23:58:36 2026 |
 | agents/project-starter.md | 1776522389.0292209680 | Sat Apr 18 14:26:29 2026 |
 | agents/poet.conf | 1776485876.5695578300 | Sat Apr 18 04:17:56 2026 |
 | agents/researcher.conf | 1776485867.6853485350 | Sat Apr 18 04:17:47 2026 |
 | agents/default.conf | 1776485865.3162927190 | Sat Apr 18 04:17:45 2026 |
-| TODO.txt | 1776484148.9302451070 | Sat Apr 18 03:49:08 2026 |
-| Dockerfile | 1776484098.7277556750 | Sat Apr 18 03:48:18 2026 |
 | README.md | 1776483588.4081740690 | Sat Apr 18 03:39:48 2026 |
-| docker-compose.yml | 1776483292.5561407190 | Sat Apr 18 03:34:52 2026 |
 | tips/program_expansion.txt | 1774460937.8407643790 | Wed Mar 25 17:48:57 2026 |
 | agents/golem.conf | 1774431167.7587499560 | Wed Mar 25 09:32:47 2026 |
 | tips/configurating_agents.txt | 1774431084.0108572940 | Wed Mar 25 09:31:24 2026 |

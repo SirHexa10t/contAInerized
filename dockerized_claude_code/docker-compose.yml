@@ -9,7 +9,7 @@ services:
     stdin_open: true   # -i (interactive)
     tty: true          # -t (allocate pseudo-TTY)
     volumes:
-      - ${AI_WORKSPACE:-/ai_workspace}:/workspace
+      - ${AI_WORKSPACE}:/workspace
       - ${AGENT_STATE}:/home/claude/.claude
       - ${ACCOUNT_FILE}:/home/claude/.claude.json  # same onboarding info for all agents
       - ${CREDENTIALS_FILE}:/home/claude/.claude/.credentials.json  # same api-token info for all agents
