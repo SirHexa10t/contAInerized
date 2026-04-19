@@ -61,8 +61,6 @@ def sync_state(name, md_path):
         ACCOUNT_FILE.write_text("{}")
     if not CREDENTIALS_FILE.exists():
         CREDENTIALS_FILE.write_text("{}")
-    if not SUMMARY_FILE.exists():
-        SUMMARY_FILE.write_text("")
     return sd
 
 
