@@ -206,6 +206,7 @@ def ensure_image():
 def launch():
     """Pick an instance (agent+session), resolve workspace, sync state, exec docker compose."""
     agent, md_path, session, workspace = select_agent()
+    resume_flag = ["--continue"] if session is not None else []
 
     if workspace is None:
         workspace = prompt_workspace(agent)         # pick workspace location
@@ -241,6 +242,7 @@ def launch():
         ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
         + [item for key in conf for item in ("-e", key)]
         + ["claude-code"]
+        + resume_flag
         + sys.argv[1:]
     )
     sys.exit(subprocess.call(cmd))
