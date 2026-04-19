@@ -1,0 +1,24 @@
+
+  Tokens used (this session)
+  - /cost — input/output token counts + estimated USD. Mainly for API-key users.
+  - Status-line vars: context_window.total_input_tokens, total_output_tokens, cache hits/misses.
+
+  Credits / plan usage
+  - /stats — usage patterns and model preferences for subscription plans (Pro/Max/Team/Enterprise).
+  - /usage — rate-limit headroom on both the 5-hour rolling window and 7-day weekly window, with reset timestamps.
+
+  Session duration
+  - /cost reports wall-clock session time.
+  - Status-line vars: cost.total_duration_ms (wall clock) and cost.total_api_duration_ms (time waiting on the API).
+
+  Context window usage (often what people actually want)
+  - /context — colored grid showing how much of the context window is consumed, with suggestions (flags MCP/memory bloat).
+  - Status-line var: context_window.used_percentage.
+
+  Everything at a glance
+  - /status — version, current model, account type, connectivity.
+
+  The status line is the most powerful knob — you write a small script referenced from ~/.claude/settings.json's statusLine field, and Claude Code feeds it live JSON with all the above plus rate-limit fields
+  (rate_limits.five_hour.used_percentage / resets_at, same for seven_day). It updates continuously in the prompt footer, so you don't have to keep typing /cost.
+
+  Key nuance: /cost is for API users (shows $), /stats is for subscription users (no $ — shows patterns and limit headroom). They're not interchangeable.

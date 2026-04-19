@@ -54,7 +54,7 @@ def sync_state(name, md_path):
         _, idx = pick(["No", "Yes"], "History found. Clear it?", indicator="→")
         if idx == 1:
             shutil.rmtree(sd)
-    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "projects" / "-workspace" / "memory").mkdir(parents=True, exist_ok=True)
 
     state_md(name).write_text(md_path.read_text())
     if not ACCOUNT_FILE.exists():
