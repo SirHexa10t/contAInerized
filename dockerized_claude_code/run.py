@@ -78,6 +78,15 @@ def agent_sort_key(item):
     return (-MODEL_FAMILY_RANK[m.group(1)], (-int(m.group(2)), -int(m.group(3) or 0)), name)
 
 
+def instance_sort_key(instance):
+    """Reuse agent_sort_key on the agent half, then sub-sort by session; orphans last."""
+    agent, _, session = instance.partition(SESSION_SEP)
+    md_path = AGENTS_DIR / f"{agent}{MD_EXT}"
+    if not md_path.exists():
+        return ((1, (0, 0), agent), session)
+    return (agent_sort_key((agent, md_path)), session)
+
+
 def select_agent():
     """Combined picker: new-agent rows, continue-instance rows, and a delete submenu.
     Returns (agent, md_path, session_or_None, workspace_or_None)."""
@@ -136,7 +145,7 @@ def delete_menu():
     MARKER_DLET = "🗑 DELETE"
     MARKER_BACK = "🚪  Back"
     while True:
-        instances = list_all_instances()
+        instances = sorted(list_all_instances(), key=instance_sort_key)
         entries = [(f"{MARKER_DLET}  {i}", i) for i in instances]
         entries.append((f"{MARKER_BACK}  (Move back to Agent Selection)", None))
 

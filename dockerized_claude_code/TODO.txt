@@ -5,8 +5,6 @@ Integrate tips from this video:
 
 Move the README.md instructions from the project-making agent to a new action: write-readme
 
-Auto-resume session on rerun of same agent
-
 On agents that are meant to constantly work on architecture, keep the summary file mounted as MEMORY.md rather than referenced. Should probably be controlled through a config in agent.conf (my own config, not Claude's)
 
 Figure out if bloating all containers with Rust, Python, NodeJS, etc. is really necessary
