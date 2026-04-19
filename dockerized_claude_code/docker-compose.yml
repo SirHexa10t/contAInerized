@@ -14,6 +14,8 @@ services:
       - ${ACCOUNT_FILE}:/home/claude/.claude.json  # same onboarding info for all agents
       - ${CREDENTIALS_FILE}:/home/claude/.claude/.credentials.json  # same api-token info for all agents
       - ./custom_commands:/home/claude/.claude/commands:ro          # shared slash commands for all agents
+      - ./settings/statusline.sh:/home/claude/.claude/statusline.sh:ro  # shared status-line script for all agents
+      - ./settings/settings.json:/home/claude/.claude/settings.json:ro  # registers the status-line script (and any other shared settings)
       - ${AI_WORKSPACE:-/ai_workspace}/memory/MEMORY.md:/home/claude/.claude/projects/-workspace/memory/MEMORY.md  # memory pointer (auto-loaded every turn; references .claude_summary)
     environment:
       - TERM                # improves(?) terminal display colors
