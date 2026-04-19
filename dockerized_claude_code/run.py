@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, subprocess, shutil, json
+import os, sys, subprocess, shutil, json, re
 from pathlib import Path
 from pick import pick  # pip install pick
 from dotenv import dotenv_values  # pip install python-dotenv
@@ -18,12 +18,12 @@ AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
 DEFAULT_WORKSPACE = os.environ.get("AI_WORKSPACE", "/ai_workspace")
 
 SESSION_SEP = "__"
-full_name = lambda agent, session: f"{agent}{SESSION_SEP}{session}"
-state_dir = lambda agent, session: AGENTS_STATE / full_name(agent, session)
+instance_name = lambda agent, session: f"{agent}{SESSION_SEP}{session}"
+state_dir = lambda agent, session: AGENTS_STATE / instance_name(agent, session)
 state_md = lambda agent, session: state_dir(agent, session) / "CLAUDE.md"
 
 
-def list_instances(agent):
+def list_sessions(agent):
     """Return session suffixes for existing {agent}__* state dirs, sorted."""
     prefix = f"{agent}{SESSION_SEP}"
     if not AGENTS_STATE.exists():
@@ -65,6 +65,19 @@ def parse_conf(md_path):
     return dotenv_values(DEFAULT_CONF) if DEFAULT_CONF.exists() else {}
 
 
+MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
+
+
+def agent_sort_key(item):
+    """Sort by family (Opus>Sonnet>Haiku), then version desc, then name asc."""
+    name, path = item
+    model = parse_conf(path).get("ANTHROPIC_MODEL", "")
+    m = re.search(r"(opus|sonnet|haiku)-(\d+)(?:-(\d+))?", model)
+    if not m:
+        return (0, (0, 0), name)
+    return (-MODEL_FAMILY_RANK[m.group(1)], (-int(m.group(2)), -int(m.group(3) or 0)), name)
+
+
 def select_agent():
     """Combined picker: new-agent rows, continue-instance rows, and a delete submenu.
     Returns (agent, md_path, session_or_None, workspace_or_None)."""
@@ -73,16 +86,16 @@ def select_agent():
     MARKER_DEL = "⚠️ DELETE‼️"
     while True:
         agents = tuple(sorted(
-            (p.stem, p) for p in AGENTS_DIR.glob(f"*{MD_EXT}")
-            if p.stem != "default"
+            ((p.stem, p) for p in AGENTS_DIR.glob(f"*{MD_EXT}") if p.stem != "default"),
+            key=agent_sort_key,
         ))
         if not agents:
             sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
 
         width = max(len(name) for name, _ in agents)
         mapping = load_workspace_map()
-        full_width = max(
-            (len(full_name(name, s)) for name, _ in agents for s in list_instances(name)),
+        instance_width = max(
+            (len(instance_name(name, s)) for name, _ in agents for s in list_sessions(name)),
             default=0,
         )
 
@@ -93,12 +106,12 @@ def select_agent():
                 f"{MARKER_NEW}  {name:<{width}} — {desc}",
                 ("new", name, path, None, None),
             ))
-            for session in list_instances(name):
-                full = full_name(name, session)
-                workspace = mapping.get(full)
+            for session in list_sessions(name):
+                instance = instance_name(name, session)
+                workspace = mapping.get(instance)
                 ws_display = workspace if workspace and Path(workspace).is_dir() else "?"
                 entries.append((
-                    f"{MARKER_CONT}      {full:<{full_width}}  ( {ws_display} )",
+                    f"{MARKER_CONT}      {instance:<{instance_width}}  ( {ws_display} )",
                     ("cont", name, path, session, workspace),
                 ))
 
@@ -165,7 +178,7 @@ def prompt_session(agent, workspace):
             print("Session suffix cannot be empty.")
             continue
         if state_dir(agent, suffix).exists():
-            print(f"Session '{full_name(agent, suffix)}' already exists. Pick another name.")
+            print(f"Instance '{instance_name(agent, suffix)}' already exists. Pick another name.")
             continue
         return suffix
 
@@ -191,39 +204,39 @@ def ensure_image():
 
 
 def launch():
-    """Pick/build a session, resolve workspace, sync state, exec docker compose."""
+    """Pick an instance (agent+session), resolve workspace, sync state, exec docker compose."""
     agent, md_path, session, workspace = select_agent()
 
     if workspace is None:
         workspace = prompt_workspace(agent)         # pick workspace location
     elif not Path(workspace).is_dir():
         sys.exit(
-            f"Workspace for '{full_name(agent, session)}' is not a valid directory: {workspace}\n"
+            f"Workspace for '{instance_name(agent, session)}' is not a valid directory: {workspace}\n"
             f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
         )
 
     if session is None:
-        session = prompt_session(agent, workspace)  # pick suffix for agent-instance / session
+        session = prompt_session(agent, workspace)  # pick session suffix for this instance
 
-    full = full_name(agent, session)
+    instance = instance_name(agent, session)
     mapping = load_workspace_map()
-    if mapping.get(full) != workspace:
-        mapping[full] = workspace
+    if mapping.get(instance) != workspace:
+        mapping[instance] = workspace
         save_workspace_map(mapping)
 
     os.environ["HOST_UID"] = str(os.getuid())
     os.environ["AGENT_STATE"] = str(sync_state(agent, session, md_path))
     os.environ["AGENT_NAME"] = agent
     os.environ["AGENT_SESSION"] = session
-    pretty = full.replace("-", " ").replace("__", " - ").title()
-    os.environ["AGENT_FULL_NAME"] = f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m"
+    pretty = instance.replace("-", " ").replace("__", " - ").title()
+    os.environ["AGENT_STATUS_LINE"] = f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m"
     os.environ["AI_WORKSPACE"] = workspace
     os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
     conf = parse_conf(md_path)
     os.environ.update(conf)
     ensure_image()
-    print(f"\033]0;Claude Code — {full}\007", end="", flush=True)
+    print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (
         ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
         + [item for key in conf for item in ("-e", key)]

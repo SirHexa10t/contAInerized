@@ -19,7 +19,7 @@ services:
       - ./memory/MEMORY.md:/home/claude/.claude/projects/-workspace/memory/MEMORY.md:ro  # memory pointer (auto-loaded every turn; references .claude_summary)
     environment:
       - TERM                # improves(?) terminal display colors
-      - AGENT_FULL_NAME     # {agent}__{session}; shown in the status line
+      - AGENT_STATUS_LINE   # pre-styled status-line text (cyan name + grey workspace)
     # Optional: restrict network access for extra isolation
     # network_mode: none
 
