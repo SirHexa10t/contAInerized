@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-import os, sys, subprocess, shutil, ast
+import os, sys, subprocess, shutil, json
 from pathlib import Path
-from pprint import pformat
 from pick import pick  # pip install pick
 from dotenv import dotenv_values  # pip install python-dotenv
 
@@ -19,7 +18,8 @@ AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
 DEFAULT_WORKSPACE = os.environ.get("AI_WORKSPACE", "/ai_workspace")
 
 SESSION_SEP = "__"
-state_dir = lambda agent, session: AGENTS_STATE / f"{agent}{SESSION_SEP}{session}"
+full_name = lambda agent, session: f"{agent}{SESSION_SEP}{session}"
+state_dir = lambda agent, session: AGENTS_STATE / full_name(agent, session)
 state_md = lambda agent, session: state_dir(agent, session) / "CLAUDE.md"
 
 
@@ -45,16 +45,16 @@ def list_all_instances():
 
 
 def load_workspace_map():
-    """Parse agent_workspace_map.txt as a Python dict literal."""
+    """Parse agent_workspace_map.txt as a JSON object."""
     if not AGENT_WORKSPACE_MAP_FILE.exists():
         return {}
     content = AGENT_WORKSPACE_MAP_FILE.read_text().strip()
-    return ast.literal_eval(content) if content else {}
+    return json.loads(content) if content else {}
 
 
 def save_workspace_map(mapping):
     AGENTS_STATE.mkdir(parents=True, exist_ok=True)
-    AGENT_WORKSPACE_MAP_FILE.write_text(pformat(mapping) + "\n")
+    AGENT_WORKSPACE_MAP_FILE.write_text(json.dumps(mapping, indent=4, sort_keys=True) + "\n")
 
 
 def parse_conf(md_path):
@@ -81,6 +81,10 @@ def select_agent():
 
         width = max(len(name) for name, _ in agents)
         mapping = load_workspace_map()
+        full_width = max(
+            (len(full_name(name, s)) for name, _ in agents for s in list_instances(name)),
+            default=0,
+        )
 
         entries = []
         for name, path in agents:
@@ -90,10 +94,12 @@ def select_agent():
                 ("new", name, path, None, None),
             ))
             for session in list_instances(name):
-                full = f"{name}{SESSION_SEP}{session}"
+                full = full_name(name, session)
+                workspace = mapping.get(full)
+                ws_display = workspace if workspace and Path(workspace).is_dir() else "?"
                 entries.append((
-                    f"{MARKER_CONT}      {full}",
-                    ("cont", name, path, session, mapping.get(full)),
+                    f"{MARKER_CONT}      {full:<{full_width}}  ( {ws_display} )",
+                    ("cont", name, path, session, workspace),
                 ))
 
         entries.append((
@@ -159,7 +165,7 @@ def prompt_session(agent, workspace):
             print("Session suffix cannot be empty.")
             continue
         if state_dir(agent, suffix).exists():
-            print(f"Session '{agent}{SESSION_SEP}{suffix}' already exists. Pick another name.")
+            print(f"Session '{full_name(agent, suffix)}' already exists. Pick another name.")
             continue
         return suffix
 
@@ -189,17 +195,17 @@ def launch():
     agent, md_path, session, workspace = select_agent()
 
     if workspace is None:
-        workspace = prompt_workspace(agent)
+        workspace = prompt_workspace(agent)         # pick workspace location
     elif not Path(workspace).is_dir():
         sys.exit(
-            f"Workspace for '{agent}{SESSION_SEP}{session}' is not a valid directory: {workspace}\n"
+            f"Workspace for '{full_name(agent, session)}' is not a valid directory: {workspace}\n"
             f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
         )
 
     if session is None:
-        session = prompt_session(agent, workspace)
+        session = prompt_session(agent, workspace)  # pick suffix for agent-instance / session
 
-    full = f"{agent}{SESSION_SEP}{session}"
+    full = full_name(agent, session)
     mapping = load_workspace_map()
     if mapping.get(full) != workspace:
         mapping[full] = workspace
@@ -209,6 +215,8 @@ def launch():
     os.environ["AGENT_STATE"] = str(sync_state(agent, session, md_path))
     os.environ["AGENT_NAME"] = agent
     os.environ["AGENT_SESSION"] = session
+    pretty = full.replace("-", " ").replace("__", " - ").title()
+    os.environ["AGENT_FULL_NAME"] = f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m"
     os.environ["AI_WORKSPACE"] = workspace
     os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)

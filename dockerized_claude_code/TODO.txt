@@ -25,3 +25,6 @@ Maybe create local (user's) configurations, which would bind agents to different
 
 Auto-resume session on rerun of same agent
 
+
+On agents that are meant to constantly work on architecture, keep the summary file mounted as MEMORY.md rather than referenced. Should probably be controlled through a config in agent.conf (my own config, not Claude's)
+
