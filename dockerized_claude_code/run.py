@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, subprocess, shutil, json, re
+import os, sys, subprocess, shutil, json, re, time
 from datetime import date
 from pathlib import Path
 from pick import pick  # pip install pick
@@ -17,6 +17,29 @@ ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
 DEFAULT_WORKSPACE = os.environ.get("AI_WORKSPACE", "/ai_workspace")
+
+CACHE_ROOT = AGENTS_STATE / "cache"
+CACHE_HOME_IN_CONTAINER = Path("/home/claude")
+CACHE_REL_PATHS = [  # shared across all agents/sessions; same relative path on host and in container
+    # languages currently in the image
+    ".cargo/registry",           # Rust crates (.crate tarballs + index)
+    ".cargo/git",                # Rust git dependencies
+    ".cache",                    # XDG cache: uv, pip, poetry, pre-commit, huggingface, torch, yarn-v1, go-build, ccache, ...
+    # speculative — empty until the relevant language is added to the Dockerfile
+    "go/pkg/mod",                # Go module cache
+    ".npm",                      # npm (non-XDG by design)
+    ".local/share/pnpm/store",   # pnpm content-addressed store
+    ".m2/repository",            # Maven local repository
+    ".gradle/caches",            # Gradle dependency + build caches
+    ".gem",                      # Ruby gems
+    ".cpanm",                    # Perl cpanminus work dir
+    ".cpan",                     # Perl CPAN classic
+    ".cabal/store",              # Haskell cabal package store
+    ".stack/snapshots",          # Haskell stack resolver snapshots
+]
+CACHE_MOUNTS = {CACHE_ROOT / rel: CACHE_HOME_IN_CONTAINER / rel for rel in CACHE_REL_PATHS}
+CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
+CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
 
 SESSION_SEP = "__"
 instance_name = lambda agent, session: f"{agent}{SESSION_SEP}{session}"
@@ -205,6 +228,42 @@ def sync_state(agent, session, md_path):
     return sd
 
 
+def prepare_caches():
+    """Pre-create shared cache dirs so Docker doesn't auto-create them as root, then prune any
+    that have grown past threshold."""
+    for host in CACHE_MOUNTS:
+        host.mkdir(parents=True, exist_ok=True)
+    prune_caches()
+
+
+def prune_caches():
+    """For each cache over CACHE_PRUNE_THRESHOLD_GB, remove files older than
+    CACHE_PRUNE_MIN_AGE_DAYS. Skipped when any agent container is running (to avoid yanking
+    caches mid-build)."""
+    result = subprocess.run(
+        ["docker", "ps", "--filter", "name=claude-code_", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or result.stdout.strip():
+        return
+    time_cutoff = time.time() - CACHE_PRUNE_MIN_AGE_DAYS * 86400  # days → seconds (match epoch-second time.time())
+    size_cutoff = CACHE_PRUNE_THRESHOLD_GB * 1024**3              # GB   → bytes   (match st_size units)
+    for host in CACHE_MOUNTS:
+        if not host.exists():
+            continue
+        files = [(f, f.stat()) for f in host.rglob("*") if f.is_file()]
+        total = sum(s.st_size for _, s in files)
+        if total <= size_cutoff:
+            continue
+        freed = 0
+        for f, s in files:
+            if s.st_mtime < time_cutoff:
+                f.unlink()
+                freed += s.st_size
+        if freed:
+            print(f"  Pruned {host.relative_to(CACHE_ROOT)}: freed {freed / 1024**3:.1f} GB (was {total / 1024**3:.1f} GB)")
+
+
 def ensure_image():
     """Rebuild the image."""
     print("  Building image...")
@@ -246,15 +305,17 @@ def launch():
     os.environ["AI_WORKSPACE"] = workspace
     os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
+    prepare_caches()
     conf = parse_conf(md_path)
     os.environ.update(conf)
     ensure_image()
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (
         ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
-        + [item for key in conf for item in ("-e", key)]
+        + [arg for host, container in CACHE_MOUNTS.items() for arg in ("-v", f"{host}:{container}")]  # -v flags mounting shared toolchain caches (optimization; see CACHE_MOUNTS)
+        + [item for key in conf for item in ("-e", key)]   # -e flags forwarding each per-agent conf key as an env var into the container
         + ["claude-code"]
-        + resume_flag
+        + resume_flag  # present if a resumed session
         + sys.argv[1:]
     )
     sys.exit(subprocess.call(cmd))
