@@ -233,13 +233,9 @@ def prepare_caches():
     that have grown past threshold."""
     for host in CACHE_MOUNTS:
         host.mkdir(parents=True, exist_ok=True)
-    prune_caches()
-
-
-def prune_caches():
-    """For each cache over CACHE_PRUNE_THRESHOLD_GB, remove files older than
-    CACHE_PRUNE_MIN_AGE_DAYS. Skipped when any agent container is running (to avoid yanking
-    caches mid-build)."""
+    
+    # prune_caches - For each cache over CACHE_PRUNE_THRESHOLD_GB, remove files older than
+    # CACHE_PRUNE_MIN_AGE_DAYS. Skipped when any agent container is running (to avoid yanking caches mid-build)
     result = subprocess.run(
         ["docker", "ps", "--filter", "name=claude-code_", "--format", "{{.Names}}"],
         capture_output=True, text=True,
@@ -296,7 +292,6 @@ def launch():
 
     # refresh frequency for Dockerfile's downloaded software
     os.environ["TOOLCHAIN_REFRESH"] = date.today().strftime("%Y-W%W")  # WEEKLY
-    os.environ["HOST_UID"] = str(os.getuid())
     os.environ["AGENT_STATE"] = str(sync_state(agent, session, md_path))
     os.environ["AGENT_NAME"] = agent
     os.environ["AGENT_SESSION"] = session

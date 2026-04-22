@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN mkdir -p /workspace
 
-ARG HOST_UID
+ARG HOST_UID=1000
 RUN useradd -m -s /bin/bash -u ${HOST_UID} claude \
     && chown -R claude:claude /workspace \
     && mkdir -p /home/claude/.claude/projects/-workspace/memory \

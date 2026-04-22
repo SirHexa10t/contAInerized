@@ -4,7 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        HOST_UID: ${HOST_UID:-1000}
         TOOLCHAIN_REFRESH: ${TOOLCHAIN_REFRESH:-bootstrap}
     container_name: claude-code_${AGENT_NAME}
     stdin_open: true   # -i (interactive)
