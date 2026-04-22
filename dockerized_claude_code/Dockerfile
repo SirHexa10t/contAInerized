@@ -24,11 +24,16 @@ RUN useradd -m -s /bin/bash -u ${HOST_UID} claude \
 
 USER claude
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+ARG TOOLCHAIN_REFRESH=bootstrap
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN : "${TOOLCHAIN_REFRESH}" \
+ && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN : "${TOOLCHAIN_REFRESH}" \
+ && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+RUN : "${TOOLCHAIN_REFRESH}" \
+ && curl -fsSL https://claude.ai/install.sh | bash
 
 ENV PATH="/home/claude/.cargo/bin:/home/claude/.local/bin:$PATH"
 ENV DISABLE_AUTOUPDATER=1

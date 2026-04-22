@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, sys, subprocess, shutil, json, re
+from datetime import date
 from pathlib import Path
 from pick import pick  # pip install pick
 from dotenv import dotenv_values  # pip install python-dotenv
@@ -234,6 +235,8 @@ def launch():
         mapping[instance] = workspace
         save_workspace_map(mapping)
 
+    # refresh frequency for Dockerfile's downloaded software
+    os.environ["TOOLCHAIN_REFRESH"] = date.today().strftime("%Y-W%W")  # WEEKLY
     os.environ["HOST_UID"] = str(os.getuid())
     os.environ["AGENT_STATE"] = str(sync_state(agent, session, md_path))
     os.environ["AGENT_NAME"] = agent

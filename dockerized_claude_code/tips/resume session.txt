@@ -9,3 +9,6 @@ This works for launching into the past session. To resume that session after lau
 /resume 18953452-2104-4f32-a089-516e71408a91
 
 
+Currently the project is configured to run non-new instances with the '--continue' flag - you don't have to resume your last session, it happens automatically
+
+

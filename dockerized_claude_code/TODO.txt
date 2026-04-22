@@ -4,8 +4,81 @@ Integrate tips from this video:
 
 
 Move the README.md instructions from the project-making agent to a new action: write-readme
+    Also include: list of features
+
+Add handling instructions to (top of) the summary file?
+    Inquire if you can store the summary in secondary memory files, rather than MEMORY.md, since I don't want to always include the summary in every question, but also can't trust that the AI would read the summary file as instructed in MEMORY.md
 
 On agents that are meant to constantly work on architecture, keep the summary file mounted as MEMORY.md rather than referenced. Should probably be controlled through a config in agent.conf (my own config, not Claude's)
 
 Figure out if bloating all containers with Rust, Python, NodeJS, etc. is really necessary
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+Dockerfile:
+
+
+
+
+It works, and the overall shape is sensible (shared auth, per-agent state, bind-mounted workspace). But it diverges from Anthropic's reference devcontainer in a few places, and two of those choices cost you cache or security.           
+                                                                                                                                                                                                                                              
+  Installer hygiene. Anthropic's reference is FROM node:20 and installs via npm — the original distribution path. Yours is debian:bookworm-slim plus three uncontrolled curl … | bash steps (rustup, uv, claude installer). No version pin, no
+   checksum. Docker cache freezes whatever each installer served on first build, so you're effectively running "whatever landed on day-of-first-build" forever, with no reproducibility across machines. Given the research/verification      
+  principles you operate under, this is the weakest link. Minimum fix: pin versions via installer flags (rustup --default-toolchain 1.87.0; the claude installer accepts a version argument), and/or pair with a published checksum check.    
+  Even a sticky ARG RUSTUP_VERSION=… that you bump deliberately is a big improvement over "unpinned but cached."                                        
+
+  ARG HOST_UID bakes UID into the image. The useradd layer is cache-keyed on the arg value, so the cache forks per host-user and invalidates any time UID changes. The typical idioms avoid that entirely: (a) assume UID 1000 like           
+  Anthropic's node user — works for most Linux hosts and all stock Docker Desktop setups — and use user: "${HOST_UID:-1000}:${HOST_UID:-1000}" in compose for the runtime override; or (b) keep the baked user but pin the literal UID 1000   
+  and drop the ARG. Either way, HOST_UID leaves the cache key and the image becomes portable across users.                                                                                                                                    
+                                                                                                                                                                                                                                              
+  No firewall = no safe --dangerously-skip-permissions. The most load-bearing piece of Anthropic's reference isn't the Dockerfile, it's init-firewall.sh — iptables locks outbound traffic to an allowlist (npm, GitHub, Claude API). That    
+  isolation is the entire reason their container is considered safe to run with permissions auto-approved. You have network_mode: none commented out but no equivalent. Fine for interactive use; if you ever want a "YOLO agent" running     
+  unattended, port that init script over (~60 lines) and add it to a target (see below).                                                                                                                                                      
+                                                                                                                                                                                                                                              
+  Minor polish. RUN mkdir -p /workspace at line 17 is redundant (the useradd RUN that follows chowns it; WORKDIR would create it too). The Rust install leaves registry caches in the final image — trivial to rm -rf                         
+  ~/.rustup/toolchains/*/share/doc ~/.cargo/registry afterward. Neither is urgent.                                                                                                                                                            
+                                                                                                                                                                                                                                              
+  2) Toolchain dependencies per-agent                                                                                                                                                                                                         
+                                                                                                                                                                                                                                              
+  Your monolithic image carries Rust + uv + Python venv + build-essential + pkg-config + libssl-dev whether the agent needs them or not. golem and poet don't; project-starter and refactorer likely do. The Docker-native answer is          
+  multi-stage with named targets:                                                                                                                       
+                                                                                                                                                                                                                                              
+  FROM debian:bookworm-slim AS base                                                                                                                     
+    # always-on: ca-certs, git, ripgrep, claude CLI, non-root user                                                                                                                                                                            
+                                                                                                                                                                                                                                              
+  FROM base AS dev                                                                                                                                                                                                                            
+    # +build-essential, pkg-config, libssl-dev, Rust, uv                                                                                                                                                                                      
+                                                                                                                                                        
+  Wire target selection through your existing config layers:                                                                                                                                                                                  
+  
+  - docker-compose.yml gains build.target: ${BUILD_TARGET:-base}.                                                                                                                                                                             
+  - agents/default.conf sets BUILD_TARGET=dev (safe default — matches current behavior).                                                                
+  - agents/golem.conf, agents/poet.conf override with BUILD_TARGET=base.                                                                                                                                                                      
+  - run.py already parses .conf into env; just make sure BUILD_TARGET is exported before ensure_image() at run.py:248, so docker compose build sees it. Note BUILD_TARGET is a build-time concern — it shouldn't be forwarded as -e at        
+  runtime; you may want to .pop() it out of the conf dict before the docker compose run call.                                                                                                                                                 
+                                                                                                                                                                                                                                              
+  BuildKit shares the base layers between both images, so you pay the Rust install once and only in the image that uses it. An added benefit: when you bump rustup, the base image doesn't rebuild, so golem/poet aren't disturbed.           
+                                                                                                                                                        
+  A lighter alternative is to leave the Dockerfile alone and accept the one-image cost — at steady state the ~2 GB lives on disk exactly once and container startup is identical. The real penalty is that any change to a dev-only layer     
+  invalidates the entire image for every agent. With six agents and active evolution, the two-target split is probably worth the ~20 lines of churn.    
+                                                                                                                                                                                                                                              
+  Don't go down the "install toolchains at runtime in an entrypoint based on env var" path. It destroys the caching story and makes agent startup slow in a variable, hard-to-debug way.                                                      
+  
+  Sources                                                                                                                                                                                                                                     
+                                                                                                                                                        
+  1. https://github.com/anthropics/claude-code/tree/main/.devcontainer — reference Dockerfile + devcontainer.json + init-firewall.sh. Single-stage, node:20, non-root node user with passwordless sudo, no Rust/uv, firewall-locked.          
+  2. https://code.claude.com/docs/en/devcontainer — confirms the firewall is what makes --dangerously-skip-permissions safe inside the container; Anthropic explicitly warns the container alone is not enough.
+  3. https://docs.docker.com/build/building/multi-stage/ — the mechanism for named target: stages with shared base layers; source for the BuildKit cache-sharing claim.                                                                       
+  4. Your /workspace/Dockerfile, /workspace/docker-compose.yml, /workspace/run.py — compared instruction-by-instruction against Anthropic's reference.                                                                                        
+                                                                                                                                                                                                                                              
