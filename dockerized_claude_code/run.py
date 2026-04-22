@@ -42,7 +42,7 @@ CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
 CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
 
 SESSION_SEP = "__"
-instance_name = lambda agent, session: f"{agent}{SESSION_SEP}{session}"
+instance_name = lambda agent, session: f"{agent_name_from_stem(agent)}{SESSION_SEP}{session}"
 state_dir = lambda agent, session: AGENTS_STATE / instance_name(agent, session)
 state_md = lambda agent, session: state_dir(agent, session) / "CLAUDE.md"
 
@@ -81,12 +81,34 @@ def save_workspace_map(mapping):
     AGENT_WORKSPACE_MAP_FILE.write_text(json.dumps(mapping, indent=4, sort_keys=True) + "\n")
 
 
-def parse_conf(md_path):
-    """Load agent-specific .conf, falling back to default.conf only if none exists."""
-    override = md_path.with_suffix(CONF_EXT)
-    if override.exists():
-        return dotenv_values(override)
-    return dotenv_values(DEFAULT_CONF) if DEFAULT_CONF.exists() else {}
+def _parse_stem(stem):
+    """'name(parent)' → ('name', 'parent'); 'name' → ('name', None)."""
+    m = re.match(r"^(.+?)\(([^)]+)\)$", stem)
+    return (m.group(1), m.group(2)) if m else (stem, None)
+
+
+def agent_name_from_stem(stem):
+    """Strip any '(conf_parent)' suffix — used for display and internal agent ID."""
+    return _parse_stem(stem)[0]
+
+
+def find_md_for_agent(agent_name):
+    """Locate an agent's .md by its clean name; handles both '<name>.md' and '<name>(*).md'."""
+    direct = AGENTS_DIR / f"{agent_name}{MD_EXT}"
+    if direct.exists():
+        return direct
+    for p in AGENTS_DIR.glob(f"{agent_name}(*){MD_EXT}"):
+        return p
+    return None
+
+
+def load_conf(md_path):
+    """Locate and load an agent's .conf. Returns (path_or_None, values_dict).
+    '<name>(parent).md' aliases to '<parent>.conf'; else '<name>.conf'; falls back to DEFAULT_CONF."""
+    name, parent = _parse_stem(md_path.stem)
+    specific = AGENTS_DIR / f"{(parent or name)}{CONF_EXT}"
+    conf_path = specific if specific.exists() else (DEFAULT_CONF if DEFAULT_CONF.exists() else None)
+    return conf_path, (dotenv_values(conf_path) if conf_path else {})
 
 
 MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
@@ -95,7 +117,8 @@ MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
 def agent_sort_key(item):
     """Sort by family (Opus>Sonnet>Haiku), then version desc, then name asc."""
     name, path = item
-    model = parse_conf(path).get("ANTHROPIC_MODEL", "")
+    _, conf = load_conf(path)
+    model = conf.get("ANTHROPIC_MODEL", "")
     m = re.search(r"(opus|sonnet|haiku)-(\d+)(?:-(\d+))?", model)
     if not m:
         return (0, (0, 0), name)
@@ -105,8 +128,8 @@ def agent_sort_key(item):
 def instance_sort_key(instance):
     """Reuse agent_sort_key on the agent half, then sub-sort by session; orphans last."""
     agent, _, session = instance.partition(SESSION_SEP)
-    md_path = AGENTS_DIR / f"{agent}{MD_EXT}"
-    if not md_path.exists():
+    md_path = find_md_for_agent(agent)
+    if md_path is None:
         return ((1, (0, 0), agent), session)
     return (agent_sort_key((agent, md_path)), session)
 
@@ -119,7 +142,7 @@ def select_agent():
     MARKER_DEL = "⚠️ DELETE‼️"
     while True:
         agents = tuple(sorted(
-            ((p.stem, p) for p in AGENTS_DIR.glob(f"*{MD_EXT}") if p.stem != "default"),
+            ((agent_name_from_stem(p.stem), p) for p in AGENTS_DIR.glob(f"*{MD_EXT}") if p.stem != "default"),
             key=agent_sort_key,
         ))
         if not agents:
@@ -300,8 +323,10 @@ def launch():
     os.environ["ACCOUNT_FILE"] = str(ACCOUNT_FILE)
     os.environ["CREDENTIALS_FILE"] = str(CREDENTIALS_FILE)
     prepare_caches()
-    conf = parse_conf(md_path)
+    conf_path, conf = load_conf(md_path)
     os.environ.update(conf)
+    print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
+    print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
     ensure_image()
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (

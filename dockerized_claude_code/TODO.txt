@@ -13,7 +13,7 @@ On agents that are meant to constantly work on architecture, keep the summary fi
 
 
 Implementation for domain-specific agents (which need their own specific binaries / programs):
-    tag agents by putting them in an extra folder (i.e. "programmer", "artist"), and that would determine which extra programs would be within their reach/containers (example: for "artist": do: "FROM base AS art")
+    tag agents (.md files, not .conf) by putting them in an extra folder (i.e. "programmer", "artist"), and that would determine which extra programs would be within their reach/containers (example: for "artist": do: "FROM base AS art")
 
 
 
