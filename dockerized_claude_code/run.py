@@ -294,7 +294,6 @@ def launch():
     os.environ["TOOLCHAIN_REFRESH"] = date.today().strftime("%Y-W%W")  # WEEKLY
     os.environ["AGENT_STATE"] = str(sync_state(agent, session, md_path))
     os.environ["AGENT_NAME"] = agent
-    os.environ["AGENT_SESSION"] = session
     pretty = instance.replace("-", " ").replace("__", " - ").title()
     os.environ["AGENT_STATUS_LINE"] = f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m"
     os.environ["AI_WORKSPACE"] = workspace

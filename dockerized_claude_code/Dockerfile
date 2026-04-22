@@ -14,13 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /workspace
-
 ARG HOST_UID=1000
-RUN useradd -m -s /bin/bash -u ${HOST_UID} claude \
-    && chown -R claude:claude /workspace \
-    && mkdir -p /home/claude/.claude/projects/-workspace/memory \
-    && chown -R claude:claude /home/claude/.claude
+RUN useradd -m -s /bin/bash -u ${HOST_UID} claude
 
 USER claude
 
