@@ -2,7 +2,7 @@ Analyze this project and produce a structured summary that would let a fresh AI 
 
 ## Instructions
 
-1. **Detect what changed.** Before reading any files, run a command to list every file in the project with its last-modified timestamp (e.g., `find /workspace -not -path '*/.git/*' -not -name '.claude_summary' -type f -printf '%T@ %Tc %p\n' | sort -k1 -nr`). Exclude `.claude_summary` from this listing — it is the summary output itself and would always appear changed. Compare this list against the `### File Manifest` section in the existing summary (if one exists). Files whose timestamps match the manifest have not changed — **do not re-read them**. Only read files that are new, modified, or missing from the manifest. If there is no existing summary, read everything.
+1. **Detect what changed.** Run `summary_files` (a bash function defined in `./settings/bashrc.sh`); it prints one filename per line. Re-read only the files it lists.
 
 2. **Explore the project thoroughly.** Read the files identified as new or changed in step 1 — entry points, configuration, READMEs, build files, directory listings — until you have a solid understanding of what this project does and how it is organized. Do not skim; do not guess. If the project is large, prioritize breadth first (directory structure, entry points, config) before depth (individual modules).
 
@@ -10,7 +10,16 @@ Analyze this project and produce a structured summary that would let a fresh AI 
 
 4. **Revise for consistent depth.** Before saving, do one revision pass: do sibling rows in each table carry comparable weight? Do sibling bullets? Is any cell or bullet padded to match a column that was not earning its space? Cut or flatten accordingly — it is fine to drop a column or collapse a row if it only fills space. Future sessions have to read the whole file on every invocation, so evenly-pitched and smaller is kinder than thorough-but-lumpy.
 
-5. **Save the summary** to `/workspace/.claude_summary`.
+5. **Save the summary** to `/workspace/.claude_summary`. The summary must contain the `### File Manifest` heading followed by a manifest block bracketed by HTML-comment markers — if the manifest has been written before, make sure that it contains the markers. If it hasn't been written before, write the markers, and leave the contents between them empty:
+
+   ```
+   ### File Manifest
+
+   <!-- manifest:begin -->
+   <!-- manifest:end -->
+   ```
+
+   Then run `summary_save_manifest` (defined in the agent's bashrc alongside `summary_diff`); it replaces whatever's between the markers with the current `<epoch> <path>` listing. **Do not run `summary_save_manifest` earlier** — it would clobber the manifest `summary_diff` just compared against, and a re-run would then show no changes. The save refuses to run if either marker is missing, so a missing block fails loudly rather than silently corrupting the file.
 
 6. **If a previous summary already exists in `/workspace/.claude_summary`**, read it before exploring the codebase. Then:
    - **Preserve** sections that are still accurate — do not rewrite what hasn't changed.
@@ -69,13 +78,16 @@ When you do include such a note, it must be *load-bearing* — a fresh session w
 If there is nothing notable, say so in one line.
 
 ### File Manifest
-A table of every project file with its last-modified timestamp (epoch and human-readable). This section is machine-consumed: future runs of `/write-summary` compare against it to skip unchanged files. Use this exact format:
+Populated by `summary_save_manifest`. Write only the heading and the begin/end markers (with nothing between them); the helper fills in the rest. Each entry is `<epoch> <path>` (integer seconds, paths relative to `/workspace`, sorted newest first). Note: `.claude_summary` itself is intentionally excluded — `summary_save_manifest` writes to it, so tracking it would always show a CHANGED loop. Format the helper produces:
 
 ```
-| File | Modified (epoch) | Modified (human) |
-|------|-----------------|------------------|
-| run.py | 1713408840.0 | Fri 18 Apr 2025 03:34:00 |
-| ... | ... | ... |
+### File Manifest
+
+<!-- manifest:begin -->
+1713408840 run.py
+1713400000 README.md
+...
+<!-- manifest:end -->
 ```
 
 ## Calibration Guidelines

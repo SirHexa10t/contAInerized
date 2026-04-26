@@ -32,7 +32,7 @@ A launcher for pre-made Claude Code agents in isolated Docker containers — eac
   custom_commands/             # Shared /slash commands (write-summary, write-readme)
   settings/
     statusline.sh              # Prints $AGENT_STATUS_LINE
-    bashrc.sh                  # Sourced via $BASH_ENV; defines `mango` (lists slash commands)
+    bashrc.sh                  # Sourced via $BASH_ENV; defines `man` (lists slash commands)
     settings.json              # Registers statusLine.command + shared settings
   memory/MEMORY.md             # Auto-loaded each turn; pointer to /workspace/.claude_summary
   tips/                        # Plain-text notes (docker, resume, login, stats, …)
@@ -110,44 +110,46 @@ State persists at `~/.claude-agents/<agent>__<session>/`; subsequent launches re
 ### Current State
 
 - `TODO.txt` open ideas: (a) integrate tips from a referenced YouTube video; (b) decide where the project summary should live for architecture-heavy agents — mounted as `MEMORY.md` (loaded every turn) vs referenced (loaded on demand) — possibly via a per-agent config flag; (c) domain-specific agents — extend the `(parent)` filename trick with `{tag}` suffixes that select multi-stage Dockerfile targets carrying extra binaries (LaTeX, Blender, ffmpeg, …); (d) Dockerfile multi-stage split deferred until disk pressure or a heavyweight domain demands it; (e) Anthropic's `init-firewall.sh` (iptables allowlist) if ever running unattended `--dangerously-skip-permissions`.
-- `settings/bashrc.sh` is bind-mounted to `/home/claude/.bashrc` and sourced via `BASH_ENV` for non-interactive bash; defines a `mango` function listing custom + built-in slash commands.
+- `settings/bashrc.sh` is bind-mounted to `/home/claude/.bashrc` and sourced via `BASH_ENV` for non-interactive bash; defines a `man` function listing custom + built-in slash commands.
 
 ### File Manifest
 
-| File | Modified (epoch) | Modified (human) |
-|------|-----------------|------------------|
-| README.md | 1777222173.8678961550 | Sun Apr 26 16:49:33 2026 |
-| launch/audit.py | 1777221615.7278611750 | Sun Apr 26 16:40:15 2026 |
-| launch/menu_picker.py | 1777217773.4573133480 | Sun Apr 26 15:36:13 2026 |
-| launch/agents_lib.py | 1777217752.4207419770 | Sun Apr 26 15:35:52 2026 |
-| run.py | 1777217174.9004281730 | Sun Apr 26 15:26:14 2026 |
-| launch/__init__.py | 1777215322.8243733670 | Sun Apr 26 14:55:22 2026 |
-| TODO.txt | 1777167517.8296526510 | Sun Apr 26 01:38:37 2026 |
-| agents/project-starter(thinker).md | 1777167483.6197537910 | Sun Apr 26 01:38:03 2026 |
-| custom_commands/write-readme.md | 1777167333.8338226420 | Sun Apr 26 01:35:33 2026 |
-| settings/bashrc.sh | 1777164529.8445751870 | Sun Apr 26 00:48:49 2026 |
-| docker-compose.yml | 1777164443.1027605010 | Sun Apr 26 00:47:23 2026 |
-| agents/thinker.conf | 1776869480.3531508960 | Wed Apr 22 14:51:20 2026 |
-| agents/medical-investigator(researcher).md | 1776867376.9052563990 | Wed Apr 22 14:16:16 2026 |
-| Dockerfile | 1776861655.3215606360 | Wed Apr 22 12:40:55 2026 |
-| tips/docker.md | 1776834041.0476991820 | Wed Apr 22 05:00:41 2026 |
-| tips/resume session.txt | 1776700083.1312546650 | Mon Apr 20 15:48:03 2026 |
-| settings/statusline.sh | 1776636360.4145117990 | Sun Apr 19 22:06:00 2026 |
-| settings/settings.json | 1776566569.1167724840 | Sun Apr 19 02:42:49 2026 |
-| custom_commands/write-summary.md | 1776565162.1179953950 | Sun Apr 19 02:19:22 2026 |
-| memory/MEMORY.md | 1776564169.8772269760 | Sun Apr 19 02:02:49 2026 |
-| tips/stats.txt | 1776560155.0707398480 | Sun Apr 19 00:55:55 2026 |
-| agents/poet.conf | 1776485876.5695578300 | Sat Apr 18 04:17:56 2026 |
-| agents/researcher.conf | 1776485867.6853485350 | Sat Apr 18 04:17:47 2026 |
-| agents/default.conf | 1776485865.3162927190 | Sat Apr 18 04:17:45 2026 |
-| tips/program_expansion.txt | 1774460937.8407643790 | Wed Mar 25 17:48:57 2026 |
-| agents/golem.conf | 1774431167.7587499560 | Wed Mar 25 09:32:47 2026 |
-| tips/configurating_agents.txt | 1774431084.0108572940 | Wed Mar 25 09:31:24 2026 |
-| tips/login.txt | 1774424528.5225492420 | Wed Mar 25 07:42:08 2026 |
-| agents/poet.md | 1774207589.7181400100 | Sun Mar 22 19:26:29 2026 |
-| agents/researcher.md | 1774199498.7066044590 | Sun Mar 22 17:11:38 2026 |
-| agents/golem.md | 1774198572.8618436960 | Sun Mar 22 16:56:12 2026 |
-| tips/chat_syntax.txt | 1774196909.2160668870 | Sun Mar 22 16:28:29 2026 |
-| agents/strict-reviewer(thinker).md | 1774196909.2150668750 | Sun Mar 22 16:28:29 2026 |
-| .dockerignore | 1774196909.2150668750 | Sun Mar 22 16:28:29 2026 |
-| agents/refactorer(thinker).md | 1774196909.2140668620 | Sun Mar 22 16:28:29 2026 |
+<!-- manifest:begin -->
+1777237241 custom_commands/write-summary.md
+1777236767 settings/bashrc.sh
+1777236763 settings/_summary.py
+1777233742 docker-compose.yml
+1777230824 TODO.txt
+1777222173 README.md
+1777221615 launch/audit.py
+1777217773 launch/menu_picker.py
+1777217752 launch/agents_lib.py
+1777217174 run.py
+1777215322 launch/__init__.py
+1777167483 agents/project-starter(thinker).md
+1777167333 custom_commands/write-readme.md
+1776869480 agents/thinker.conf
+1776867376 agents/medical-investigator(researcher).md
+1776861655 Dockerfile
+1776834041 tips/docker.md
+1776700083 tips/resume session.txt
+1776636360 settings/statusline.sh
+1776566569 settings/settings.json
+1776564169 memory/MEMORY.md
+1776560155 tips/stats.txt
+1776485876 agents/poet.conf
+1776485867 agents/researcher.conf
+1776485865 agents/default.conf
+1774460937 tips/program_expansion.txt
+1774431167 agents/golem.conf
+1774431084 tips/configurating_agents.txt
+1774424528 tips/login.txt
+1774207589 agents/poet.md
+1774199498 agents/researcher.md
+1774198572 agents/golem.md
+1774196909 .dockerignore
+1774196909 agents/refactorer(thinker).md
+1774196909 agents/strict-reviewer(thinker).md
+1774196909 tips/chat_syntax.txt
+<!-- manifest:end -->
+

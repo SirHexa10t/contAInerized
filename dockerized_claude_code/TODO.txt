@@ -13,6 +13,7 @@ Implementation for domain-specific agents (which need their own specific binarie
     tag agents (.md files, not .conf) by putting ~~them in an extra folder~~ the tags in the agent names', within brackets or curly braces (i.e. "programmer", "artist"), and that would determine which extra programs would be within their reach/containers (example: for "artist": do: "FROM base AS art")
         it's better to add more data to the filename via brackets and/or curly braces. Just like it's done with conf files. That way you can have multiple tags.
 
+Add host filesystem paths to env-space during workspace-choice, so that the user could complete path-selection with 'Tab' presses
 
 
 

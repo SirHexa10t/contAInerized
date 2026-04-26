@@ -8,7 +8,7 @@ alias ll='ls -tarlushFN --color=always --time-style="+%F_%T" --group-directories
 
 # List every custom slash command (under /home/claude/.claude/commands/),
 # then a short roster of Claude Code's built-in slash commands.
-mango() {
+man() {
     local commands_dir="$HOME/.claude/commands"
 
     printf '\nCustom commands (from custom_commands/):\n'
@@ -36,3 +36,26 @@ mango() {
     printf '  /model      Switch model mid-session\n'
     printf '  /help       List of built-in commands\n\n'
 }
+
+# Resolve _summary.py: container bind-mount path first, else next to this bashrc.
+_SUMMARY_PY="/home/claude/.claude/_summary.py"
+[ -f "$_SUMMARY_PY" ] || _SUMMARY_PY="$(dirname "${BASH_SOURCE[0]}")/_summary.py"
+
+# Diff /workspace against the manifest in /workspace/.claude_summary;
+# print NEW / CHANGED / DELETED lines for every file that differs.
+# Useful when the AI also needs to know about DELETED files to prune from the prose.
+summary_diff() { python3 "$_SUMMARY_PY" diff; }
+
+# Same comparison, but prints just one path per line for the files that actually need
+# re-reading (NEW + CHANGED, no prefixes, no DELETED). The cleanest list for the AI
+# to walk through during /write-summary.
+summary_files() { python3 "$_SUMMARY_PY" files; }
+
+# Replace the manifest block in /workspace/.claude_summary with a fresh listing.
+# Refuses to run unless the manifest's <!-- manifest:begin --> / <!-- manifest:end -->
+# markers are present (so a missing block fails loudly rather than silently
+# corrupting the file). Run AFTER summary_diff has informed you of changes —
+# running it earlier would clobber the manifest summary_diff is about to compare
+# against, and a re-run would then show no changes at all.
+summary_save_manifest() { python3 "$_SUMMARY_PY" save; }
+
