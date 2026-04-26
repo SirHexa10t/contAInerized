@@ -105,7 +105,9 @@ STYLE_CURRENT_DIR    = "bold fg:ansiyellow"
 
 # ============================================================
 
+import glob
 import os
+import readline
 from pathlib import Path
 
 from prompt_toolkit import Application                                     # pip install prompt_toolkit
@@ -312,19 +314,38 @@ def confirm_dialog(message):
     return answer in CONFIRM_YES_ANSWERS
 
 
+def _path_completer(text, state):
+    """Tab-complete `text` as a host filesystem path; expands `~` for matching."""
+    matches = glob.glob(os.path.expanduser(text) + "*")
+    matches = [m + os.sep if os.path.isdir(m) else m for m in matches]
+    return matches[state] if state < len(matches) else None
+
+
 def ask_for_workspace(agent, default=None):
     """Prompt for a workspace path; Enter uses `default` (or DEFAULT_WORKSPACE).
-    Returns the absolute path, with `~` expanded but symlinks preserved — the form
-    the user typed is what gets stored."""
+    Tab completes against the host filesystem. Returns the absolute path with `~`
+    expanded but symlinks preserved — the form the user typed is what gets stored."""
     default = default if default is not None else DEFAULT_WORKSPACE
-    while True:
-        entered = input(
-            f"Workspace path for '{agent}' instance [{default}]: "
-        ).strip() or default
-        absolute = os.path.abspath(os.path.expanduser(entered))
-        if Path(absolute).is_dir():
-            return absolute
-        print(f"Not a directory: {absolute}")
+    prior_completer = readline.get_completer()
+    prior_delims = readline.get_completer_delims()
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(" \t\n")
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")  # macOS / BSD libedit syntax
+    else:
+        readline.parse_and_bind("tab: complete")        # GNU readline syntax
+    try:
+        while True:
+            entered = input(
+                f"Workspace path for '{agent}' instance [{default}]: "
+            ).strip() or default
+            absolute = os.path.abspath(os.path.expanduser(entered))
+            if Path(absolute).is_dir():
+                return absolute
+            print(f"Not a directory: {absolute}")
+    finally:
+        readline.set_completer(prior_completer)
+        readline.set_completer_delims(prior_delims)
 
 
 def select_agent():
