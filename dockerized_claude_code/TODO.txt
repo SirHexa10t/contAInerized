@@ -13,7 +13,8 @@ On agents that are meant to constantly work on architecture, keep the summary fi
 
 
 Implementation for domain-specific agents (which need their own specific binaries / programs):
-    tag agents (.md files, not .conf) by putting them in an extra folder (i.e. "programmer", "artist"), and that would determine which extra programs would be within their reach/containers (example: for "artist": do: "FROM base AS art")
+    tag agents (.md files, not .conf) by putting ~~them in an extra folder~~ the tags in the agent names', within brackets or curly braces (i.e. "programmer", "artist"), and that would determine which extra programs would be within their reach/containers (example: for "artist": do: "FROM base AS art")
+        it's better to add more data to the filename via brackets and/or curly braces. Just like it's done with conf files. That way you can have multiple tags.
 
 
 
@@ -66,7 +67,15 @@ Implementation for domain-specific agents (which need their own specific binarie
 
 
 
-
+Agent ideas:
+    Language Teacher
+    Image to Text ?
+    Image Drawing ?
+    Voice Synth ?
+    Parody Writer ? Singer ?
+    Meme finder ?
+    DnD ?
+    Companion ?
 
 
 
