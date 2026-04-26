@@ -9,11 +9,12 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import dotenv_values  # pip install python-dotenv
 
-PROJECT = Path(__file__).resolve().parent
+PROJECT = Path(__file__).resolve().parent.parent  # this file lives in launch/, project root is one up
 AGENTS_DIR = PROJECT / "agents"
 
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
@@ -23,7 +24,10 @@ AGENTS_STATE = Path.home() / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
-DEFAULT_WORKSPACE = os.environ.get("AI_WORKSPACE", "/ai_workspace")
+DEFAULT_WORKSPACE = (
+    os.environ.get("AI_WORKSPACE")
+    or ("/ai_workspace" if os.getcwd() == os.path.expanduser("~") else os.getcwd())
+)  # fall back to $PWD, except when $PWD is $HOME — then use the bind-mount default
 SESSION_SEP = "__"
 MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
 NO_WORKSPACE_DISPLAY = "?"  # subtitle placeholder for instances with no valid workspace
@@ -150,9 +154,29 @@ def creatable_agents():
     return out
 
 
+def relative_time(mtime):
+    """Human-readable relative time from an epoch mtime (e.g. '3 days ago', '5 minutes ago')."""
+    delta = datetime.now() - datetime.fromtimestamp(mtime)
+    if delta.days >= 1:
+        return f"{delta.days} day{'s' if delta.days != 1 else ''} ago"
+    hours = delta.seconds // 3600
+    if hours >= 1:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    minutes = delta.seconds // 60
+    return f"{minutes} minute{'s' if minutes != 1 else ''} ago" if minutes else "just now"
+
+
+def _last_used_mtime(instance_id):
+    """Return mtime of the latest history.jsonl under the instance state dir, or None if absent."""
+    files = list((AGENTS_STATE / instance_id).rglob("history.jsonl"))
+    return max((f.stat().st_mtime for f in files), default=None)
+
+
 def continuable_instances():
     """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped;
-    sorted by (agent rank, session)."""
+    sorted by (agent rank, session). Marks instances whose workspace resolves to the
+    current working directory (for the picker's CURRENT DIR hint)."""
+    cwd = Path.cwd().resolve()
     mapping = load_workspace_map()
     out = []
     for dir_name in list_all_instances():
@@ -164,6 +188,9 @@ def continuable_instances():
         ws = mapping.get(instance)
         ws_valid = bool(ws and Path(ws).is_dir())
         ws_display = ws if ws_valid else NO_WORKSPACE_DISPLAY
+        is_current_dir = ws_valid and Path(ws).resolve() == cwd
+        last_mtime = _last_used_mtime(instance)
+        last_used_display = relative_time(last_mtime) if last_mtime is not None else "(never)"
         out.append({
             "id": instance,
             "agent_name": agent,
@@ -171,12 +198,14 @@ def continuable_instances():
             "md_path": md_path,
             "workspace": ws,                     # raw — None if missing from map; may be invalid path string
             "workspace_display": ws_display,
+            "is_current_dir": is_current_dir,
             "preview": (
                 f"Continue session '{instance}'.\n\n"
                 f"Agent:     {agent}\n"
                 f"Session:   {session}\n"
                 f"Workspace: {ws_display}\n"
                 f"State:     {AGENTS_STATE / instance}\n"
+                f"Last used: {last_used_display}\n"
             ),
         })
     out.sort(key=lambda d: (agent_sort_key((d["agent_name"], d["md_path"])), d["session"]))
@@ -190,3 +219,19 @@ def delete_instance(instance_id):
     if instance_id in m:
         del m[instance_id]
         save_workspace_map(m)
+
+
+def redefine_instance(old_id, agent, new_session, new_workspace):
+    """Move an instance's state dir to a new (agent, session) and update its workspace mapping.
+    No-op for the rename if old and new ids match; the workspace map is always updated."""
+    new_id = instance_name(agent, new_session)
+    if new_id != old_id:
+        new_dir = AGENTS_STATE / new_id
+        if new_dir.exists():
+            raise ValueError(f"Instance '{new_id}' already exists.")
+        (AGENTS_STATE / old_id).rename(new_dir)
+    m = load_workspace_map()
+    if new_id != old_id:
+        m.pop(old_id, None)
+    m[new_id] = new_workspace
+    save_workspace_map(m)

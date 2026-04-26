@@ -3,12 +3,12 @@ import os, shutil, subprocess, sys, time
 from datetime import date
 from pathlib import Path
 
-from agents_lib import (
+from launch.agents_lib import (
     PROJECT, AGENTS_DIR, AGENTS_STATE, AGENT_WORKSPACE_MAP_FILE, ACCOUNT_FILE, CREDENTIALS_FILE,
-    instance_name, load_conf, load_workspace_map, save_workspace_map,
+    SESSION_SEP, instance_name, find_md_for_agent, load_conf, load_workspace_map, save_workspace_map,
     install_latest_md, prompt_session, creatable_agents,
 )
-from menu_picker import select_agent, ask_for_workspace
+from launch.menu_picker import select_agent, ask_for_workspace
 
 if shutil.which("docker") is None:
     sys.exit("docker is required but was not found in PATH.")
@@ -80,12 +80,12 @@ def ensure_image():
         sys.exit(ret)
 
 
-def set_container_env(agent, session, workspace, md_path):
+def set_container_env(agent, session, workspace, state_path):
     """Populate os.environ with everything the container needs (besides the per-agent conf dict)."""
     pretty = f"{agent.replace('-', ' ').title()} - {session.replace('-', ' ').title()}"
     os.environ.update({
         "TOOLCHAIN_REFRESH": date.today().strftime("%Y-W%W"),  # weekly cache key for Dockerfile downloads
-        "AGENT_STATE": str(install_latest_md(agent, session, md_path)),
+        "AGENT_STATE": str(state_path),
         "AGENT_NAME": agent,
         "AGENT_STATUS_LINE": f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m",
         "AI_WORKSPACE": workspace,
@@ -94,11 +94,39 @@ def set_container_env(agent, session, workspace, md_path):
     })
 
 
+def parse_target():
+    """If sys.argv[1] names an existing instance ('agent__session') or a known agent, consume
+    it and return a (kind, payload) tuple shaped like select_agent's return. Otherwise None
+    (the picker will run, and any args fall through to `claude`)."""
+    if len(sys.argv) < 2 or sys.argv[1].startswith("-"):
+        return None
+    target = sys.argv[1]
+
+    if SESSION_SEP in target and (AGENTS_STATE / target).is_dir():
+        agent, _, session = target.partition(SESSION_SEP)
+        md_path = find_md_for_agent(agent)
+        if md_path is not None:
+            sys.argv.pop(1)
+            return ("cont", {
+                "agent_name": agent,
+                "md_path": md_path,
+                "session": session,
+                "workspace": load_workspace_map().get(target),
+            })
+
+    md_path = find_md_for_agent(target)
+    if md_path is not None:
+        sys.argv.pop(1)
+        return ("new", {"agent_name": target, "md_path": md_path})
+
+    return None
+
+
 def launch():
     """Pick an instance (agent+session), resolve workspace, sync state, exec docker compose."""
     if not creatable_agents():
         sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
-    pick = select_agent()
+    pick = parse_target() or select_agent()
     if pick is None:
         sys.exit(0)
 
@@ -130,7 +158,8 @@ def launch():
         mapping[instance] = workspace
         save_workspace_map(mapping)
 
-    set_container_env(agent, session, workspace, md_path)
+    state_path = install_latest_md(agent, session, md_path)
+    set_container_env(agent, session, workspace, state_path)
     prepare_caches()
     prune_caches()
     conf_path, conf = load_conf(md_path)

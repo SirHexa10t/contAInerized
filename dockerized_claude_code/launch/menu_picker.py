@@ -32,6 +32,7 @@ Generic-picker entry shape (pick_with_preview):
 
 HINT_BASE_TEXT       = "↑↓ navigate  •  type to filter  •  Enter select  •  Esc cancel"
 HINT_DELETE_SUFFIX   = "  •  Del delete"
+HINT_REDEFINE_SUFFIX = "  •  F2 redefine"
 FILTER_LABEL         = "filter: "
 EMPTY_FILTER_MESSAGE = "(no matches)"
 DIVIDER_CHAR         = "│"
@@ -100,9 +101,11 @@ STYLE_DEL_MARKER     = "fg:ansired"
 STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
+STYLE_CURRENT_DIR    = "bold fg:ansiyellow"
 
 # ============================================================
 
+import os
 from pathlib import Path
 
 from prompt_toolkit import Application                                     # pip install prompt_toolkit
@@ -114,9 +117,9 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
 
-from agents_lib import (
-    DEFAULT_WORKSPACE,
-    creatable_agents, continuable_instances, delete_instance,
+from .agents_lib import (
+    AGENTS_STATE, DEFAULT_WORKSPACE,
+    creatable_agents, continuable_instances, delete_instance, instance_name, redefine_instance,
 )
 
 
@@ -132,7 +135,7 @@ def _plain(display):
     return "".join(text for _, text in _normalize(display))
 
 
-def pick_with_preview(title, entries, *, allow_delete=False):
+def pick_with_preview(title, entries, *, allow_delete=False, allow_redefine=False):
     """Render a full-screen picker; block until the user picks or cancels."""
     if not entries:
         raise ValueError("entries must be non-empty")
@@ -177,7 +180,11 @@ def pick_with_preview(title, entries, *, allow_delete=False):
         return [(f"class:{CLS_TITLE}", title)]
 
     def status_fragments():
-        hint = HINT_BASE_TEXT + (HINT_DELETE_SUFFIX if allow_delete else "")
+        hint = HINT_BASE_TEXT
+        if allow_delete:
+            hint += HINT_DELETE_SUFFIX
+        if allow_redefine:
+            hint += HINT_REDEFINE_SUFFIX
         out = [(f"class:{CLS_STATUS}", hint), ("", "\n")]
         if state["filter"]:
             out.append((f"class:{CLS_FILTER}", FILTER_LABEL))
@@ -256,6 +263,17 @@ def pick_with_preview(title, entries, *, allow_delete=False):
             state["result"] = ("delete", entry["value"])
             event.app.exit()
 
+    if allow_redefine:
+        @kb.add("f2")
+        def _(event):
+            if not state["shown"]:
+                return
+            entry = entries[state["cursor"]]
+            if not entry.get("redefinable", True):
+                return  # silently ignored — caller marked this row non-redefinable
+            state["result"] = ("redefine", entry["value"])
+            event.app.exit()
+
     body = HSplit([
         Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
         VSplit([
@@ -294,16 +312,19 @@ def confirm_dialog(message):
     return answer in CONFIRM_YES_ANSWERS
 
 
-def ask_for_workspace(agent):
-    """Prompt for a workspace path; Enter uses DEFAULT_WORKSPACE. Returns resolved absolute path."""
+def ask_for_workspace(agent, default=None):
+    """Prompt for a workspace path; Enter uses `default` (or DEFAULT_WORKSPACE).
+    Returns the absolute path, with `~` expanded but symlinks preserved — the form
+    the user typed is what gets stored."""
+    default = default if default is not None else DEFAULT_WORKSPACE
     while True:
         entered = input(
-            f"Workspace path for new '{agent}' instance [{DEFAULT_WORKSPACE}]: "
-        ).strip() or DEFAULT_WORKSPACE
-        resolved = str(Path(entered).expanduser().resolve())
-        if Path(resolved).is_dir():
-            return resolved
-        print(f"Not a directory: {resolved}")
+            f"Workspace path for '{agent}' instance [{default}]: "
+        ).strip() or default
+        absolute = os.path.abspath(os.path.expanduser(entered))
+        if Path(absolute).is_dir():
+            return absolute
+        print(f"Not a directory: {absolute}")
 
 
 def select_agent():
@@ -331,15 +352,19 @@ def select_agent():
                 "preview": agent["preview"],
                 "value": ("new", agent),
                 "deletable": False,
+                "redefinable": False,
             })
             for inst in instances_by_agent.get(agent["agent_name"], []):
+                cont_display = [
+                    (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
+                    (STYLE_AGENT_NAME, f"{inst['id']:<{instance_name_width}}"),
+                    ("", "    "),
+                ]
+                if inst.get("is_current_dir"):
+                    cont_display.append((STYLE_CURRENT_DIR, "(CURRENT DIR) "))
+                cont_display.append((STYLE_WORKSPACE_HINT, inst["workspace_display"]))
                 entries.append({
-                    "display": [
-                        (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
-                        (STYLE_AGENT_NAME, f"{inst['id']:<{instance_name_width}}"),
-                        ("", "    "),
-                        (STYLE_WORKSPACE_HINT, inst["workspace_display"]),
-                    ],
+                    "display": cont_display,
                     "preview": inst["preview"],
                     "value": ("cont", inst),
                 })
@@ -352,9 +377,10 @@ def select_agent():
             "preview": DELMENU_PREVIEW,
             "value": ("delmenu",),
             "deletable": False,
+            "redefinable": False,
         })
 
-        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True)
+        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_redefine=True)
         if action is None:
             return None
 
@@ -362,6 +388,20 @@ def select_agent():
             inst = value[1]
             if confirm_dialog(CONFIRM_DELETE_FMT.format(name=inst["id"])):
                 delete_instance(inst["id"])
+            continue
+
+        if action == "redefine":  # picker enforces redefinability — only ('cont', inst) values reach here
+            inst = value[1]
+            agent_name = inst["agent_name"]
+            while True:
+                new_session = input(f"New session suffix for '{agent_name}' [{inst['session']}]: ").strip() or inst["session"]
+                if new_session == inst["session"]:
+                    break  # keeping the same session — no collision possible
+                if not (AGENTS_STATE / instance_name(agent_name, new_session)).exists():
+                    break  # not colliding with an existing instance
+                print(f"Instance '{instance_name(agent_name, new_session)}' already exists. Pick another name.")
+            new_workspace = ask_for_workspace(agent_name, default=inst["workspace"])
+            redefine_instance(inst["id"], agent_name, new_session, new_workspace)
             continue
 
         if value[0] == "delmenu":
