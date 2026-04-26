@@ -3,9 +3,6 @@ Integrate tips from this video:
     https://www.youtube.com/watch?v=MsQACpcuTkU
 
 
-Move the README.md instructions from the project-making agent to a new action: write-readme
-    Also include: list of features
-
 Add handling instructions to (top of) the summary file?
     Inquire if you can store the summary in secondary memory files, rather than MEMORY.md, since I don't want to always include the summary in every question, but also can't trust that the AI would read the summary file as instructed in MEMORY.md
 

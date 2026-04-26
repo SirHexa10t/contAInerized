@@ -56,41 +56,7 @@ If tests need domain-specific data you don't have — realistic records, specifi
 
 ## Documentation: README.md
 
-Unless the user explicitly wants something very brief and simple (one-off script, tiny utility — if ambiguous, ask), every project ships with a `README.md` that takes a fresh reader from a clean machine to a running program. It has three required pieces, and the tech stack setup lives in its **own section**, separate from the run instructions.
-
-### 1. What the project does
-
-Lead with the goal in one or two sentences: what it is, who it's for, what problem it solves. Without this, a visitor can't tell whether they're in the right place.
-
-### 2. Tech Stack Setup (its own section)
-
-List every language, framework, and notable tool — and for each, point the user to the **recommended way to install it**. Not "install Rust" — *how*:
-
-- **Languages / runtimes**: link to the official installer and give the shortest reliable command. E.g., the `rustup` one-liner for Rust; `uv` as the fast path to a managed Python; the official Node installer or a version manager for Node.
-- **Package managers**: which one, which version, how to install it cleanly.
-- **System config**: any `/etc/` files, OS settings, kernel parameters, file permissions, or user groups the user needs to tweak. Name the exact file and the exact change — don't hand-wave.
-- **BIOS / firmware**: if virtualization, IOMMU, Secure Boot, TPM, or similar need toggling, say (a) **how to enter BIOS** (common vendor keys — varies, list the usual suspects), and (b) **how to verify from the OS after boot** that the setting actually took effect.
-- Split steps per-OS (macOS / Linux / Windows) when they diverge. Don't assume the reader's platform.
-
-This section ends when every required `which <tool>` would succeed and any system/BIOS prerequisites are confirmed.
-
-**If setup is expansive** — many steps, multiple system tweaks, specific ordering — ship a **setup script** (`setup.sh`, `scripts/setup.py`, etc.) that the README points to instead of forcing the user to execute a long checklist by hand. The script must:
-
-- **Be verbose** — announce each step before running it and confirm after (e.g. `Installing uv...` → `✓ uv installed`). The user should always know what's happening and what just happened.
-- **Fail loud, fail fast** — exit non-zero on any error and stop immediately. Never partially succeed silently, never skip a failed step.
-- **Be described in the README** — so the user expects the chatty output and the halt-on-failure behavior, and knows a failure mid-run means "fix the cause and re-run," not "the script is buggy."
-
-### 3. How to Run (its own section)
-
-Assumes setup is done. This section is about *using* the project.
-
-- **Entry points**: which files to run, and in what order if sequence matters (e.g., "run `scripts/bootstrap.py` once, then `src/main.py`").
-- **Concrete terminal examples**: at least a couple of real invocations with realistic arguments, not `<placeholders>`. Show the full command as it should be typed.
-- **Expected output**: describe or show what success looks like — a sample stdout snippet, a screenshot, a log excerpt, whatever fits. If you haven't been able to run the project yourself (blind authoring, or the output is domain-specific), **ask the user to paste a real successful run's output** so the README reflects reality rather than a plausible guess.
-
-### Keep it honest
-
-Walk through the README mentally (or literally) on a clean machine before calling it done. Any step that's ambiguous, assumes pre-installed software, or quietly skips a detail is a bug in the README. A README that half-works is worse than one that's explicit about what it doesn't cover.
+Every project ships with a `README.md`. Use the `/write-readme` slash command — it holds the full ruleset (purpose statement, features, tech stack setup with per-OS / BIOS guidance, how-to-run with verified examples, and a brief-mode escape hatch for one-off scripts).
 
 ## When cutting corners is allowed
 
