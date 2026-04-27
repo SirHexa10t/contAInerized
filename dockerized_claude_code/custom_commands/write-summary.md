@@ -10,16 +10,21 @@ Analyze this project and produce a structured summary that would let a fresh AI 
 
 4. **Revise for consistent depth.** Before saving, do one revision pass: do sibling rows in each table carry comparable weight? Do sibling bullets? Is any cell or bullet padded to match a column that was not earning its space? Cut or flatten accordingly — it is fine to drop a column or collapse a row if it only fills space. Future sessions have to read the whole file on every invocation, so evenly-pitched and smaller is kinder than thorough-but-lumpy.
 
-5. **Save the summary** to `/workspace/.claude_summary`. The summary must contain the `### File Manifest` heading followed by a manifest block bracketed by HTML-comment markers — if the manifest has been written before, make sure that it contains the markers. If it hasn't been written before, write the markers, and leave the contents between them empty:
+5. **Save the summary** to `/workspace/.claude_summary`. The `### File Manifest` section MUST contain its HTML-comment markers (`<!-- manifest:begin -->` and `<!-- manifest:end -->`), regardless of whether the manifest was populated by a previous run or this is the first run. `summary_save_manifest` refuses to run if either marker is missing, so a missing block fails loudly rather than silently corrupting the file.
+
+   **Leave the entries between the markers alone.** They are the only record of what `summary_files` compared against — clobbering them in the saved summary file forces every file to appear as `NEW` on the next `/write-summary` run, defeating the diff and forcing a full re-read. The only reason to wipe the entries is if you suspect the previous AI agent left them in a broken or untrustworthy state (e.g., corrupted timestamps, entries that don't match reality); that forces every file to be re-evaluated next time, which is the intended remedy in that case.
+
+   The manifest block as it should appear in your saved file:
 
    ```
    ### File Manifest
 
    <!-- manifest:begin -->
+   <... existing entries (or empty on a first ever run) ...>
    <!-- manifest:end -->
    ```
 
-   Then run `summary_save_manifest` (defined in the agent's bashrc alongside `summary_diff`); it replaces whatever's between the markers with the current `<epoch> <path>` listing. **Do not run `summary_save_manifest` earlier** — it would clobber the manifest `summary_diff` just compared against, and a re-run would then show no changes. The save refuses to run if either marker is missing, so a missing block fails loudly rather than silently corrupting the file.
+   Once the prose is saved, run `summary_save_manifest` (defined in the agent's bashrc alongside `summary_diff` and `summary_files`); it replaces whatever's between the markers with the current `<epoch> <path>` listing. **Do not run `summary_save_manifest` earlier** — it would clobber the entries `summary_files` just compared against, and a re-run would then show no changes.
 
 6. **If a previous summary already exists in `/workspace/.claude_summary`**, read it before exploring the codebase. Then:
    - **Preserve** sections that are still accurate — do not rewrite what hasn't changed.
@@ -46,6 +51,8 @@ Languages, frameworks, key dependencies, and infrastructure (e.g., Docker, CI pr
 
 ### Project Structure
 Map of top-level directories and key files with a short description of each. Use a flat list or a tree — whichever is clearer. Only go one or two levels deep; do not enumerate every file.
+
+**Each line's description should communicate ROLE — what kind of code lives there — so a fresh contributor knows where new additions belong**, not just what the directory name already implies. Where applicable, follow the role with one or more of: an extension-point hint (`drop a <name>.md here to register`), a dependency direction (`imports from agents_lib`), or a boundary (`no UI, no docker calls`) — boundaries are especially valuable when adjacent files have similar names, since what *doesn't* belong is often as useful as what does. Spend more lines on the project's main files — entry point, core modules, principal UI surface; let single-purpose leaves get one short clause. A description that just restates the directory or filename doesn't earn its space.
 
 **If the project has a recurring entity** (agents, services, API endpoints, plugins, microservices), follow the tree with a small table — one row per instance, columns for the axes that differ (name, role, model/version, config). Tables scan faster than prose when information repeats.
 
@@ -78,7 +85,7 @@ When you do include such a note, it must be *load-bearing* — a fresh session w
 If there is nothing notable, say so in one line.
 
 ### File Manifest
-Populated by `summary_save_manifest`. Write only the heading and the begin/end markers (with nothing between them); the helper fills in the rest. Each entry is `<epoch> <path>` (integer seconds, paths relative to `/workspace`, sorted newest first). Note: `.claude_summary` itself is intentionally excluded — `summary_save_manifest` writes to it, so tracking it would always show a CHANGED loop. Format the helper produces:
+Populated by `summary_save_manifest`. The two HTML-comment markers (`<!-- manifest:begin -->` and `<!-- manifest:end -->`) must always be present in the saved file; the helper rewrites only the lines between them, so don't edit those entries by hand. On a re-run, leave whatever entries already sit between the markers in place — see step 5 for why. Each entry is `<epoch> <path>` (integer seconds, paths relative to `/workspace`, sorted newest first). Note: `.claude_summary` itself is intentionally excluded — `summary_save_manifest` writes to it, so tracking it would always show a CHANGED loop. Format the helper produces:
 
 ```
 ### File Manifest
@@ -100,5 +107,5 @@ Populated by `summary_save_manifest`. Write only the heading and the begin/end m
 - **Do not** elaborate where elaboration doesn't earn its line. Every sentence must carry information a fresh session would act on. Cut restatements of what a table already shows, qualifiers that repeat the section heading, and colour commentary. Prefer a terse correct line over a padded one.
 - **Do not** pad with filler. If the project is simple, the summary should be short. But do not sacrifice scannability (whitespace, tables, headings) to hit a lower word count — structure is not filler.
 - **Do not** speculate. If something is unclear, note the ambiguity rather than guessing.
-- **Always** regenerate the File Manifest from a fresh `find` — never copy timestamps from the previous manifest without verifying.
-- **Exclude** `.claude_summary` from the File Manifest — it is the summary output itself and would always appear as changed, creating a self-referential loop.
+- **Always** let `summary_save_manifest` regenerate the manifest from a fresh filesystem walk — never edit the timestamps inside the markers by hand, and never copy them across runs.
+- **Exclude** `.claude_summary` from the File Manifest — `summary_save_manifest` already does this; the exclusion exists because the helper writes that file and tracking it would always show a CHANGED loop.

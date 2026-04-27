@@ -1,2 +1,0 @@
-
-Make sure that your login's OAuth generates a key for the appropriate account-type. Credits are not shared between API, Pro, and other account types

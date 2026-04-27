@@ -8,8 +8,8 @@ isolated Docker container with persistent per-instance state.
 ## Features
 
 - **Pre-made agent personas** — drop `agents/<name>.md` (the agent's
-  `CLAUDE.md`) plus an optional `agents/<name>.conf` for env-var overrides;
-  the picker shows it on the next launch.
+  `CLAUDE.md`) plus an optional `agents/<name>.conf` for env vars; the picker
+  shows it on the next launch.
 - **Multiple sessions per agent** — every launch is an instance keyed by
   `<agent>__<session>`, with its own conversation history and workspace.
 - **Resume conversations** — picking a "Cont." row auto-passes `--continue`
@@ -23,8 +23,9 @@ isolated Docker container with persistent per-instance state.
   `$HOME`, in which case it falls back to `/ai_workspace`); rows whose
   workspace matches `$PWD` are tagged `(CURRENT DIR)` in yellow.
 - **Shared toolchain caches** — Cargo, uv/pip, npm, pnpm, etc. live under
-  `~/.claude-agents/cache/` and bind-mount into every container, with a
-  size-based prune when total grows past 5 GB.
+  `~/.claude-agents/cache/` and bind-mount into every container; one agent's
+  downloads benefit every later launch. Files older than 7 days are pruned
+  from any cache that grows past 5 GB (skipped while a container is running).
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
 - **State auditor** — `python3 -m launch.audit` reports orphaned state dirs,
@@ -49,16 +50,34 @@ themselves.
 
 ```bash
 brew install --cask docker         # Docker Desktop — start it once before continuing
-brew install python@3.12
+brew install python@3.14
 pip3 install prompt_toolkit python-dotenv
 ```
 
-### Install — Linux (Debian/Ubuntu)
+(The Linux block below also works on macOS — `curl …/uv/install.sh | sh` is
+cross-platform — if you'd rather use uv + a standalone venv than Homebrew's
+system-wide Python.)
+
+### Install — Linux (general; uses upstream installers, gives you the latest versions)
+
+`apt`-shipped Python and Docker tend to lag well behind upstream. This route uses
+[uv](https://github.com/astral-sh/uv) for Python and Docker's official convenience
+script, both of which stay current.
 
 ```bash
-sudo apt install docker.io docker-compose-plugin python3 python3-pip
-sudo usermod -aG docker $USER      # log out + back in for the group to take effect
-pip3 install --user prompt_toolkit python-dotenv
+# === Python ===
+curl -LsSf https://astral.sh/uv/install.sh | sh   # installs uv
+. "$HOME/.local/bin/env"                          # adds uv to PATH for this session
+
+uv venv ~/pydev --python 3.14                     # creates ~/pydev with Python 3.14 (uv auto-downloads it)
+source ~/pydev/bin/activate                       # standard venv activation
+uv pip install prompt_toolkit python-dotenv
+
+# === Docker ===
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# !!! Log out + back in (or reboot) for FUTURE shells to pick up the docker group !!!
+newgrp docker                                     # activates the docker group for THIS shell only
 ```
 
 ### Install — Windows
@@ -68,7 +87,16 @@ run the launcher from inside WSL2; from there follow the Linux steps.
 
 ### Verify
 
-Before the first run, confirm the toolchain is in place:
+If you installed Python via the recommended standalone venv (the Linux block above
+puts it at `~/pydev`), **activate it first** so `python3` resolves to that
+interpreter:
+
+```bash
+source ~/pydev/bin/activate
+```
+
+Without activation, `python3` runs the system interpreter and the `dotenv` /
+`prompt_toolkit` import below fails. Now confirm the toolchain:
 
 ```bash
 docker compose version
@@ -110,13 +138,14 @@ container; the resulting `~/.claude-agents/.claude.json` and
 `~/.claude-agents/.credentials.json` are bind-mounted into every subsequent
 container, so you never have to re-authenticate per agent.
 
-A successful launch prints a build line, the resolved agent definition, and
-the conf file in use, then drops you into Claude Code:
+A successful launch prints the resolved agent definition and conf, then a
+build line, then drops you into Claude Code:
 
 ```
-  Building image...
   Agent definition: agents/researcher.md
   Configuration:    agents/researcher.conf
+  Building image...
+[docker compose build output]
 [Claude Code starts; status line shows: ● Researcher - Myproject ( /path/to/workspace )]
 ```
 
@@ -151,8 +180,10 @@ is wrong.
 
 1. Create `agents/<name>.md`. The first line becomes the picker label; the
    whole file becomes the agent's `CLAUDE.md` inside the container.
-2. (Optional) Create `agents/<name>.conf` to override env vars from
-   `agents/default.conf`:
+2. (Optional) Create `agents/<name>.conf` for env vars. **Per-agent `.conf`
+   replaces `agents/default.conf` wholesale — not merged.** If you only want
+   to change one key, copy the rest of `default.conf` over too, otherwise
+   you'll silently lose the defaults you didn't redeclare.
 
    ```
    ANTHROPIC_MODEL="claude-sonnet-4-6"

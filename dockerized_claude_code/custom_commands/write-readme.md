@@ -15,6 +15,8 @@ Write or update a `README.md` for this project that takes a fresh reader from a 
 
 5. **Write the README** following the structure below, saving to `/workspace/README.md`.
 
+**Out of scope.** The `summary_diff` / `summary_files` / `summary_save_manifest` bash helpers belong to `/write-summary` — they track `/workspace/.claude_summary`, which README work neither reads nor writes. Don't run them as part of this skill.
+
 ## README Structure
 
 Four sections, in this order. `Features` is optional for trivial scripts; the other three are required.

@@ -4,7 +4,8 @@ Two operations, dispatched via the first CLI arg:
   diff   compare current /workspace contents against the manifest in .claude_summary;
          print one line per NEW / CHANGED / DELETED file.
   save   replace the manifest block in .claude_summary with the current listing.
-         Refuses to run unless the begin/end markers are present.
+         Refuses to run unless a '### File Manifest' heading is followed by
+         begin/end markers, each on its own line.
 
 Invoked by the bash wrappers `summary_diff` and `summary_save_manifest` defined in
 settings/bashrc.sh. `.claude_summary` is intentionally excluded from the listing —
@@ -43,17 +44,28 @@ def list_files():
 def find_manifest_block():
     """Read SUMMARY and locate the manifest block. Returns (text, begin, end) — the
     full file text plus the indices spanning the content between the markers.
-    Returns None if SUMMARY doesn't exist or either marker is missing."""
+    Returns None if SUMMARY doesn't exist, the heading is missing, or either marker
+    is missing.
+
+    The `### File Manifest` heading must appear on its own line, and both markers
+    must appear on their own lines *after* that heading. This anchoring keeps the
+    parser from latching onto incidental mentions of the marker strings elsewhere
+    in the document (e.g., in prose explaining the manifest format)."""
     if not SUMMARY.exists():
         return None
     text = SUMMARY.read_text()
-    begin = text.find(BEGIN_TAG)
-    if begin == -1:
+    header = re.search(r"^### File Manifest$", text, re.MULTILINE)
+    if header is None:
         return None
-    end = text.find(END_TAG, begin + len(BEGIN_TAG))
-    if end == -1:
+    begin = re.search(r"^" + re.escape(BEGIN_TAG) + r"$", text[header.end():], re.MULTILINE)
+    if begin is None:
         return None
-    return text, begin + len(BEGIN_TAG), end
+    begin_pos = header.end() + begin.end()
+    end = re.search(r"^" + re.escape(END_TAG) + r"$", text[begin_pos:], re.MULTILINE)
+    if end is None:
+        return None
+    end_pos = begin_pos + end.start()
+    return text, begin_pos, end_pos
 
 
 def parse_manifest():
@@ -100,8 +112,9 @@ def cmd_save():
         if not SUMMARY.exists():
             raise SystemExit(f"{SUMMARY} does not exist; create it first.")
         raise SystemExit(
-            f"Refusing to save: missing manifest markers in {SUMMARY}. "
-            f"Expected '{BEGIN_TAG}' and '{END_TAG}' (each in its own line)."
+            f"Refusing to save: missing manifest block in {SUMMARY}. "
+            f"Expected a '### File Manifest' heading followed by '{BEGIN_TAG}' "
+            f"and '{END_TAG}' — each on its own line."
         )
     text, begin, end = found
     items = sorted(list_files().items(), key=lambda kv: (-kv[1], kv[0]))
