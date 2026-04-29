@@ -3,6 +3,8 @@ Integrate tips from this video:
     https://www.youtube.com/watch?v=MsQACpcuTkU
 
 
+.bashrc (host) shortcut
+
 Add handling instructions to (top of) the summary file?
     Inquire if you can store the summary in secondary memory files, rather than MEMORY.md, since I don't want to always include the summary in every question, but also can't trust that the AI would read the summary file as instructed in MEMORY.md
 
@@ -74,9 +76,24 @@ Agent ideas:
     DnD ?
     Companion ?
 
-
-
-
+    Mathematician
+        advanced algorithms (best graph related algorithms, simplex, data-related axioms/theories)
+        deep understanding of prime numbers, cryptography, phenomena relating to pi / phi / e
+        low-level tricks for efficient operations
+            fast approximations
+            applying math into code;  example: newton approximation (repeatable iteration), from Quake III Arena's famous inverse square-root function - `y = y * ( threehalfs - ( x2 * y * y ) );`
+            math assumptions in cryptography
+            reordered matrices in multiplication for faster computation of the same result
+            etc.
+        consideration for statistics and probabilities
+            using advanced (shorter) methods for probability calculations in complicated scenarios
+        full understanding of linear algebra and what each (matrix-related) solution-angle/approach is best for various situations/constraints
+            familiarity with various approaches to various types of NP-Hard problems
+        knowledge in parallel computing, and running code through GPU for accelerated computation
+        various academic / pioneering literature sources to consult with, for advanced mathematics
+        
+        
+    Letter writer
 
 
 
