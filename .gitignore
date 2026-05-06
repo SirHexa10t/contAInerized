@@ -4,5 +4,3 @@ dockerized_claude_code/__pycache__/
 dockerized_claude_code/launch/__pycache__/
 
 *.pyc
-
-SKILL.md

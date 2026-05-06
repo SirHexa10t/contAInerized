@@ -39,17 +39,56 @@ CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
 CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
 
 SKILLS_IN_CONTAINER = "/home/claude/.claude/skills"
+PROJECT_CUSTOM_SKILLS_DIR = PROJECT / "custom_skills"
 
 
-def project_skills_mount(workspace):
-    """If the user's workspace has a `.skills/` folder, surface it as the agent's
-    skills directory inside the container. Lets users ship company-policy or
-    project-specific skills alongside their code. Optional — absent folder means no
-    mount, no project-level skills loaded; the agent runs as normal."""
-    skills_dir = Path(workspace) / ".skills"
-    if not skills_dir.is_dir():
-        return []
-    return ["-v", f"{skills_dir}:{SKILLS_IN_CONTAINER}:ro"]
+def has_continuable_history(state_path):
+    """Whether the agent state has any actual conversation transcript that
+    `claude --continue` can load. Claude Code writes input events to
+    `projects/<encoded-workspace>/history.jsonl` (used by the picker for the
+    'Last used' timestamp) regardless of whether a conversation actually
+    occurred — but the conversation itself lives in a session-UUID JSONL file
+    alongside it. If the only thing on disk is `history.jsonl` (or all other
+    JSONLs are 0-byte), `--continue` will fail with 'No conversation found
+    to continue' and exit. This check lets the launcher fall back to a fresh
+    session in that case instead of crashing."""
+    projects_dir = state_path / "projects"
+    if not projects_dir.is_dir():
+        return False
+    for jsonl in projects_dir.rglob("*.jsonl"):
+        if jsonl.name == "history.jsonl":
+            continue
+        try:
+            if jsonl.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def aggregated_skills_mounts(workspace, state_path):
+    """Surface skills from `custom_skills/` (this project's bundled skills) and
+    `<workspace>/.skills/` (the user's per-workspace skills) as the agent's skills
+    directory. Each `<name>/SKILL.md` becomes a `/<name>` slash command. When both
+    sources have a skill with the same name, the workspace's wins (last-write).
+    Both sources are optional; if neither exists, no mounts are added.
+
+    Mount points are pre-created on the host (under `<state>/skills/<name>/`) as
+    the launcher user, so Docker doesn't auto-create them as root — which would
+    otherwise leave undeletable directories blocking `delete_instance`'s rmtree."""
+    skills = {}  # name -> source path
+    for source_dir in (PROJECT_CUSTOM_SKILLS_DIR, Path(workspace) / ".skills"):
+        if not source_dir.is_dir():
+            continue
+        for skill in source_dir.iterdir():
+            if skill.is_dir() and (skill / "SKILL.md").is_file():
+                skills[skill.name] = skill   # workspace overrides project-bundled
+    skills_root_on_host = state_path / "skills"
+    args = []
+    for name, source in sorted(skills.items()):
+        (skills_root_on_host / name).mkdir(parents=True, exist_ok=True)
+        args.extend(["-v", f"{source}:{SKILLS_IN_CONTAINER}/{name}:ro"])
+    return args
 
 
 def prepare_caches():
@@ -152,7 +191,17 @@ def launch():
         session = payload["session"]
         workspace = payload["workspace"]
 
-    resume_flag = ["--continue"] if session is not None else []
+    if session is not None and has_continuable_history(AGENTS_STATE / instance_name(agent, session)):
+        resume_flag = ["--continue"]
+    elif session is not None:
+        # "Cont." was picked but the instance has no actual conversation transcript
+        # yet (e.g. a previous launch was quit immediately, leaving only the input
+        # log in history.jsonl). Skip --continue so Claude Code starts a fresh
+        # session in this instance instead of crashing on "No conversation found".
+        print(f"  (Instance '{instance_name(agent, session)}' has no prior conversation; starting fresh.)")
+        resume_flag = []
+    else:
+        resume_flag = []
 
     if workspace is None:
         workspace = ask_for_workspace(agent)        # pick workspace location
@@ -178,15 +227,15 @@ def launch():
     conf_path, conf = load_conf(md_path)
     print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
     print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
-    project_skills = Path(workspace) / ".skills"
-    if project_skills.is_dir():
-        print(f"  Project skills:   {project_skills}")
+    skill_mounts = aggregated_skills_mounts(workspace, state_path)
+    if skill_mounts:
+        print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
     ensure_image()
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (
         ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
         + [arg for host, container in CACHE_MOUNTS.items() for arg in ("-v", f"{host}:{container}")]  # -v flags mounting shared toolchain caches (optimization; see CACHE_MOUNTS)
-        + project_skills_mount(workspace)  # -v flag surfacing the workspace's `.skills/` as the agent's skills dir, if present
+        + skill_mounts  # -v flags surfacing each skill from custom_skills/ + workspace's .skills/
         + [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]  # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
         + resume_flag  # present if a resumed session

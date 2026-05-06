@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -213,8 +214,27 @@ def continuable_instances():
 
 
 def delete_instance(instance_id):
-    """Remove an instance's state dir and its workspace mapping entry."""
-    shutil.rmtree(AGENTS_STATE / instance_id)
+    """Remove an instance's state dir and its workspace mapping entry. If Docker
+    bind-mounts left root-owned mountpoints behind (e.g. under skills/), shutil
+    can't remove them as the launcher user — fall back to `sudo rm -rf` so the
+    deletion completes without forcing the user out of the picker. Already-gone
+    state dirs (FileNotFoundError) are treated as success so the map entry is
+    still cleaned up."""
+    state_path = AGENTS_STATE / instance_id
+    try:
+        shutil.rmtree(state_path)
+    except FileNotFoundError:
+        pass  # already cleaned (manually or otherwise) — proceed to map cleanup
+    except PermissionError:
+        print(f"\n  Some files in '{state_path}' are root-owned (Docker bind-mount artifacts).")
+        print(f"  Elevating with sudo to complete the cleanup...")
+        result = subprocess.run(["sudo", "rm", "-rf", str(state_path)])
+        if result.returncode != 0:
+            print(f"\n  sudo cleanup failed (exit {result.returncode}).")
+            print(f"  Manual cleanup:  sudo rm -rf '{state_path}'")
+            # Block re-entry into the picker so the user can read the failure.
+            input("\n  Press Enter to return to the picker...")
+            return
     m = load_workspace_map()
     if instance_id in m:
         del m[instance_id]
