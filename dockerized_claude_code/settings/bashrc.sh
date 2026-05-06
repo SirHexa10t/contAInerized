@@ -6,10 +6,12 @@ shopt -s expand_aliases   # aliases are off by default in non-interactive bash
 # custom ls
 alias ll='ls -tarlushFN --color=always --time-style="+%F_%T" --group-directories-first '
 
-# List every custom slash command (under /home/claude/.claude/commands/),
-# then a short roster of Claude Code's built-in slash commands.
+# List every custom slash command (under /home/claude/.claude/commands/), then any
+# stored prompts (under /workspace/.prompts/, only shown when that dir exists), and
+# finally a short roster of Claude Code's built-in slash commands.
 man() {
     local commands_dir="$HOME/.claude/commands"
+    local prompts_dir="/workspace/.prompts"
 
     printf '\nCustom commands (from custom_commands/):\n'
     if [ -d "$commands_dir" ] && compgen -G "$commands_dir/*.md" >/dev/null; then
@@ -21,6 +23,17 @@ man() {
         done
     else
         printf '  (none)\n'
+    fi
+
+    if [ -d "$prompts_dir" ]; then
+        printf "\nCustom prompts (run to use the specified file's contents as a prompt):\n"
+        local found=0
+        for prompt_file in "$prompts_dir"/*; do
+            [ -f "$prompt_file" ] || continue
+            printf '  @%s\n' "${prompt_file#/workspace/}"
+            found=1
+        done
+        [ "$found" -eq 0 ] && printf '  (none)\n'
     fi
 
     printf '\n'
