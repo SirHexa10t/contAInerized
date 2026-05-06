@@ -38,6 +38,19 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CACHE_HOME_IN_CONTAINER / rel for rel in CACHE
 CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
 CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
 
+SKILLS_IN_CONTAINER = "/home/claude/.claude/skills"
+
+
+def project_skills_mount(workspace):
+    """If the user's workspace has a `.skills/` folder, surface it as the agent's
+    skills directory inside the container. Lets users ship company-policy or
+    project-specific skills alongside their code. Optional — absent folder means no
+    mount, no project-level skills loaded; the agent runs as normal."""
+    skills_dir = Path(workspace) / ".skills"
+    if not skills_dir.is_dir():
+        return []
+    return ["-v", f"{skills_dir}:{SKILLS_IN_CONTAINER}:ro"]
+
 
 def prepare_caches():
     """Pre-create shared cache dirs so Docker doesn't auto-create them as root."""
@@ -165,11 +178,15 @@ def launch():
     conf_path, conf = load_conf(md_path)
     print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
     print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
+    project_skills = Path(workspace) / ".skills"
+    if project_skills.is_dir():
+        print(f"  Project skills:   {project_skills}")
     ensure_image()
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (
         ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
         + [arg for host, container in CACHE_MOUNTS.items() for arg in ("-v", f"{host}:{container}")]  # -v flags mounting shared toolchain caches (optimization; see CACHE_MOUNTS)
+        + project_skills_mount(workspace)  # -v flag surfacing the workspace's `.skills/` as the agent's skills dir, if present
         + [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]  # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
         + resume_flag  # present if a resumed session

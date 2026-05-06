@@ -6,11 +6,13 @@ shopt -s expand_aliases   # aliases are off by default in non-interactive bash
 # custom ls
 alias ll='ls -tarlushFN --color=always --time-style="+%F_%T" --group-directories-first '
 
-# List every custom slash command (under /home/claude/.claude/commands/), then any
-# stored prompts (under /workspace/.prompts/, only shown when that dir exists), and
-# finally a short roster of Claude Code's built-in slash commands.
+# List every custom slash command (under /home/claude/.claude/commands/),
+# then any project skills (under /home/claude/.claude/skills/), 
+# then any stored prompts (under /workspace/.prompts/, only shown when that dir exists),
+# and finally a short roster of Claude Code's built-in slash commands.
 man() {
     local commands_dir="$HOME/.claude/commands"
+    local skills_dir="$HOME/.claude/skills"
     local prompts_dir="/workspace/.prompts"
 
     printf '\nCustom commands (from custom_commands/):\n'
@@ -23,6 +25,21 @@ man() {
         done
     else
         printf '  (none)\n'
+    fi
+
+    if [ -d "$skills_dir" ] && compgen -G "$skills_dir/*/SKILL.md" >/dev/null; then
+        printf '\nProject skills:\n'
+        for skill_md in "$skills_dir"/*/SKILL.md; do
+            [ -f "$skill_md" ] || continue
+            local skill_name skill_desc
+            skill_name=$(basename "$(dirname "$skill_md")")
+            skill_desc=$(awk '/^description:/{sub(/^description:[[:space:]]*/, ""); sub(/^"/, ""); sub(/"$/, ""); print; exit}' "$skill_md")
+            if [ -n "$skill_desc" ]; then
+                printf '  /%-20s %s\n' "$skill_name" "$skill_desc"
+            else
+                printf '  /%s\n' "$skill_name"
+            fi
+        done
     fi
 
     if [ -d "$prompts_dir" ]; then

@@ -128,3 +128,12 @@ Tool permissions (settings.json → allow/deny) — Restrict what tools an agent
 
 
 
+skills (or similar)
+    heavy-lift (execute prompt with a lot of forward thinking and filling-in the blanks, and iterating over solutions)
+    verbatim (don't reinterpret or consider the prompt's consequences. Just do it.)
+    prettify (print json in human-readable format, with newlines and indents)
+
+
+check if user's skills should be mounted one by one, by scanning the contents of .skills/ (because I don't know if it'd work directly when user provides it as a symlink)
+
+

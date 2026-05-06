@@ -28,6 +28,15 @@ isolated Docker container with persistent per-instance state.
   from any cache that grows past 5 GB (skipped while a container is running).
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
+- **Per-workspace skills** — drop a `.skills/` folder in your workspace with
+  one or more `<name>/SKILL.md` files; each becomes a `/<name>` slash command
+  scoped to that workspace, with all the skills features (auto-invocation,
+  resource bundles, hot reload). Absent folder = no project skills loaded.
+- **Per-workspace prompts** — `@<path>` works on any file to inline its
+  contents into a message; the `.prompts/` folder is a discovery convention,
+  so the in-container `man` command surfaces those files as ready-to-paste
+  `@.prompts/<file>` lines. Absent folder just means `man` shows nothing
+  under "Custom prompts".
 - **State auditor** — `python3 -m launch.audit` reports orphaned state dirs,
   drifted CLAUDE.md files, ghost workspace-map entries, and missing/empty
   OAuth files.
