@@ -28,6 +28,10 @@ isolated Docker container with persistent per-instance state.
   from any cache that grows past 5 GB (skipped while a container is running).
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
+- **Project-wide key bindings** — `settings/keybindings.json` is mounted into
+  every agent. Current entries add `Shift+Enter` as newline-without-submit
+  alongside the defaults (`Enter` submits, `Ctrl+J` newline, `Alt+Enter`
+  newline in most terminals). Edits propagate live, no restart required.
 - **Per-workspace skills** — drop a `.skills/` folder in your workspace with
   one or more `<name>/SKILL.md` files; each becomes a `/<name>` slash command
   scoped to that workspace, with all the skills features (auto-invocation,

@@ -132,16 +132,10 @@ skills (or similar)
     heavy-lift (execute prompt with a lot of forward thinking and filling-in the blanks, and iterating over solutions)
     verbatim (don't reinterpret or consider the prompt's consequences. Just do it.)
     prettify (print json in human-readable format, with newlines and indents)
-    print <file> (prints with stylizing, or directly, or just metadata; according to filetype)
 
 
 check if user's skills should be mounted one by one, by scanning the contents of .skills/ (because I don't know if it'd work directly when user provides it as a symlink)
 
 
-SHIFT+ENTER setting for newling
 
-
-Add support for internal docker containers (doccker container within docker container)
-
-Install Docker, npm, and other stuff in a neat manner.
 
