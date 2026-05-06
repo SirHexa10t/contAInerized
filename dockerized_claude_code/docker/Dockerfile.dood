@@ -1,0 +1,42 @@
+# DooD-stack image — extends `claude-agents:prog` with the Docker CLI + Compose
+# plugin and adds the claude user to a group whose GID matches the host's
+# `docker` group, so the bind-mounted /var/run/docker.sock (mounted by
+# docker/compose.dood.yml) is read/writable from inside the container.
+#
+# Built when an instance has the DooD mode set (see agent_modes_map.json and
+# launch/agent_composition.py's apply_modes()).
+#
+# Build order: claude-agents:prog must be built first — run.py's ensure_image()
+# builds incrementally (base → prog → dood) so each FROM resolves.
+
+FROM claude-agents:prog
+
+USER root
+
+# Docker CLI + Compose plugin from Docker's official apt repo. The CLI talks to
+# whichever daemon is reachable; for it to do anything from inside this
+# container, /var/run/docker.sock must be bind-mounted (compose.dood.yml does
+# this) AND claude must be in a group with the matching GID (handled below).
+RUN install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+ && chmod a+r /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+        > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+ && rm -rf /var/lib/apt/lists/*
+
+# Match the host's docker-group GID so the bind-mounted socket is accessible.
+# If the host's GID is already taken by some other group inside the image, just
+# add claude to that existing group; otherwise create a fresh `docker` group
+# with that GID and add claude to it. Either way claude ends up able to read
+# the socket.
+ARG DOCKER_GID=999
+RUN existing=$(getent group ${DOCKER_GID} | cut -d: -f1) \
+ && if [ -n "$existing" ]; then \
+        usermod -aG "$existing" claude; \
+    else \
+        groupadd -g ${DOCKER_GID} docker && usermod -aG docker claude; \
+    fi
+
+USER claude

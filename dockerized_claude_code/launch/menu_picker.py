@@ -1,5 +1,6 @@
-"""Agent picker UI built on prompt_toolkit. Pulls picker-entry builders from agents_lib
-(creatable_agents, continuable_instances, delete_instance); has no agent-domain logic.
+"""Interactive agent UI: full-screen picker (prompt_toolkit) plus supporting
+line-prompt helpers for workspace path and session suffix. Pulls picker-entry
+builders and state lookups from agents_crud; has no agent-domain logic.
 
 Public API:
 
@@ -8,6 +9,19 @@ Public API:
       user picks something or cancels. Discovers agents/instances and handles
       deletions internally.
       -> ('new', agent_dict) | ('cont', instance_dict) | None on cancel/empty
+
+  ask_for_workspace(agent, default=None)
+      Line prompt for a workspace path; tab-completes against the host filesystem.
+      -> absolute path string
+
+  prompt_session(agent, workspace)
+      Line prompt for a session suffix; rejects collisions with existing instances.
+      -> session suffix string
+
+  prompt_dood(default=False)
+      Y/N prompt for the DooD mode opt-in (with security explainer); used by run.py
+      on new [prog] instances and by select_agent's modify flow.
+      -> bool
 
   pick_with_preview(title, entries, *, allow_delete=False)
       Generic full-screen picker primitive used by select_agent.
@@ -32,7 +46,7 @@ Generic-picker entry shape (pick_with_preview):
 
 HINT_BASE_TEXT       = "↑↓ navigate  •  type to filter  •  Enter select  •  Esc cancel"
 HINT_DELETE_SUFFIX   = "  •  Del delete"
-HINT_REDEFINE_SUFFIX = "  •  F2 redefine"
+HINT_MODIFY_SUFFIX   = "  •  F2 modify"
 FILTER_LABEL         = "filter: "
 EMPTY_FILTER_MESSAGE = "(no matches)"
 DIVIDER_CHAR         = "│"
@@ -102,6 +116,8 @@ STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
 STYLE_CURRENT_DIR    = "bold fg:ansiyellow"
+STYLE_TAG            = "fg:ansibrightgreen"
+STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" modes — visual warning that the instance has reduced isolation
 
 # ============================================================
 
@@ -119,10 +135,15 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
 
-from .agents_lib import (
+from .agents_crud import (
     AGENTS_STATE, DEFAULT_WORKSPACE,
-    creatable_agents, continuable_instances, delete_instance, instance_name, redefine_instance,
+    creatable_agents, continuable_instances, delete_instance, instance_name, modify_instance,
+    state_dir,
 )
+
+# Mode names live in agent_composition.MODE_HANDLERS; menu_picker imports the keys
+# it cares about by string to avoid pulling in the handler module just for symbols.
+MODE_DOOD = "DooD"
 
 
 def _normalize(display):
@@ -132,12 +153,27 @@ def _normalize(display):
     return list(display)
 
 
+def _tag_prefix_str(tags):
+    """'[t1] [t2] ' for a non-empty tag list, '' for empty. Used to size the tag column
+    consistently across Create rows (so agent names line up regardless of tags)."""
+    return "".join(f"[{t}] " for t in tags) if tags else ""
+
+
+def _mode_prefix_str(modes):
+    """'{m1} {m2} ' for a non-empty mode list, '' for empty. Curly braces (vs.
+    square brackets used by tags) distinguish modes — tags come from the agent's
+    filename grammar, modes are per-instance opt-ins like DooD. Sizes the mode
+    column on Cont rows so instance IDs align whether or not the instance has
+    elevated modes."""
+    return "".join(f"{{{m}}} " for m in modes) if modes else ""
+
+
 def _plain(display):
     """Plain-text view of a display, used for filter matching."""
     return "".join(text for _, text in _normalize(display))
 
 
-def pick_with_preview(title, entries, *, allow_delete=False, allow_redefine=False):
+def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False):
     """Render a full-screen picker; block until the user picks or cancels."""
     if not entries:
         raise ValueError("entries must be non-empty")
@@ -185,8 +221,8 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_redefine=Fals
         hint = HINT_BASE_TEXT
         if allow_delete:
             hint += HINT_DELETE_SUFFIX
-        if allow_redefine:
-            hint += HINT_REDEFINE_SUFFIX
+        if allow_modify:
+            hint += HINT_MODIFY_SUFFIX
         out = [(f"class:{CLS_STATUS}", hint), ("", "\n")]
         if state["filter"]:
             out.append((f"class:{CLS_FILTER}", FILTER_LABEL))
@@ -265,15 +301,15 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_redefine=Fals
             state["result"] = ("delete", entry["value"])
             event.app.exit()
 
-    if allow_redefine:
+    if allow_modify:
         @kb.add("f2")
         def _(event):
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
-            if not entry.get("redefinable", True):
-                return  # silently ignored — caller marked this row non-redefinable
-            state["result"] = ("redefine", entry["value"])
+            if not entry.get("modifiable", True):
+                return  # silently ignored — caller marked this row non-modifiable
+            state["result"] = ("modify", entry["value"])
             event.app.exit()
 
     body = HSplit([
@@ -348,6 +384,42 @@ def ask_for_workspace(agent, default=None):
         readline.set_completer_delims(prior_delims)
 
 
+def prompt_session(agent, workspace):
+    """Prompt for a session suffix; default = last segment of the workspace path.
+    Rejects collisions with existing `{agent}__{suffix}` state dirs."""
+    default = Path(workspace).name
+    while True:
+        suffix = input(f"Session suffix for '{agent}' [{default}]: ").strip() or default
+        if not suffix:
+            print("Session suffix cannot be empty.")
+            continue
+        if state_dir(agent, suffix).exists():
+            print(f"Instance '{instance_name(agent, suffix)}' already exists. Pick another name.")
+            continue
+        return suffix
+
+
+def prompt_dood(default=False):
+    """Y/N prompt for opting into DooD (Docker-out-of-Docker) mode. `default`
+    reflects the instance's current setting (True on modify if it's already DooD,
+    False on first creation). Returns True if DooD should be enabled."""
+    print()
+    print("  Docker-out-of-Docker (DooD) mode?")
+    print("  This is for agents that need to run their own Docker containers")
+    print("  (e.g., to test a project that uses docker compose). Without it,")
+    print("  the agent can't reach the host's Docker daemon.")
+    print()
+    print("  ⚠ Avoid unless you actually need it. DooD bind-mounts")
+    print("    /var/run/docker.sock, which gives the container effective root")
+    print("    on the host (it can start any container as root, read host")
+    print("    paths via volume mounts, etc.).")
+    default_marker = "Y/n" if default else "y/N"
+    answer = input(f"  Enable DooD? [{default_marker}]: ").strip().lower()
+    if not answer:
+        return default
+    return answer in ("y", "yes")
+
+
 def select_agent():
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
     Caller must ensure at least one agent .md exists before invoking."""
@@ -362,22 +434,38 @@ def select_agent():
         agent_name_width = max(len(a["label_name"]) for a in agents)
         instance_name_width = max((len(i["id"]) for i in instances), default=0)
 
+        # Two prefix columns sized to the widest values across all rows, so the
+        # agent-name and instance-ID columns line up regardless of which rows have
+        # tags / modes. Tags go on Create rows (green); modes go on Cont rows (red,
+        # warning). Each row pads the column it doesn't use so vertical alignment holds.
+        tag_strs = [_tag_prefix_str(a.get("tags", [])) for a in agents]
+        tag_col_width = max(map(len, tag_strs), default=0)
+        mode_strs_by_inst = {i["id"]: _mode_prefix_str(i.get("modes", [])) for i in instances}
+        mode_col_width = max((len(s) for s in mode_strs_by_inst.values()), default=0)
+
         entries = []
-        for agent in agents:
+        for agent, tag_str in zip(agents, tag_strs):
             entries.append({
                 "display": [
                     (STYLE_NEW_MARKER, f"{MARKER_NEW}  "),
+                    (STYLE_TAG, tag_str),
+                    ("", " " * (tag_col_width - len(tag_str))),
+                    ("", " " * mode_col_width),    # blank mode column on Create rows — modes only apply to instances
                     (STYLE_AGENT_NAME, f"{agent['label_name']:<{agent_name_width}}"),
                     ("", f" — {agent['description']}"),
                 ],
                 "preview": agent["preview"],
                 "value": ("new", agent),
                 "deletable": False,
-                "redefinable": False,
+                "modifiable": False,
             })
             for inst in instances_by_agent.get(agent["agent_name"], []):
+                mode_str = mode_strs_by_inst[inst["id"]]
                 cont_display = [
                     (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
+                    ("", " " * tag_col_width),   # blank tag column — keeps Cont rows aligned with tagged Create rows
+                    (STYLE_MODE_WARNING, mode_str),
+                    ("", " " * (mode_col_width - len(mode_str))),
                     (STYLE_AGENT_NAME, f"{inst['id']:<{instance_name_width}}"),
                     ("", "    "),
                 ]
@@ -398,10 +486,10 @@ def select_agent():
             "preview": DELMENU_PREVIEW,
             "value": ("delmenu",),
             "deletable": False,
-            "redefinable": False,
+            "modifiable": False,
         })
 
-        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_redefine=True)
+        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True)
         if action is None:
             return None
 
@@ -411,7 +499,7 @@ def select_agent():
                 delete_instance(inst["id"])
             continue
 
-        if action == "redefine":  # picker enforces redefinability — only ('cont', inst) values reach here
+        if action == "modify":  # picker enforces modifiability — only ('cont', inst) values reach here
             inst = value[1]
             agent_name = inst["agent_name"]
             while True:
@@ -422,7 +510,18 @@ def select_agent():
                     break  # not colliding with an existing instance
                 print(f"Instance '{instance_name(agent_name, new_session)}' already exists. Pick another name.")
             new_workspace = ask_for_workspace(agent_name, default=inst["workspace"])
-            redefine_instance(inst["id"], agent_name, new_session, new_workspace)
+            # DooD prompt only for [prog]-tagged agents — non-prog images don't have the
+            # docker CLI installed in any layer, so DooD wouldn't actually do anything.
+            # Existing modes other than DooD are passed through untouched.
+            current_modes = list(inst.get("modes", []))
+            if "prog" in inst.get("tags", []):
+                wants_dood = prompt_dood(default=(MODE_DOOD in current_modes))
+                new_modes = [m for m in current_modes if m != MODE_DOOD]
+                if wants_dood:
+                    new_modes.append(MODE_DOOD)
+            else:
+                new_modes = current_modes
+            modify_instance(inst["id"], agent_name, new_session, new_workspace, new_modes)
             continue
 
         if value[0] == "delmenu":

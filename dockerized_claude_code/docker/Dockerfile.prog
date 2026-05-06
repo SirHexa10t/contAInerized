@@ -1,0 +1,30 @@
+# Programming-stack image — extends `claude-agents:base` with build-essential,
+# Rust toolchain, and Node.js LTS. Built when an agent's filename includes the
+# [prog] tag (see launch/agent_composition.py's apply_tags()).
+#
+# Build order: `claude-agents:base` must be built first — run.py's ensure_image()
+# guarantees this by always building docker/Dockerfile before any overlay.
+
+FROM claude-agents:base
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js (current LTS) + npm via NodeSource — gets a recent LTS instead of the
+# stale apt version. Includes corepack (yarn / pnpm shims) automatically.
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+USER claude
+
+ARG SOFTWARE_STACK_REFRESH=bootstrap
+
+RUN : "${SOFTWARE_STACK_REFRESH}" \
+ && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+
+ENV PATH="/home/claude/.cargo/bin:$PATH"

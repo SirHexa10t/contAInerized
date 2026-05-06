@@ -1,0 +1,19 @@
+# Override layered on top of compose.yml + compose.prog.yml when an instance
+# has the DooD (Docker-out-of-Docker) mode enabled. Swaps the Dockerfile to
+# docker/Dockerfile.dood (which extends claude-agents:prog with the Docker CLI
+# and a docker-group GID matching the host), tags the result as
+# claude-agents:dood, and bind-mounts the host's /var/run/docker.sock so the
+# agent's `docker` commands reach the host's daemon.
+#
+# Compose merges this with compose.yml + compose.prog.yml via run.py — see
+# apply_modes() in launch/agent_composition.py.
+
+services:
+  claude-code:
+    image: claude-agents:dood
+    build:
+      dockerfile: docker/Dockerfile.dood
+      args:
+        DOCKER_GID: ${DOCKER_GID:-999}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

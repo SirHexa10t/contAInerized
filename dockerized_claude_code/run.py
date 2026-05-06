@@ -1,42 +1,31 @@
 #!/usr/bin/env python3
-import os, shutil, subprocess, sys, time
+import os, shutil, subprocess, sys
 from datetime import date
 from pathlib import Path
 
-from launch.agents_lib import (
-    PROJECT, AGENTS_DIR, AGENTS_STATE, AGENT_WORKSPACE_MAP_FILE, ACCOUNT_FILE, CREDENTIALS_FILE,
-    SESSION_SEP, instance_name, find_md_for_agent, load_conf, load_workspace_map, save_workspace_map,
-    install_latest_md, prompt_session, creatable_agents,
+from launch.agent_composition import (
+    PROJECT, AGENTS_DIR, apply_modes, apply_tags, find_md_for_agent, load_conf, parse_stem,
 )
-from launch.menu_picker import select_agent, ask_for_workspace
+from launch.agents_crud import (
+    AGENTS_STATE, AGENT_WORKSPACE_MAP_FILE, ACCOUNT_FILE, CREDENTIALS_FILE,
+    SESSION_SEP, instance_name, load_workspace_map, save_workspace_map,
+    get_instance_modes, set_instance_modes, install_latest_md, creatable_agents,
+)
+from launch.menu_picker import select_agent, ask_for_workspace, prompt_dood, prompt_session
+
+MODE_DOOD = "DooD"  # mirrors the key in agent_composition.MODE_HANDLERS
 
 if shutil.which("docker") is None:
     sys.exit("docker is required but was not found in PATH.")
 
-COMPOSE_FILE = PROJECT / "docker-compose.yml"
+COMPOSE_FILE = PROJECT / "docker" / "compose.yml"
 
-CACHE_ROOT = AGENTS_STATE / "cache"
-CACHE_HOME_IN_CONTAINER = Path("/home/claude")
-CACHE_REL_PATHS = [  # shared across all agents/sessions; same relative path on host and in container
-    # languages currently in the image
-    ".cargo/registry",           # Rust crates (.crate tarballs + index)
-    ".cargo/git",                # Rust git dependencies
-    ".cache",                    # XDG cache: uv, pip, poetry, pre-commit, huggingface, torch, yarn-v1, go-build, ccache, ...
-    # speculative — empty until the relevant language is added to the Dockerfile
-    "go/pkg/mod",                # Go module cache
-    ".npm",                      # npm (non-XDG by design)
-    ".local/share/pnpm/store",   # pnpm content-addressed store
-    ".m2/repository",            # Maven local repository
-    ".gradle/caches",            # Gradle dependency + build caches
-    ".gem",                      # Ruby gems
-    ".cpanm",                    # Perl cpanminus work dir
-    ".cpan",                     # Perl CPAN classic
-    ".cabal/store",              # Haskell cabal package store
-    ".stack/snapshots",          # Haskell stack resolver snapshots
-]
-CACHE_MOUNTS = {CACHE_ROOT / rel: CACHE_HOME_IN_CONTAINER / rel for rel in CACHE_REL_PATHS}
-CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
-CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
+# Weekly cache buster for the Dockerfile's curl-piped downloads (uv, rich-cli,
+# Claude Code in `base`; rustup in `prog`). The value flips every Monday, so the
+# next build after a week-roll re-fetches those binaries; intra-week builds reuse
+# the cache. Bump this manually (e.g. to "force-2026-05-08") to force a refresh
+# mid-week without `--no-cache`.
+SOFTWARE_STACK_REFRESH = date.today().strftime("%Y-W%W")
 
 SKILLS_IN_CONTAINER = "/home/claude/.claude/skills"
 PROJECT_CUSTOM_SKILLS_DIR = PROJECT / "custom_skills"
@@ -91,52 +80,31 @@ def aggregated_skills_mounts(workspace, state_path):
     return args
 
 
-def prepare_caches():
-    """Pre-create shared cache dirs so Docker doesn't auto-create them as root."""
-    for host in CACHE_MOUNTS:
-        host.mkdir(parents=True, exist_ok=True)
-
-
-def prune_caches():
-    """For caches above CACHE_PRUNE_THRESHOLD_GB, remove files older than CACHE_PRUNE_MIN_AGE_DAYS.
-    Skipped when any agent container is running (to avoid yanking caches mid-build)."""
-    result = subprocess.run(
-        ["docker", "ps", "--filter", "name=claude-code_", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0 or result.stdout.strip():
-        return
-    time_cutoff = time.time() - CACHE_PRUNE_MIN_AGE_DAYS * 86400  # days → seconds (match epoch-second time.time())
-    size_cutoff = CACHE_PRUNE_THRESHOLD_GB * 1024**3              # GB   → bytes   (match st_size units)
-    for host in CACHE_MOUNTS:
-        if not host.exists():
-            continue
-        files = [(f, f.stat()) for f in host.rglob("*") if f.is_file()]
-        total = sum(s.st_size for _, s in files)
-        if total <= size_cutoff:
-            continue
-        freed = 0
-        for f, s in files:
-            if s.st_mtime < time_cutoff:
-                f.unlink()
-                freed += s.st_size
-        if freed:
-            print(f"  Pruned {host.relative_to(CACHE_ROOT)}: freed {freed / 1024**3:.1f} GB (was {total / 1024**3:.1f} GB)")
-
-
-def ensure_image():
-    """Rebuild the image."""
-    print("  Building image...")
-    ret = subprocess.call(["docker", "compose", "-f", str(COMPOSE_FILE), "build"])
+def ensure_image(overlays):
+    """Build the image stack incrementally. Always builds the base image; for each
+    overlay in order, builds with the cumulative `-f` chain so overlay Dockerfiles
+    that do `FROM claude-agents:<previous>` find the parent tag already populated.
+    `overlays` is a list of compose-override Paths in build order (e.g.
+    [compose.prog.yml, compose.dood.yml] for a DooD-tagged-prog agent)."""
+    base_args = ["-f", str(COMPOSE_FILE)]
+    print("  Building base image...")
+    ret = subprocess.call(["docker", "compose"] + base_args + ["build"])
     if ret != 0:
         sys.exit(ret)
+    cumulative = list(base_args)
+    for overlay in overlays:
+        cumulative += ["-f", str(overlay)]
+        print(f"  Building overlay: {overlay.name}...")
+        ret = subprocess.call(["docker", "compose"] + cumulative + ["build"])
+        if ret != 0:
+            sys.exit(ret)
 
 
 def set_container_env(agent, session, workspace, state_path):
     """Populate os.environ with everything the container needs (besides the per-agent conf dict)."""
     pretty = f"{agent.replace('-', ' ').title()} - {session.replace('-', ' ').title()}"
     os.environ.update({
-        "TOOLCHAIN_REFRESH": date.today().strftime("%Y-W%W"),  # weekly cache key for Dockerfile downloads
+        "SOFTWARE_STACK_REFRESH": SOFTWARE_STACK_REFRESH,
         "AGENT_STATE": str(state_path),
         "AGENT_NAME": agent,
         "AGENT_STATUS_LINE": f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m",
@@ -220,25 +188,47 @@ def launch():
         mapping[instance] = workspace
         save_workspace_map(mapping)
 
+    tags = parse_stem(md_path.stem)[1]
+    # Mode resolution — new [prog] instances prompt for DooD; cont reuses what's stored.
+    # Non-prog agents skip the prompt (their image has no docker CLI for DooD to drive).
+    if kind == "new" and "prog" in tags:
+        modes = [MODE_DOOD] if prompt_dood() else []
+        set_instance_modes(instance, modes)
+    else:
+        modes = get_instance_modes(instance)
+
+    try:
+        tag_extras = apply_tags(tags)
+        mode_extras = apply_modes(modes)
+    except (ValueError, RuntimeError) as e:
+        sys.exit(f"  {e}")
+    # Tag overlays first, then mode overlays — DooD's Dockerfile.dood does
+    # `FROM claude-agents:prog`, so the prog overlay must layer in earlier.
+    overlays = tag_extras["compose_overrides"] + mode_extras["compose_overrides"]
+    volume_args = tag_extras["volume_args"] + mode_extras["volume_args"]
+    compose_args = ["-f", str(COMPOSE_FILE)] + [arg for p in overlays for arg in ("-f", str(p))]
+
     state_path = install_latest_md(agent, session, md_path)
     set_container_env(agent, session, workspace, state_path)
-    prepare_caches()
-    prune_caches()
     conf_path, conf = load_conf(md_path)
     print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
     print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
+    if tags:
+        print(f"  Tags:             {' '.join(f'[{t}]' for t in tags)}")
+    if modes:
+        print(f"  Modes:            {' '.join('{' + m + '}' for m in modes)}")
     skill_mounts = aggregated_skills_mounts(workspace, state_path)
     if skill_mounts:
         print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
-    ensure_image()
+    ensure_image(overlays)
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "run", "--rm", "-it"]
-        + [arg for host, container in CACHE_MOUNTS.items() for arg in ("-v", f"{host}:{container}")]  # -v flags mounting shared toolchain caches (optimization; see CACHE_MOUNTS)
-        + skill_mounts  # -v flags surfacing each skill from custom_skills/ + workspace's .skills/
+        ["docker", "compose"] + compose_args + ["run", "--rm", "-it"]
+        + volume_args             # tag- and mode-contributed mounts ([prog] caches, DooD socket already in compose.dood.yml, etc.)
+        + skill_mounts            # -v flags surfacing each skill from custom_skills/ + workspace's .skills/
         + [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]  # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
-        + resume_flag  # present if a resumed session
+        + resume_flag             # present if a resumed session
         + sys.argv[1:]
     )
     sys.exit(subprocess.call(cmd))

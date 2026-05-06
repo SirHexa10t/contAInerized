@@ -1,0 +1,34 @@
+name: claude-agents   # explicit so the compose project name doesn't default to the parent dir ("docker"). Matches the host state dir (~/.claude-agents/).
+
+services:
+  claude-code:
+    image: claude-agents:base   # tagged on build so docker/Dockerfile.prog's `FROM claude-agents:base` resolves; overridden to `claude-agents:prog` by compose.prog.yml.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        SOFTWARE_STACK_REFRESH: ${SOFTWARE_STACK_REFRESH:-bootstrap}
+    container_name: claude-code_${AGENT_NAME}
+    stdin_open: true   # -i (interactive)
+    tty: true          # -t (allocate pseudo-TTY)
+    volumes:
+      - ${AI_WORKSPACE}:/workspace
+      - ${AGENT_STATE}:/home/claude/.claude
+      - ${ACCOUNT_FILE}:/home/claude/.claude.json  # same onboarding info for all agents
+      - ${CREDENTIALS_FILE}:/home/claude/.claude/.credentials.json  # same api-token info for all agents
+      - ../custom_commands:/home/claude/.claude/commands:ro          # shared slash commands for all agents
+      - ../settings/statusline.sh:/home/claude/.claude/statusline.sh:ro  # shared status-line script for all agents
+      - ../settings/bashrc.sh:/home/claude/.bashrc:ro                    # sourced by every non-interactive bash (via BASH_ENV)
+      - ../settings/_summary.py:/home/claude/.claude/_summary.py:ro      # backs summary_diff / summary_save_manifest in bashrc
+      - ../settings/settings.json:/home/claude/.claude/settings.json:ro  # registers the status-line script (and any other shared settings)
+      - ../settings/keybindings.json:/home/claude/.claude/keybindings.json:ro  # project-wide key bindings (Shift+Enter newline, etc.); auto-detected on edit
+      - ../memory/MEMORY.md:/home/claude/.claude/projects/-workspace/memory/MEMORY.md:ro  # memory pointer (auto-loaded every turn; references .claude_summary)
+      # Shared toolchain caches mount in only for [prog]-tagged agents — the base
+      # image has no Rust/Node toolchain to use them. The mount args are produced
+      # by apply_tags() in launch/agent_composition.py (see CACHE_MOUNTS there).
+    environment:
+      - TERM                # improves(?) terminal display colors
+      - AGENT_STATUS_LINE   # pre-styled status-line text (cyan name + grey workspace)
+      - BASH_ENV=/home/claude/.bashrc   # non-interactive bash sources this at startup
+    # Optional: restrict network access for extra isolation
+    # network_mode: none

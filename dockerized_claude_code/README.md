@@ -18,14 +18,19 @@ isolated Docker container with persistent per-instance state.
   fresh `poet` instance; `python3 run.py poet__myproject` continues that
   specific instance directly.
 - **Interactive picker** — full-screen TUI with type-to-filter, Del to
-  delete an instance, F2 to redefine its session name and/or workspace.
+  delete an instance, F2 to modify its session name and/or workspace.
 - **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is
   `$HOME`, in which case it falls back to `/ai_workspace`); rows whose
   workspace matches `$PWD` are tagged `(CURRENT DIR)` in yellow.
-- **Shared toolchain caches** — Cargo, uv/pip, npm, pnpm, etc. live under
-  `~/.claude-agents/cache/` and bind-mount into every container; one agent's
-  downloads benefit every later launch. Files older than 7 days are pruned
-  from any cache that grows past 5 GB (skipped while a container is running).
+- **Per-agent build mode** — append `[prog]` to a filename (e.g.
+  `refactorer[prog](thinker).md`) to opt into the heavier Dockerfile stage
+  with Rust + Node. Untagged agents get the lighter base image (bash, git,
+  ripgrep, Python + uv, Claude Code).
+- **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
+  `~/.claude-agents/cache/` and bind-mount into `[prog]`-tagged containers
+  (the base image has no compilers to use them). One agent's downloads
+  benefit every later launch. Files older than 7 days are pruned from any
+  cache that grows past 5 GB (skipped while a container is running).
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
 - **Project-wide key bindings** — `settings/keybindings.json` is mounted into
@@ -55,9 +60,11 @@ Host requirements:
 - Two Python packages: **`prompt_toolkit`** (picker UI) and
   **`python-dotenv`** (`.conf` parsing)
 
-Inside the container, the Dockerfile installs Claude Code, Rust (`rustup`),
-and `uv` automatically — nothing else needs to be on the host for the agents
-themselves.
+Inside the container, a two-stage Dockerfile (`docker/Dockerfile`) supplies
+the runtime: the **base** stage installs Claude Code + `uv` + ripgrep — what
+every agent needs — and the **prog** stage adds `build-essential`, Rust
+(`rustup`), and Node.js for `[prog]`-tagged agents. Nothing else needs to
+be on the host for the agents themselves.
 
 ### Install — macOS (Homebrew)
 
@@ -131,7 +138,7 @@ Every container bind-mounts a host directory at `/workspace`. By default:
 
 You can also pick the workspace interactively when the launcher prompts. The
 form you type (with `~` expanded but symlinks preserved) is stored verbatim in
-`~/.claude-agents/agent_workspace_map.txt`.
+`~/.claude-agents/agent_workspace_map.json`.
 
 ## How to Run
 
@@ -205,9 +212,21 @@ is wrong.
 
 3. (Optional) To share a `.conf` between several agents, name the file
    `<name>(<parent>).md` — the parenthesised suffix points at
-   `agents/<parent>.conf`. For example, `refactorer(thinker).md` uses
-   `agents/thinker.conf`.
-4. Re-run `python3 run.py` — the new agent appears in the picker, sorted by
+   `agents/<parent>.conf`. For example, `feature-identifier(thinker).md`
+   uses `agents/thinker.conf`.
+4. (Optional) Append a `[<tag>]` to the filename to opt into a build mode.
+   Currently supported:
+
+   - `[prog]` — uses the `prog` Dockerfile stage (Rust + Node + a real
+     compiler) and bind-mounts the shared toolchain caches into the
+     container. Untagged agents stay on `base`.
+
+   Tag and conf-alias suffixes can combine and order doesn't matter —
+   `refactorer[prog](thinker).md` and `refactorer(thinker)[prog].md` parse
+   identically. **Reserved syntax**: `[…]` is reserved for tags, `(…)` for
+   the conf alias. Don't use these characters in agent names.
+
+5. Re-run `python3 run.py` — the new agent appears in the picker, sorted by
    model family (Opus > Sonnet > Haiku) then version.
 
 ## Persistent State Layout
@@ -216,8 +235,8 @@ is wrong.
 ~/.claude-agents/
   .claude.json                       # shared OAuth account info
   .credentials.json                  # shared API credentials
-  agent_workspace_map.txt            # JSON: instance_id → workspace path
-  cache/                             # shared toolchain caches (cargo, uv, npm, …)
+  agent_workspace_map.json           # instance_id → workspace path
+  cache/                             # shared toolchain caches (cargo, npm, …); mounted into [prog] agents only
   <agent>__<session>/                # one per instance
     CLAUDE.md                        # copy of the agent's .md
     projects/-workspace/...          # claude's per-project state, incl. history.jsonl
@@ -229,12 +248,13 @@ is wrong.
 run.py                               # entry point + CLI shortcuts
 launch/
   __init__.py
-  agents_lib.py                      # discovery, naming, conf, sort, redefine, …
+  agent_composition.py               # filename grammar (parse_stem), conf loading, sort policy, [tag] dispatch
+  agents_crud.py                     # state-dir lifecycle, workspace map, picker-entry builders
   menu_picker.py                     # picker UI + ask_for_workspace
   audit.py                           # state-checker (run as `python -m launch.audit`)
 agents/                              # agent definitions (.md + optional .conf)
 custom_commands/                     # shared slash commands
 settings/                            # status line + bashrc + Claude Code settings
 memory/MEMORY.md                     # auto-loaded pointer to /workspace/.claude_summary
-Dockerfile, docker-compose.yml       # container build + bind mounts
+docker/                              # multi-stage Dockerfile + compose files (base + prog override)
 ```

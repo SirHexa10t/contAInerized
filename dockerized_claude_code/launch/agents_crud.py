@@ -1,51 +1,31 @@
-"""Agent domain layer: discovery, naming, workspace mapping, conf loading, sort policy,
-state-dir sync, the interactive session-suffix prompt, and the picker-entry builders
-(creatable_agents, continuable_instances, delete_instance) the menu_picker UI consumes.
+"""Agent state CRUD: workspace mapping, state-dir lifecycle, the interactive
+session-suffix prompt, and the picker-entry builders (creatable_agents,
+continuable_instances, delete_instance, modify_instance) the menu_picker UI consumes.
 
-Imports nothing from run.py or menu_picker.py — both import from here.
+Imports from agent_composition only; nothing from run.py or menu_picker — both import from here.
 """
 
 import json
 import os
-import re
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import dotenv_values  # pip install python-dotenv
+from .agent_composition import (
+    AGENTS_DIR, AGENTS_STATE, MD_EXT, agent_sort_key, find_md_for_agent, parse_stem,
+)
 
-PROJECT = Path(__file__).resolve().parent.parent  # this file lives in launch/, project root is one up
-AGENTS_DIR = PROJECT / "agents"
-
-DEFAULT_CONF = AGENTS_DIR / "default.conf"
-MD_EXT = ".md"
-CONF_EXT = ".conf"
-AGENTS_STATE = Path.home() / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
-AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.txt"
+AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
+AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"  # {instance_id: [mode, ...]}; only entries for instances with modes
 DEFAULT_WORKSPACE = (
     os.environ.get("AI_WORKSPACE")
     or ("/ai_workspace" if os.getcwd() == os.path.expanduser("~") else os.getcwd())
 )  # fall back to $PWD, except when $PWD is $HOME — then use the bind-mount default
 SESSION_SEP = "__"
-MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
 NO_WORKSPACE_DISPLAY = "?"  # subtitle placeholder for instances with no valid workspace
-
-
-def _parse_stem(stem):
-    """'name(parent)' → ('name', 'parent'); 'name' → ('name', None)."""
-    m = re.match(r"^(.+?)\(([^)]+)\)$", stem)
-    return (m.group(1), m.group(2)) if m else (stem, None)
-
-
-def find_md_for_agent(agent_name):
-    """Locate an agent's .md by its clean name; handles both '<name>.md' and '<name>(*).md'."""
-    direct = AGENTS_DIR / f"{agent_name}{MD_EXT}"
-    if direct.exists():
-        return direct
-    return next(AGENTS_DIR.glob(f"{agent_name}(*){MD_EXT}"), None)
 
 
 # instance_name expects an already-clean agent name; the (parent) suffix is stripped once in creatable_agents.
@@ -63,7 +43,7 @@ def list_all_instances():
 
 
 def load_workspace_map():
-    """Parse agent_workspace_map.txt as a JSON object."""
+    """Parse agent_workspace_map.json into a dict."""
     if not AGENT_WORKSPACE_MAP_FILE.exists():
         return {}
     content = AGENT_WORKSPACE_MAP_FILE.read_text().strip()
@@ -76,33 +56,35 @@ def save_workspace_map(mapping):
     AGENT_WORKSPACE_MAP_FILE.write_text(json.dumps(mapping, indent=4, sort_keys=True) + "\n")
 
 
-def load_conf(md_path):
-    """Locate and load an agent's .conf. Returns (path_or_None, values_dict).
-    '<name>(parent).md' aliases to '<parent>.conf'; else '<name>.conf'; falls back to DEFAULT_CONF."""
-    name, parent = _parse_stem(md_path.stem)
-    specific = AGENTS_DIR / f"{(parent or name)}{CONF_EXT}"
-    conf_path = specific if specific.exists() else (DEFAULT_CONF if DEFAULT_CONF.exists() else None)
-    return conf_path, (dotenv_values(conf_path) if conf_path else {})
+def load_modes_map():
+    """Parse agent_modes_map.json into a dict of {instance_id: [mode, ...]}."""
+    if not AGENT_MODES_MAP_FILE.exists():
+        return {}
+    content = AGENT_MODES_MAP_FILE.read_text().strip()
+    return json.loads(content) if content else {}
 
 
-def parse_model_id(model):
-    """Extract (family, major, minor) from a model ID like 'claude-opus-4-7'.
-    Returns None when no recognized family is present."""
-    m = re.search(r"(opus|sonnet|haiku)-(\d+)(?:-(\d+))?", model)
-    if not m:
-        return None
-    return m.group(1), int(m.group(2)), int(m.group(3) or 0)
+def save_modes_map(mapping):
+    """Write the modes map as pretty-printed JSON; creates AGENTS_STATE if needed."""
+    AGENTS_STATE.mkdir(parents=True, exist_ok=True)
+    AGENT_MODES_MAP_FILE.write_text(json.dumps(mapping, indent=4, sort_keys=True) + "\n")
 
 
-def agent_sort_key(item):
-    """Sort by family (Opus>Sonnet>Haiku), then version desc, then name asc."""
-    name, path = item
-    _, conf = load_conf(path)
-    parsed = parse_model_id(conf.get("ANTHROPIC_MODEL", ""))
-    if parsed is None:
-        return (0, (0, 0), name)
-    family, major, minor = parsed
-    return (-MODEL_FAMILY_RANK[family], (-major, -minor), name)
+def get_instance_modes(instance_id):
+    """Return the modes list for an instance (empty if none set)."""
+    return load_modes_map().get(instance_id, [])
+
+
+def set_instance_modes(instance_id, modes):
+    """Persist the modes list for an instance. An empty list removes the entry
+    from the map (we don't store empty entries — keeps the file small and the
+    'no modes' case explicit by absence)."""
+    m = load_modes_map()
+    if modes:
+        m[instance_id] = modes
+    else:
+        m.pop(instance_id, None)
+    save_modes_map(m)
 
 
 def install_latest_md(agent, session, md_path):
@@ -119,34 +101,20 @@ def install_latest_md(agent, session, md_path):
     return sd
 
 
-def prompt_session(agent, workspace):
-    """Prompt for a session suffix; default = last segment of the workspace path.
-    Rejects collisions with existing `{agent}__{suffix}` state dirs."""
-    default = Path(workspace).name
-    while True:
-        suffix = input(f"Session suffix for '{agent}' [{default}]: ").strip() or default
-        if not suffix:
-            print("Session suffix cannot be empty.")
-            continue
-        if state_dir(agent, suffix).exists():
-            print(f"Instance '{instance_name(agent, suffix)}' already exists. Pick another name.")
-            continue
-        return suffix
-
-
 # === Picker entries — return dicts the menu_picker UI renders directly. ===
 
 def creatable_agents():
     """Agent dicts for the picker's Create rows; sorted by model family/version."""
     out = []
     for path in AGENTS_DIR.glob(f"*{MD_EXT}"):
-        name = _parse_stem(path.stem)[0]
+        name, tags, _ = parse_stem(path.stem)
         if name == "default":
             continue
         content = path.read_text()
         out.append({
             "label_name": name,                       # what the picker renders as the row label
             "agent_name": name,                       # parallel to continuable_instances; lets launch read agent uniformly
+            "tags": tags,                             # filename-grammar tags (e.g. ["prog"]); rendered prefixed in green by menu_picker
             "description": content.splitlines()[0].lstrip("# ").strip(),
             "preview": f"Create a new instance of '{name}'.\n\n--- {path.name} ---\n{content}",
             "md_path": path,
@@ -176,27 +144,35 @@ def _last_used_mtime(instance_id):
 def continuable_instances():
     """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped;
     sorted by (agent rank, session). Marks instances whose workspace resolves to the
-    current working directory (for the picker's CURRENT DIR hint)."""
+    current working directory (for the picker's CURRENT DIR hint), and surfaces tags
+    (from the .md filename) and modes (from agent_modes_map.json) so the picker can
+    style the row and the modify flow can decide which prompts to show."""
     cwd = Path.cwd().resolve()
     mapping = load_workspace_map()
+    modes_map = load_modes_map()
     out = []
     for dir_name in list_all_instances():
         agent, _, session = dir_name.partition(SESSION_SEP)
         md_path = find_md_for_agent(agent)
         if md_path is None:
             continue
+        _, tags, _ = parse_stem(md_path.stem)
         instance = instance_name(agent, session)
+        modes = modes_map.get(instance, [])
         ws = mapping.get(instance)
         ws_valid = bool(ws and Path(ws).is_dir())
         ws_display = ws if ws_valid else NO_WORKSPACE_DISPLAY
         is_current_dir = ws_valid and Path(ws).resolve() == cwd
         last_mtime = _last_used_mtime(instance)
         last_used_display = relative_time(last_mtime) if last_mtime is not None else "(never)"
+        modes_display = ", ".join(modes) if modes else "(none)"
         out.append({
             "id": instance,
             "agent_name": agent,
             "session": session,
             "md_path": md_path,
+            "tags": tags,
+            "modes": modes,
             "workspace": ws,                     # raw — None if missing from map; may be invalid path string
             "workspace_display": ws_display,
             "is_current_dir": is_current_dir,
@@ -205,6 +181,7 @@ def continuable_instances():
                 f"Agent:     {agent}\n"
                 f"Session:   {session}\n"
                 f"Workspace: {ws_display}\n"
+                f"Modes:     {modes_display}\n"
                 f"State:     {AGENTS_STATE / instance}\n"
                 f"Last used: {last_used_display}\n"
             ),
@@ -239,19 +216,34 @@ def delete_instance(instance_id):
     if instance_id in m:
         del m[instance_id]
         save_workspace_map(m)
+    m = load_modes_map()
+    if instance_id in m:
+        del m[instance_id]
+        save_modes_map(m)
 
 
-def redefine_instance(old_id, agent, new_session, new_workspace):
-    """Move an instance's state dir to a new (agent, session) and update its workspace mapping.
-    No-op for the rename if old and new ids match; the workspace map is always updated."""
+def modify_instance(old_id, agent, new_session, new_workspace, new_modes):
+    """Move an instance's state dir to a new (agent, session) and update both the
+    workspace and modes mappings. No-op for the rename if old and new ids match;
+    the maps are always rewritten so callers can change modes without renaming."""
     new_id = instance_name(agent, new_session)
     if new_id != old_id:
         new_dir = AGENTS_STATE / new_id
         if new_dir.exists():
             raise ValueError(f"Instance '{new_id}' already exists.")
         (AGENTS_STATE / old_id).rename(new_dir)
+    # workspace map
     m = load_workspace_map()
     if new_id != old_id:
         m.pop(old_id, None)
     m[new_id] = new_workspace
     save_workspace_map(m)
+    # modes map (empty list ⇒ remove the entry; see set_instance_modes)
+    m = load_modes_map()
+    if new_id != old_id:
+        m.pop(old_id, None)
+    if new_modes:
+        m[new_id] = new_modes
+    else:
+        m.pop(new_id, None)
+    save_modes_map(m)

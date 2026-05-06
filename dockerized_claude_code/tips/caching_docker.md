@@ -10,7 +10,7 @@ Build cache is on-disk and content-keyed — it survives reboots, host updates, 
 
 ## Watch a build
 
-- `docker compose -f ./docker-compose.yml build` — run standalone; every step missing the `CACHED` tag is where invalidation happened. The instruction just above that step is the cause.
+- `docker compose -f ./docker/compose.yml build` — run standalone; every step missing the `CACHED` tag is where invalidation happened. The instruction just above that step is the cause.
 
 ## Force fresh
 

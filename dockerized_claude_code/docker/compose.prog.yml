@@ -1,0 +1,13 @@
+# Override layered on top of compose.yml when an agent's filename includes the
+# [prog] tag. Swaps the Dockerfile to docker/Dockerfile.prog (which extends
+# claude-agents:base with build-essential, Rust, Node) and tags the result as
+# claude-agents:prog so it's distinct from the base image.
+#
+# Compose merges this with compose.yml via run.py — see apply_tags() in
+# launch/agent_composition.py.
+
+services:
+  claude-code:
+    image: claude-agents:prog
+    build:
+      dockerfile: docker/Dockerfile.prog
