@@ -94,7 +94,8 @@ TITLE_AGENT_PICKER = "Select an agent:"
 TITLE_DELETE_MENU  = "‼️  DELETE AGENT INSTANCES  ‼️"
 
 MARKER_NEW    = "✨ Create"
-MARKER_CONT   = " 🏷️ Cont."
+MARKER_CONT   = "🏷️ Cont."   # indent applied via CONT_INDENT below — keeps the marker label clean
+CONT_INDENT   = ""        # spaces prepended to Cont rows so they nest visually under their parent Create row
 MARKER_DELMNU = "⚠️ DELETE‼️"
 MARKER_DLET   = "🗑 DELETE"
 MARKER_BACK   = "🚪  Back"
@@ -122,6 +123,7 @@ STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" mod
 # ============================================================
 
 import glob
+import io
 import os
 import readline
 from pathlib import Path
@@ -135,6 +137,43 @@ from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
+from rich.console import Console                                           # pip install rich
+from rich.markdown import Markdown
+
+
+def _render_md(text):
+    """Render markdown text to an ANSI-encoded string for the picker's preview pane.
+    Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower."""
+    buf = io.StringIO()
+    Console(file=buf, force_terminal=True, color_system="truecolor", width=80).print(Markdown(text))
+    return buf.getvalue()
+
+
+def _create_preview(agent):
+    """Build the Create-row preview markdown from a creatable_agents dict and render to ANSI.
+    Italic source line, horizontal rule, then the .md content as-is."""
+    return _render_md(
+        f"*Create a new instance of `{agent['agent_name']}` — `agents/{agent['md_path'].name}`*\n\n"
+        f"---\n\n"
+        f"{agent['md_text']}"
+    )
+
+
+def _cont_preview(inst):
+    """Build the Cont-row preview markdown from a continuable_instances dict and render to ANSI.
+    Italic lead-in, horizontal rule, then a YAML-fenced metadata block (rich syntax-colors keys/values)."""
+    return _render_md(
+        f"*Continue session `{inst['id']}`.*\n\n"
+        f"---\n\n"
+        f"```yaml\n"
+        f"Agent:     {inst['agent_name']}\n"
+        f"Session:   {inst['session']}\n"
+        f"Workspace: {inst['workspace_display']}\n"
+        f"Modes:     {inst['modes_display']}\n"
+        f"State:     {inst['state_path']}\n"
+        f"Last used: {inst['last_used_display']}\n"
+        f"```\n"
+    )
 
 from .agents_crud import (
     AGENTS_STATE, DEFAULT_WORKSPACE,
@@ -315,6 +354,19 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
             state["result"] = ("modify", entry["value"])
             event.app.exit()
 
+    def accent_style():
+        """Colour the preview's left-edge accent bar based on the selected row's kind:
+        green for Create rows, yellow for Cont rows, dim default for menu/back rows."""
+        if not state["shown"]:
+            return f"class:{CLS_DIVIDER}"
+        value = entries[state["cursor"]].get("value")
+        kind = value[0] if isinstance(value, tuple) and value else None
+        if kind == "new":
+            return STYLE_NEW_MARKER     # fg:ansigreen
+        if kind == "cont":
+            return STYLE_CONT_MARKER    # fg:ansiyellow
+        return f"class:{CLS_DIVIDER}"
+
     body = HSplit([
         Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
         VSplit([
@@ -327,6 +379,7 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
                 width=D(weight=LIST_WEIGHT),
             ),
             Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=f"class:{CLS_DIVIDER}"),
+            Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
             Window(
                 FormattedTextControl(preview_text),
                 wrap_lines=True,
@@ -459,7 +512,7 @@ def select_agent():
                     (STYLE_AGENT_NAME, f"{agent['label_name']:<{agent_name_width}}"),
                     ("", f" — {agent['description']}"),
                 ],
-                "preview": agent["preview"],
+                "preview": _create_preview(agent),
                 "value": ("new", agent),
                 "deletable": False,
                 "modifiable": False,
@@ -467,6 +520,7 @@ def select_agent():
             for inst in instances_by_agent.get(agent["agent_name"], []):
                 mode_str = mode_strs_by_inst[inst["id"]]
                 cont_display = [
+                    ("", CONT_INDENT),
                     (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
                     (STYLE_MODE_WARNING, mode_str),
                     ("", " " * (shared_col_width - len(mode_str))),
@@ -478,7 +532,7 @@ def select_agent():
                 cont_display.append((STYLE_WORKSPACE_HINT, inst["workspace_display"]))
                 entries.append({
                     "display": cont_display,
-                    "preview": inst["preview"],
+                    "preview": _cont_preview(inst),
                     "value": ("cont", inst),
                 })
 
@@ -548,7 +602,7 @@ def _delete_submenu():
                     (STYLE_DEL_MARKER, f"{MARKER_DLET}  "),
                     (STYLE_DEL_NAME, inst["id"]),
                 ],
-                "preview": inst["preview"],
+                "preview": _cont_preview(inst),
                 "value": inst["id"],
             })
         entries.append({

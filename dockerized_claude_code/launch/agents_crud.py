@@ -5,7 +5,6 @@ continuable_instances, delete_instance, modify_instance) the menu_picker UI cons
 Imports from agent_composition only; nothing from run.py or menu_picker — both import from here.
 """
 
-import io
 import json
 import os
 import shutil
@@ -13,22 +12,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from rich.console import Console      # pip install rich (host dep; see install_dependencies.sh)
-from rich.markdown import Markdown
-
 from .agent_composition import (
     AGENTS_DIR, AGENTS_STATE, MD_EXT, agent_sort_key, find_md_for_agent, parse_stem,
 )
-
-
-def _render_md(text):
-    """Render markdown text to an ANSI-encoded string suitable for prompt_toolkit's
-    preview pane (wrap with `ANSI(...)` at display time so the escape codes get parsed).
-    Width is fixed to 80 — wide enough for typical previews; prompt_toolkit re-wraps
-    if the pane is narrower."""
-    buf = io.StringIO()
-    Console(file=buf, force_terminal=True, color_system="truecolor", width=80).print(Markdown(text))
-    return buf.getvalue()
 
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
@@ -118,23 +104,21 @@ def install_latest_md(agent, session, md_path):
 # === Picker entries — return dicts the menu_picker UI renders directly. ===
 
 def creatable_agents():
-    """Agent dicts for the picker's Create rows; sorted by model family/version."""
+    """Agent dicts for the picker's Create rows; sorted by model family/version. Raw
+    fields only — `menu_picker` composes the preview markdown and renders it."""
     out = []
     for path in AGENTS_DIR.glob(f"*{MD_EXT}"):
         name, tags, _ = parse_stem(path.stem)
         if name == "default":
             continue
         content = path.read_text()
-        # Lead-in lines stay plain; the .md body is rendered to ANSI via rich so headers,
-        # bold/italic, code blocks, lists etc. show with proper styling in the preview pane.
-        rendered_body = _render_md(content)
         out.append({
             "label_name": name,                       # what the picker renders as the row label
             "agent_name": name,                       # parallel to continuable_instances; lets launch read agent uniformly
             "tags": tags,                             # filename-grammar tags (e.g. ["prog"]); rendered prefixed in green by menu_picker
             "description": content.splitlines()[0].lstrip("# ").strip(),
-            "preview": f"Create a new instance of '{name}'.\n\n--- {path.name} ---\n{rendered_body}",
             "md_path": path,
+            "md_text": content,                       # raw .md content; menu_picker uses it as the preview body
         })
     out.sort(key=lambda d: agent_sort_key((d["agent_name"], d["md_path"])))
     return out
@@ -190,18 +174,12 @@ def continuable_instances():
             "md_path": md_path,
             "tags": tags,
             "modes": modes,
-            "workspace": ws,                     # raw — None if missing from map; may be invalid path string
+            "modes_display": modes_display,        # comma-joined or "(none)"; menu_picker uses it verbatim
+            "workspace": ws,                       # raw — None if missing from map; may be invalid path string
             "workspace_display": ws_display,
             "is_current_dir": is_current_dir,
-            "preview": (
-                f"Continue session '{instance}'.\n\n"
-                f"Agent:     {agent}\n"
-                f"Session:   {session}\n"
-                f"Workspace: {ws_display}\n"
-                f"Modes:     {modes_display}\n"
-                f"State:     {AGENTS_STATE / instance}\n"
-                f"Last used: {last_used_display}\n"
-            ),
+            "state_path": AGENTS_STATE / instance, # ~/.claude-agents/<id>; shown in the preview pane
+            "last_used_display": last_used_display,
         })
     out.sort(key=lambda d: (agent_sort_key((d["agent_name"], d["md_path"])), d["session"]))
     return out
