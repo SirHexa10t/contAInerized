@@ -31,7 +31,7 @@ These insert a newline without submitting in every terminal, no setup required:
 
 For "needs config" terminals, run `/terminal-setup` once from a Claude Code session **on the host** (not from inside Docker — the dockerised TTY reports as `xterm-256color` and the setup command can't tell what the host terminal actually is). Setup writes to that terminal's profile/config and persists; future Claude Code sessions in that terminal — including dockerised ones — inherit the new behaviour.
 
-For "not supported" terminals, your only options are: switch to a different terminal, or stick with the always-works keys above.
+For "not supported" terminals, your only options are: switch to a different terminal (recommendation: Kitty), or stick with the always-works keys above.
 
 ## `settings/keybindings.json` — role and limitations
 

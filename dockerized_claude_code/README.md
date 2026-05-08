@@ -46,6 +46,16 @@ isolated Docker container with persistent per-instance state.
   so the in-container `man` command surfaces those files as ready-to-paste
   `@.prompts/<file>` lines. Absent folder just means `man` shows nothing
   under "Custom prompts".
+- **DooD (Docker-out-of-Docker) mode** — opt into per-instance, prompted
+  at create/modify time for any `[prog]`-tagged agent. Bind-mounts
+  `/var/run/docker.sock` so the agent can drive the host's Docker daemon
+  (run sub-containers, build images). ⚠ effective host-root; declined by
+  default.
+- **Optional credential passthrough** — drop your `~/.aws` (or `gcloud`,
+  `kube`, `ssh`, `gh`, `.npmrc`, `.pypirc`) under
+  `~/.claude-agents/optional_creds/` and the matching CLI inside the
+  container picks it up automatically. See *Optional Host Mounts* below
+  for the full table.
 - **State auditor** — `python3 -m launch.audit` reports orphaned state dirs,
   drifted CLAUDE.md files, ghost workspace-map entries, and missing/empty
   OAuth files.
@@ -236,11 +246,69 @@ is wrong.
   .claude.json                       # shared OAuth account info
   .credentials.json                  # shared API credentials
   agent_workspace_map.json           # instance_id → workspace path
+  agent_modes_map.json               # instance_id → list of opted-in modes (e.g. ["DooD"])
   cache/                             # shared toolchain caches (cargo, npm, …); mounted into [prog] agents only
+  optional_creds/                    # opt-in passthrough creds; see "Optional Host Mounts" below
   <agent>__<session>/                # one per instance
     CLAUDE.md                        # copy of the agent's .md
     projects/-workspace/...          # claude's per-project state, incl. history.jsonl
 ```
+
+## Optional Host Mounts
+
+Beyond the always-on bind-mounts (workspace, agent state, OAuth credentials,
+shared commands/settings/skills), several paths are **conditional** — applied
+only when the relevant host-side resource exists or when the instance opts in.
+Each is independent; nothing here is required for a basic launch.
+
+| Mount | Source | Container path | Trigger |
+|---|---|---|---|
+| Workspace skills | `<workspace>/.skills/<name>/` | `/home/claude/.claude/skills/<name>` | dir present in workspace; each becomes a `/<name>` slash command |
+| Workspace prompts | `<workspace>/.prompts/` | (left in-place at `/workspace/.prompts/`; surfaced by the in-container `man`) | dir present in workspace |
+| Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | agent filename includes `[prog]` |
+| Docker socket | `/var/run/docker.sock` (host) | `/var/run/docker.sock` | instance has DooD mode enabled (asked at create/modify) |
+| Optional creds | `~/.claude-agents/optional_creds/<service>/` | varies by service (see below) | path exists on host |
+
+### Optional credentials (recognized services)
+
+Drop a directory or file under `~/.claude-agents/optional_creds/` and it
+gets bind-mounted into the container at the matching default location, so
+the corresponding CLI just works. Read-write (cloud CLIs need to refresh
+tokens, write cache, etc.). Anything not in this list is ignored — extend
+`OPTIONAL_CREDS_MOUNTS` in `launch/user_additions.py` to recognize more tools.
+
+| `optional_creds/` entry | Container path | CLI | Auto-installed in `[prog]` |
+|---|---|---|---|
+| `aws/`     | `/home/claude/.aws/`                       | `aws`     | ✓ via `uv tool install awscli` |
+| `gcloud/`  | `/home/claude/.config/gcloud/`             | `gcloud`, `gsutil` | ✓ via apt (Google Cloud apt repo) — heavy install (~400-500MB) |
+| `kube/`    | `/home/claude/.kube/`                      | `kubectl` | ✓ static binary into `~/.local/bin` |
+| `ssh/`     | `/home/claude/.ssh/`                       | `ssh`, `git` over ssh | — already in `base` image |
+| `gh/`      | `/home/claude/.config/gh/`                 | `gh`      | ✓ via apt (GitHub apt repo) |
+| `glab/`    | `/home/claude/.config/glab-cli/`           | `glab`    | ✓ via apt (GitLab packagecloud repo) |
+| `vercel/`  | `/home/claude/.local/share/com.vercel.cli/`| `vercel`  | ✓ via `npm install -g vercel` |
+| `railway/` | `/home/claude/.config/railway/`            | `railway` | ✓ via `npm install -g @railway/cli` |
+| `npmrc`    | `/home/claude/.npmrc`                      | `npm` (auth tokens) | — `npm` is in the prog image |
+| `pypirc`   | `/home/claude/.pypirc`                     | `twine` / pip uploads | — install yourself: `uv tool install twine` |
+
+**Auto-install:** for entries marked ✓, dropping the credentials dir on the
+host also flips an `INSTALL_<TOOL>=1` build-arg, and `Dockerfile.prog`
+installs the CLI on the next `[prog]` build. Each tool gets its own ARG, so
+adding a new credential only invalidates that tool's layer (downstream
+layers re-run as no-ops). Removing a credential reverses it on the next
+build. Auto-install only happens for `[prog]`-tagged agents; non-prog
+agents get the credentials passthrough but no CLI (those agents probably
+don't need cloud tools anyway).
+
+To enable AWS in any `[prog]` agent, for example:
+
+```bash
+mkdir -p ~/.claude-agents/optional_creds
+ln -s ~/.aws ~/.claude-agents/optional_creds/aws    # symlink so host edits propagate
+# or:  cp -r ~/.aws ~/.claude-agents/optional_creds/aws
+```
+
+Next launch of any `[prog]` agent: the prog image rebuilds with `awscli`
+installed, and the mounted creds make it ready to use.
 
 ## Project Layout
 
@@ -250,6 +318,7 @@ launch/
   __init__.py
   agent_composition.py               # filename grammar (parse_stem), conf loading, sort policy, [tag] dispatch
   agents_crud.py                     # state-dir lifecycle, workspace map, picker-entry builders
+  user_additions.py                  # per-workspace skills + optional credentials passthrough
   menu_picker.py                     # picker UI + ask_for_workspace
   audit.py                           # state-checker (run as `python -m launch.audit`)
 agents/                              # agent definitions (.md + optional .conf)

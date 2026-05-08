@@ -12,6 +12,10 @@ from launch.agents_crud import (
     get_instance_modes, set_instance_modes, install_latest_md, creatable_agents,
 )
 from launch.menu_picker import select_agent, ask_for_workspace, prompt_dood, prompt_session
+from launch.user_additions import (
+    aggregated_skills_mounts, ensure_optional_creds_readme,
+    optional_creds_install_env, optional_creds_mounts,
+)
 
 MODE_DOOD = "DooD"  # mirrors the key in agent_composition.MODE_HANDLERS
 
@@ -26,9 +30,6 @@ COMPOSE_FILE = PROJECT / "docker" / "compose.yml"
 # the cache. Bump this manually (e.g. to "force-2026-05-08") to force a refresh
 # mid-week without `--no-cache`.
 SOFTWARE_STACK_REFRESH = date.today().strftime("%Y-W%W")
-
-SKILLS_IN_CONTAINER = "/home/claude/.claude/skills"
-PROJECT_CUSTOM_SKILLS_DIR = PROJECT / "custom_skills"
 
 
 def has_continuable_history(state_path):
@@ -55,31 +56,6 @@ def has_continuable_history(state_path):
     return False
 
 
-def aggregated_skills_mounts(workspace, state_path):
-    """Surface skills from `custom_skills/` (this project's bundled skills) and
-    `<workspace>/.skills/` (the user's per-workspace skills) as the agent's skills
-    directory. Each `<name>/SKILL.md` becomes a `/<name>` slash command. When both
-    sources have a skill with the same name, the workspace's wins (last-write).
-    Both sources are optional; if neither exists, no mounts are added.
-
-    Mount points are pre-created on the host (under `<state>/skills/<name>/`) as
-    the launcher user, so Docker doesn't auto-create them as root — which would
-    otherwise leave undeletable directories blocking `delete_instance`'s rmtree."""
-    skills = {}  # name -> source path
-    for source_dir in (PROJECT_CUSTOM_SKILLS_DIR, Path(workspace) / ".skills"):
-        if not source_dir.is_dir():
-            continue
-        for skill in source_dir.iterdir():
-            if skill.is_dir() and (skill / "SKILL.md").is_file():
-                skills[skill.name] = skill   # workspace overrides project-bundled
-    skills_root_on_host = state_path / "skills"
-    args = []
-    for name, source in sorted(skills.items()):
-        (skills_root_on_host / name).mkdir(parents=True, exist_ok=True)
-        args.extend(["-v", f"{source}:{SKILLS_IN_CONTAINER}/{name}:ro"])
-    return args
-
-
 def ensure_image(overlays):
     """Build the image stack incrementally. Always builds the base image; for each
     overlay in order, builds with the cumulative `-f` chain so overlay Dockerfiles
@@ -101,7 +77,9 @@ def ensure_image(overlays):
 
 
 def set_container_env(agent, session, workspace, state_path):
-    """Populate os.environ with everything the container needs (besides the per-agent conf dict)."""
+    """Populate os.environ with everything the container needs (besides the per-agent conf dict).
+    INSTALL_<TOOL> flags from optional_creds_install_env reflect which optional_creds/<name>/
+    entries exist; Dockerfile.prog gates each CLI install on the matching flag."""
     pretty = f"{agent.replace('-', ' ').title()} - {session.replace('-', ' ').title()}"
     os.environ.update({
         "SOFTWARE_STACK_REFRESH": SOFTWARE_STACK_REFRESH,
@@ -112,6 +90,7 @@ def set_container_env(agent, session, workspace, state_path):
         "ACCOUNT_FILE": str(ACCOUNT_FILE),
         "CREDENTIALS_FILE": str(CREDENTIALS_FILE),
     })
+    os.environ.update(optional_creds_install_env())
 
 
 def parse_target():
@@ -220,12 +199,17 @@ def launch():
     skill_mounts = aggregated_skills_mounts(workspace, state_path)
     if skill_mounts:
         print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
+    ensure_optional_creds_readme()
+    cred_mounts, cred_names = optional_creds_mounts()
+    if cred_names:
+        print(f"  Optional creds:   {', '.join(cred_names)} (from optional_creds/)")
     ensure_image(overlays)
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
     cmd = (
         ["docker", "compose"] + compose_args + ["run", "--rm", "-it"]
         + volume_args             # tag- and mode-contributed mounts ([prog] caches, DooD socket already in compose.dood.yml, etc.)
         + skill_mounts            # -v flags surfacing each skill from custom_skills/ + workspace's .skills/
+        + cred_mounts             # -v flags surfacing each recognized service in optional_creds/
         + [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]  # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
         + resume_flag             # present if a resumed session

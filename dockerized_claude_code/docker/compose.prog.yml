@@ -11,3 +11,14 @@ services:
     image: claude-agents:prog
     build:
       dockerfile: docker/Dockerfile.prog
+      args:
+        # Each gates the matching optional CLI install in Dockerfile.prog. Set to
+        # "1" by run.py when the corresponding optional_creds/<name>/ exists on the
+        # host (otherwise unset → "0", and the install RUN is a no-op).
+        INSTALL_AWS:     ${INSTALL_AWS:-0}
+        INSTALL_GCLOUD:  ${INSTALL_GCLOUD:-0}
+        INSTALL_GH:      ${INSTALL_GH:-0}
+        INSTALL_GLAB:    ${INSTALL_GLAB:-0}
+        INSTALL_KUBE:    ${INSTALL_KUBE:-0}
+        INSTALL_VERCEL:  ${INSTALL_VERCEL:-0}
+        INSTALL_RAILWAY: ${INSTALL_RAILWAY:-0}
