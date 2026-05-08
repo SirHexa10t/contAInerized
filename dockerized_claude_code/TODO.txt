@@ -139,9 +139,6 @@ check if user's skills should be mounted one by one, by scanning the contents of
 
 Anthropic's GitHub skills?
 
-communications between agents (on same PC; maybe commonly mounted file?)
-    agents talking to each other, such as front-end and back-end; going back and forth to resolve issues
-
 
 share image with claude code
     currently it seems only possible by putting an image in the workspace
@@ -149,7 +146,62 @@ share image with claude code
 
 find a way to resolve the spaces instead of newlines (broken shell commands and strings) issue when copying from claude code
 
-fix menu GUI - too much space when [prog] and {DooD} are both present
-    {DooD} shouldn't push the non-session agents further away from [prog]
 
+
+
+
+
+
+
+
+communications between agents (on same PC; maybe commonly mounted file?)
+    agents talking to each other, such as front-end and back-end; going back and forth to resolve issues
+
+  Can local AIs communicate? Yes. Each agent runs in its own container with shared filesystem mounts, so a "messages/" directory in the workspace is the simplest message bus — agent A writes a turn, agent B reads it, replies into the same
+   file. No network needed.
+
+  Can they prompt each other? Yes, two ways:
+  - Subprocess (cleanest): Claude Code has a non-interactive -p mode. From inside one agent's container, you can run claude -p --append-system-prompt "$(cat /agents/worker.md)" "<the prompt>" via the Bash tool, capture stdout, and feed
+  the response back to the caller. Stateless one-shot, perfect for manager → worker delegation.
+  - Persistent two-way (more work): each agent runs in its own long-running container with a shared transcript file. An external coordinator (or a "turn token" file) decides whose turn it is. Each agent's CLAUDE.md instructs it to read
+  prior turns and append its own. Better for debates and back-and-forth.
+
+  Can confirmations work? Yes — three layers:
+  - Claude Code's built-in permission system still applies, so risky actions (Bash, Write, Edit) prompt the user inside whichever agent's session is active.
+  - For unattended runs, --dangerously-skip-permissions + a tight --allowedTools allowlist (the worker only gets read tools, say) is the standard pattern. Anthropic's init-firewall.sh (already on your TODO) is what makes that safe.
+  - For "manager wants worker's work confirmed by human": the manager's session shows the worker's output and the manager waits for your approval before proceeding. Just one human-in-the-loop point.
+
+  For starting with just two, I'd start with the subprocess pattern. Concrete shape:
+
+  1. Mount agents/ into the container (currently it isn't).
+  2. Add a custom skill, e.g. /delegate <name> "<prompt>", that runs claude -p --append-system-prompt "$(cat agents/<name>.md)" "<prompt>" and returns the output.
+  3. The manager agent's CLAUDE.md describes when to use /delegate, what to send, how to act on the response.
+  4. Optionally, a second /converse <name> skill that maintains a /conversation/<thread>.md file for multi-turn back-and-forth.
+
+  That's a couple-hours add and gives you manager+worker, philosopher+philosopher, etc. The Claude Agent SDK is the heavier alternative if you ever want full programmatic control of the loop, but subprocess fits this launcher's grain.
+
+
+
+  /join-forum <forum-name>
+    create if doesn't exist
+    introduce self
+    some way to pass speaking token; maybe round-robin? First to declare willingness to answer? An actual mutex is good.
+
+
+new tags:
+    [larp] - a role-player; pretend to be a Plato, or a man stuck on Mars...
+        well defined through a c writing bot; Character_Builder - will ask you for all of the details and background info (or tweaks; you may choose a certain historical interpretation of a known character over some other, or at a specific period of the character's life. If it's an invented character; fill in the whole personal history)
+        gets into character - fitting emotional tone, has same manner of speech, same vocabulary, knows the contents of all the books that they wrote, 
+        gets into the setting - lives in the right era, adopts the fitting mindset, uses different words, knows/doesn't-know certain concepts, possibly thinks the Earth is flat...
+        'internal thoughts' should be written down as well
+        do not break character, unless <specifically asked to discuss or maybe update persona? / some extreme condition?>
+    [auto] - Autonomous; can act without confirmations.
+        Always comes with a firewall
+        Colored
+
+    in the main menu, offer a key shortcut for tag/mode legend display
+
+
+sort tags:
+    add extra sort: first those with no tags, then [prog], then [auto], then [larp]
 
