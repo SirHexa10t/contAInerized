@@ -153,6 +153,3 @@ fix menu GUI - too much space when [prog] and {DooD} are both present
     {DooD} shouldn't push the non-session agents further away from [prog]
 
 
-Optional wiring for credential files;
-GCP:
-    /home/claude/.config/gcloud/application_default_credentials.json

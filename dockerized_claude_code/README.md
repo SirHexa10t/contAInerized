@@ -67,8 +67,8 @@ Host requirements:
 - **Docker** + the Compose v2 plugin
 - **Python 3.10+** (the launcher uses walrus expressions and structural
   unpacking)
-- Two Python packages: **`prompt_toolkit`** (picker UI) and
-  **`python-dotenv`** (`.conf` parsing)
+- Three Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
+  (`.conf` parsing), **`rich`** (markdown rendering for agent previews)
 
 Inside the container, a two-stage Dockerfile (`docker/Dockerfile`) supplies
 the runtime: the **base** stage installs Claude Code + `uv` + ripgrep — what
@@ -76,61 +76,60 @@ every agent needs — and the **prog** stage adds `build-essential`, Rust
 (`rustup`), and Node.js for `[prog]`-tagged agents. Nothing else needs to
 be on the host for the agents themselves.
 
-### Install — macOS (Homebrew)
+### Install — Linux
+
+Run the installer from the project root:
 
 ```bash
-brew install --cask docker         # Docker Desktop — start it once before continuing
-brew install python@3.14
-pip3 install prompt_toolkit python-dotenv
+bash install_dependencies.sh
 ```
 
-(The Linux block below also works on macOS — `curl …/uv/install.sh | sh` is
-cross-platform — if you'd rather use uv + a standalone venv than Homebrew's
-system-wide Python.)
+It uses uv to set up a Python venv at `~/pydev` with all three pip deps,
+installs Docker via the official convenience script (which bundles the
+Compose v2 plugin), and adds your user to the `docker` group. Idempotent —
+safe to re-run; if `~/pydev` already exists, it's reused as-is.
 
-### Install — Linux (general; uses upstream installers, gives you the latest versions)
+### Install — macOS
 
-`apt`-shipped Python and Docker tend to lag well behind upstream. This route uses
-[uv](https://github.com/astral-sh/uv) for Python and Docker's official convenience
-script, both of which stay current.
+The same installer works on macOS — it detects Darwin and uses Homebrew to
+install Docker Desktop, while the Python side uses uv (same as Linux):
 
 ```bash
-# === Python ===
-curl -LsSf https://astral.sh/uv/install.sh | sh   # installs uv
-. "$HOME/.local/bin/env"                          # adds uv to PATH for this session
-
-uv venv ~/pydev --python 3.14                     # creates ~/pydev with Python 3.14 (uv auto-downloads it)
-source ~/pydev/bin/activate                       # standard venv activation
-uv pip install prompt_toolkit python-dotenv
-
-# === Docker ===
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-# !!! Log out + back in (or reboot) for FUTURE shells to pick up the docker group !!!
-newgrp docker                                     # activates the docker group for THIS shell only
+bash install_dependencies.sh
 ```
+
+If you don't have Homebrew, the script will print the Docker Desktop
+download URL so you can install it manually, then re-run to set up Python.
 
 ### Install — Windows
 
-Install [Docker Desktop](https://www.docker.com/products/docker-desktop) and
-run the launcher from inside WSL2; from there follow the Linux steps.
+Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop)
+and [Python 3.10+](https://www.python.org/downloads/) from their official
+sites, then `pip install prompt_toolkit python-dotenv rich` in your shell
+of choice.
+
+Or — recommended — install Docker Desktop on the Windows host and run the
+launcher from inside WSL2; once you're at a WSL2 bash prompt, the Linux
+installer above takes over.
+
+### Manual install
+
+If you'd rather not use the installer, the *Host requirements* list above is
+exhaustive — pick whatever Python/Docker route fits your setup.
 
 ### Verify
 
-If you installed Python via the recommended standalone venv (the Linux block above
-puts it at `~/pydev`), **activate it first** so `python3` resolves to that
-interpreter:
+Activate the venv the installer created so `python3` resolves to it:
 
 ```bash
 source ~/pydev/bin/activate
 ```
 
-Without activation, `python3` runs the system interpreter and the `dotenv` /
-`prompt_toolkit` import below fails. Now confirm the toolchain:
+Then confirm the toolchain:
 
 ```bash
 docker compose version
-python3 -c "import prompt_toolkit, dotenv; print('ok')"
+python3 -c "import prompt_toolkit, dotenv, rich; print('ok')"
 ```
 
 If either errors out, fix it before proceeding — `run.py` exits early with a

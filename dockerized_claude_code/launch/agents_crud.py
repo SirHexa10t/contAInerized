@@ -5,6 +5,7 @@ continuable_instances, delete_instance, modify_instance) the menu_picker UI cons
 Imports from agent_composition only; nothing from run.py or menu_picker — both import from here.
 """
 
+import io
 import json
 import os
 import shutil
@@ -12,9 +13,22 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from rich.console import Console      # pip install rich (host dep; see install_dependencies.sh)
+from rich.markdown import Markdown
+
 from .agent_composition import (
     AGENTS_DIR, AGENTS_STATE, MD_EXT, agent_sort_key, find_md_for_agent, parse_stem,
 )
+
+
+def _render_md(text):
+    """Render markdown text to an ANSI-encoded string suitable for prompt_toolkit's
+    preview pane (wrap with `ANSI(...)` at display time so the escape codes get parsed).
+    Width is fixed to 80 — wide enough for typical previews; prompt_toolkit re-wraps
+    if the pane is narrower."""
+    buf = io.StringIO()
+    Console(file=buf, force_terminal=True, color_system="truecolor", width=80).print(Markdown(text))
+    return buf.getvalue()
 
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
@@ -111,12 +125,15 @@ def creatable_agents():
         if name == "default":
             continue
         content = path.read_text()
+        # Lead-in lines stay plain; the .md body is rendered to ANSI via rich so headers,
+        # bold/italic, code blocks, lists etc. show with proper styling in the preview pane.
+        rendered_body = _render_md(content)
         out.append({
             "label_name": name,                       # what the picker renders as the row label
             "agent_name": name,                       # parallel to continuable_instances; lets launch read agent uniformly
             "tags": tags,                             # filename-grammar tags (e.g. ["prog"]); rendered prefixed in green by menu_picker
             "description": content.splitlines()[0].lstrip("# ").strip(),
-            "preview": f"Create a new instance of '{name}'.\n\n--- {path.name} ---\n{content}",
+            "preview": f"Create a new instance of '{name}'.\n\n--- {path.name} ---\n{rendered_body}",
             "md_path": path,
         })
     out.sort(key=lambda d: agent_sort_key((d["agent_name"], d["md_path"])))

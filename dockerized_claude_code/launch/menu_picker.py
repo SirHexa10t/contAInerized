@@ -128,6 +128,7 @@ from pathlib import Path
 
 from prompt_toolkit import Application                                     # pip install prompt_toolkit
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
@@ -212,7 +213,9 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
     def preview_text():
         if not state["shown"]:
             return ""
-        return entries[state["cursor"]]["preview"]
+        # Wrap in ANSI(...) so rich-rendered escape codes in Create-row previews show
+        # as styled text. Plain previews (Cont rows, etc.) pass through unchanged.
+        return ANSI(entries[state["cursor"]]["preview"])
 
     def title_fragments():
         return [(f"class:{CLS_TITLE}", title)]
@@ -434,14 +437,17 @@ def select_agent():
         agent_name_width = max(len(a["label_name"]) for a in agents)
         instance_name_width = max((len(i["id"]) for i in instances), default=0)
 
-        # Two prefix columns sized to the widest values across all rows, so the
-        # agent-name and instance-ID columns line up regardless of which rows have
-        # tags / modes. Tags go on Create rows (green); modes go on Cont rows (red,
-        # warning). Each row pads the column it doesn't use so vertical alignment holds.
+        # Shared tag/mode column: tags only appear on Create rows, modes only on Cont rows,
+        # so they never collide and can occupy the same horizontal slot. Width is sized to
+        # the widest of either so the agent-name / instance-ID column still lines up.
+        # Effect: a `{DooD}` mark on a Cont row sits at the same column as `[prog]` would
+        # on a Create row (just nested by the Cont marker's longer prefix).
         tag_strs = [_tag_prefix_str(a.get("tags", [])) for a in agents]
-        tag_col_width = max(map(len, tag_strs), default=0)
         mode_strs_by_inst = {i["id"]: _mode_prefix_str(i.get("modes", [])) for i in instances}
-        mode_col_width = max((len(s) for s in mode_strs_by_inst.values()), default=0)
+        shared_col_width = max(
+            [len(s) for s in tag_strs] + [len(s) for s in mode_strs_by_inst.values()],
+            default=0,
+        )
 
         entries = []
         for agent, tag_str in zip(agents, tag_strs):
@@ -449,8 +455,7 @@ def select_agent():
                 "display": [
                     (STYLE_NEW_MARKER, f"{MARKER_NEW}  "),
                     (STYLE_TAG, tag_str),
-                    ("", " " * (tag_col_width - len(tag_str))),
-                    ("", " " * mode_col_width),    # blank mode column on Create rows — modes only apply to instances
+                    ("", " " * (shared_col_width - len(tag_str))),
                     (STYLE_AGENT_NAME, f"{agent['label_name']:<{agent_name_width}}"),
                     ("", f" — {agent['description']}"),
                 ],
@@ -463,9 +468,8 @@ def select_agent():
                 mode_str = mode_strs_by_inst[inst["id"]]
                 cont_display = [
                     (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
-                    ("", " " * tag_col_width),   # blank tag column — keeps Cont rows aligned with tagged Create rows
                     (STYLE_MODE_WARNING, mode_str),
-                    ("", " " * (mode_col_width - len(mode_str))),
+                    ("", " " * (shared_col_width - len(mode_str))),
                     (STYLE_AGENT_NAME, f"{inst['id']:<{instance_name_width}}"),
                     ("", "    "),
                 ]
