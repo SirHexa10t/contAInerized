@@ -117,6 +117,7 @@ STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
 STYLE_CURRENT_DIR    = "bold fg:ansiyellow"
+STYLE_DEFAULT_DIR    = "bold fg:ansiyellow"   # same yellow as CURRENT DIR — kept as its own constant so colours can diverge later
 STYLE_TAG            = "fg:ansibrightgreen"
 STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" modes — visual warning that the instance has reduced isolation
 
@@ -529,6 +530,8 @@ def select_agent():
                 ]
                 if inst.get("is_current_dir"):
                     cont_display.append((STYLE_CURRENT_DIR, "(CURRENT DIR) "))
+                elif inst.get("is_default_dir"):
+                    cont_display.append((STYLE_DEFAULT_DIR, "(DEFAULT DIR) "))
                 cont_display.append((STYLE_WORKSPACE_HINT, inst["workspace_display"]))
                 entries.append({
                     "display": cont_display,

@@ -19,9 +19,12 @@ isolated Docker container with persistent per-instance state.
   specific instance directly.
 - **Interactive picker** — full-screen TUI with type-to-filter, Del to
   delete an instance, F2 to modify its session name and/or workspace.
-- **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is
-  `$HOME`, in which case it falls back to `/ai_workspace`); rows whose
-  workspace matches `$PWD` are tagged `(CURRENT DIR)` in yellow.
+- **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is in
+  `DEFAULTING_DIRS` — `$HOME`, `~/Desktop/Documents/Downloads`, `/tmp`,
+  `/var/tmp`, `/` — in which case it falls back to `/ai_workspace`). Rows
+  whose workspace matches `$PWD` are tagged `(CURRENT DIR)` in yellow; when
+  `$PWD` is one of `DEFAULTING_DIRS`, rows whose workspace is the fallback
+  target get `(DEFAULT DIR)` in the same yellow.
 - **Per-agent build mode** — append `[prog]` to a filename (e.g.
   `refactorer[prog](thinker).md`) to opt into the heavier Dockerfile stage
   with Rust + Node. Untagged agents get the lighter base image (bash, git,

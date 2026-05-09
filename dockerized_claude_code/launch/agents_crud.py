@@ -20,10 +20,29 @@ ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
 AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"  # {instance_id: [mode, ...]}; only entries for instances with modes
+# Where new instances default their workspace to when launched from a "neutral"
+# directory (one in DEFAULTING_DIRS — typically $HOME). Acts as a shared sandbox so the
+# launcher never silently bind-mounts something like the user's whole home dir.
+FALLBACK_WORKSPACE = "/ai_workspace"
+# Directories that divert workspace selection to FALLBACK_WORKSPACE — when launching
+# from one of these (cwd ∈ DEFAULTING_DIRS), DEFAULT_WORKSPACE falls back instead of
+# using $PWD. Same list also drives the picker's `(DEFAULT DIR)` mark on Cont rows
+# at FALLBACK_WORKSPACE when cwd resolves to one of these dirs.
+DEFAULTING_DIRS = [
+    os.path.expanduser("~"),
+    os.path.expanduser("~/Desktop"),
+    os.path.expanduser("~/Downloads"),
+    os.path.expanduser("~/Pictures"),
+    os.path.expanduser("~/Videos"),
+    os.path.expanduser("~/.ssh"),
+    "/tmp",
+    "/var/tmp",
+    "/",
+]
 DEFAULT_WORKSPACE = (
     os.environ.get("AI_WORKSPACE")
-    or ("/ai_workspace" if os.getcwd() == os.path.expanduser("~") else os.getcwd())
-)  # fall back to $PWD, except when $PWD is $HOME — then use the bind-mount default
+    or (FALLBACK_WORKSPACE if os.getcwd() in DEFAULTING_DIRS else os.getcwd())
+)  # fall back to $PWD, except when $PWD is one of DEFAULTING_DIRS — then use FALLBACK_WORKSPACE
 SESSION_SEP = "__"
 NO_WORKSPACE_DISPLAY = "?"  # subtitle placeholder for instances with no valid workspace
 
@@ -149,6 +168,13 @@ def continuable_instances():
     (from the .md filename) and modes (from agent_modes_map.json) so the picker can
     style the row and the modify flow can decide which prompts to show."""
     cwd = Path.cwd().resolve()
+    defaulting_dirs_resolved = {Path(d).resolve() for d in DEFAULTING_DIRS}
+    fallback_resolved = Path(FALLBACK_WORKSPACE).resolve()
+    # True when cwd resolves to one of DEFAULTING_DIRS (symlinks normalized via .resolve(),
+    # so e.g. /home/<user> matches /var/users/<user> if the latter symlinks to the former).
+    # Subdirectories deliberately don't count — being in a project under $HOME doesn't make
+    # /ai_workspace your "default" in any meaningful way.
+    cwd_is_defaulting_dir = cwd in defaulting_dirs_resolved
     mapping = load_workspace_map()
     modes_map = load_modes_map()
     out = []
@@ -163,7 +189,9 @@ def continuable_instances():
         ws = mapping.get(instance)
         ws_valid = bool(ws and Path(ws).is_dir())
         ws_display = ws if ws_valid else NO_WORKSPACE_DISPLAY
-        is_current_dir = ws_valid and Path(ws).resolve() == cwd
+        ws_resolved = Path(ws).resolve() if ws_valid else None
+        is_current_dir = ws_valid and ws_resolved == cwd
+        is_default_dir = ws_valid and cwd_is_defaulting_dir and ws_resolved == fallback_resolved
         last_mtime = _last_used_mtime(instance)
         last_used_display = relative_time(last_mtime) if last_mtime is not None else "(never)"
         modes_display = ", ".join(modes) if modes else "(none)"
@@ -178,6 +206,7 @@ def continuable_instances():
             "workspace": ws,                       # raw — None if missing from map; may be invalid path string
             "workspace_display": ws_display,
             "is_current_dir": is_current_dir,
+            "is_default_dir": is_default_dir,      # cwd ∈ DEFAULTING_DIRS and ws is FALLBACK_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
             "state_path": AGENTS_STATE / instance, # ~/.claude-agents/<id>; shown in the preview pane
             "last_used_display": last_used_display,
         })

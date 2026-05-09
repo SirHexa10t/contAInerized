@@ -186,15 +186,17 @@ communications between agents (on same PC; maybe commonly mounted file?)
     create if doesn't exist
     introduce self
     some way to pass speaking token; maybe round-robin? First to declare willingness to answer? An actual mutex is good.
+        write willingness to reply into queue
+        write into tmp
+        writer writes into queue
+            task-ending queue determines whose message goes in next
 
 
 new tags:
     [larp] - a role-player; pretend to be a Plato, or a man stuck on Mars...
-        well defined through a c writing bot; Character_Builder - will ask you for all of the details and background info (or tweaks; you may choose a certain historical interpretation of a known character over some other, or at a specific period of the character's life. If it's an invented character; fill in the whole personal history)
-        gets into character - fitting emotional tone, has same manner of speech, same vocabulary, knows the contents of all the books that they wrote, 
-        gets into the setting - lives in the right era, adopts the fitting mindset, uses different words, knows/doesn't-know certain concepts, possibly thinks the Earth is flat...
-        'internal thoughts' should be written down as well
-        do not break character, unless <specifically asked to discuss or maybe update persona? / some extreme condition?>
+        well defined through a writing bot; Character_Builder (an independent agent) - will ask you for all of the details and background info (or tweaks; you may choose a certain historical interpretation of a known character over some other, or at a specific period of the character's life. If it's an invented character; fill in the whole personal history)
+
+                
     [auto] - Autonomous; can act without confirmations.
         Always comes with a firewall
         Colored
