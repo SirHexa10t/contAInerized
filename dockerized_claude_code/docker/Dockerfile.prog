@@ -1,9 +1,10 @@
-# Programming-stack image — extends `claude-agents:base` with build-essential,
-# Rust toolchain, and Node.js LTS. Built when an agent's filename includes the
-# [prog] tag (see launch/agent_composition.py's apply_tags()).
+# Programming-stack image — extends its PARENT_IMAGE (default claude-agents:base)
+# with build-essential, Rust toolchain, and Node.js LTS. Built when an agent's
+# filename includes the [prog] tag.
 #
-# Build order: `claude-agents:base` must be built first — run.py's ensure_image()
-# guarantees this by always building docker/Dockerfile before any overlay.
+# Build chain: PARENT_IMAGE is set by run.py's ensure_image() to whatever
+# precedes prog in the chain — for prog as the first chain step, that's
+# claude-agents:base. The default below is the standalone case.
 #
 # Optional CLI installs at the end are gated by INSTALL_<TOOL>=1 build-args, set
 # by run.py based on which directories exist under ~/.claude-agents/optional_creds/.
@@ -12,7 +13,8 @@
 # (rustup, node) come BEFORE optional installs so opting into a new tool doesn't
 # trigger a Rust reinstall.
 
-FROM claude-agents:base
+ARG PARENT_IMAGE=claude-agents:base
+FROM ${PARENT_IMAGE}
 
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \

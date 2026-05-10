@@ -2,7 +2,7 @@ name: claude-agents   # explicit so the compose project name doesn't default to 
 
 services:
   claude-code:
-    image: claude-agents:base   # tagged on build so docker/Dockerfile.prog's `FROM claude-agents:base` resolves; overridden to `claude-agents:prog` by compose.prog.yml.
+    image: ${TARGET_IMAGE:-claude-agents:base}   # set by run.py per chain step; default is the bare base build.
     build:
       context: ..
       dockerfile: docker/Dockerfile

@@ -1,221 +1,157 @@
 #!/usr/bin/env python3
-import os, shutil, subprocess, sys
-from datetime import date
-from pathlib import Path
+import argparse
+import sys
 
 from launch.agent_composition import (
-    PROJECT, AGENTS_DIR, apply_modes, apply_tags, find_md_for_agent, load_conf, parse_stem,
+    AGENTS_DIR,
+    apply_composition, compute_chain, load_conf, parse_stem,
 )
 from launch.agents_crud import (
-    AGENTS_STATE, AGENT_WORKSPACE_MAP_FILE, ACCOUNT_FILE, CREDENTIALS_FILE,
-    SESSION_SEP, instance_name, load_workspace_map, save_workspace_map,
-    get_instance_modes, set_instance_modes, install_latest_md, creatable_agents,
+    creatable_agents, get_instance_modes, has_continuable_history,
+    install_latest_md, instance_name, resolve_pick, set_instance_modes,
+    update_workspace_map, validate_stored_workspace,
 )
-from launch.menu_picker import select_agent, ask_for_workspace, prompt_dood, prompt_session
+from launch.docker_config import (
+    print_launch_banner, require_docker, run_compose, set_container_env,
+)
+from launch.menu_picker import select_agent, ask_for_workspace, prompt_modes, prompt_session
 from launch.user_additions import (
-    aggregated_skills_mounts, ensure_optional_creds_readme,
-    optional_creds_install_env, optional_creds_mounts,
+    aggregated_skills_mounts, ensure_optional_creds_readme, optional_creds_mounts,
 )
 
-MODE_DOOD = "DooD"  # mirrors the key in agent_composition.MODE_HANDLERS
-
-if shutil.which("docker") is None:
-    sys.exit("docker is required but was not found in PATH.")
-
-COMPOSE_FILE = PROJECT / "docker" / "compose.yml"
-
-# Weekly cache buster for the Dockerfile's curl-piped downloads (uv, rich-cli,
-# Claude Code in `base`; rustup in `prog`). The value flips every Monday, so the
-# next build after a week-roll re-fetches those binaries; intra-week builds reuse
-# the cache. Bump this manually (e.g. to "force-2026-05-08") to force a refresh
-# mid-week without `--no-cache`.
-SOFTWARE_STACK_REFRESH = date.today().strftime("%Y-W%W")
+require_docker()
 
 
-def has_continuable_history(state_path):
-    """Whether the agent state has any actual conversation transcript that
-    `claude --continue` can load. Claude Code writes input events to
-    `projects/<encoded-workspace>/history.jsonl` (used by the picker for the
-    'Last used' timestamp) regardless of whether a conversation actually
-    occurred — but the conversation itself lives in a session-UUID JSONL file
-    alongside it. If the only thing on disk is `history.jsonl` (or all other
-    JSONLs are 0-byte), `--continue` will fail with 'No conversation found
-    to continue' and exit. This check lets the launcher fall back to a fresh
-    session in that case instead of crashing."""
-    projects_dir = state_path / "projects"
-    if not projects_dir.is_dir():
-        return False
-    for jsonl in projects_dir.rglob("*.jsonl"):
-        if jsonl.name == "history.jsonl":
-            continue
-        try:
-            if jsonl.stat().st_size > 0:
-                return True
-        except OSError:
-            continue
-    return False
+def parse_cli():
+    """Parse the launcher's CLI. Returns (pick, claude_args):
+        pick        — ('new'|'cont', payload) if a known agent/instance name was
+                      given as the positional arg, else None (picker will run).
+        claude_args — anything else from argv: flags argparse didn't recognize, plus
+                      the positional if it didn't resolve to a known target. These
+                      get appended to the `docker compose run … claude-code` command
+                      so they reach claude inside the container.
+
+    Use `--` to force args through to claude even when they look like our own flags
+    (e.g. `python3 run.py poet -- --help` runs poet and passes --help to claude).
+
+    Examples — argv[1:] split into (positional `target`, leftover `claude_args`):
+        []                       → target=None,    claude_args=[]                # picker opens
+        ["poet"]                 → target="poet",  claude_args=[]
+        ["poet", "--print"]      → target="poet",  claude_args=["--print"]
+        ["--some-flag"]          → target=None,    claude_args=["--some-flag"]   # picker opens; flag → claude
+        ["poet", "--", "--help"] → target="poet",  claude_args=["--help"]        # `--` ends our parsing
+        ["bogus", "extra"]       → target="bogus", claude_args=["extra"]         # bogus unresolved → moved to claude_args
+    """
+    parser = argparse.ArgumentParser(
+        prog="run.py",
+        description="Launcher for Claude Code agents. Omit the target to open the picker.",
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help="Agent name (e.g. 'poet') or instance id (e.g. 'poet__myproject').",
+    )
+    args, claude_args = parser.parse_known_args()
+    if args.target is None:
+        return None, claude_args
+    pick = resolve_pick(args.target)
+    if pick is None:
+        # Unknown name — pass it through to claude as a positional, picker still runs.
+        return None, [args.target] + claude_args
+    return pick, claude_args
 
 
-def ensure_image(overlays):
-    """Build the image stack incrementally. Always builds the base image; for each
-    overlay in order, builds with the cumulative `-f` chain so overlay Dockerfiles
-    that do `FROM claude-agents:<previous>` find the parent tag already populated.
-    `overlays` is a list of compose-override Paths in build order (e.g.
-    [compose.prog.yml, compose.dood.yml] for a DooD-tagged-prog agent)."""
-    base_args = ["-f", str(COMPOSE_FILE)]
-    print("  Building base image...")
-    ret = subprocess.call(["docker", "compose"] + base_args + ["build"])
-    if ret != 0:
-        sys.exit(ret)
-    cumulative = list(base_args)
-    for overlay in overlays:
-        cumulative += ["-f", str(overlay)]
-        print(f"  Building overlay: {overlay.name}...")
-        ret = subprocess.call(["docker", "compose"] + cumulative + ["build"])
-        if ret != 0:
-            sys.exit(ret)
-
-
-def set_container_env(agent, session, workspace, state_path):
-    """Populate os.environ with everything the container needs (besides the per-agent conf dict).
-    INSTALL_<TOOL> flags from optional_creds_install_env reflect which optional_creds/<name>/
-    entries exist; Dockerfile.prog gates each CLI install on the matching flag."""
-    pretty = f"{agent.replace('-', ' ').title()} - {session.replace('-', ' ').title()}"
-    os.environ.update({
-        "SOFTWARE_STACK_REFRESH": SOFTWARE_STACK_REFRESH,
-        "AGENT_STATE": str(state_path),
-        "AGENT_NAME": agent,
-        "AGENT_STATUS_LINE": f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m",
-        "AI_WORKSPACE": workspace,
-        "ACCOUNT_FILE": str(ACCOUNT_FILE),
-        "CREDENTIALS_FILE": str(CREDENTIALS_FILE),
-    })
-    os.environ.update(optional_creds_install_env())
-
-
-def parse_target():
-    """If sys.argv[1] names an existing instance ('agent__session') or a known agent, consume
-    it and return a (kind, payload) tuple shaped like select_agent's return. Otherwise None
-    (the picker will run, and any args fall through to `claude`)."""
-    if len(sys.argv) < 2 or sys.argv[1].startswith("-"):
-        return None
-    target = sys.argv[1]
-
-    if SESSION_SEP in target and (AGENTS_STATE / target).is_dir():
-        agent, _, session = target.partition(SESSION_SEP)
-        md_path = find_md_for_agent(agent)
-        if md_path is not None:
-            sys.argv.pop(1)
-            return ("cont", {
-                "agent_name": agent,
-                "md_path": md_path,
-                "session": session,
-                "workspace": load_workspace_map().get(target),
-            })
-
-    md_path = find_md_for_agent(target)
-    if md_path is not None:
-        sys.argv.pop(1)
-        return ("new", {"agent_name": target, "md_path": md_path})
-
-    return None
-
-
-def launch():
-    """Pick an instance (agent+session), resolve workspace, sync state, exec docker compose."""
+def select_pick():
+    """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
+    back to the interactive picker if no target was given on the command line, exit
+    cleanly if the user cancels. Returns (kind, payload, claude_args)."""
     if not creatable_agents():
         sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
-    pick = parse_target() or select_agent()
+    pick, claude_args = parse_cli()
+    pick = pick or select_agent()
     if pick is None:
         sys.exit(0)
-
     kind, payload = pick
+    return kind, payload, claude_args
+
+
+def resolve_target(payload):
+    """Stage 2 — Filesystem validation. Unpack the payload into agent / md_path,
+    ensure a workspace (prompt for new, validate-or-exit for cont's stored value),
+    name a session (prompt for new), derive the canonical instance id.
+    Returns (agent, md_path, session, workspace, instance)."""
     agent = payload["agent_name"]
     md_path = payload["md_path"]
-    if kind == "new":
-        session, workspace = None, None
-    else:  # "cont"
-        session = payload["session"]
-        workspace = payload["workspace"]
-
-    if session is not None and has_continuable_history(AGENTS_STATE / instance_name(agent, session)):
-        resume_flag = ["--continue"]
-    elif session is not None:
-        # "Cont." was picked but the instance has no actual conversation transcript
-        # yet (e.g. a previous launch was quit immediately, leaving only the input
-        # log in history.jsonl). Skip --continue so Claude Code starts a fresh
-        # session in this instance instead of crashing on "No conversation found".
-        print(f"  (Instance '{instance_name(agent, session)}' has no prior conversation; starting fresh.)")
-        resume_flag = []
-    else:
-        resume_flag = []
-
+    session = payload.get("session")          # set for cont, None for new (filled in by prompt_session below)
+    workspace = payload.get("workspace")      # same — None for new, possibly-stale path string for cont
+    if session is not None:
+        validate_stored_workspace(instance_name(agent, session), workspace)
     if workspace is None:
-        workspace = ask_for_workspace(agent)        # pick workspace location
-    elif not Path(workspace).is_dir():
-        sys.exit(
-            f"Workspace for '{instance_name(agent, session)}' is not a valid directory: {workspace}\n"
-            f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
-        )
-
+        workspace = ask_for_workspace(agent)
     if session is None:
-        session = prompt_session(agent, workspace)  # pick session suffix for this instance
+        session = prompt_session(agent, workspace)
+    return agent, md_path, session, workspace, instance_name(agent, session)
 
-    instance = instance_name(agent, session)
-    mapping = load_workspace_map()
-    if mapping.get(instance) != workspace:
-        mapping[instance] = workspace
-        save_workspace_map(mapping)
 
+def compute_resume_flag(kind, instance):
+    """Stage 3 — Resume detection. Returns the claude args needed to resume an
+    existing conversation (`["--continue"]`) or `[]` for a fresh session. Cont
+    with no transcript prints a notice and starts fresh — `--continue` against
+    history-only state crashes claude with 'No conversation found'."""
+    if kind != "cont":
+        return []
+    if has_continuable_history(instance):
+        return ["--continue"]
+    print(f"  (Instance '{instance}' has no prior conversation; starting fresh.)")
+    return []
+
+
+def compose_runtime(kind, instance, md_path):
+    """Stage 5 — Categorisation. Pull tags from the .md filename, resolve modes
+    (prompt for new instances in priority order, load stored modes for cont),
+    compute the build chain, and run handler side effects to gather runtime
+    extras (volume mounts, env exports). Returns (tags, modes, chain, volume_args)."""
     tags = parse_stem(md_path.stem)[1]
-    # Mode resolution — new [prog] instances prompt for DooD; cont reuses what's stored.
-    # Non-prog agents skip the prompt (their image has no docker CLI for DooD to drive).
-    if kind == "new" and "prog" in tags:
-        modes = [MODE_DOOD] if prompt_dood() else []
-        set_instance_modes(instance, modes)
+    if kind == "new":
+        modes = prompt_modes(tags, current_modes=[])
+        set_instance_modes(instance, modes)   # warns inside if both auto+DooD are set
     else:
         modes = get_instance_modes(instance)
-
     try:
-        tag_extras = apply_tags(tags)
-        mode_extras = apply_modes(modes)
+        chain = compute_chain(tags, modes)
+        extras = apply_composition(chain)
     except (ValueError, RuntimeError) as e:
         sys.exit(f"  {e}")
-    # Tag overlays first, then mode overlays — DooD's Dockerfile.dood does
-    # `FROM claude-agents:prog`, so the prog overlay must layer in earlier.
-    overlays = tag_extras["compose_overrides"] + mode_extras["compose_overrides"]
-    volume_args = tag_extras["volume_args"] + mode_extras["volume_args"]
-    compose_args = ["-f", str(COMPOSE_FILE)] + [arg for p in overlays for arg in ("-f", str(p))]
+    return tags, modes, chain, extras["volume_args"]
 
+
+def setup_state(agent, session, workspace, md_path):
+    """Stage 6 — Setup. Install the agent's .md into its state dir, populate the
+    env vars compose substitutes at build/run time, load the per-agent conf, and
+    gather the skill + optional-creds bind-mounts (with the auto-readme touch).
+    Returns (conf_path, conf, skill_mounts, cred_mounts, cred_names)."""
     state_path = install_latest_md(agent, session, md_path)
     set_container_env(agent, session, workspace, state_path)
     conf_path, conf = load_conf(md_path)
-    print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
-    print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
-    if tags:
-        print(f"  Tags:             {' '.join(f'[{t}]' for t in tags)}")
-    if modes:
-        print(f"  Modes:            {' '.join('{' + m + '}' for m in modes)}")
     skill_mounts = aggregated_skills_mounts(workspace, state_path)
-    if skill_mounts:
-        print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
     ensure_optional_creds_readme()
     cred_mounts, cred_names = optional_creds_mounts()
-    if cred_names:
-        print(f"  Optional creds:   {', '.join(cred_names)} (from optional_creds/)")
-    ensure_image(overlays)
-    print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
-    cmd = (
-        ["docker", "compose"] + compose_args + ["run", "--rm", "-it"]
-        + volume_args             # tag- and mode-contributed mounts ([prog] caches, DooD socket already in compose.dood.yml, etc.)
-        + skill_mounts            # -v flags surfacing each skill from custom_skills/ + workspace's .skills/
-        + cred_mounts             # -v flags surfacing each recognized service in optional_creds/
-        + [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]  # -e flags setting each per-agent conf key=value in the container
-        + ["claude-code"]
-        + resume_flag             # present if a resumed session
-        + sys.argv[1:]
-    )
-    sys.exit(subprocess.call(cmd))
+    return conf_path, conf, skill_mounts, cred_mounts, cred_names
+
+
+def launch():
+    """Seven-stage orchestrator: input → filesystem validation → resume detection
+    → persist → categorise (tags/modes/chain) → setup (state/env/mounts) → run.
+    One call per stage so a future operation slots in at the right point with
+    localised changes."""
+    kind, payload, claude_args = select_pick()
+    agent, md_path, session, workspace, instance = resolve_target(payload)
+    resume_flag = compute_resume_flag(kind, instance)
+    update_workspace_map(instance, workspace)
+    tags, modes, chain, volume_args = compose_runtime(kind, instance, md_path)
+    conf_path, conf, skill_mounts, cred_mounts, cred_names = setup_state(agent, session, workspace, md_path)
+    print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names)
+    run_compose(chain, instance, claude_args, resume_flag, volume_args, skill_mounts, cred_mounts, conf)
 
 
 if __name__ == "__main__":

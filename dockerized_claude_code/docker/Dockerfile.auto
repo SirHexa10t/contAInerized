@@ -1,0 +1,32 @@
+# Auto-mode image — extends its PARENT_IMAGE (default claude-agents:base) with
+# iptables (for the runtime allowlist firewall) and a tightly-scoped sudoers
+# entry that lets the `claude` user run /usr/local/bin/init-firewall.sh as root.
+# No other sudo commands are allowed.
+#
+# Built when an instance has the {auto} mode set. The firewall script and the
+# entrypoint wrapper are bind-mounted at runtime by docker/compose.auto.yml
+# (so they can be edited without rebuilding the image); the wrapper sets up the
+# iptables allowlist on container start and then `exec claude "$@"`, with the
+# --dangerously-skip-permissions flag injected by compose.auto.yml's entrypoint.
+#
+# Chain note: PARENT_IMAGE is set by run.py based on what comes before {auto}
+# in the chain — typically claude-agents:base for an auto-only agent, or
+# claude-agents:prog for a [prog] {auto} agent. Default below is the standalone case.
+
+ARG PARENT_IMAGE=claude-agents:base
+FROM ${PARENT_IMAGE}
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iptables \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Sudoers — give claude passwordless sudo for ONLY /usr/local/bin/init-firewall.sh.
+# Other sudo calls (e.g. apt, opening a root shell) are blocked. The script
+# itself is bind-mounted in by compose.auto.yml; this just authorises calling it.
+RUN echo 'claude ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh' > /etc/sudoers.d/claude-firewall \
+ && chmod 0440 /etc/sudoers.d/claude-firewall
+
+USER claude

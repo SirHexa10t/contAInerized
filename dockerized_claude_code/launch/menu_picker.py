@@ -18,14 +18,25 @@ Public API:
       Line prompt for a session suffix; rejects collisions with existing instances.
       -> session suffix string
 
+  prompt_auto(default=False)
+      Y/N prompt for the {auto} mode opt-in (unattended-execution + firewall
+      explainer); used by run.py on new instances and by select_agent's modify flow.
+      -> bool
+
   prompt_dood(default=False)
-      Y/N prompt for the DooD mode opt-in (with security explainer); used by run.py
+      Y/N prompt for the {DooD} mode opt-in (with security explainer); used by run.py
       on new [prog] instances and by select_agent's modify flow.
       -> bool
 
-  pick_with_preview(title, entries, *, allow_delete=False)
+  prompt_modes(tags, current_modes=())
+      Run all applicable mode prompts in ORDERED_MODES priority order (auto, then
+      DooD if [prog]); pre-fills defaults from the existing modes list. Used by
+      run.py (new instances) and select_agent's modify flow.
+      -> list[str] of newly-selected modes
+
+  pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
       Generic full-screen picker primitive used by select_agent.
-      -> ('select', value) | ('delete', value) | (None, None)
+      -> ('select', value) | ('delete', value) | ('modify', value) | (None, None)
 
   confirm_dialog(message)
       Inline [y/N] prompt.
@@ -33,10 +44,11 @@ Public API:
 
 Generic-picker entry shape (pick_with_preview):
     {
-        'display':   str | list[(style, text)] | FormattedText,
-        'preview':   str,
-        'value':     any,   # opaque; returned to the caller on selection
-        'deletable': bool,  # optional; defaults True. When False, Del is a no-op on this row.
+        'display':    str | list[(style, text)] | FormattedText,
+        'preview':    str,
+        'value':      any,    # opaque; returned to the caller on selection
+        'deletable':  bool,   # optional; defaults True. When False, Del is a no-op on this row.
+        'modifiable': bool,   # optional; defaults True. When False, F2 is a no-op on this row.
     }
 """
 
@@ -94,8 +106,7 @@ TITLE_AGENT_PICKER = "Select an agent:"
 TITLE_DELETE_MENU  = "‼️  DELETE AGENT INSTANCES  ‼️"
 
 MARKER_NEW    = "✨ Create"
-MARKER_CONT   = "🏷️ Cont."   # indent applied via CONT_INDENT below — keeps the marker label clean
-CONT_INDENT   = ""        # spaces prepended to Cont rows so they nest visually under their parent Create row
+MARKER_CONT   = "🏷️ Cont."
 MARKER_DELMNU = "⚠️ DELETE‼️"
 MARKER_DLET   = "🗑 DELETE"
 MARKER_BACK   = "🚪  Back"
@@ -141,6 +152,13 @@ from prompt_toolkit.styles import Style
 from rich.console import Console                                           # pip install rich
 from rich.markdown import Markdown
 
+from .agent_composition import MODE_AUTO, MODE_DOOD
+from .agents_crud import (
+    AGENTS_STATE, DEFAULT_WORKSPACE,
+    creatable_agents, continuable_instances, delete_instance, instance_name, modify_instance,
+    state_dir,
+)
+
 
 def _render_md(text):
     """Render markdown text to an ANSI-encoded string for the picker's preview pane.
@@ -148,6 +166,12 @@ def _render_md(text):
     buf = io.StringIO()
     Console(file=buf, force_terminal=True, color_system="truecolor", width=80).print(Markdown(text))
     return buf.getvalue()
+
+
+def _agent_description(md_text):
+    """First line of an agent .md, stripped of any markdown heading marker — used as
+    the right-hand description on a Create row in the picker."""
+    return md_text.splitlines()[0].lstrip("# ").strip()
 
 
 def _create_preview(agent):
@@ -175,16 +199,6 @@ def _cont_preview(inst):
         f"Last used: {inst['last_used_display']}\n"
         f"```\n"
     )
-
-from .agents_crud import (
-    AGENTS_STATE, DEFAULT_WORKSPACE,
-    creatable_agents, continuable_instances, delete_instance, instance_name, modify_instance,
-    state_dir,
-)
-
-# Mode names live in agent_composition.MODE_HANDLERS; menu_picker imports the keys
-# it cares about by string to avoid pulling in the handler module just for symbols.
-MODE_DOOD = "DooD"
 
 
 def _normalize(display):
@@ -456,25 +470,73 @@ def prompt_session(agent, workspace):
         return suffix
 
 
-def prompt_dood(default=False):
-    """Y/N prompt for opting into DooD (Docker-out-of-Docker) mode. `default`
-    reflects the instance's current setting (True on modify if it's already DooD,
-    False on first creation). Returns True if DooD should be enabled."""
+def prompt_yn(header, body, prompt_label, default=False):
+    """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
+    list of explanation/caveat lines (empty strings render as blank lines for
+    visual separation), and `prompt_label` is what shows in the actual y/N input
+    (e.g. '{auto}'). Returns bool; Enter alone uses `default`."""
     print()
-    print("  Docker-out-of-Docker (DooD) mode?")
-    print("  This is for agents that need to run their own Docker containers")
-    print("  (e.g., to test a project that uses docker compose). Without it,")
-    print("  the agent can't reach the host's Docker daemon.")
-    print()
-    print("  ⚠ Avoid unless you actually need it. DooD bind-mounts")
-    print("    /var/run/docker.sock, which gives the container effective root")
-    print("    on the host (it can start any container as root, read host")
-    print("    paths via volume mounts, etc.).")
+    print(f"  {header}")
+    for line in body:
+        print(f"  {line}" if line else "")
     default_marker = "Y/n" if default else "y/N"
-    answer = input(f"  Enable DooD? [{default_marker}]: ").strip().lower()
+    answer = input(f"  Enable {prompt_label}? [{default_marker}]: ").strip().lower()
     if not answer:
         return default
     return answer in ("y", "yes")
+
+
+def prompt_auto(default=False):
+    """Y/N prompt for opting into {auto} mode."""
+    return prompt_yn(
+        header="Auto / unattended mode?",
+        body=[
+            "Lets the agent run continuously without per-action permission prompts",
+            "(passes --dangerously-skip-permissions to claude). The container runs",
+            "behind an iptables outbound allowlist, so the agent can only reach",
+            "Anthropic, GitHub, npm, PyPI, crates.io and DNS — anything else is",
+            "dropped at the network layer.",
+            "",
+            "⚠ Even with the firewall, the agent has full filesystem write access",
+            "  in its workspace and can run arbitrary code there. Use only for",
+            "  tasks where you trust the agent to act on its own.",
+        ],
+        prompt_label="{auto}",
+        default=default,
+    )
+
+
+def prompt_dood(default=False):
+    """Y/N prompt for opting into {DooD} (Docker-out-of-Docker) mode."""
+    return prompt_yn(
+        header="Docker-out-of-Docker (DooD) mode?",
+        body=[
+            "This is for agents that need to run their own Docker containers",
+            "(e.g., to test a project that uses docker compose). Without it,",
+            "the agent can't reach the host's Docker daemon.",
+            "",
+            "⚠ Avoid unless you actually need it. DooD bind-mounts",
+            "  /var/run/docker.sock, which gives the container effective root",
+            "  on the host (it can start any container as root, read host",
+            "  paths via volume mounts, etc.).",
+        ],
+        prompt_label="{DooD}",
+        default=default,
+    )
+
+
+def prompt_modes(tags, current_modes=()):
+    """Prompt for each mode in MODE_HANDLERS priority order, applying per-mode
+    applicability gates (DooD only fires for [prog] agents). `current_modes` is
+    the existing list (pre-fills the Y/N defaults — empty for new instances).
+    Returns the new modes in priority order — used by run.py for new instances
+    and by select_agent's modify flow."""
+    new_modes = []
+    if prompt_auto(default=(MODE_AUTO in current_modes)):
+        new_modes.append(MODE_AUTO)
+    if "prog" in tags and prompt_dood(default=(MODE_DOOD in current_modes)):
+        new_modes.append(MODE_DOOD)
+    return new_modes
 
 
 def select_agent():
@@ -488,7 +550,7 @@ def select_agent():
         for inst in instances:
             instances_by_agent.setdefault(inst["agent_name"], []).append(inst)
 
-        agent_name_width = max(len(a["label_name"]) for a in agents)
+        agent_name_width = max(len(a["agent_name"]) for a in agents)
         instance_name_width = max((len(i["id"]) for i in instances), default=0)
 
         # Shared tag/mode column: tags only appear on Create rows, modes only on Cont rows,
@@ -510,8 +572,8 @@ def select_agent():
                     (STYLE_NEW_MARKER, f"{MARKER_NEW}  "),
                     (STYLE_TAG, tag_str),
                     ("", " " * (shared_col_width - len(tag_str))),
-                    (STYLE_AGENT_NAME, f"{agent['label_name']:<{agent_name_width}}"),
-                    ("", f" — {agent['description']}"),
+                    (STYLE_AGENT_NAME, f"{agent['agent_name']:<{agent_name_width}}"),
+                    ("", f" — {_agent_description(agent['md_text'])}"),
                 ],
                 "preview": _create_preview(agent),
                 "value": ("new", agent),
@@ -521,7 +583,6 @@ def select_agent():
             for inst in instances_by_agent.get(agent["agent_name"], []):
                 mode_str = mode_strs_by_inst[inst["id"]]
                 cont_display = [
-                    ("", CONT_INDENT),
                     (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
                     (STYLE_MODE_WARNING, mode_str),
                     ("", " " * (shared_col_width - len(mode_str))),
@@ -571,17 +632,7 @@ def select_agent():
                     break  # not colliding with an existing instance
                 print(f"Instance '{instance_name(agent_name, new_session)}' already exists. Pick another name.")
             new_workspace = ask_for_workspace(agent_name, default=inst["workspace"])
-            # DooD prompt only for [prog]-tagged agents — non-prog images don't have the
-            # docker CLI installed in any layer, so DooD wouldn't actually do anything.
-            # Existing modes other than DooD are passed through untouched.
-            current_modes = list(inst.get("modes", []))
-            if "prog" in inst.get("tags", []):
-                wants_dood = prompt_dood(default=(MODE_DOOD in current_modes))
-                new_modes = [m for m in current_modes if m != MODE_DOOD]
-                if wants_dood:
-                    new_modes.append(MODE_DOOD)
-            else:
-                new_modes = current_modes
+            new_modes = prompt_modes(inst.get("tags", []), inst.get("modes", []))
             modify_instance(inst["id"], agent_name, new_session, new_workspace, new_modes)
             continue
 

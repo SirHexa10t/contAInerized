@@ -1,7 +1,8 @@
 """Agent composition layer: parses the agent filename grammar
 (`<name>([tag]|(parent))*`), locates the matching `.md`, picks the right `.conf`,
-sorts agents by model family/version, and dispatches per-tag handlers (apply_tags)
-that contribute compose overrides + bind-mounts to the docker compose run.
+sorts agents by model family/version, and computes the docker build chain
+(base → tags → modes) plus the per-handler runtime contributions (volume mounts +
+side effects) via apply_composition.
 
 Imports nothing from agents_crud, run.py, or menu_picker — all of them import from here.
 """
@@ -22,6 +23,20 @@ DEFAULT_CONF = AGENTS_DIR / "default.conf"
 MD_EXT = ".md"
 CONF_EXT = ".conf"
 MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
+
+# === Tag and mode names — the source-of-truth string identifiers for `[<tag>]` and `{<mode>}`.
+# ORDERED_* lists declare priority (chain order, prompt order, label render order); each
+# walrus also publishes the matching TAG_*/MODE_* module-level constant. Adding a new
+# tag/mode means appending one line here AND wiring its handler in *_HANDLERS below. ===
+
+ORDERED_TAGS = [
+    TAG_PROG  := "prog",
+]
+
+ORDERED_MODES = [
+    MODE_AUTO := "auto",
+    MODE_DOOD := "DooD",
+]
 
 # === Shared toolchain caches — mounted only when an agent has the [prog] tag ===
 CACHE_ROOT = AGENTS_STATE / "cache"
@@ -91,7 +106,7 @@ def find_md_for_agent(agent_name):
 def load_conf(md_path):
     """Locate and load an agent's .conf. Returns (path_or_None, values_dict).
     A '(parent)' suffix in the filename aliases to '<parent>.conf'; otherwise '<name>.conf';
-    falls back to DEFAULT_CONF. Tags are ignored here — handled by apply_tags()."""
+    falls back to DEFAULT_CONF. Tags are ignored here — handled by apply_composition()."""
     name, _, parent = parse_stem(md_path.stem)
     specific = AGENTS_DIR / f"{(parent or name)}{CONF_EXT}"
     conf_path = specific if specific.exists() else (DEFAULT_CONF if DEFAULT_CONF.exists() else None)
@@ -154,34 +169,26 @@ def prune_caches():
 
 
 def _apply_prog():
-    """[prog] tag: switch the build target to `prog` (build-essential, Rust, Node)
-    via docker/compose.prog.yml, and mount shared toolchain caches under the
-    container user's $HOME so package downloads survive across rebuilds."""
+    """[prog] tag handler. Two responsibilities — the side effects run *first*,
+    then the dict of runtime extras is returned:
+
+      • SIDE EFFECTS: prepare_caches() mkdirs the host cache dirs (so the
+        bind-mount targets exist before the container starts; otherwise Docker
+        creates them as root and we can't clean them up later); prune_caches()
+        opportunistically trims oversized caches.
+      • RETURNS: volume_args list of -v flags mounting those caches into the
+        container at the matching paths.
+
+    The compose/Dockerfile pair (compose.prog.yml + docker/Dockerfile.prog) is
+    NOT selected here — chain order in compute_chain handles that."""
     prepare_caches()
     prune_caches()
     return {
-        "compose_overrides": [PROJECT / "docker" / "compose.prog.yml"],
         "volume_args": [arg for h, c in CACHE_MOUNTS.items() for arg in ("-v", f"{h}:{c}")],
     }
 
 
-TAG_HANDLERS = {
-    "prog": _apply_prog,
-}
-
-
-def apply_tags(tags):
-    """Run each tag's handler and aggregate their contributions.
-    Returns {compose_overrides: [Path,...], volume_args: [str,...]}.
-    Unknown tags raise ValueError so a typo in a filename surfaces loudly rather than silently doing nothing."""
-    aggregated = {"compose_overrides": [], "volume_args": []}
-    for tag in tags:
-        if tag not in TAG_HANDLERS:
-            raise ValueError(f"Unknown agent tag: [{tag}]. Known tags: {sorted(TAG_HANDLERS)}")
-        contribution = TAG_HANDLERS[tag]()
-        for key in aggregated:
-            aggregated[key].extend(contribution.get(key, []))
-    return aggregated
+TAG_HANDLERS = {TAG_PROG: _apply_prog}   # ordering for tags lives in ORDERED_TAGS; this dict is a pure lookup
 
 
 # === Mode dispatch — like tags, but per-instance (set at create/modify time, stored in agent_modes_map.json) ===
@@ -203,15 +210,12 @@ def _detect_docker_gid():
 
 
 def _apply_dood():
-    """[DooD mode]: bind-mount the host's /var/run/docker.sock so the agent can drive
-    the host's Docker daemon (run sub-containers, build images, etc.). Builds
-    claude-agents:dood (FROM claude-agents:prog + docker-ce-cli + docker-compose-plugin)
-    via docker/compose.dood.yml.
-
-    Detects the host's docker-group GID via getent and exports it as DOCKER_GID so
-    compose can pass it as a build-arg. Without a docker group on the host, the agent
-    couldn't access the bind-mounted socket — so we fail loudly here rather than build
-    an image that won't work."""
+    """{DooD} mode: bind-mount the host's /var/run/docker.sock so the agent can drive
+    the host's Docker daemon (run sub-containers, build images, etc.). Detects the
+    host's docker-group GID via getent and exports it as DOCKER_GID so compose can
+    pass it as a build-arg. Without a docker group on the host, the agent couldn't
+    access the bind-mounted socket — so we fail loudly here rather than build an
+    image that won't work."""
     gid = _detect_docker_gid()
     if gid is None:
         raise RuntimeError(
@@ -220,24 +224,86 @@ def _apply_dood():
             "If you don't actually need DooD, modify the instance and decline the prompt."
         )
     os.environ["DOCKER_GID"] = gid
-    return {
-        "compose_overrides": [PROJECT / "docker" / "compose.dood.yml"],
-    }
+    return {}
 
 
+def _apply_auto():
+    """{auto} mode: lets the agent run unattended (--dangerously-skip-permissions
+    is added in compose.auto.yml's entrypoint) behind an iptables outbound allowlist.
+    The Dockerfile.auto image carries iptables + sudo + a tightly-scoped sudoers
+    entry; the firewall script + entrypoint wrapper get bind-mounted via compose.auto.yml.
+    No host-side side effects."""
+    return {}
+
+
+# Ordering for modes lives in ORDERED_MODES (defined up top with the constants);
+# this dict is a pure lookup from name → handler.
 MODE_HANDLERS = {
-    "DooD": _apply_dood,
+    MODE_AUTO: _apply_auto,
+    MODE_DOOD: _apply_dood,
 }
 
 
-def apply_modes(modes):
-    """Run each mode's handler and aggregate their contributions.
-    Same shape as apply_tags. Unknown modes raise ValueError."""
-    aggregated = {"compose_overrides": [], "volume_args": []}
-    for mode in modes:
-        if mode not in MODE_HANDLERS:
-            raise ValueError(f"Unknown mode: {mode}. Known modes: {sorted(MODE_HANDLERS)}")
-        contribution = MODE_HANDLERS[mode]()
+# === Chain composition: the build/run image is layered base → tags (in ORDERED_TAGS order) → modes (in ORDERED_MODES order). ===
+
+def compute_chain(tags, modes):
+    """Return the build chain for the given tags + modes. Always starts with 'base';
+    appends tags in ORDERED_TAGS order, then modes in ORDERED_MODES order. Result
+    drives both image naming (claude-agents:<chain[1:] joined by dot>, or
+    claude-agents:base for chain == ['base']) and the compose -f stack. Unknown
+    tags/modes raise ValueError so a typo surfaces loudly.
+
+    `tags` / `modes` accept any iterable; coerced to sets internally for O(1)
+    membership checks and natural deduplication."""
+    tags, modes = set(tags), set(modes)
+    if unknown := tags - set(ORDERED_TAGS):
+        raise ValueError(f"Unknown tag(s): {sorted(unknown)}. Known tags: {ORDERED_TAGS}")
+    if unknown := modes - set(ORDERED_MODES):
+        raise ValueError(f"Unknown mode(s): {sorted(unknown)}. Known modes: {ORDERED_MODES}")
+    chain = ["base"]
+    for tag in ORDERED_TAGS:
+        if tag in tags:
+            chain.append(tag)
+    for mode in ORDERED_MODES:
+        if mode in modes:
+            chain.append(mode)
+    return chain
+
+
+def apply_composition(chain):
+    """Run handlers for each non-base step in the chain and aggregate their contributions.
+    Returns {volume_args: [str,...]}. Tag steps look up TAG_HANDLERS, mode steps MODE_HANDLERS;
+    'base' has no handler and is skipped. Unknown steps raise ValueError — chains coming from
+    compute_chain are pre-validated, so this only fires if the caller built a chain by hand.
+
+    NOTE: handlers may have side effects (host-side mkdirs, env-var exports for
+    build-args, etc.) — see each `_apply_*` docstring. Calling apply_composition
+    therefore both *gathers* runtime extras AND *triggers* any pre-build/pre-run
+    setup the chain implies."""
+    aggregated = {"volume_args": []}
+    for step in chain[1:]:
+        handler = TAG_HANDLERS.get(step) or MODE_HANDLERS.get(step)
+        if handler is None:
+            raise ValueError(f"Unknown chain step: {step}. Known: {list(TAG_HANDLERS) + list(MODE_HANDLERS)}")
+        contribution = handler()
         for key in aggregated:
             aggregated[key].extend(contribution.get(key, []))
     return aggregated
+
+
+def chain_image_tag(chain):
+    """The docker image tag for a chain. ['base'] → 'claude-agents:base'.
+    ['base', 'prog', 'auto'] → 'claude-agents:prog.auto' (lowercase to match
+    the lowercase compose/Dockerfile filenames)."""
+    if len(chain) == 1:
+        return "claude-agents:base"
+    return "claude-agents:" + ".".join(step.lower() for step in chain[1:])
+
+
+def chain_compose_files(chain):
+    """The compose `-f <path>` arg list for a chain. Always includes compose.yml;
+    adds compose.<step>.yml (lowercased) for each non-base step in order."""
+    args = ["-f", str(PROJECT / "docker" / "compose.yml")]
+    for step in chain[1:]:
+        args += ["-f", str(PROJECT / "docker" / f"compose.{step.lower()}.yml")]
+    return args

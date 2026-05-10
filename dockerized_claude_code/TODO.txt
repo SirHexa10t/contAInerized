@@ -197,7 +197,7 @@ new tags:
         well defined through a writing bot; Character_Builder (an independent agent) - will ask you for all of the details and background info (or tweaks; you may choose a certain historical interpretation of a known character over some other, or at a specific period of the character's life. If it's an invented character; fill in the whole personal history)
 
                 
-    [auto] - Autonomous; can act without confirmations.
+    {auto} - Autonomous; can act without confirmations.
         Always comes with a firewall
         Colored
 
@@ -205,5 +205,27 @@ new tags:
 
 
 sort tags:
-    add extra sort: first those with no tags, then [prog], then [auto], then [larp]
+    add extra sort: first those with no tags, then [prog], then {auto}, then [larp]
+
+
+composition legend (F8):
+    Tags:  agent core-affinities; dictate requirements and tools
+        tagname: short sentence explanation
+    Modes:  special approach/capability activation
+        modename: short sentence explanation
+
+Add to memory: auto mode is active; ask for access to site if you can't reach desired resource.
+
+(INVALID DIR) red label for workdirs that don't exist (not dir or symlink, or maybe other thing that I'm not thinking about)
+
+
+this repo's premise looks interesting, look into it later:
+    addyosmani/agent-skills
+
+
+Add user's firewall whitelist in ~/.claude-agents
+
+Activate spellcheck within claude code?
+
+Actually have {auto} work
 

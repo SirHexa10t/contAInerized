@@ -1,15 +1,15 @@
-# DooD-stack image — extends `claude-agents:prog` with the Docker CLI + Compose
-# plugin and adds the claude user to a group whose GID matches the host's
-# `docker` group, so the bind-mounted /var/run/docker.sock (mounted by
-# docker/compose.dood.yml) is read/writable from inside the container.
+# DooD-stack image — extends its PARENT_IMAGE (default claude-agents:prog) with
+# the Docker CLI + Compose plugin and adds the claude user to a group whose GID
+# matches the host's `docker` group, so the bind-mounted /var/run/docker.sock
+# (mounted by docker/compose.dood.yml) is read/writable from inside the container.
 #
 # Built when an instance has the DooD mode set (see agent_modes_map.json and
-# launch/agent_composition.py's apply_modes()).
-#
-# Build order: claude-agents:prog must be built first — run.py's ensure_image()
-# builds incrementally (base → prog → dood) so each FROM resolves.
+# launch/agent_composition.py's apply_modes()). DooD is gated behind [prog] in
+# the prompt flow, so PARENT_IMAGE always resolves to something that includes
+# prog — either claude-agents:prog or a chain layer above it (e.g. prog.auto).
 
-FROM claude-agents:prog
+ARG PARENT_IMAGE=claude-agents:prog
+FROM ${PARENT_IMAGE}
 
 USER root
 

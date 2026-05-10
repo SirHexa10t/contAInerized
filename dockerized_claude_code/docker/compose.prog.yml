@@ -1,17 +1,20 @@
-# Override layered on top of compose.yml when an agent's filename includes the
-# [prog] tag. Swaps the Dockerfile to docker/Dockerfile.prog (which extends
-# claude-agents:base with build-essential, Rust, Node) and tags the result as
-# claude-agents:prog so it's distinct from the base image.
+# Compose layer for the [prog] chain step. Swaps in docker/Dockerfile.prog
+# (build-essential + Rust + Node), parameterises PARENT_IMAGE/TARGET_IMAGE so
+# the chain composer in launch/agent_composition.py can place this anywhere
+# in the build sequence.
 #
-# Compose merges this with compose.yml via run.py — see apply_tags() in
-# launch/agent_composition.py.
+# Defaults reflect the standalone case (prog directly on top of base):
+#   PARENT_IMAGE = claude-agents:base
+#   TARGET_IMAGE = claude-agents:prog
+# run.py overrides both when the chain has more steps before/after.
 
 services:
   claude-code:
-    image: claude-agents:prog
+    image: ${TARGET_IMAGE:-claude-agents:prog}
     build:
       dockerfile: docker/Dockerfile.prog
       args:
+        PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:base}
         # Each gates the matching optional CLI install in Dockerfile.prog. Set to
         # "1" by run.py when the corresponding optional_creds/<name>/ exists on the
         # host (otherwise unset → "0", and the install RUN is a no-op).
