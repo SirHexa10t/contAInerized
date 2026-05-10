@@ -13,10 +13,11 @@ import shutil
 import subprocess
 import sys
 from datetime import date
+from pathlib import Path
 
 from .agent_composition import PROJECT, chain_compose_files, chain_image_tag
 from .agents_crud import ACCOUNT_FILE, CREDENTIALS_FILE
-from .user_additions import optional_creds_install_env
+from .user_additions import FIREWALL_WHITELIST_FILE, optional_creds_install_env
 
 
 # Weekly cache buster for the Dockerfile's curl-piped downloads (uv, rich-cli,
@@ -80,11 +81,13 @@ def set_container_env(agent, session, workspace, state_path):
     os.environ.update(optional_creds_install_env())
 
 
-def print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names):
+def print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names, whitelist_count):
     """Print the multi-line summary that appears before docker compose builds the
     image — agent definition path, conf path, active tags + modes, and skills/creds
     counts when applicable. Each line is conditional on having something to show
-    (no empty 'Tags: ' if there are none)."""
+    (no empty 'Tags: ' if there are none). `whitelist_count` is None for non-{auto}
+    launches (line hidden); an integer count (possibly 0) when {auto} is active so
+    the user sees the file's existence and current size."""
     print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
     print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
     if tags:
@@ -95,6 +98,10 @@ def print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_name
         print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from optional_creds/)")
+    if whitelist_count is not None:
+        plural = "" if whitelist_count == 1 else "s"
+        display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(Path.home()))
+        print(f"  User whitelist:   {whitelist_count} domain{plural} (from {display_path})")
 
 
 def run_compose(chain, instance, claude_args, resume_flag, volume_args, skill_mounts, cred_mounts, conf):

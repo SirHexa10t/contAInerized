@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .agent_composition import (
-    AGENTS_DIR, AGENTS_STATE, MD_EXT, MODE_AUTO, MODE_DOOD,
+    AGENTS_DIR, AGENTS_STATE, MD_EXT, MEMORY_DIR, MODE_AUTO, MODE_DOOD, ORDERED_MODES,
     agent_sort_key, find_md_for_agent, parse_stem,
 )
 
@@ -201,6 +201,127 @@ def install_latest_md(agent, session, md_path):
     return sd
 
 
+def _force_remove(path, *, name=None):
+    """Best-effort removal of `path` (file, symlink, or directory). Logs what's
+    being removed, falls back to `sudo rm -rf` for root-owned artifacts (Docker
+    bind-mount leftovers), and follows up with `sudo -k` so cached credentials
+    don't linger past this single operation.
+
+    `name` is an optional human-friendly identifier — when provided, the path
+    is treated as user-initiated removal (no "stale" descriptor in the log)
+    and a sudo failure pauses for keypress so the user can read the failure
+    before the function returns (used by `delete_instance`, mid-picker UX).
+    Without `name`, the removal is logged as "stale" cleanup and the function
+    returns silently on failure (used by `sync_memory_templates`).
+
+    Returns True on success (including "already absent"); False if even sudo
+    couldn't remove the path."""
+    if not path.exists() and not path.is_symlink():
+        return True
+
+    kind = "symlink" if path.is_symlink() else ("dir" if path.is_dir() else "file")
+    descriptor = "" if name else "stale "
+    print(f"  Removing {descriptor}{kind}: {path}")
+
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(path)
+        return True
+    except FileNotFoundError:
+        return True   # raced with another removal; consider it done
+    except (PermissionError, OSError):
+        pass          # fall through to sudo escalation
+
+    print(f"\n  Permission denied — root-owned (Docker bind-mount artifact). Elevating with sudo...")
+    result = subprocess.run(["sudo", "rm", "-rf", str(path)], check=False)
+    subprocess.run(["sudo", "-k"], check=False)   # clear cached credentials
+    if result.returncode == 0:
+        return True
+
+    print(f"\n  sudo cleanup failed (exit {result.returncode}).")
+    print(f"  Manual cleanup:  sudo rm -rf '{path}'")
+    if name:
+        input("\n  Press Enter to continue...")
+    return False
+
+
+def sync_memory_templates(state_path, modes):
+    """Reconcile per-instance MEMORY.md with the templates whose activation
+    condition is currently true. Each template's first and last lines act as
+    wrapper markers that locate the block in MEMORY.md without inline marker
+    comments. Anything *outside* the wrapped blocks is preserved verbatim —
+    that's where agent-added auto-memory pointer entries live."""
+    templates = [
+        # always-active templates (one entry per filename)
+        ("seek_summary.md", True),
+        # mode-conditional addendums (one entry per mode in ORDERED_MODES)
+        *((f"{mode.lower()}-addendum.md", mode in modes) for mode in ORDERED_MODES),
+    ]
+    memory_path = state_path / "projects" / "-workspace" / "memory" / "MEMORY.md"
+
+    # Defensive cleanup for pre-existing instances. When MEMORY.md was a project-
+    # wide read-only bind-mount, Docker may have left an artifact at this path —
+    # a symlink, an auto-created placeholder, an empty directory, a root-owned
+    # file, or in some setups even a regular file with stale content. Anything
+    # other than a regular non-symlink file gets removed here so the read/write
+    # below operates on a clean slate; a write-time PermissionError later (e.g.
+    # a regular but root-owned leftover) triggers another removal + retry.
+    if memory_path.is_symlink() or (memory_path.exists() and not memory_path.is_file()):
+        _force_remove(memory_path)
+
+    original = memory_path.read_text() if memory_path.exists() else ""
+    content = original
+
+    for filename, active in templates:
+        template_file = MEMORY_DIR / filename
+        if not template_file.exists():
+            continue
+        template = template_file.read_text().strip()   # also drops leading/trailing newlines so lines[0]/[-1] are real wrappers
+        lines = template.splitlines()
+        if len(lines) < 2:
+            continue   # need at least a start- and end-wrapper line
+        start, end = lines[0], lines[-1]
+
+        s_idx = content.find(start)
+        e_idx = content.find(end)
+        in_memory = s_idx != -1 and s_idx < e_idx
+
+        if not active and not in_memory:
+            continue   # nothing to add or remove
+
+        if in_memory:
+            end_pos = e_idx + len(end)
+        else:
+            # Treat append as "splice into the empty range at end-of-content".
+            s_idx = end_pos = len(content)
+
+        # Walk past any newlines immediately before s_idx — keeps the leading "\n\n"
+        # separator from stacking onto existing newlines (a removal then drops the
+        # block's leading blank lines cleanly; an append onto trailing-newline content
+        # produces exactly one "\n\n" separator instead of three).
+        while s_idx > 0 and content[s_idx - 1] == "\n":
+            s_idx -= 1
+
+        # Lead with "\n\n" only when there's preceding content — keeps the first template
+        # at the top of the file from getting a stray leading blank line.
+        new_block = (("\n\n" if s_idx > 0 else "") + template) if active else ""
+        content = content[:s_idx] + new_block + content[end_pos:]
+
+    if content != original:
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            memory_path.write_text(content)
+        except PermissionError:
+            # Stale file with restrictive perms (typically a root-owned bind-mount
+            # leftover that survived the cleanup above because it was a regular file).
+            # Force-remove and retry; sudo fallback inside _force_remove handles the
+            # root-owned case.
+            _force_remove(memory_path)
+            memory_path.write_text(content)
+
+
 # === Picker entries — return dicts the menu_picker UI renders directly. ===
 
 def creatable_agents():
@@ -317,27 +438,14 @@ def continuable_instances():
 
 
 def delete_instance(instance_id):
-    """Remove an instance's state dir and its workspace mapping entry. If Docker
-    bind-mounts left root-owned mountpoints behind (e.g. under skills/), shutil
-    can't remove them as the launcher user — fall back to `sudo rm -rf` so the
-    deletion completes without forcing the user out of the picker. Already-gone
-    state dirs (FileNotFoundError) are treated as success so the map entry is
-    still cleaned up."""
+    """Remove an instance's state dir and its workspace + modes mapping entries.
+    Path removal goes through `_force_remove(name=...)` which logs the removal,
+    handles root-owned Docker bind-mount leftovers via sudo, and pauses for
+    keypress on failure. Already-gone state dirs are treated as success so the
+    map entries are still cleaned up."""
     state_path = AGENTS_STATE / instance_id
-    try:
-        shutil.rmtree(state_path)
-    except FileNotFoundError:
-        pass  # already cleaned (manually or otherwise) — proceed to map cleanup
-    except PermissionError:
-        print(f"\n  Some files in '{state_path}' are root-owned (Docker bind-mount artifacts).")
-        print(f"  Elevating with sudo to complete the cleanup...")
-        result = subprocess.run(["sudo", "rm", "-rf", str(state_path)])
-        if result.returncode != 0:
-            print(f"\n  sudo cleanup failed (exit {result.returncode}).")
-            print(f"  Manual cleanup:  sudo rm -rf '{state_path}'")
-            # Block re-entry into the picker so the user can read the failure.
-            input("\n  Press Enter to return to the picker...")
-            return
+    if not _force_remove(state_path, name=instance_id):
+        return   # _force_remove printed errors and waited for keypress
     m = load_workspace_map()
     if instance_id in m:
         del m[instance_id]

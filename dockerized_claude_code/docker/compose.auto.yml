@@ -26,4 +26,5 @@ services:
     volumes:
       - ../docker/init-firewall.sh:/usr/local/bin/init-firewall.sh:ro
       - ../docker/auto-entrypoint.sh:/usr/local/bin/auto-entrypoint.sh:ro
+      - ${HOME}/.claude-agents/firewall_whitelist.txt:/usr/local/etc/firewall_whitelist.txt:ro  # user-managed extra domains; init-firewall.sh reads this after its built-in ALLOWED_DOMAINS loop
     entrypoint: ["/usr/local/bin/auto-entrypoint.sh", "--dangerously-skip-permissions"]

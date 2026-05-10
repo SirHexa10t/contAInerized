@@ -3,20 +3,21 @@ import argparse
 import sys
 
 from launch.agent_composition import (
-    AGENTS_DIR,
+    AGENTS_DIR, MODE_AUTO,
     apply_composition, compute_chain, load_conf, parse_stem,
 )
 from launch.agents_crud import (
     creatable_agents, get_instance_modes, has_continuable_history,
     install_latest_md, instance_name, resolve_pick, set_instance_modes,
-    update_workspace_map, validate_stored_workspace,
+    sync_memory_templates, update_workspace_map, validate_stored_workspace,
 )
 from launch.docker_config import (
     print_launch_banner, require_docker, run_compose, set_container_env,
 )
 from launch.menu_picker import select_agent, ask_for_workspace, prompt_modes, prompt_session
 from launch.user_additions import (
-    aggregated_skills_mounts, ensure_optional_creds_readme, optional_creds_mounts,
+    aggregated_skills_mounts, ensure_firewall_whitelist, ensure_optional_creds_readme,
+    firewall_whitelist_count, optional_creds_mounts,
 )
 
 require_docker()
@@ -125,16 +126,21 @@ def compose_runtime(kind, instance, md_path):
     return tags, modes, chain, extras["volume_args"]
 
 
-def setup_state(agent, session, workspace, md_path):
-    """Stage 6 — Setup. Install the agent's .md into its state dir, populate the
-    env vars compose substitutes at build/run time, load the per-agent conf, and
-    gather the skill + optional-creds bind-mounts (with the auto-readme touch).
+def setup_state(agent, session, workspace, md_path, modes):
+    """Stage 6 — Setup. Install the agent's .md into its state dir, sync per-
+    instance MEMORY.md to the current modes (adds/refreshes/removes mode
+    addendums while preserving agent-added pointer entries outside the wrapped
+    blocks), populate the env vars compose substitutes at build/run time, load
+    the per-agent conf, and gather the skill + optional-creds bind-mounts (with
+    the auto-readme touch).
     Returns (conf_path, conf, skill_mounts, cred_mounts, cred_names)."""
     state_path = install_latest_md(agent, session, md_path)
+    sync_memory_templates(state_path, modes)
     set_container_env(agent, session, workspace, state_path)
     conf_path, conf = load_conf(md_path)
     skill_mounts = aggregated_skills_mounts(workspace, state_path)
     ensure_optional_creds_readme()
+    ensure_firewall_whitelist()
     cred_mounts, cred_names = optional_creds_mounts()
     return conf_path, conf, skill_mounts, cred_mounts, cred_names
 
@@ -149,8 +155,9 @@ def launch():
     resume_flag = compute_resume_flag(kind, instance)
     update_workspace_map(instance, workspace)
     tags, modes, chain, volume_args = compose_runtime(kind, instance, md_path)
-    conf_path, conf, skill_mounts, cred_mounts, cred_names = setup_state(agent, session, workspace, md_path)
-    print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names)
+    conf_path, conf, skill_mounts, cred_mounts, cred_names = setup_state(agent, session, workspace, md_path, modes)
+    whitelist_count = firewall_whitelist_count() if MODE_AUTO in modes else None
+    print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names, whitelist_count)
     run_compose(chain, instance, claude_args, resume_flag, volume_args, skill_mounts, cred_mounts, conf)
 
 

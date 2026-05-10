@@ -229,3 +229,8 @@ Activate spellcheck within claude code?
 
 Actually have {auto} work
 
+
+the line of code: `MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}` at "agent_composition.py": how about just turning it into a list, with order as priority? How would the code look like?
+    That's not to say I'm against using a dict, but that'd be more uniform data formation...
+
+

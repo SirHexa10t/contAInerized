@@ -18,6 +18,7 @@ from dotenv import dotenv_values  # pip install python-dotenv
 PROJECT = Path(__file__).resolve().parent.parent  # this file lives in launch/, project root is one up
 AGENTS_DIR = PROJECT / "agents"
 AGENTS_STATE = Path.home() / ".claude-agents"   # shared with agents_crud (which derives ACCOUNT_FILE etc. from this)
+MEMORY_DIR = PROJECT / "memory"   # source-of-truth template files synced into per-instance MEMORY.md by agents_crud.sync_memory_templates
 
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
 MD_EXT = ".md"

@@ -117,3 +117,51 @@ def optional_creds_install_env():
         f"INSTALL_{name.upper()}": ("1" if (OPTIONAL_CREDS_DIR / name).exists() else "0")
         for name in OPTIONAL_CREDS_MOUNTS
     }
+
+
+# ============================================================
+# Firewall whitelist — ~/.claude-agents/firewall_whitelist.txt
+# ============================================================
+
+# User-managed list of extra domains to allow through the {auto} mode firewall,
+# alongside the built-in ALLOWED_DOMAINS in docker/init-firewall.sh. One domain
+# per line, '#' for comments. compose.auto.yml bind-mounts it into the container;
+# init-firewall.sh reads it after its built-in allowlist loop.
+FIREWALL_WHITELIST_FILE = AGENTS_STATE / "firewall_whitelist.txt"
+
+_FIREWALL_WHITELIST_TEMPLATE = """\
+# User-defined firewall allowlist for {auto} mode.
+#
+# Each non-empty, non-comment line is treated as a domain to allow alongside
+# the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, plus DNS).
+# See docker/init-firewall.sh for the full set of built-ins.
+#
+# Examples — uncomment any line below to grant outbound access on the next
+# {auto} launch:
+#
+# x.com
+# news.ycombinator.com
+# stackoverflow.com
+# docs.python.org
+#
+# Changes apply on the next {auto} launch — the firewall runs once at container
+# start and snapshots the resolved IPs for each domain.
+"""
+
+
+def ensure_firewall_whitelist():
+    """Create ~/.claude-agents/firewall_whitelist.txt with a commented preamble on
+    first launch so users discovering the file know what to put in it. Idempotent —
+    won't overwrite user edits."""
+    AGENTS_STATE.mkdir(parents=True, exist_ok=True)
+    if not FIREWALL_WHITELIST_FILE.exists():
+        FIREWALL_WHITELIST_FILE.write_text(_FIREWALL_WHITELIST_TEMPLATE)
+
+
+def firewall_whitelist_count():
+    """Count active domain lines in firewall_whitelist.txt — non-empty after
+    stripping inline comments and surrounding whitespace."""
+    if not FIREWALL_WHITELIST_FILE.exists():
+        return 0
+    return sum(1 for line in FIREWALL_WHITELIST_FILE.read_text().splitlines()
+               if line.split("#", 1)[0].strip())
