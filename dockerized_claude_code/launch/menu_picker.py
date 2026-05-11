@@ -65,6 +65,8 @@ Generic-picker entry shape (pick_with_preview):
 HINT_BASE_TEXT       = "↑↓ navigate  •  type to filter  •  Enter select  •  Esc cancel"
 HINT_DELETE_SUFFIX   = "  •  Del delete"
 HINT_MODIFY_SUFFIX   = "  •  F2 modify"
+HINT_LEGEND_SUFFIX   = "  •  F8 legend"
+HINT_LEGEND_OPEN     = "F8 / Esc close legend"
 FILTER_LABEL         = "filter: "
 EMPTY_FILTER_MESSAGE = "(no matches)"
 DIVIDER_CHAR         = "│"
@@ -157,8 +159,11 @@ from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
 from rich.console import Console                                           # pip install rich
 from rich.markdown import Markdown
+from rich.theme import Theme
 
-from .agent_composition import MODE_AUTO, MODE_DOOD
+from .agent_composition import (
+    MODE_AUTO, MODE_DESCRIPTIONS, MODE_DOOD, ORDERED_MODES, ORDERED_TAGS, TAG_DESCRIPTIONS,
+)
 from .agents_crud import (
     DEFAULT_WORKSPACE,
     creatable_agents, continuable_instances, delete_instance, instance_name, modify_instance,
@@ -167,12 +172,54 @@ from .agents_crud import (
 from .paths import AGENTS_STATE, FIREWALL_WHITELIST_FILE, PROJECT
 
 
-def _render_md(text):
+def _render_md(text, *, theme=None):
     """Render markdown text to an ANSI-encoded string for the picker's preview pane.
-    Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower."""
+    Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower. Optional
+    `theme` (dict of Rich style names → style strings) overrides Markdown's defaults
+    for this render — used by the legend to colour-code tag vs mode entries."""
     buf = io.StringIO()
-    Console(file=buf, force_terminal=True, color_system="truecolor", width=80).print(Markdown(text))
+    Console(
+        file=buf, force_terminal=True, color_system="truecolor", width=80,
+        theme=Theme(theme) if theme else None,
+    ).print(Markdown(text))
     return buf.getvalue()
+
+
+def _build_composition_legend():
+    """Build the F8 'composition legend' shown over the preview pane. Rendered
+    via _render_md so it matches Create-row previews stylistically. Tags and
+    Modes are rendered as two separate markdown documents so each can override
+    `markdown.code` (green for tag names, bold red for mode names) — matching
+    the picker's per-row marker colours (STYLE_TAG / STYLE_MODE_WARNING)."""
+    rows_tags = "\n".join(
+        f"| `{tag}` | {TAG_DESCRIPTIONS.get(tag, '')} |"
+        for tag in ORDERED_TAGS
+    )
+    rows_modes = "\n".join(
+        f"| `{mode}` | {MODE_DESCRIPTIONS.get(mode, '')} |"
+        for mode in ORDERED_MODES
+    )
+    tags_md = (
+        "# Tags\n\n"
+        "Agent core-affinities; dictate requirements and tools.\n\n"
+        "| Tag | Description |\n"
+        "|-----|-------------|\n"
+        f"{rows_tags}\n"
+    )
+    modes_md = (
+        "# Modes\n\n"
+        "Special approach/capability activation.\n\n"
+        "| Mode | Description |\n"
+        "|------|-------------|\n"
+        f"{rows_modes}\n"
+    )
+    return (
+        _render_md(tags_md,  theme={"markdown.code": "bright_green"})
+        + _render_md(modes_md, theme={"markdown.code": "bold bright_red"})
+    )
+
+
+LEGEND_TEXT = _build_composition_legend()   # module-level so the picker doesn't rebuild on every keypress
 
 
 def _agent_description(md_text):
@@ -235,8 +282,12 @@ def _plain(display):
     return "".join(text for _, text in _normalize(display))
 
 
-def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False):
-    """Render a full-screen picker; block until the user picks or cancels."""
+def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False, legend_text=None):
+    """Render a full-screen picker; block until the user picks or cancels.
+
+    legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
+    over the preview pane (Esc closes it). The agent picker passes LEGEND_TEXT so
+    users can recall what each [tag] / {mode} marker means."""
     if not entries:
         raise ValueError("entries must be non-empty")
 
@@ -245,6 +296,7 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
         "filter": "",
         "shown": list(range(len(entries))),
         "result": (None, None),
+        "legend_open": False,
     }
 
     def refilter():
@@ -272,6 +324,8 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
         return out
 
     def preview_text():
+        if state["legend_open"] and legend_text is not None:
+            return ANSI(legend_text)
         if not state["shown"]:
             return ""
         # Wrap in ANSI(...) so rich-rendered escape codes in Create-row previews show
@@ -282,11 +336,16 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
         return [(f"class:{CLS_TITLE}", title)]
 
     def status_fragments():
-        hint = HINT_BASE_TEXT
-        if allow_delete:
-            hint += HINT_DELETE_SUFFIX
-        if allow_modify:
-            hint += HINT_MODIFY_SUFFIX
+        if state["legend_open"]:
+            hint = HINT_LEGEND_OPEN
+        else:
+            hint = HINT_BASE_TEXT
+            if allow_delete:
+                hint += HINT_DELETE_SUFFIX
+            if allow_modify:
+                hint += HINT_MODIFY_SUFFIX
+            if legend_text is not None:
+                hint += HINT_LEGEND_SUFFIX
         out = [(f"class:{CLS_STATUS}", hint), ("", "\n")]
         if state["filter"]:
             out.append((f"class:{CLS_FILTER}", FILTER_LABEL))
@@ -336,10 +395,22 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
             event.app.exit()
 
     @kb.add("escape")
+    def _(event):
+        if state["legend_open"]:
+            state["legend_open"] = False
+            return
+        state["result"] = (None, None)
+        event.app.exit()
+
     @kb.add("c-c")
     def _(event):
         state["result"] = (None, None)
         event.app.exit()
+
+    @kb.add("f8")
+    def _(event):
+        if legend_text is not None:
+            state["legend_open"] = not state["legend_open"]
 
     @kb.add("backspace")
     def _(event):
@@ -618,7 +689,7 @@ def select_agent():
             "modifiable": False,
         })
 
-        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True)
+        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True, legend_text=LEGEND_TEXT)
         if action is None:
             return None
 
@@ -673,7 +744,7 @@ def _delete_submenu():
             "deletable": False,
         })
 
-        action, value = pick_with_preview(TITLE_DELETE_MENU, entries, allow_delete=True)
+        action, value = pick_with_preview(TITLE_DELETE_MENU, entries, allow_delete=True, legend_text=LEGEND_TEXT)
         if action is None or value is None:
             return
         if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value)):

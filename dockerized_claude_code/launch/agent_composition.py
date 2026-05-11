@@ -24,12 +24,14 @@ from .utils import parse_lines
 
 MD_EXT = ".md"
 CONF_EXT = ".conf"
-MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
 
-# === Tag and mode names — the source-of-truth string identifiers for `[<tag>]` and `{<mode>}`.
-# ORDERED_* lists declare priority (chain order, prompt order, label render order); each
-# walrus also publishes the matching TAG_*/MODE_* module-level constant. Adding a new
-# tag/mode means appending one line here AND wiring its handler in *_HANDLERS below. ===
+# === Priority orderings — earlier entries sort/place ahead of later ones. ===
+# ORDERED_TAGS / ORDERED_MODES drive the chain composition (each walrus also
+# publishes the matching TAG_*/MODE_* module-level constant; adding a new
+# tag/mode means appending one line here AND wiring its handler in *_HANDLERS
+# below). ORDERED_MODEL_FAMILIES only feeds the picker's sort priority.
+
+ORDERED_MODEL_FAMILIES = ["opus", "sonnet", "haiku"]
 
 ORDERED_TAGS = [
     TAG_PROG  := "prog",
@@ -39,6 +41,18 @@ ORDERED_MODES = [
     MODE_AUTO := "auto",
     MODE_DOOD := "DooD",
 ]
+
+# Short, one-sentence explanations of each tag/mode — surfaced by the picker's
+# F8 composition legend so users can recall what a given `[tag]` / `{mode}`
+# implies. Keys must match the names in ORDERED_TAGS / ORDERED_MODES.
+TAG_DESCRIPTIONS = {
+    TAG_PROG: "programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)",
+}
+
+MODE_DESCRIPTIONS = {
+    MODE_AUTO: "autonomous; Doesn't need permission to perform actions. Built with a firewall slightly increased security. Danger: hard to control!",
+    MODE_DOOD: "Docker outside-of Docker; Can run Docker. Danger: authority to do anything (effectively host-root)!",
+}
 
 # === [prog]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
 CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
@@ -290,14 +304,13 @@ def parse_model_id(model):
 
 
 def agent_sort_key(item):
-    """Sort by family (Opus>Sonnet>Haiku), then version desc, then name asc."""
+    """Sort by family (ORDERED_MODEL_FAMILIES order — opus first, haiku last),
+    then version desc, then name asc. Agents whose .conf has no recognisable
+    model sink past all known families via the sentinel index."""
     name, path = item
     _, conf = load_conf(path)
-    parsed = parse_model_id(conf.get("ANTHROPIC_MODEL", ""))
-    if parsed is None:
-        return (0, (0, 0), name)
-    family, major, minor = parsed
-    return (-MODEL_FAMILY_RANK[family], (-major, -minor), name)
+    family, major, minor = parse_model_id(conf.get("ANTHROPIC_MODEL", "")) or (None, 0, 0)
+    return (_ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
 
 
 def _ordering_index_or_end(value, ordering):
