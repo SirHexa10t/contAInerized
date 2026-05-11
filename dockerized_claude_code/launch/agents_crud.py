@@ -14,35 +14,17 @@ from datetime import datetime
 from pathlib import Path
 
 from .agent_composition import (
-    AGENTS_DIR, AGENTS_STATE, MD_EXT, MEMORY_DIR, MODE_AUTO, MODE_DOOD, ORDERED_MODES,
-    agent_sort_key, find_md_for_agent, parse_stem,
+    MD_EXT, MODE_AUTO, MODE_DOOD, ORDERED_MODES,
+    agent_sort_key, find_md_for_agent, mode_sort_key, parse_stem, tag_sort_key,
+)
+from .docker_config import read_workspace_pref
+from .paths import (
+    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
+    AGENTS_STATE, CREDENTIALS_FILE, DEFAULTING_DIRS, FALLBACK_WORKSPACE, MEMORY_DIR,
 )
 
-ACCOUNT_FILE = AGENTS_STATE / ".claude.json"
-CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"
-AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
-AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"  # {instance_id: [mode, ...]}; only entries for instances with modes
-# Where new instances default their workspace to when launched from a "neutral"
-# directory (one in DEFAULTING_DIRS — typically $HOME). Acts as a shared sandbox so the
-# launcher never silently bind-mounts something like the user's whole home dir.
-FALLBACK_WORKSPACE = "/ai_workspace"
-# Directories that divert workspace selection to FALLBACK_WORKSPACE — when launching
-# from one of these (cwd ∈ DEFAULTING_DIRS), DEFAULT_WORKSPACE falls back instead of
-# using $PWD. Same list also drives the picker's `(DEFAULT DIR)` mark on Cont rows
-# at FALLBACK_WORKSPACE when cwd resolves to one of these dirs.
-DEFAULTING_DIRS = [
-    os.path.expanduser("~"),
-    os.path.expanduser("~/Desktop"),
-    os.path.expanduser("~/Downloads"),
-    os.path.expanduser("~/Pictures"),
-    os.path.expanduser("~/Videos"),
-    os.path.expanduser("~/.ssh"),
-    "/tmp",
-    "/var/tmp",
-    "/",
-]
 DEFAULT_WORKSPACE = (
-    os.environ.get("AI_WORKSPACE")
+    read_workspace_pref()
     or (FALLBACK_WORKSPACE if os.getcwd() in DEFAULTING_DIRS else os.getcwd())
 )  # fall back to $PWD, except when $PWD is one of DEFAULTING_DIRS — then use FALLBACK_WORKSPACE
 SESSION_SEP = "__"
@@ -325,7 +307,9 @@ def sync_memory_templates(state_path, modes):
 # === Picker entries — return dicts the menu_picker UI renders directly. ===
 
 def creatable_agents():
-    """Agent dicts for the picker's Create rows; sorted by model family/version. Raw
+    """Agent dicts for the picker's Create rows. Sorted first by tag set
+    (untagged first, then groups ordered by each tag's position in ORDERED_TAGS);
+    within each tag group, the existing model family/version sort applies. Raw
     fields only — `menu_picker` derives display values (description, preview) from md_text."""
     out = []
     for path in AGENTS_DIR.glob(f"*{MD_EXT}"):
@@ -338,7 +322,10 @@ def creatable_agents():
             "md_path": path,
             "md_text": path.read_text(),              # raw .md content; menu_picker uses it for both description and preview
         })
-    out.sort(key=lambda d: agent_sort_key((d["agent_name"], d["md_path"])))
+    out.sort(key=lambda d: (
+        tag_sort_key(d["tags"]),                                  # untagged sinks to top; the rest follow ORDERED_TAGS positions
+        agent_sort_key((d["agent_name"], d["md_path"])),          # within each tag group: family/version/name
+    ))
     return out
 
 
@@ -385,11 +372,13 @@ def has_continuable_history(instance_id):
 
 
 def continuable_instances():
-    """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped;
-    sorted by (agent rank, session). Marks instances whose workspace resolves to the
-    current working directory (for the picker's CURRENT DIR hint), and surfaces tags
-    (from the .md filename) and modes (from agent_modes_map.json) so the picker can
-    style the row and the modify flow can decide which prompts to show."""
+    """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped.
+    Sorted first by mode set (mode-less first, then groups ordered by each mode's
+    position in ORDERED_MODES); within each mode group, sorted by (agent rank,
+    session) as before. Marks instances whose workspace resolves to the current
+    working directory (for the picker's CURRENT DIR hint), and surfaces tags
+    (from the .md filename) and modes (from agent_modes_map.json) so the picker
+    can style the row and the modify flow can decide which prompts to show."""
     cwd = Path.cwd().resolve()
     defaulting_dirs_resolved = {Path(d).resolve() for d in DEFAULTING_DIRS}
     fallback_resolved = Path(FALLBACK_WORKSPACE).resolve()
@@ -433,7 +422,11 @@ def continuable_instances():
             "state_path": AGENTS_STATE / instance, # ~/.claude-agents/<id>; shown in the preview pane
             "last_used_display": last_used_display,
         })
-    out.sort(key=lambda d: (agent_sort_key((d["agent_name"], d["md_path"])), d["session"]))
+    out.sort(key=lambda d: (
+        mode_sort_key(d["modes"]),                                # mode-less sinks to top; the rest follow ORDERED_MODES positions
+        agent_sort_key((d["agent_name"], d["md_path"])),          # within each mode group: family/version/name
+        d["session"],                                             # then session for tiebreak between instances of the same agent
+    ))
     return out
 
 

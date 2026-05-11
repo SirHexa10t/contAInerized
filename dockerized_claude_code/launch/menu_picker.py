@@ -42,6 +42,12 @@ Public API:
       Inline [y/N] prompt.
       -> bool
 
+  print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names, whitelist_count)
+      Print the multi-line "about to launch" summary (agent definition, conf,
+      tags, modes, skills, creds, user whitelist count) before docker compose
+      builds the image. Conditional lines for tags/modes/skills/creds/whitelist
+      — only shown when applicable.
+
 Generic-picker entry shape (pick_with_preview):
     {
         'display':    str | list[(style, text)] | FormattedText,
@@ -154,10 +160,11 @@ from rich.markdown import Markdown
 
 from .agent_composition import MODE_AUTO, MODE_DOOD
 from .agents_crud import (
-    AGENTS_STATE, DEFAULT_WORKSPACE,
+    DEFAULT_WORKSPACE,
     creatable_agents, continuable_instances, delete_instance, instance_name, modify_instance,
     state_dir,
 )
+from .paths import AGENTS_STATE, FIREWALL_WHITELIST_FILE, PROJECT
 
 
 def _render_md(text):
@@ -671,3 +678,26 @@ def _delete_submenu():
             return
         if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value)):
             delete_instance(value)
+
+
+def print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names, whitelist_count):
+    """Print the multi-line summary that appears before docker compose builds the
+    image — agent definition path, conf path, active tags + modes, and skills/creds
+    counts when applicable. Each line is conditional on having something to show
+    (no empty 'Tags: ' if there are none). `whitelist_count` is None for non-{auto}
+    launches (line hidden); an integer count (possibly 0) when {auto} is active so
+    the user sees the file's existence and current size."""
+    print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
+    print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
+    if tags:
+        print(f"  Tags:             {' '.join(f'[{t}]' for t in tags)}")
+    if modes:
+        print(f"  Modes:            {' '.join('{' + m + '}' for m in modes)}")
+    if skill_mounts:
+        print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
+    if cred_names:
+        print(f"  Optional creds:   {', '.join(cred_names)} (from optional_creds/)")
+    if whitelist_count is not None:
+        plural = "" if whitelist_count == 1 else "s"
+        display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(Path.home()))
+        print(f"  User whitelist:   {whitelist_count} domain{plural} (from {display_path})")

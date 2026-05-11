@@ -6,6 +6,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      network: host   # use host's network namespace for the build — BuildKit's own bridge has had DNS failures resolving curl/apt repo hosts on some setups
       args:
         SOFTWARE_STACK_REFRESH: ${SOFTWARE_STACK_REFRESH:-bootstrap}
     container_name: claude-code_${AGENT_NAME}

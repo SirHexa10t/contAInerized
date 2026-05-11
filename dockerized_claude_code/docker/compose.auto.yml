@@ -23,8 +23,13 @@ services:
         PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:base}
     cap_add:
       - NET_ADMIN
+    environment:
+      # Pass-through of the launcher's resolved allowlist (built-ins + user entries
+      # + apex/www counterparts, deduped, space-separated). init-firewall.sh
+      # iterates it directly. The host-side source whitelist is NOT mounted in —
+      # the container only sees the final list.
+      - WHITELIST_DOMAINS
     volumes:
       - ../docker/init-firewall.sh:/usr/local/bin/init-firewall.sh:ro
       - ../docker/auto-entrypoint.sh:/usr/local/bin/auto-entrypoint.sh:ro
-      - ${HOME}/.claude-agents/firewall_whitelist.txt:/usr/local/etc/firewall_whitelist.txt:ro  # user-managed extra domains; init-firewall.sh reads this after its built-in ALLOWED_DOMAINS loop
     entrypoint: ["/usr/local/bin/auto-entrypoint.sh", "--dangerously-skip-permissions"]

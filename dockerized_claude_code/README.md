@@ -20,20 +20,31 @@ isolated Docker container with persistent per-instance state.
 - **Interactive picker** — full-screen TUI with type-to-filter, Del to
   delete an instance, F2 to modify its session name and/or workspace.
 - **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is in
-  `DEFAULTING_DIRS` — `$HOME`, `~/Desktop/Documents/Downloads`, `/tmp`,
-  `/var/tmp`, `/` — in which case it falls back to `/ai_workspace`). Rows
-  whose workspace matches `$PWD` are tagged `(CURRENT DIR)` in yellow; when
-  `$PWD` is one of `DEFAULTING_DIRS`, rows whose workspace is the fallback
-  target get `(DEFAULT DIR)` in the same yellow.
-- **Per-agent build mode** — append `[prog]` to a filename (e.g.
-  `refactorer[prog](thinker).md`) to opt into the heavier Dockerfile stage
-  with Rust + Node. Untagged agents get the lighter base image (bash, git,
-  ripgrep, Python + uv, Claude Code).
+  `DEFAULTING_DIRS` — `$HOME`, `~/Desktop`, `~/Downloads`, `~/Pictures`,
+  `~/Videos`, `~/.ssh`, `/tmp`, `/var/tmp`, `/` — in which case it falls back
+  to `/ai_workspace`). Rows whose workspace matches `$PWD` are tagged
+  `(CURRENT DIR)` in yellow; when `$PWD` is one of `DEFAULTING_DIRS`, rows
+  whose workspace is the fallback target get `(DEFAULT DIR)` in the same
+  yellow.
+- **Per-agent build tags & per-instance modes** — append `[prog]` to a
+  filename (e.g. `refactorer[prog](thinker).md`) to opt into the heavier
+  Dockerfile stage with Rust + Node + uv. Modes are picked per instance at
+  create/modify time: `{auto}` runs the agent unattended (`--dangerously-skip-permissions`)
+  behind an iptables outbound allowlist; `{DooD}` bind-mounts the host's
+  Docker socket. Tags + modes compose into a layered build chain
+  (`base → prog → auto`, etc.) — each step has its own `Dockerfile.<name>`
+  + `compose.<name>.yml`.
 - **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
   `~/.claude-agents/cache/` and bind-mount into `[prog]`-tagged containers
   (the base image has no compilers to use them). One agent's downloads
   benefit every later launch. Files older than 7 days are pruned from any
   cache that grows past 5 GB (skipped while a container is running).
+- **`{auto}`-mode firewall with user-extendable whitelist** — outbound
+  traffic from `{auto}` containers is restricted to a built-in domain list
+  (Anthropic API, GitHub, npm, PyPI, crates.io, plus DNS). Drop extra
+  domains, one per line, into `~/.claude-agents/firewall_whitelist.txt` to
+  allow them on the next launch. The firewall self-tests at container start
+  and refuses to launch the agent if enforcement isn't actually working.
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
 - **Project-wide key bindings** — `settings/keybindings.json` is mounted into
@@ -49,11 +60,11 @@ isolated Docker container with persistent per-instance state.
   so the in-container `man` command surfaces those files as ready-to-paste
   `@.prompts/<file>` lines. Absent folder just means `man` shows nothing
   under "Custom prompts".
-- **DooD (Docker-out-of-Docker) mode** — opt into per-instance, prompted
-  at create/modify time for any `[prog]`-tagged agent. Bind-mounts
-  `/var/run/docker.sock` so the agent can drive the host's Docker daemon
-  (run sub-containers, build images). ⚠ effective host-root; declined by
-  default.
+- **DooD (Docker-out-of-Docker) mode** — opt into per-instance, prompted at
+  create/modify time. Bind-mounts `/var/run/docker.sock` so the agent can
+  drive the host's Docker daemon (run sub-containers, build images).
+  ⚠ effective host-root; declined by default; the launcher prints a stern
+  warning when an instance ends up with both `{auto}` and `{DooD}` enabled.
 - **Optional credential passthrough** — drop your `~/.aws` (or `gcloud`,
   `kube`, `ssh`, `gh`, `.npmrc`, `.pypirc`) under
   `~/.claude-agents/optional_creds/` and the matching CLI inside the
@@ -70,14 +81,21 @@ Host requirements:
 - **Docker** + the Compose v2 plugin
 - **Python 3.10+** (the launcher uses walrus expressions and structural
   unpacking)
-- Three Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
-  (`.conf` parsing), **`rich`** (markdown rendering for agent previews)
+- Four Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
+  (`.conf` parsing), **`rich`** (markdown rendering for agent previews),
+  **`publicsuffix2`** (apex-domain detection for the `{auto}` firewall
+  whitelist)
 
-Inside the container, a two-stage Dockerfile (`docker/Dockerfile`) supplies
-the runtime: the **base** stage installs Claude Code + `uv` + ripgrep — what
-every agent needs — and the **prog** stage adds `build-essential`, Rust
-(`rustup`), and Node.js for `[prog]`-tagged agents. Nothing else needs to
-be on the host for the agents themselves.
+Inside the container, the runtime image is built incrementally as a chain
+of layers. `docker/Dockerfile` (the **base** stage) installs Claude Code +
+`uv` + ripgrep — what every agent needs. On top of that, each chain step
+has its own `Dockerfile.<name>` (e.g. `Dockerfile.prog` adds `build-essential`,
+Rust, Node; `Dockerfile.auto` adds iptables + sudo for the firewall) and
+matching `compose.<name>.yml` (extra mounts, capabilities, entrypoint).
+The chain assembled for a given launch is `["base", ...active tags,
+...active modes]`; intermediate images are tagged `claude-agents:base`,
+`claude-agents:prog`, `claude-agents:prog.auto`, etc., so common prefixes
+are cached. Nothing else needs to be on the host for the agents themselves.
 
 ### Install — Linux
 
@@ -87,10 +105,11 @@ Run the installer from the project root:
 bash install_dependencies.sh
 ```
 
-It uses uv to set up a Python venv at `~/pydev` with all three pip deps,
+It uses uv to set up a Python venv at `~/pydev` with all four pip deps,
 installs Docker via the official convenience script (which bundles the
 Compose v2 plugin), and adds your user to the `docker` group. Idempotent —
-safe to re-run; if `~/pydev` already exists, it's reused as-is.
+safe to re-run; if `~/pydev` already exists, it's reused as-is, and the
+pip-install step always re-runs so any newly-added dep gets picked up.
 
 ### Install — macOS
 
@@ -108,8 +127,8 @@ download URL so you can install it manually, then re-run to set up Python.
 
 Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop)
 and [Python 3.10+](https://www.python.org/downloads/) from their official
-sites, then `pip install prompt_toolkit python-dotenv rich` in your shell
-of choice.
+sites, then `pip install prompt_toolkit python-dotenv rich publicsuffix2`
+in your shell of choice.
 
 Or — recommended — install Docker Desktop on the Windows host and run the
 launcher from inside WSL2; once you're at a WSL2 bash prompt, the Linux
@@ -132,7 +151,7 @@ Then confirm the toolchain:
 
 ```bash
 docker compose version
-python3 -c "import prompt_toolkit, dotenv, rich; print('ok')"
+python3 -c "import prompt_toolkit, dotenv, rich, publicsuffix2; print('ok')"
 ```
 
 If either errors out, fix it before proceeding — `run.py` exits early with a
@@ -144,9 +163,11 @@ fail at the picker step.
 Every container bind-mounts a host directory at `/workspace`. By default:
 
 1. `$AI_WORKSPACE` if set in the host environment, else
-2. `$PWD`, except when `$PWD` is `$HOME` — in which case it falls back to
-   `/ai_workspace` (so launching from your home directory doesn't accidentally
-   share your entire `$HOME` with the container).
+2. `$PWD`, except when `$PWD` is one of `DEFAULTING_DIRS` (`$HOME`,
+   `~/Desktop`, `~/Downloads`, `~/Pictures`, `~/Videos`, `~/.ssh`, `/tmp`,
+   `/var/tmp`, `/`) — in which case it falls back to `/ai_workspace` (so
+   launching from a "neutral" directory doesn't accidentally share something
+   like your entire `$HOME` with the container).
 
 You can also pick the workspace interactively when the launcher prompts. The
 form you type (with `~` expanded but symlinks preserved) is stored verbatim in
@@ -170,16 +191,27 @@ container; the resulting `~/.claude-agents/.claude.json` and
 `~/.claude-agents/.credentials.json` are bind-mounted into every subsequent
 container, so you never have to re-authenticate per agent.
 
-A successful launch prints the resolved agent definition and conf, then a
-build line, then drops you into Claude Code:
+A successful launch prints a banner summarising the resolved agent (chain,
+skills, optional creds, whitelist), then builds each chain step incrementally,
+then drops you into Claude Code:
 
 ```
-  Agent definition: agents/researcher.md
+  Agent definition: agents/researcher[prog].md
   Configuration:    agents/researcher.conf
-  Building image...
+  Tags:             [prog]
+  Modes:            {auto}
+  Project skills:   2 loaded (custom_skills/ + .skills/ if present)
+  User whitelist:   3 domains (from ~/.claude-agents/firewall_whitelist.txt)
+  Building base → claude-agents:base...
+  Building prog → claude-agents:prog...
+  Building auto → claude-agents:prog.auto...
 [docker compose build output]
+init-firewall.sh: enforcement verified — allowlist of 15 domains active, all other outbound rejected.
 [Claude Code starts; status line shows: ● Researcher - Myproject ( /path/to/workspace )]
 ```
+
+Lines for tags, modes, skills, optional creds, and whitelist are conditional —
+they only appear when the relevant feature is in play.
 
 ### Picker controls
 
@@ -226,17 +258,30 @@ is wrong.
    `<name>(<parent>).md` — the parenthesised suffix points at
    `agents/<parent>.conf`. For example, `feature-identifier(thinker).md`
    uses `agents/thinker.conf`.
-4. (Optional) Append a `[<tag>]` to the filename to opt into a build mode.
-   Currently supported:
+4. (Optional) Append a `[<tag>]` to the filename to opt into a build tag.
+   Tags are per-agent (in the filename) and stable; modes are picked
+   per-instance at create-time and stored in `agent_modes_map.json`.
+
+   **Tags** (currently supported):
 
    - `[prog]` — uses the `prog` Dockerfile stage (Rust + Node + a real
      compiler) and bind-mounts the shared toolchain caches into the
      container. Untagged agents stay on `base`.
 
-   Tag and conf-alias suffixes can combine and order doesn't matter —
+   **Modes** (prompted per instance, also re-prompted on F2-modify):
+
+   - `{auto}` — `--dangerously-skip-permissions` behind an iptables outbound
+     allowlist (init-firewall.sh runs at container start). Lets the agent
+     run unattended. ⚠ guardrail-only; combine with `{DooD}` and the agent
+     can do anything on the host.
+   - `{DooD}` — bind-mount `/var/run/docker.sock`. Lets the agent drive the
+     host's Docker daemon. ⚠ effective host-root.
+
+   Tag, mode, and conf-alias suffixes can combine and order doesn't matter —
    `refactorer[prog](thinker).md` and `refactorer(thinker)[prog].md` parse
-   identically. **Reserved syntax**: `[…]` is reserved for tags, `(…)` for
-   the conf alias. Don't use these characters in agent names.
+   identically. **Reserved syntax**: `[…]` for tags, `(…)` for the conf
+   alias, `{…}` for modes (modes don't appear in filenames; the syntax is
+   reserved for the picker UI). Don't use these characters in agent names.
 
 5. Re-run `python3 run.py` — the new agent appears in the picker, sorted by
    model family (Opus > Sonnet > Haiku) then version.
@@ -248,11 +293,13 @@ is wrong.
   .claude.json                       # shared OAuth account info
   .credentials.json                  # shared API credentials
   agent_workspace_map.json           # instance_id → workspace path
-  agent_modes_map.json               # instance_id → list of opted-in modes (e.g. ["DooD"])
+  agent_modes_map.json               # instance_id → list of opted-in modes (e.g. ["auto", "DooD"])
+  firewall_whitelist.txt             # user-managed extra domains for {auto} mode (auto-created with a template preamble; comments + one domain per line)
   cache/                             # shared toolchain caches (cargo, npm, …); mounted into [prog] agents only
   optional_creds/                    # opt-in passthrough creds; see "Optional Host Mounts" below
   <agent>__<session>/                # one per instance
     CLAUDE.md                        # copy of the agent's .md
+    projects/-workspace/memory/MEMORY.md   # per-instance, regenerated each launch from memory/seek_summary.md + active mode addendums (preserves agent-added pointer entries outside the wrapped blocks)
     projects/-workspace/...          # claude's per-project state, incl. history.jsonl
 ```
 
@@ -268,7 +315,8 @@ Each is independent; nothing here is required for a basic launch.
 | Workspace skills | `<workspace>/.skills/<name>/` | `/home/claude/.claude/skills/<name>` | dir present in workspace; each becomes a `/<name>` slash command |
 | Workspace prompts | `<workspace>/.prompts/` | (left in-place at `/workspace/.prompts/`; surfaced by the in-container `man`) | dir present in workspace |
 | Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | agent filename includes `[prog]` |
-| Docker socket | `/var/run/docker.sock` (host) | `/var/run/docker.sock` | instance has DooD mode enabled (asked at create/modify) |
+| Firewall whitelist | `~/.claude-agents/firewall_whitelist.txt` | `/usr/local/etc/firewall_whitelist.txt` (ro) | instance has `{auto}` mode enabled |
+| Docker socket | `/var/run/docker.sock` (host) | `/var/run/docker.sock` | instance has `{DooD}` mode enabled (asked at create/modify) |
 | Optional creds | `~/.claude-agents/optional_creds/<service>/` | varies by service (see below) | path exists on host |
 
 ### Optional credentials (recognized services)
@@ -315,17 +363,27 @@ installed, and the mounted creds make it ready to use.
 ## Project Layout
 
 ```
-run.py                               # entry point + CLI shortcuts
+run.py                               # entry point + 7-stage launch() orchestrator
 launch/
   __init__.py
-  agent_composition.py               # filename grammar (parse_stem), conf loading, sort policy, [tag] dispatch
-  agents_crud.py                     # state-dir lifecycle, workspace map, picker-entry builders
-  user_additions.py                  # per-workspace skills + optional credentials passthrough
-  menu_picker.py                     # picker UI + ask_for_workspace
+  agent_composition.py               # filename grammar (parse_stem), conf loading, sort policy, tag/mode constants + handlers, build-chain composition (compute_chain, apply_composition)
+  agents_crud.py                     # state-dir lifecycle, workspace + modes maps, sync_memory_templates, _force_remove (sudo+sudo-k fallback), picker-entry builders
+  docker_config.py                   # docker-side: env-var population, image build chain, run_compose, banner
+  user_additions.py                  # custom_skills + workspace .skills, optional credentials, firewall whitelist auto-create
+  menu_picker.py                     # picker UI + ask_for_workspace + prompt_modes + prompt_session
   audit.py                           # state-checker (run as `python -m launch.audit`)
 agents/                              # agent definitions (.md + optional .conf)
-custom_commands/                     # shared slash commands
-settings/                            # status line + bashrc + Claude Code settings
-memory/MEMORY.md                     # auto-loaded pointer to /workspace/.claude_summary
-docker/                              # multi-stage Dockerfile + compose files (base + prog override)
+custom_commands/                     # shared slash commands (`/refactor`, `/unspaghettify`, `/write-readme`, `/write-summary`)
+custom_skills/                       # shared skills bundled with the project
+settings/                            # status line + bashrc + Claude Code settings + keybindings + manifest helpers
+memory/
+  seek_summary.md                    # always-active MEMORY.md template (points the agent at .claude_summary)
+  auto-addendum.md                   # {auto}-mode addendum (firewall guidance)
+docker/
+  Dockerfile, compose.yml            # base image + base compose
+  Dockerfile.prog, compose.prog.yml  # [prog] tag layer (Rust + Node + uv)
+  Dockerfile.auto, compose.auto.yml  # {auto} mode layer (iptables + sudo + entrypoint wrapper)
+  Dockerfile.dood, compose.dood.yml  # {DooD} mode layer (docker.sock bind-mount)
+  init-firewall.sh                   # iptables outbound allowlist; bind-mounted into {auto} containers
+  auto-entrypoint.sh                 # runs init-firewall.sh, then claude with --dangerously-skip-permissions
 ```

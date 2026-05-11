@@ -4,23 +4,24 @@ sorts agents by model family/version, and computes the docker build chain
 (base → tags → modes) plus the per-handler runtime contributions (volume mounts +
 side effects) via apply_composition.
 
-Imports nothing from agents_crud, run.py, or menu_picker — all of them import from here.
+Imports path constants from paths, generic helpers from utils, env-staging
+helpers from docker_config, and user-side data from user_additions;
+agents_crud, menu_picker, and run.py import from here.
 """
 
-import os
 import re
 import subprocess
 import time
-from pathlib import Path
 
 from dotenv import dotenv_values  # pip install python-dotenv
+from publicsuffix2 import get_sld  # pip install publicsuffix2
 
-PROJECT = Path(__file__).resolve().parent.parent  # this file lives in launch/, project root is one up
-AGENTS_DIR = PROJECT / "agents"
-AGENTS_STATE = Path.home() / ".claude-agents"   # shared with agents_crud (which derives ACCOUNT_FILE etc. from this)
-MEMORY_DIR = PROJECT / "memory"   # source-of-truth template files synced into per-instance MEMORY.md by agents_crud.sync_memory_templates
+from .docker_config import register_docker_gid, register_whitelist_domains
+from .paths import (
+    AGENTS_DIR, CACHE_MOUNTS, CACHE_ROOT, DEFAULT_CONF, FIREWALL_WHITELIST_FILE, MEMORY_DIR,
+)
+from .utils import parse_lines
 
-DEFAULT_CONF = AGENTS_DIR / "default.conf"
 MD_EXT = ".md"
 CONF_EXT = ".conf"
 MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}
@@ -39,29 +40,194 @@ ORDERED_MODES = [
     MODE_DOOD := "DooD",
 ]
 
-# === Shared toolchain caches — mounted only when an agent has the [prog] tag ===
-CACHE_ROOT = AGENTS_STATE / "cache"
-CACHE_HOME_IN_CONTAINER = Path("/home/claude")
-CACHE_REL_PATHS = [  # shared across all [prog] agents/sessions; same relative path on host and in container
-    # languages currently in the prog image
-    ".cargo/registry",           # Rust crates (.crate tarballs + index)
-    ".cargo/git",                # Rust git dependencies
-    ".cache",                    # XDG cache: uv, pip, poetry, pre-commit, huggingface, torch, yarn-v1, go-build, ccache, ...
-    # speculative — empty until the relevant language is added to the Dockerfile
-    "go/pkg/mod",                # Go module cache
-    ".npm",                      # npm (non-XDG by design)
-    ".local/share/pnpm/store",   # pnpm content-addressed store
-    ".m2/repository",            # Maven local repository
-    ".gradle/caches",            # Gradle dependency + build caches
-    ".gem",                      # Ruby gems
-    ".cpanm",                    # Perl cpanminus work dir
-    ".cpan",                     # Perl CPAN classic
-    ".cabal/store",              # Haskell cabal package store
-    ".stack/snapshots",          # Haskell stack resolver snapshots
-]
-CACHE_MOUNTS = {CACHE_ROOT / rel: CACHE_HOME_IN_CONTAINER / rel for rel in CACHE_REL_PATHS}
+# === [prog]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
 CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
 CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
+
+# === Always-allowed domains in {auto} mode (used by resolved_whitelist_domains) ===
+# The list lives here (not in init-firewall.sh) so a single Python step owns the
+# full resolved domain set — built-ins + user entries, plus a non-www counterpart
+# for any `www.`-prefixed entry, plus a `www.X` counterpart for entries that are
+# registrable apexes (Public Suffix List-aware, so `foo.co.uk` is recognised
+# the same as `foo.com`) — and bash inside the container just iterates whatever
+# WHITELIST_DOMAINS holds.
+BUILTIN_FIREWALL_DOMAINS = [
+    # === Core launcher dependencies ===
+    # Anthropic
+    "api.anthropic.com",
+    "console.anthropic.com",
+    "claude.ai",
+    # GitHub (git, releases, raw, codeload, container registry)
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "codeload.github.com",
+    "ghcr.io",
+    # npm
+    "registry.npmjs.org",
+    # PyPI
+    "pypi.org",
+    "files.pythonhosted.org",
+    # crates.io (Rust)
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+
+    # === Developer documentation & references ===
+    # Q&A and community
+    "stackoverflow.com",
+    "stackexchange.com",     # covers DBA / Security / Code Review etc.; Server Fault and Super User live at their own apexes
+    "gitlab.com",
+    # Language docs — Python (PyPI registry above)
+    "docs.python.org",
+    "peps.python.org",
+    # Language docs — Rust (crates.io registry above)
+    "doc.rust-lang.org",
+    "rust-lang.org",
+    "docs.rs",
+    # Language docs — Node.js / JavaScript (npm registry above)
+    "nodejs.org",
+    "developer.mozilla.org",  # MDN — also covers HTML / CSS / Web APIs
+    "npmjs.com",
+    "tc39.es",                # ECMAScript spec
+    # Language docs — TypeScript
+    "typescriptlang.org",
+    # Language docs — Go
+    "go.dev",
+    "pkg.go.dev",
+    # Language docs — Java
+    "docs.oracle.com",
+    "openjdk.org",
+    "mvnrepository.com",
+    "search.maven.org",
+    # Language docs — C# / .NET (also covers Azure, VS Code, TypeScript, etc.)
+    "learn.microsoft.com",
+    # Language docs — C / C++
+    "en.cppreference.com",
+    "isocpp.org",
+    # Language docs — Ruby
+    "ruby-lang.org",
+    "ruby-doc.org",
+    "rubygems.org",
+    # Language docs — PHP
+    "php.net",
+    "packagist.org",
+    # Language docs — Swift / Apple
+    "swift.org",
+    "developer.apple.com",
+    # Language docs — Kotlin
+    "kotlinlang.org",
+    # Language docs — Other
+    "haskell.org",
+    "dart.dev",
+    "elixir-lang.org",
+    "hexdocs.pm",
+    "scala-lang.org",
+    "clojure.org",
+    "julialang.org",
+    "ocaml.org",
+    "erlang.org",
+    "r-project.org",
+    "cran.r-project.org",
+    "perl.org",
+    "perldoc.perl.org",
+    "lua.org",
+    # Cloud / infra — AWS
+    "docs.aws.amazon.com",
+    "aws.amazon.com",
+    "repost.aws",            # AWS re:Post Q&A
+    # Cloud / infra — GCP
+    "cloud.google.com",
+    "firebase.google.com",
+    # Cloud / infra — Azure (learn.microsoft.com above)
+    "azure.microsoft.com",
+    # Cloud / infra — Docker / Kubernetes / Helm
+    "docs.docker.com",
+    "kubernetes.io",
+    "helm.sh",
+    # Cloud / infra — HashiCorp (Terraform, Vault, Consul, Nomad)
+    "developer.hashicorp.com",
+    # Web standards
+    "whatwg.org",            # HTML / DOM / Fetch specs
+    "w3.org",                # W3C specs
+    "caniuse.com",           # browser compat tables
+    "web.dev",               # Google web best-practices
+    # Frontend frameworks
+    "react.dev",
+    "vuejs.org",
+    "angular.dev",
+    "svelte.dev",
+    "nextjs.org",
+    "nuxt.com",
+    "remix.run",
+    "astro.build",
+    # Backend frameworks — Python
+    "docs.djangoproject.com",
+    "flask.palletsprojects.com",
+    "fastapi.tiangolo.com",
+    # Backend frameworks — Node
+    "expressjs.com",
+    "nestjs.com",
+    # Backend frameworks — Java
+    "spring.io",
+    "docs.spring.io",
+    # Backend frameworks — Ruby
+    "rubyonrails.org",
+    "guides.rubyonrails.org",
+    # Backend frameworks — PHP
+    "laravel.com",
+    "symfony.com",
+    # ML / data
+    "pytorch.org",
+    "tensorflow.org",
+    "scikit-learn.org",
+    "numpy.org",
+    "pandas.pydata.org",
+    "jupyter.org",
+    "huggingface.co",
+    "arxiv.org",
+    "paperswithcode.com",
+    # AI / LLM APIs (Anthropic API endpoints above)
+    "docs.anthropic.com",
+    "platform.openai.com",
+    # Databases
+    "postgresql.org",
+    "dev.mysql.com",
+    "mariadb.com",
+    "sqlite.org",
+    "redis.io",
+    "mongodb.com",
+    "elastic.co",
+    # Linux / systems
+    "man7.org",              # Linux man pages
+    "kernel.org",
+    "wiki.archlinux.org",    # general Linux setup info, even off-Arch
+    "access.redhat.com",
+    "lwn.net",               # kernel and systems-internals reporting
+    # Standards / RFCs
+    "datatracker.ietf.org",
+    "rfc-editor.org",
+    "semver.org",
+    "json.org",
+    # Build & tooling
+    "webpack.js.org",
+    "vite.dev",
+    "rollupjs.org",
+    "esbuild.github.io",
+    "cmake.org",
+    "ninja-build.org",
+    "git-scm.com",
+    # Reliable tutorial / reference sites
+    "realpython.com",        # Python
+    "baeldung.com",          # Java / Spring
+    "digitalocean.com",      # community tutorials
+    "css-tricks.com",        # web / CSS
+    "smashingmagazine.com",  # web / CSS
+    "learnxinyminutes.com",  # quick-reference cheat sheets per language
+    "martinfowler.com",      # architecture and refactoring
+    "fly.io",                # systems / networking writing on fly.io/blog
+]
 
 
 def parse_stem(stem):
@@ -134,6 +300,27 @@ def agent_sort_key(item):
     return (-MODEL_FAMILY_RANK[family], (-major, -minor), name)
 
 
+def _ordering_index_or_end(value, ordering):
+    """Position of `value` in `ordering`, or `len(ordering)` if absent — pushes
+    unknowns past the end when used as a sort-key element."""
+    return ordering.index(value) if value in ordering else len(ordering)
+
+
+def tag_sort_key(tags):
+    """Sort key for agents grouped by tag set, following ORDERED_TAGS order.
+    Untagged ([]) → empty tuple, which sorts before any non-empty key. Unknown
+    tags sink past the end via a sentinel index so typo'd tags don't mix into
+    the untagged group."""
+    return tuple(sorted(_ordering_index_or_end(t, ORDERED_TAGS) for t in tags))
+
+
+def mode_sort_key(modes):
+    """Sort key for instances grouped by mode set, following ORDERED_MODES order.
+    Mode-less ([]) → empty tuple, which sorts before any non-empty key. Unknown
+    modes sink past the end via a sentinel index."""
+    return tuple(sorted(_ordering_index_or_end(m, ORDERED_MODES) for m in modes))
+
+
 # === Tag dispatch: each handler returns the extras its tag contributes to the docker compose run ===
 
 def prepare_caches():
@@ -189,9 +376,6 @@ def _apply_prog():
     }
 
 
-TAG_HANDLERS = {TAG_PROG: _apply_prog}   # ordering for tags lives in ORDERED_TAGS; this dict is a pure lookup
-
-
 # === Mode dispatch — like tags, but per-instance (set at create/modify time, stored in agent_modes_map.json) ===
 
 def _detect_docker_gid():
@@ -213,10 +397,10 @@ def _detect_docker_gid():
 def _apply_dood():
     """{DooD} mode: bind-mount the host's /var/run/docker.sock so the agent can drive
     the host's Docker daemon (run sub-containers, build images, etc.). Detects the
-    host's docker-group GID via getent and exports it as DOCKER_GID so compose can
-    pass it as a build-arg. Without a docker group on the host, the agent couldn't
-    access the bind-mounted socket — so we fail loudly here rather than build an
-    image that won't work."""
+    host's docker-group GID via getent and hands it to docker_config.register_docker_gid
+    so the compose layer can pick it up as a build-arg. Without a docker group on
+    the host, the agent couldn't access the bind-mounted socket — so we fail loudly
+    here rather than build an image that won't work."""
     gid = _detect_docker_gid()
     if gid is None:
         raise RuntimeError(
@@ -224,8 +408,37 @@ def _apply_dood():
             "`sudo usermod -aG docker $USER` (then log out + back in). "
             "If you don't actually need DooD, modify the instance and decline the prompt."
         )
-    os.environ["DOCKER_GID"] = gid
+    register_docker_gid(gid)
     return {}
+
+
+# === Firewall allowlist (used by {auto} mode) ===
+# The built-in domain list lives at the top of this file with the other
+# constants; resolved_whitelist_domains below combines it with the user's
+# whitelist, mirroring `www.`-prefixed entries to their non-www counterpart
+# (`www.foo.com` → also `foo.com`) and adding `www.X` for entries that are
+# registrable apexes (`foo.com` → also `www.foo.com`). Subdomain entries
+# without `www.` stay as-is (no bogus `www.api.foo.com` for init-firewall.sh
+# to waste time resolving).
+
+def resolved_whitelist_domains():
+    """Full domain list for the {auto} firewall. Each entry passes through; then:
+      - if it starts with `www.`, the non-www counterpart is also registered
+        (the user typed `www.` explicitly — trust both forms matter);
+      - otherwise, `www.X` is added only when X is a registrable apex per the
+        Public Suffix List (so `foo.com` and `foo.co.uk` qualify; `api.foo.com`
+        doesn't — adding `www.api.foo.com` would cause a DNS-resolution warning
+        at firewall init).
+    Deduped, sorted."""
+    expanded = set()
+    for d in set(BUILTIN_FIREWALL_DOMAINS) | set(parse_lines(FIREWALL_WHITELIST_FILE)):
+        d = d.removeprefix("*.")   # tolerate accidental wildcards: `*.foo.com` → `foo.com` (no expansion, but no crash)
+        expanded.add(d)
+        if d.startswith("www."):
+            expanded.add(d.removeprefix("www."))
+        elif get_sld(d) == d:
+            expanded.add("www." + d)
+    return sorted(expanded)
 
 
 def _apply_auto():
@@ -233,12 +446,19 @@ def _apply_auto():
     is added in compose.auto.yml's entrypoint) behind an iptables outbound allowlist.
     The Dockerfile.auto image carries iptables + sudo + a tightly-scoped sudoers
     entry; the firewall script + entrypoint wrapper get bind-mounted via compose.auto.yml.
-    No host-side side effects."""
+    Side effect: hands the resolved domain list (built-ins + user entries +
+    www↔apex counterparts where applicable) to docker_config.register_whitelist_domains
+    so the compose layer can pass it through to init-firewall.sh — no whitelist
+    file mount needed inside the container."""
+    register_whitelist_domains(resolved_whitelist_domains())
     return {}
 
 
-# Ordering for modes lives in ORDERED_MODES (defined up top with the constants);
-# this dict is a pure lookup from name → handler.
+# Handler dispatch tables. Tag/mode ordering lives in ORDERED_TAGS / ORDERED_MODES
+# (defined up top with the other constants); these dicts are pure name → handler
+# lookups. TAG_HANDLERS sits next to MODE_HANDLERS so the dispatch surface for the
+# whole composition layer is in one place.
+TAG_HANDLERS = {TAG_PROG: _apply_prog}
 MODE_HANDLERS = {
     MODE_AUTO: _apply_auto,
     MODE_DOOD: _apply_dood,
@@ -290,21 +510,3 @@ def apply_composition(chain):
         for key in aggregated:
             aggregated[key].extend(contribution.get(key, []))
     return aggregated
-
-
-def chain_image_tag(chain):
-    """The docker image tag for a chain. ['base'] → 'claude-agents:base'.
-    ['base', 'prog', 'auto'] → 'claude-agents:prog.auto' (lowercase to match
-    the lowercase compose/Dockerfile filenames)."""
-    if len(chain) == 1:
-        return "claude-agents:base"
-    return "claude-agents:" + ".".join(step.lower() for step in chain[1:])
-
-
-def chain_compose_files(chain):
-    """The compose `-f <path>` arg list for a chain. Always includes compose.yml;
-    adds compose.<step>.yml (lowercased) for each non-base step in order."""
-    args = ["-f", str(PROJECT / "docker" / "compose.yml")]
-    for step in chain[1:]:
-        args += ["-f", str(PROJECT / "docker" / f"compose.{step.lower()}.yml")]
-    return args

@@ -222,15 +222,22 @@ Add to memory: auto mode is active; ask for access to site if you can't reach de
 this repo's premise looks interesting, look into it later:
     addyosmani/agent-skills
 
-
-Add user's firewall whitelist in ~/.claude-agents
-
 Activate spellcheck within claude code?
-
-Actually have {auto} work
 
 
 the line of code: `MODEL_FAMILY_RANK = {"opus": 3, "sonnet": 2, "haiku": 1}` at "agent_composition.py": how about just turning it into a list, with order as priority? How would the code look like?
     That's not to say I'm against using a dict, but that'd be more uniform data formation...
+
+
+skills:
+    git-pr:
+        if on main or production, git-branch
+        git pull
+        git push
+        open pr
+    git-branch:
+        if on main or production, create a new branch, bring changes over.
+        git commit
+        git publish branch to remote
 
 

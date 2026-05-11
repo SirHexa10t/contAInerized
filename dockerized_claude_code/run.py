@@ -3,7 +3,7 @@ import argparse
 import sys
 
 from launch.agent_composition import (
-    AGENTS_DIR, MODE_AUTO,
+    MODE_AUTO,
     apply_composition, compute_chain, load_conf, parse_stem,
 )
 from launch.agents_crud import (
@@ -12,9 +12,12 @@ from launch.agents_crud import (
     sync_memory_templates, update_workspace_map, validate_stored_workspace,
 )
 from launch.docker_config import (
-    print_launch_banner, require_docker, run_compose, set_container_env,
+    require_docker, run_compose, set_container_env,
 )
-from launch.menu_picker import select_agent, ask_for_workspace, prompt_modes, prompt_session
+from launch.menu_picker import (
+    ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
+)
+from launch.paths import AGENTS_DIR
 from launch.user_additions import (
     aggregated_skills_mounts, ensure_firewall_whitelist, ensure_optional_creds_readme,
     firewall_whitelist_count, optional_creds_mounts,

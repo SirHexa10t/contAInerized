@@ -24,9 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from launch.agent_composition import find_md_for_agent
 from launch.agents_crud import (
-    ACCOUNT_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_STATE, CREDENTIALS_FILE, SESSION_SEP,
+    SESSION_SEP,
     list_all_instances, load_workspace_map, state_md,
 )
+from launch.paths import ACCOUNT_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_STATE, CREDENTIALS_FILE
 
 
 def _check_json_file(path):

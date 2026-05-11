@@ -4,146 +4,174 @@
 
 ### Purpose
 
-Docker-based launcher for pre-made Claude Code agents. Each persona ships its own model and `CLAUDE.md`; all share OAuth credentials, workspace mapping, slash commands, status line, and toolchain caches. Multiple persistent sessions per agent; prior conversations resume automatically.
+Docker-based launcher for pre-made Claude Code agents. Each persona ships its own `CLAUDE.md` and (optionally) `.conf`; all share OAuth credentials, workspace mapping, slash commands, status line, skills, and toolchain caches. Multiple persistent sessions per agent; prior conversations resume automatically. Per-agent build *tags* and per-instance runtime *modes* compose into a layered Docker image and per-launch behavior.
 
 ### Tech Stack
 
-- Python 3.10+ (host launcher; uses walrus operator and structural unpacking)
-- `prompt_toolkit` — full-screen TUI picker
-- `python-dotenv` — `.conf` parsing
-- Stdlib `readline` (with libedit fallback on macOS) — tab completion in the workspace prompt
-- Docker + Compose v2 (host); container is `debian:bookworm-slim` + Claude Code installer + Rust + uv
+- Python 3.10+ host launcher (uses walrus operator)
+- `prompt_toolkit` — full-screen TUI picker; `python-dotenv` — `.conf` parsing; stdlib `readline` (libedit fallback) — workspace tab completion
+- Docker + Compose v2; container is `debian:bookworm-slim` + Claude Code installer; `[prog]` tag layer adds Rust + Node + uv toolchains; `{auto}` mode layer adds iptables + sudo
 - No tests, no CI, no lockfile
 
 ### Project Structure
 
 ```
-run.py                              entry point: CLI parsing, launch flow, cache management, docker invocation
+run.py                          entry point: 7-stage `launch()` orchestrator (input → fs validation → resume → persist → categorise → setup → run); imports from each launch/* module
 launch/
-  agents_lib.py                     agent-domain logic (no UI, no docker): discovery, naming, conf, sort, state-dir sync, picker-entry builders
-  menu_picker.py                    prompt_toolkit picker UI + ask_for_workspace; imports from agents_lib
-  audit.py                          read-only state-correctness checker; standalone CLI (`python -m launch.audit`)
-agents/                             agent definitions — drop a `<name>.md` (+ optional `.conf`) here to register
-custom_commands/                    shared slash commands — drop a `<name>.md` here, available as `/<name>`
-settings/
-  bashrc.sh                         in-container bashrc (via BASH_ENV); shell helpers (`man`, `summary_*`)
-  _summary.py                       standalone helpers backing `summary_*` (manifest scan/save for `/write-summary`)
-  statusline.sh                     prints `$AGENT_STATUS_LINE`
-  settings.json                     Claude Code settings (currently only `statusLine.command`)
-memory/MEMORY.md                    pointer to `.claude_summary`; auto-loaded every session
-tips/                               reference notes (all `.md`)
-Dockerfile, docker-compose.yml      container build + bind mounts
+  agent_composition.py          filename-grammar parser (parse_stem), tag/mode constants + handlers, build-chain composition (compute_chain, apply_composition), cache mounts, conf loader; root of the import graph (imports nothing from siblings)
+  agents_crud.py                instance-state CRUD: workspace/modes JSON maps, install_latest_md, sync_memory_templates, _force_remove (sudo fallback for Docker leftovers), picker entry builders, delete/modify_instance; imports only from agent_composition
+  docker_config.py              docker-side: env-var population, image build chain, run_compose, banner; imports from agent_composition + agents_crud + user_additions
+  menu_picker.py                prompt_toolkit picker UI + ask_for_workspace + prompt_modes + prompt_session; imports from agents_crud + agent_composition
+  user_additions.py             user-side contributions: aggregated_skills_mounts (custom_skills/ + .skills/), optional_creds_*, ensure_firewall_whitelist + firewall_whitelist_count; imports only from agent_composition
+  audit.py                      read-only state-correctness checker; standalone `python -m launch.audit`
+agents/                         agent definitions — drop a `<name>[tag](parent).md` (+ optional `.conf`) here
+custom_commands/                project-wide slash commands — drop `<name>.md`, available as `/<name>`
+custom_skills/                  project-bundled skills — drop `<name>/SKILL.md`, available as `/<name>`
+memory/
+  seek_summary.md               always-active MEMORY.md template (wrappers + body); points the agent at .claude_summary
+  auto-addendum.md              {auto}-mode addendum; tells the agent the firewall is in place and how to react
+docker/
+  Dockerfile, compose.yml       base image (no compilers); `claude-agents:base`
+  Dockerfile.prog, compose.prog.yml    [prog] tag layer: Rust + Node + uv; bind-mounts CACHE_REL_PATHS
+  Dockerfile.auto, compose.auto.yml    {auto} mode: iptables + sudo + auto-entrypoint.sh + init-firewall.sh + --dangerously-skip-permissions
+  Dockerfile.dood, compose.dood.yml    {DooD} mode: bind-mounts host's /var/run/docker.sock; exports DOCKER_GID
+  init-firewall.sh, auto-entrypoint.sh    runtime scripts bind-mounted into {auto} containers
+settings/                       in-container bashrc + manifest helpers + status line + Claude settings/keybindings
+tips/                           reference notes; `caching_docker.md` + `newlines_in_prompt.md` are recent additions
+install_bashrc_alias.sh, install_dependencies.sh    one-time host setup
 ```
 
-| Name | Role | Conf | Model |
+| Agent | Tags / parent | Conf | Role |
 |---|---|---|---|
-| `golem` | Fast-answering simpleton (cheapest) | `golem.conf` | haiku-4-5 |
-| `poet` | Dramatic literary commentator | `poet.conf` | sonnet-4-6 |
-| `researcher` | Doc-scouring researcher with Sources | `researcher.conf` | opus-4-7 |
-| `medical-investigator(researcher)` | Evidence-based clinical inquiry | `researcher.conf` | opus-4-7 |
-| `project-starter(thinker)` | Bootstraps new projects | `thinker.conf` | opus-4-7 |
-| `refactorer(thinker)` | Perfection-seeking refactorer | `thinker.conf` | opus-4-7 |
-| `strict-reviewer(thinker)` | Severity-tagged code reviewer | `thinker.conf` | opus-4-7 |
+| `golem` | — | `golem.conf` | Fast simpleton (haiku) |
+| `poet` | — | `poet.conf` | Dramatic literary commentator (sonnet) |
+| `researcher[prog]` | `[prog]` | `researcher.conf` | Doc-scouring researcher with Sources (opus) |
+| `medical-investigator(researcher)` | parent=researcher | `researcher.conf` | Evidence-based clinical inquiry |
+| `feature-identifier(thinker)` | parent=thinker | `thinker.conf` | Feature discovery |
+| `project-starter[prog](thinker)` | `[prog]`, thinker | `thinker.conf` | Bootstraps new projects |
+| `refactorer[prog](thinker)` | `[prog]`, thinker | `thinker.conf` | Perfection-seeking refactorer |
+| `strict-reviewer[prog](thinker)` | `[prog]`, thinker | `thinker.conf` | Severity-tagged code reviewer |
+| `bug-investigator[prog](breakthrough)` | `[prog]`, breakthrough | `breakthrough.conf` | Long-chain bug investigation |
+| `mathematician[prog](breakthrough)` | `[prog]`, breakthrough | `breakthrough.conf` | Algorithm/proof attack |
 
-`agents/default.conf` is the last-resort fallback when no specific or aliased conf matches; `thinker.conf` is currently equivalent (opus-4-7 + max effort + thinking on) but exists as a named role.
+`default.conf` is the last-resort fallback. `thinker.conf` ≈ opus + max + thinking; `breakthrough.conf` adds large MAX_THINKING_TOKENS + MAX_OUTPUT_TOKENS for long-derivation work.
 
 ### Architecture
 
-End-user entry: `python3 run.py [target] [...claude-args]`. Code path: `run.py:181` → `launch()` (`run.py:125`).
+Entry: `python3 run.py [target] [...claude-args]` → `launch()` (`run.py:148`).
 
-1. **Docker presence check** at module load (`run.py:13`) — `sys.exit` early if `docker` is not in `PATH`.
-2. **Empty-agents guard** — `creatable_agents()` (`agents_lib.py:138`); `sys.exit` if none.
-3. **Pick** — `parse_target() or select_agent()`: `parse_target` (`run.py:97`) consumes `sys.argv[1]` if it names an existing instance dir or known agent; otherwise `select_agent()` (`menu_picker.py:351`) renders the picker, with rows from `creatable_agents()` and `continuable_instances()` (`agents_lib.py:175`).
-4. **Resolve workspace + session** — for "new", `ask_for_workspace(agent)` then `prompt_session(agent, workspace)`; for "cont", both come from the picker payload.
-5. **Update workspace map** — `~/.claude-agents/agent_workspace_map.json` (JSON: `instance_id → workspace`); writes only on change.
-6. **Materialize state** — `install_latest_md()` (`agents_lib.py:107`) writes the agent's `.md` to `<state_dir>/CLAUDE.md` and ensures shared OAuth files exist.
-7. **Env + caches** — `set_container_env()` populates `os.environ` (`AGENT_STATE`, `AGENT_NAME`, `AGENT_STATUS_LINE`, `SOFTWARE_STACK_REFRESH`, …). All toolchain caches (Cargo, uv/pip, npm, pnpm, …) are pooled in a single host-side directory `~/.claude-agents/cache/` and bind-mounted into every container at the matching path under `/home/claude/` — so one agent's downloads benefit every subsequent launch. `prepare_caches()` mkdirs the host dirs (so Docker doesn't auto-create them as root); `prune_caches()` evicts files older than 7 days from any cache that exceeds 5 GB (skipped while any `claude-code_*` container is running).
-8. **Build + exec** — `ensure_image()` runs `docker compose build`, then `docker compose run --rm -it` (`run.py:170`) with `-v` cache mounts, `-e KEY=VALUE` per conf entry, and `--continue` for cont instances. `sys.exit(subprocess.call(cmd))`.
+1. **Input** — `select_pick()`: argparse parses `target` (file or instance id); unknown name falls through to `claude_args`. Picker opens if no target. Empty-`agents/` exits early.
+2. **Filesystem validation** — `resolve_target(payload)`: prompts for missing workspace/session for `new`, validates a stored stale workspace path for `cont`.
+3. **Resume detection** — `compute_resume_flag(kind, instance)` returns `["--continue"]` only when the instance has a non-empty conversation JSONL (history-only state would crash claude).
+4. **Persist** — `update_workspace_map(instance, workspace)` writes `~/.claude-agents/agent_workspace_map.json` if changed.
+5. **Categorise** — `compose_runtime(kind, instance, md_path)`: parses `[tags]` from the filename, prompts/loads `{modes}` (per-instance, stored in `agent_modes_map.json`), `compute_chain(tags, modes)` builds `["base", ...tags-in-ORDERED_TAGS-order, ...modes-in-ORDERED_MODES-order]`, `apply_composition(chain)` runs each step's handler (side effects: mkdir caches for `[prog]`, detect `DOCKER_GID` for `{DooD}`) and aggregates `volume_args`.
+6. **Setup** — `setup_state(...)`: `install_latest_md` copies `agents/<x>.md` → `<state>/CLAUDE.md`; `sync_memory_templates` regenerates per-instance MEMORY.md from `memory/seek_summary.md` + each active mode's addendum (preserving agent-added pointer entries outside the wrapper blocks); `set_container_env` populates `os.environ`; `aggregated_skills_mounts`/`optional_creds_mounts` collect `-v` args; `ensure_*` helpers create the optional-creds README and firewall whitelist file with template content if missing.
+7. **Banner + run** — `print_launch_banner` summarises chain/skills/creds/whitelist; `run_compose` builds each chain step incrementally (`docker compose build` per step with `PARENT_IMAGE`/`TARGET_IMAGE` env-var threading), sets `TARGET_IMAGE`, and execs `docker compose -f compose.yml [-f compose.<step>.yml]* run --rm -it ... claude-code`. `sys.exit(subprocess.call(cmd))`.
 
 Bind mounts (host → container):
-
 - `$AI_WORKSPACE` → `/workspace`
-- `~/.claude-agents/<agent>__<session>/` → `/home/claude/.claude` (per-instance state)
-- `~/.claude-agents/.claude.json` → `/home/claude/.claude.json` (shared OAuth)
-- `~/.claude-agents/.credentials.json` → `/home/claude/.claude/.credentials.json`
-- `./custom_commands/` → `/home/claude/.claude/commands` (ro; shared slash commands)
-- `./settings/statusline.sh` → `/home/claude/.claude/statusline.sh` (ro)
-- `./settings/bashrc.sh` → `/home/claude/.bashrc` (ro; sourced via `BASH_ENV`)
-- `./settings/_summary.py` → `/home/claude/.claude/_summary.py` (ro)
-- `./settings/settings.json` → `/home/claude/.claude/settings.json` (ro)
-- `./memory/MEMORY.md` → `/home/claude/.claude/projects/-workspace/memory/MEMORY.md` (ro)
-- Per-launch `~/.claude-agents/cache/<rel>` → `/home/claude/<rel>` for each rel in `CACHE_REL_PATHS` (`run.py:20`)
+- `~/.claude-agents/<agent>__<session>/` → `/home/claude/.claude` (per-instance state; CLAUDE.md and MEMORY.md live inside)
+- `~/.claude-agents/.claude.json` + `.credentials.json` → matching paths (shared OAuth)
+- `./custom_commands/` → `/home/claude/.claude/commands` (ro)
+- `./custom_skills/<name>/` and `<workspace>/.skills/<name>/` → `/home/claude/.claude/skills/<name>` (ro; workspace overrides project)
+- `./settings/{statusline.sh,bashrc.sh,_summary.py,settings.json,keybindings.json}` → matching container paths (ro)
+- `~/.claude-agents/optional_creds/<svc>/` → CLI-default path (rw; aws/gcloud/kube/ssh/gh/glab/vercel/railway/npmrc/pypirc)
+- `~/.claude-agents/firewall_whitelist.txt` → `/usr/local/etc/firewall_whitelist.txt` (`{auto}` only, ro)
+- `~/.claude-agents/cache/<rel>` → `/home/claude/<rel>` (`[prog]` only, rw)
+- `/var/run/docker.sock` → same path (`{DooD}` only)
 
 ### Conventions and Patterns
 
-- **Identity**: `agent` = clean name (parens stripped via `_parse_stem`), `session` = user-chosen suffix, `instance` = `agent__session`. `instance_name()` assumes its `agent` arg is already clean — the strip happens once at discovery in `creatable_agents()`, not on every call.
-- **Conf aliasing via filename**: `agents/<name>(<parent>).md` resolves to `agents/<parent>.conf` (e.g., `refactorer(thinker).md` → `thinker.conf`); see `_parse_stem` (`agents_lib.py:36`).
-- **Per-agent `.conf` fully replaces `default.conf`** (`agents_lib.py:78`) — not merged; agent confs must re-declare any default they still want.
+- **Filename grammar**: `<name>(<tag>|<parent>)*.md`. `[tag]` accumulates; `(parent)` is single-valued; order between brackets and parens is free. Parsed by `parse_stem` (`agent_composition.py:67`). Tags drive build chain; parent picks the `.conf`.
+- **Tag vs mode distinction**: tags `[x]` are per-agent (in filename, stable); modes `{x}` are per-instance (selected at `new`, stored in `agent_modes_map.json`, prompted/changed via `modify_instance`). Both compose into the build chain via `compute_chain`.
+- **Adding a new tag/mode**: append to `ORDERED_TAGS` / `ORDERED_MODES` (walrus also sets the constant) AND add a handler entry in `TAG_HANDLERS` / `MODE_HANDLERS` (`agent_composition.py:33-40`). Create `Dockerfile.<name>` + `compose.<name>.yml`. The chain composition picks them up automatically.
+- **Image naming**: `claude-agents:base`, `claude-agents:prog`, `claude-agents:prog.auto`, etc. — chain steps after `base` joined by `.` and lowercased (`chain_image_tag`).
+- **Per-agent `.conf` fully replaces `default.conf`** (not merged — agent confs must re-declare any default they still want).
+- **MEMORY.md is per-instance and writable** (no longer a project-wide read-only mount). `sync_memory_templates` (`agents_crud.py:250`) reconciles wrapped blocks at every launch using the first/last lines of each `memory/<x>.md` template as start/end markers; everything outside the markers is preserved verbatim (auto-memory step 2 — agent-added pointer entries).
+- **`_force_remove(path, *, name=None)`** (`agents_crud.py:204`) is the canonical removal helper — file/symlink/dir, sudo + `sudo -k` fallback for root-owned Docker bind-mount leftovers; `name=` switches it to user-facing mode (logs without "stale", pauses for keypress on sudo failure). `delete_instance` and `sync_memory_templates` both go through it.
 - **Env-var config layering** (edit at the layer that owns the key):
   - `Dockerfile` `ENV`: `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `USE_BUILTIN_RIPGREP=0`. Baked into the image; needs rebuild.
-  - `agents/default.conf`: model/effort defaults; last-resort fallback only (per-agent confs replace it wholesale).
-  - `agents/<name>.conf` (or aliased): forwarded as `-e KEY=VALUE` per entry (conf is **not** spilled into host env).
-  - `docker-compose.yml` `environment`: static shared keys (`TERM`, `AGENT_STATUS_LINE`, `BASH_ENV`).
-  - `run.py:set_container_env`: dynamic launch-time keys (`AGENT_STATE`, `AGENT_NAME`, `AGENT_STATUS_LINE`, `SOFTWARE_STACK_REFRESH`, `AI_WORKSPACE`, `ACCOUNT_FILE`, `CREDENTIALS_FILE`).
-- **Instance ID**: `<agent>__<session>` (`SESSION_SEP = "__"`) — also the state-dir name and the workspace-map key.
-- **Module dependencies are linear**: `agents_lib` imports nothing from siblings; `menu_picker` imports from `agents_lib`; `run.py` imports from both. No cycles.
-- **Picker dict roles differ**: agent rows (`creatable_agents()`) carry `label_name` + `agent_name`; instance rows (`continuable_instances()`) carry `id` + `agent_name`. Don't conflate.
-- **Picker key bindings**: ↑/↓ navigate, type-to-filter, Enter selects, Del deletes (with confirmation), F2 redefines an instance (walks through new session + workspace), Esc/Ctrl-C cancels.
-- **Workspace storage**: `ask_for_workspace` expands `~` and makes absolute via `os.path.abspath`, but does **not** resolve symlinks — the form the user typed is what gets persisted in `agent_workspace_map.json` (`menu_picker.py:324`).
-- **Workspace-prompt tab completion**: `ask_for_workspace` swaps in a path-completing readline completer for the prompt's duration; the libedit-vs-GNU-readline backend is detected at runtime and the matching `parse_and_bind` syntax is used (so macOS works too).
-- **Default workspace**: `$AI_WORKSPACE` else `$PWD`, except when `$PWD == $HOME` then `/ai_workspace` (so launching from home doesn't bind-mount all of `$HOME`); see `agents_lib.py:27`.
-- **Manifest helpers** (`settings/_summary.py` + bash wrappers `summary_diff` / `summary_files` / `summary_save_manifest`): back the `/write-summary` slash command. The parser anchors on the `### File Manifest` heading and requires both HTML-comment marker lines to appear on their own lines after it (so incidental marker mentions in prose are ignored); `summary_save_manifest` refuses to run if any of those three lines is missing.
-- **Container UID**: `HOST_UID` build arg matches the host UID so bind-mounted files stay host-writable (`Dockerfile:17`).
-- **Empty build context**: `.dockerignore` is just `*` — the image is built entirely from apt + installer scripts; nothing is copied from `/workspace`.
+  - `agents/default.conf` / `<parent>.conf` / `<name>.conf`: forwarded as `-e KEY=VALUE` (per-agent fully replaces default).
+  - `compose.yml` `environment`: static shared keys (`TERM`, `AGENT_STATUS_LINE`, `BASH_ENV`).
+  - `set_container_env` (`docker_config.py:67`): launch-time keys (`AGENT_STATE`, `AGENT_NAME`, `AI_WORKSPACE`, `SOFTWARE_STACK_REFRESH`, `ACCOUNT_FILE`, `CREDENTIALS_FILE`, plus `INSTALL_<TOOL>` flags).
+- **`{auto}` + `{DooD}` together is dangerous** — `set_instance_modes` warns explicitly (`warn_dood_with_auto`); the agent has unattended root-equivalent host access via the docker socket.
+- **`{auto}` firewall ergonomics**: built-in `ALLOWED_DOMAINS` (Anthropic API, GitHub, npm, PyPI, crates.io) + user file at `~/.claude-agents/firewall_whitelist.txt` (`#`-comments, one domain per line); init-firewall.sh has a self-test that fails the launch if `example.com` *is* reachable (catches iptables-nft/legacy backend mismatches).
+- **`SOFTWARE_STACK_REFRESH`** = ISO week (`%Y-W%W`) — weekly cache buster for the Dockerfile's curl-piped installers (uv, rich-cli, Claude Code, rustup); set in `docker_config.py:27` and forced via env var to override mid-week.
+- **Container UID**: `HOST_UID` build arg matches the host UID so bind-mounted files stay host-writable.
+- **Manifest helpers** (`settings/_summary.py` + bash wrappers `summary_diff` / `summary_files` / `summary_save_manifest`) back `/write-summary`. The save helper anchors on the `### File Manifest` heading and refuses to run without both `<!-- manifest:begin -->` / `<!-- manifest:end -->` markers.
 
 ### Known Issues
 
-- **No tests, no CI, no lockfile** — nothing guards against regressions.
-- **`docker compose build` runs unconditionally on every launch** (`run.py:75`) — adds ~1 s even when nothing changed; no image-exists short-circuit.
-- **`install_latest_md` overwrites the state dir's `CLAUDE.md` every launch** (`agents_lib.py:107`) — any in-container edits are silently discarded. `audit.py` reports drift but doesn't repair.
-- **No `/switch` slash command** — possible but limited to agents sharing the same `.conf` and workspace; deemed too restrictive to ship. See `tips/configurating_agents.md` and the dedicated section in `TODO.txt`.
-- **`launch/audit.py` uses `sys.path.insert(0, …)`** at module top so it runs both as `python -m launch.audit` and `python launch/audit.py` — functional but unconventional.
+- **No tests, no CI, no lockfile**.
+- **`docker compose build` runs unconditionally per chain step on every launch** (`docker_config.py:46`) — adds a few seconds; no image-exists short-circuit.
+- **`install_latest_md` overwrites `<state>/CLAUDE.md` every launch** — any in-container edits silently discarded; `audit.py` reports drift but doesn't repair.
+- **Per-instance MEMORY.md never refreshes the template body once written** — `sync_memory_templates` matches blocks by wrapper lines and replaces the body, so upstream edits to a template's body *do* propagate; but if a user customises the wrapper-line format, existing instances' MEMORY.md keeps the old wrappers and the launcher orphans them (see `sync_memory_templates` docstring).
+- **Bash trim in `init-firewall.sh` uses `echo $line | sed ... | xargs`** — three subprocess calls per user-whitelist line. Negligible for typical whitelist sizes; would matter at hundreds of entries.
 
 ### Current State
 
-Nothing in flight. `TODO.txt` lists future ideas (domain-tagged agents that compose extra `FROM ... AS` Docker stages, summary-placement experiments, `init-firewall.sh` for unattended `--dangerously-skip-permissions`, per-agent Bedrock backing, video-tip integration) but none are mid-implementation.
+Nothing in flight. `TODO.txt` lists future ideas (domain-tagged agents bringing extra apt/CLI tooling — image/video/3D/audio toolchains; integration of an external AI-workflow video; per-agent backing model configurability; an option to mount the project summary directly into MEMORY.md rather than referencing `.claude_summary`). None are mid-implementation.
 
 ### File Manifest
 
 <!-- manifest:begin -->
+1778406366 launch/agents_crud.py
+1778404415 launch/docker_config.py
+1778404286 docker/init-firewall.sh
+1778404278 launch/user_additions.py
+1778401876 docker/compose.auto.yml
+1778401847 run.py
+1778397355 launch/agent_composition.py
+1778395542 docker/compose.yml
+1778395537 memory/auto-addendum.md
+1778395535 memory/seek_summary.md
+1778391900 TODO.txt
+1778387884 custom_commands/unspaghettify.md
+1778387883 custom_commands/refactor.md
+1778377682 launch/menu_picker.py
+1778370331 docker/auto-entrypoint.sh
+1778370302 docker/compose.dood.yml
+1778370288 docker/compose.prog.yml
+1778370254 docker/Dockerfile.auto
+1778370235 docker/Dockerfile.dood
+1778370219 docker/Dockerfile.prog
+1778366051 README.md
+1778213936 install_dependencies.sh
+1778137159 tips/newlines_in_prompt.md
+1778104819 docker/Dockerfile
+1778099042 tips/caching_docker.md
+1778098155 launch/audit.py
+1778097935 agents/feature-identifier(thinker).md
+1778097934 custom_commands/write-summary.md
+1778085365 settings/keybindings.json
+1778075141 custom_skills/print/SKILL.md
+1778052996 settings/bashrc.sh
+1778036448 .prompts/models_update.txt
+1777429255 install_bashrc_alias.sh
+1777427342 agents/bug-investigator[prog](breakthrough).md
+1777424090 agents/mathematician[prog](breakthrough).md
+1777392091 agents/breakthrough.conf
+1777259003 custom_commands/write-readme.md
 1777255042 settings/_summary.py
-1777253372 custom_commands/write-summary.md
 1777252333 tips/token_usage_stats.md
 1777252322 tips/resume session.md
 1777252311 tips/login.md
 1777252296 tips/configurating_agents.md
 1777252289 tips/chat_syntax.md
-1777251869 TODO.txt
-1777251632 README.md
-1777242739 launch/menu_picker.py
-1777237414 settings/bashrc.sh
-1777233742 docker-compose.yml
-1777221615 launch/audit.py
-1777217752 launch/agents_lib.py
-1777217174 run.py
 1777215322 launch/__init__.py
-1777167483 agents/project-starter(thinker).md
-1777167333 custom_commands/write-readme.md
+1777167483 agents/project-starter[prog](thinker).md
 1776869480 agents/thinker.conf
 1776867376 agents/medical-investigator(researcher).md
-1776861655 Dockerfile
-1776834041 tips/caching_docker.md
 1776636360 settings/statusline.sh
 1776566569 settings/settings.json
-1776564169 memory/MEMORY.md
 1776485876 agents/poet.conf
 1776485867 agents/researcher.conf
 1776485865 agents/default.conf
 1774431167 agents/golem.conf
 1774207589 agents/poet.md
-1774199498 agents/researcher.md
+1774199498 agents/researcher[prog].md
 1774198572 agents/golem.md
 1774196909 .dockerignore
-1774196909 agents/refactorer(thinker).md
-1774196909 agents/strict-reviewer(thinker).md
+1774196909 agents/refactorer[prog](thinker).md
+1774196909 agents/strict-reviewer[prog](thinker).md
 <!-- manifest:end -->

@@ -3,21 +3,22 @@ and optional credentials (~/.claude-agents/optional_creds/<service>/). Both foll
 pattern: scan a known host location, return -v flags for whatever's present. Collected here
 so run.py can stay focused on docker compose orchestration.
 
-Imports from agent_composition only (PROJECT for custom_skills/, AGENTS_STATE for optional_creds/).
-"""
+Path constants for the host-side and container-side locations (FIREWALL_WHITELIST_FILE,
+OPTIONAL_CREDS_DIR, OPTIONAL_CREDS_MOUNTS, SKILLS_IN_CONTAINER, PROJECT_CUSTOM_SKILLS_DIR)
+live in paths.py."""
 
 from pathlib import Path
 
-from .agent_composition import AGENTS_STATE, PROJECT
+from .paths import (
+    FIREWALL_WHITELIST_FILE, OPTIONAL_CREDS_DIR, OPTIONAL_CREDS_MOUNTS,
+    PROJECT_CUSTOM_SKILLS_DIR, SKILLS_IN_CONTAINER,
+)
+from .utils import parse_lines
 
 
 # ============================================================
 # Skills — project-bundled (custom_skills/) + per-workspace (.skills/)
 # ============================================================
-
-SKILLS_IN_CONTAINER = "/home/claude/.claude/skills"
-PROJECT_CUSTOM_SKILLS_DIR = PROJECT / "custom_skills"
-
 
 def aggregated_skills_mounts(workspace, state_path):
     """Surface skills from `custom_skills/` (this project's bundled skills) and
@@ -47,29 +48,6 @@ def aggregated_skills_mounts(workspace, state_path):
 # ============================================================
 # Optional credentials — ~/.claude-agents/optional_creds/<service>/
 # ============================================================
-
-# Each subpath under ~/.claude-agents/optional_creds/, when present on the host,
-# gets bind-mounted to the matching default location inside the container so the
-# corresponding CLI (aws/gcloud/gh/etc.) just works. Read-write so cloud CLIs can
-# refresh tokens / write cache; presence on host is the opt-in.
-OPTIONAL_CREDS_DIR = AGENTS_STATE / "optional_creds"
-OPTIONAL_CREDS_MOUNTS = {
-    "aws":     "/home/claude/.aws",
-    "gcloud":  "/home/claude/.config/gcloud",
-    "kube":    "/home/claude/.kube",
-    "ssh":     "/home/claude/.ssh",
-    "gh":      "/home/claude/.config/gh",
-    "glab":    "/home/claude/.config/glab-cli",
-    "vercel":  "/home/claude/.local/share/com.vercel.cli",
-    "railway": "/home/claude/.config/railway",
-    "npmrc":   "/home/claude/.npmrc",
-    "pypirc":  "/home/claude/.pypirc",
-}
-# Each cred dir's presence flips the matching INSTALL_<TOOL>=1 build-arg below. The
-# Dockerfile.prog decides what to do with it — most install the matching CLI; some
-# entries with no install rule (ssh/npmrc are already covered by base + prog) just
-# get the no-op default and a passthrough mount.
-
 
 _OPTIONAL_CREDS_README = """\
 (Auto-generated on first launch by run.py — safe to edit or delete; only re-created if missing.)
@@ -110,9 +88,10 @@ def optional_creds_mounts():
 
 
 def optional_creds_install_env():
-    """Build the INSTALL_<TOOL>=1|0 env vars Dockerfile.prog reads as build-args, based
-    on which optional_creds/<name>/ entries exist on the host. Returns a dict the caller
-    merges into os.environ before docker compose build."""
+    """Build the INSTALL_<TOOL>=1|0 build-arg dict for Dockerfile.prog, keyed by
+    presence of each optional_creds/<name>/ entry on the host. Returns the dict;
+    docker_config.register_install_creds_flags is the caller that surfaces it to
+    compose."""
     return {
         f"INSTALL_{name.upper()}": ("1" if (OPTIONAL_CREDS_DIR / name).exists() else "0")
         for name in OPTIONAL_CREDS_MOUNTS
@@ -120,21 +99,21 @@ def optional_creds_install_env():
 
 
 # ============================================================
-# Firewall whitelist — ~/.claude-agents/firewall_whitelist.txt
+# Firewall whitelist — user-facing file location + operations
 # ============================================================
-
-# User-managed list of extra domains to allow through the {auto} mode firewall,
-# alongside the built-in ALLOWED_DOMAINS in docker/init-firewall.sh. One domain
-# per line, '#' for comments. compose.auto.yml bind-mounts it into the container;
-# init-firewall.sh reads it after its built-in allowlist loop.
-FIREWALL_WHITELIST_FILE = AGENTS_STATE / "firewall_whitelist.txt"
 
 _FIREWALL_WHITELIST_TEMPLATE = """\
 # User-defined firewall allowlist for {auto} mode.
 #
 # Each non-empty, non-comment line is treated as a domain to allow alongside
 # the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, plus DNS).
-# See docker/init-firewall.sh for the full set of built-ins.
+# See BUILTIN_FIREWALL_DOMAINS in launch/agent_composition.py for the full set.
+#
+# - Matching is by IP, not hostname.
+# - For an apex domain (`foo.com`, `foo.co.uk`), the launcher auto-adds the `www.` counterpart — both forms get allowed even when they resolve to different IPs (common on CDN-fronted sites).
+# - If you type the `www.` form yourself (`www.foo.com`, `www.api.foo.com`), the launcher also registers the non-www counterpart, so both forms are covered.
+# - Subdomain entries without `www.` (`api.foo.com`) are passed through as-is — no `www.` prefix is added.
+# - Wildcards like `*.foo.com` don't expand — each subdomain you want needs its own line. A leading `*.` is silently stripped, so `*.foo.com` is treated the same as `foo.com` (no crash, but no subdomain coverage either).
 #
 # Examples — uncomment any line below to grant outbound access on the next
 # {auto} launch:
@@ -153,15 +132,13 @@ def ensure_firewall_whitelist():
     """Create ~/.claude-agents/firewall_whitelist.txt with a commented preamble on
     first launch so users discovering the file know what to put in it. Idempotent —
     won't overwrite user edits."""
-    AGENTS_STATE.mkdir(parents=True, exist_ok=True)
+    FIREWALL_WHITELIST_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not FIREWALL_WHITELIST_FILE.exists():
         FIREWALL_WHITELIST_FILE.write_text(_FIREWALL_WHITELIST_TEMPLATE)
 
 
 def firewall_whitelist_count():
-    """Count active domain lines in firewall_whitelist.txt — non-empty after
-    stripping inline comments and surrounding whitespace."""
-    if not FIREWALL_WHITELIST_FILE.exists():
-        return 0
-    return sum(1 for line in FIREWALL_WHITELIST_FILE.read_text().splitlines()
-               if line.split("#", 1)[0].strip())
+    """Count active domain lines in the user's firewall_whitelist.txt — for the
+    launch banner. Excludes built-ins and the auto-added apex/www counterparts;
+    this is "how many entries did the user write themselves"."""
+    return sum(1 for _ in parse_lines(FIREWALL_WHITELIST_FILE))

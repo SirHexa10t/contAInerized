@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # init-firewall.sh — iptables-based outbound allowlist for the {auto} mode.
 #
-# Vendored from Anthropic's devcontainer reference (MIT-licensed):
+# Originally vendored from Anthropic's devcontainer reference (MIT-licensed):
 #   https://github.com/anthropics/claude-code/tree/main/.devcontainer
-# Anthropic occasionally updates that script as the allowlisted endpoints
-# evolve; refresh from upstream periodically (or merge their changes by hand
-# below) and keep this header in sync.
+# Now diverged: the launcher resolves the allowlist in Python (built-ins +
+# user's firewall_whitelist.txt + apex/www counterparts, deduped) and passes
+# it in via the WHITELIST_DOMAINS env var. This script just iterates it.
 #
-# Invoked by docker/auto-entrypoint.sh on container start (via sudo). Sets up
-# an iptables outbound allow-list so an unattended (--dangerously-skip-permissions)
-# agent can only reach domains we trust: Anthropic API, GitHub, npm, PyPI,
-# crates.io and DNS. Everything else is dropped at the network layer.
+# Invoked by docker/auto-entrypoint.sh on container start (via sudo). The
+# sudoers entry installed by Dockerfile.auto restricts claude to ONLY this
+# command, and `Defaults env_keep += "WHITELIST_DOMAINS"` preserves the env
+# var across the privilege boundary.
 #
-# To add domains: append to ALLOWED_DOMAINS below; re-run the {auto} agent
-# (the script runs on every container start, so changes apply immediately).
+# Re-run protection: a marker in /var/run blocks any second invocation, so an
+# attacker can't set their own WHITELIST_DOMAINS and reapply a permissive
+# firewall after the first (legitimate) run has finished. /var/run is
+# root-owned; the marker is created here (running as root via sudo) and the
+# claude user can't remove it.
 #
 # Image requirements (handled by docker/Dockerfile.auto):
 #   - iptables installed
@@ -21,10 +24,19 @@
 
 set -euo pipefail
 
-# Reset filter chains. DON'T flush the nat table — Docker's embedded DNS resolver
-# at 127.0.0.11 is a fake address redirected to dockerd via a NAT rule installed
-# inside the container's namespace. Flushing nat (`iptables -t nat -F`) destroys
-# that redirect; subsequent DNS lookups fail silently, no allowlist entries get
+# --- Init-once marker -------------------------------------------------------
+MARKER=/var/run/init-firewall.applied
+if [ -e "$MARKER" ]; then
+    echo "init-firewall.sh: firewall already applied for this container; refusing to re-run." >&2
+    exit 1
+fi
+touch "$MARKER"
+
+# --- Reset filter chains ----------------------------------------------------
+# DON'T flush the nat table — Docker's embedded DNS resolver at 127.0.0.11 is
+# a fake address redirected to dockerd via a NAT rule installed inside the
+# container's namespace. Flushing nat (`iptables -t nat -F`) destroys that
+# redirect; subsequent DNS lookups fail silently, no allowlist entries get
 # added, and outbound dies with ConnectionRefused once claude starts.
 iptables -F
 iptables -X
@@ -46,43 +58,17 @@ iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
-# Allowlist — resolve each, accept HTTPS (443) and HTTP (80) to the resulting IPs
-ALLOWED_DOMAINS=(
-    # Anthropic
-    "api.anthropic.com"
-    "console.anthropic.com"
-    "claude.ai"
+# --- Allowlist --------------------------------------------------------------
+# WHITELIST_DOMAINS is space-separated, produced by the launcher via
+# user_additions.resolved_whitelist_domains(). Already deduped and apex/www
+# expanded — nothing to parse here.
 
-    # GitHub (git, releases, raw, codeload, container registry)
-    "github.com"
-    "api.github.com"
-    "raw.githubusercontent.com"
-    "objects.githubusercontent.com"
-    "codeload.github.com"
-    "ghcr.io"
-
-    # npm
-    "registry.npmjs.org"
-
-    # PyPI
-    "pypi.org"
-    "files.pythonhosted.org"
-
-    # crates.io (Rust)
-    "crates.io"
-    "static.crates.io"
-    "index.crates.io"
-)
-
-# Resolve a single domain and add accept rules for HTTPS/HTTP. Used for both
-# the built-in ALLOWED_DOMAINS list above and the user-managed whitelist below.
 allow_domain() {
     local domain="$1"
-    local source="${2:-built-in}"
     local ips
     ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
     if [ -z "$ips" ]; then
-        echo "init-firewall.sh: warning: '$domain' ($source) did not resolve; skipping" >&2
+        echo "init-firewall.sh: warning: '$domain' did not resolve; skipping" >&2
         return
     fi
     for ip in $ips; do
@@ -91,35 +77,26 @@ allow_domain() {
     done
 }
 
-for domain in "${ALLOWED_DOMAINS[@]}"; do
+domain_count=0
+for domain in ${WHITELIST_DOMAINS:-}; do
     allow_domain "$domain"
+    domain_count=$((domain_count + 1))
 done
 
-# User whitelist — extra domains the user added on the host at
-# ~/.claude-agents/firewall_whitelist.txt. compose.auto.yml bind-mounts it to
-# the path below; missing file is tolerated defensively (the launcher's
-# ensure_firewall_whitelist creates one on first launch and is idempotent after).
-USER_WHITELIST=/usr/local/etc/firewall_whitelist.txt
-if [ -f "$USER_WHITELIST" ]; then
-    while IFS= read -r line; do
-        # strip everything after '#' (inline comments + comment-only lines), trim whitespace
-        domain=$(echo "$line" | sed 's/#.*//' | xargs)
-        [ -n "$domain" ] && allow_domain "$domain" "user"
-    done < "$USER_WHITELIST"
-fi
-
-# Catch-all REJECT at the end of OUTPUT/FORWARD. Belt-and-suspenders with the
-# `iptables -P OUTPUT DROP` policy above — under iptables-nft / iptables-legacy
-# backend mismatches, the policy isn't always honored, but explicit `-A` rules
-# are. REJECT (vs DROP) returns ICMP-port-unreachable so applications fail fast
-# instead of waiting for TCP timeout.
+# --- Catch-all REJECT -------------------------------------------------------
+# Belt-and-suspenders with the `iptables -P OUTPUT DROP` policy — under
+# iptables-nft / iptables-legacy backend mismatches, the policy isn't always
+# honored, but explicit `-A` rules are. REJECT (vs DROP) returns
+# ICMP-port-unreachable so applications fail fast instead of waiting for TCP
+# timeout.
 iptables -A OUTPUT  -j REJECT --reject-with icmp-port-unreachable
 iptables -A FORWARD -j REJECT --reject-with icmp-port-unreachable
 
-# Self-test — verify the firewall actually enforces. Without this, a backend
-# mismatch (rules written but not honored) would silently leave the unattended
-# agent free to reach anywhere. Fail loudly so the container terminates rather
-# than starting claude on top of a non-functional firewall.
+# --- Self-test --------------------------------------------------------------
+# Without this, a backend mismatch (rules written but not honored) would
+# silently leave the unattended agent free to reach anywhere. Fail loudly so
+# the container terminates rather than starting claude on top of a
+# non-functional firewall.
 echo "init-firewall.sh: testing enforcement..."
 
 # Negative test: example.com is NOT in the allowlist; should be unreachable.
@@ -144,4 +121,4 @@ if ! curl --connect-timeout 5 -s -o /dev/null -I https://api.anthropic.com; then
     exit 1
 fi
 
-echo "init-firewall.sh: enforcement verified — allowlist of ${#ALLOWED_DOMAINS[@]} domains active, all other outbound rejected."
+echo "init-firewall.sh: enforcement verified — allowlist of ${domain_count} domains active, all other outbound rejected."
