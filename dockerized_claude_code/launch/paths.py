@@ -97,6 +97,7 @@ OPTIONAL_CREDS_MOUNTS = {
     "ssh":     "/home/claude/.ssh",
     "gh":      "/home/claude/.config/gh",
     "glab":    "/home/claude/.config/glab-cli",
+    "jira":    "/home/claude/.config/.jira",
     "vercel":  "/home/claude/.local/share/com.vercel.cli",
     "railway": "/home/claude/.config/railway",
     "npmrc":   "/home/claude/.npmrc",

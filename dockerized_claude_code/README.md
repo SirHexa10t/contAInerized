@@ -81,10 +81,8 @@ Host requirements:
 - **Docker** + the Compose v2 plugin
 - **Python 3.10+** (the launcher uses walrus expressions and structural
   unpacking)
-- Four Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
-  (`.conf` parsing), **`rich`** (markdown rendering for agent previews),
-  **`publicsuffix2`** (apex-domain detection for the `{auto}` firewall
-  whitelist)
+- Three Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
+  (`.conf` parsing), **`rich`** (markdown rendering for agent previews)
 
 Inside the container, the runtime image is built incrementally as a chain
 of layers. `docker/Dockerfile` (the **base** stage) installs Claude Code +
@@ -105,7 +103,7 @@ Run the installer from the project root:
 bash install_dependencies.sh
 ```
 
-It uses uv to set up a Python venv at `~/pydev` with all four pip deps,
+It uses uv to set up a Python venv at `~/pydev` with all three pip deps,
 installs Docker via the official convenience script (which bundles the
 Compose v2 plugin), and adds your user to the `docker` group. Idempotent —
 safe to re-run; if `~/pydev` already exists, it's reused as-is, and the
@@ -127,7 +125,7 @@ download URL so you can install it manually, then re-run to set up Python.
 
 Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop)
 and [Python 3.10+](https://www.python.org/downloads/) from their official
-sites, then `pip install prompt_toolkit python-dotenv rich publicsuffix2`
+sites, then `pip install prompt_toolkit python-dotenv rich`
 in your shell of choice.
 
 Or — recommended — install Docker Desktop on the Windows host and run the
@@ -151,7 +149,7 @@ Then confirm the toolchain:
 
 ```bash
 docker compose version
-python3 -c "import prompt_toolkit, dotenv, rich, publicsuffix2; print('ok')"
+python3 -c "import prompt_toolkit, dotenv, rich; print('ok')"
 ```
 
 If either errors out, fix it before proceeding — `run.py` exits early with a
@@ -335,6 +333,7 @@ tokens, write cache, etc.). Anything not in this list is ignored — extend
 | `ssh/`     | `/home/claude/.ssh/`                       | `ssh`, `git` over ssh | — already in `base` image |
 | `gh/`      | `/home/claude/.config/gh/`                 | `gh`      | ✓ via apt (GitHub apt repo) |
 | `glab/`    | `/home/claude/.config/glab-cli/`           | `glab`    | ✓ via apt (GitLab packagecloud repo) |
+| `jira/`    | `/home/claude/.config/.jira/`              | `jira` (ankitpokhrel/jira-cli) | ✓ static binary from GitHub releases — your Jira host (`<org>.atlassian.net`) needs to be in the {auto} whitelist for the CLI to reach it |
 | `vercel/`  | `/home/claude/.local/share/com.vercel.cli/`| `vercel`  | ✓ via `npm install -g vercel` |
 | `railway/` | `/home/claude/.config/railway/`            | `railway` | ✓ via `npm install -g @railway/cli` |
 | `npmrc`    | `/home/claude/.npmrc`                      | `npm` (auth tokens) | — `npm` is in the prog image |

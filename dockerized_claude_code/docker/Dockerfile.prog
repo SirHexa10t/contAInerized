@@ -93,6 +93,24 @@ RUN : "${INSTALL_KUBE}" \
         && chmod +x /home/claude/.local/bin/kubectl; \
     fi
 
+# Jira CLI (ankitpokhrel/jira-cli) — Go-based static binary from GitHub releases.
+# Latest version pulled from the GitHub API at build time; arch maps amd64 → x86_64,
+# arm64 → arm64 (the tarball's own naming convention).
+ARG INSTALL_JIRA=0
+RUN : "${INSTALL_JIRA}" \
+ && if [ "$INSTALL_JIRA" = "1" ]; then \
+        VERSION=$(curl -fsSL https://api.github.com/repos/ankitpokhrel/jira-cli/releases/latest | grep -oP '"tag_name": "v\K[^"]+') \
+        && case "$(dpkg --print-architecture)" in \
+              amd64) ARCH_SUFFIX=x86_64 ;; \
+              arm64) ARCH_SUFFIX=arm64 ;; \
+              *) echo "unsupported arch for jira-cli: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+           esac \
+        && curl -fsSL "https://github.com/ankitpokhrel/jira-cli/releases/download/v${VERSION}/jira_${VERSION}_linux_${ARCH_SUFFIX}.tar.gz" \
+           | tar -xz -C /tmp \
+        && mv "/tmp/jira_${VERSION}_linux_${ARCH_SUFFIX}/bin/jira" /home/claude/.local/bin/jira \
+        && rm -rf "/tmp/jira_${VERSION}_linux_${ARCH_SUFFIX}"; \
+    fi
+
 ARG INSTALL_VERCEL=0
 RUN : "${INSTALL_VERCEL}" \
  && if [ "$INSTALL_VERCEL" = "1" ]; then npm install -g vercel; fi

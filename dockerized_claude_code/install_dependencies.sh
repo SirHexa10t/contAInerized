@@ -6,7 +6,7 @@
 # ---------------
 #   • uv               — Python toolchain manager (Astral's installer if missing)
 #   • ~/pydev          — uv-managed venv with Python 3.14 + the launcher's pip
-#                        deps: prompt_toolkit, python-dotenv, rich, publicsuffix2
+#                        deps: prompt_toolkit, python-dotenv, rich
 #   • Docker engine    — Linux: official convenience script (bundles Compose v2)
 #                        macOS: Docker Desktop (via Homebrew if available;
 #                                otherwise prints a manual-install hint)
@@ -61,10 +61,10 @@ else
     log "Creating Python venv at ~/pydev (uv will auto-download Python 3.14 if needed)..."
     uv venv "$HOME/pydev" --python 3.14
 fi
-log "Installing/updating launcher deps in ~/pydev (prompt_toolkit, python-dotenv, rich, publicsuffix2)..."
+log "Installing/updating launcher deps in ~/pydev (prompt_toolkit, python-dotenv, rich)..."
 # shellcheck disable=SC1091
 source "$HOME/pydev/bin/activate"
-uv pip install prompt_toolkit python-dotenv rich publicsuffix2
+uv pip install prompt_toolkit python-dotenv rich
 
 # 3. Docker (OS-specific) ------------------------------------------------------
 

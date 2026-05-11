@@ -14,7 +14,6 @@ import subprocess
 import time
 
 from dotenv import dotenv_values  # pip install python-dotenv
-from publicsuffix2 import get_sld  # pip install publicsuffix2
 
 from .docker_config import register_docker_gid, register_whitelist_domains
 from .paths import (
@@ -60,187 +59,187 @@ CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over
 
 # === Always-allowed domains in {auto} mode (used by resolved_whitelist_domains) ===
 # The list lives here (not in init-firewall.sh) so a single Python step owns the
-# full resolved domain set — built-ins + user entries, plus a non-www counterpart
-# for any `www.`-prefixed entry, plus a `www.X` counterpart for entries that are
-# registrable apexes (Public Suffix List-aware, so `foo.co.uk` is recognised
-# the same as `foo.com`) — and bash inside the container just iterates whatever
-# WHITELIST_DOMAINS holds.
+# full resolved domain set — built-ins + user whitelist entries, deduped. Every
+# form you want allowed must be listed explicitly (e.g. both `foo.com` and
+# `www.foo.com` if both are needed). The one convenience: a `www.X` entry also
+# implicitly allows `X`, since the user typing the `www.` form clearly meant
+# the bare apex too. Bash inside the container just iterates WHITELIST_DOMAINS.
 BUILTIN_FIREWALL_DOMAINS = [
     # === Core launcher dependencies ===
     # Anthropic
     "api.anthropic.com",
     "console.anthropic.com",
-    "claude.ai",
+    "www.claude.ai",
     # GitHub (git, releases, raw, codeload, container registry)
-    "github.com",
+    "www.github.com",
     "api.github.com",
-    "raw.githubusercontent.com",
-    "objects.githubusercontent.com",
+    "www.raw.githubusercontent.com",
+    "www.objects.githubusercontent.com",
     "codeload.github.com",
-    "ghcr.io",
+    "www.ghcr.io",
     # npm
     "registry.npmjs.org",
     # PyPI
-    "pypi.org",
+    "www.pypi.org",
     "files.pythonhosted.org",
     # crates.io (Rust)
-    "crates.io",
+    "www.crates.io",
     "static.crates.io",
     "index.crates.io",
 
     # === Developer documentation & references ===
     # Q&A and community
-    "stackoverflow.com",
-    "stackexchange.com",     # covers DBA / Security / Code Review etc.; Server Fault and Super User live at their own apexes
-    "gitlab.com",
+    "www.stackoverflow.com",
+    "www.stackexchange.com",     # covers DBA / Security / Code Review etc.; Server Fault and Super User live at their own apexes
+    "www.gitlab.com",
     # Language docs — Python (PyPI registry above)
     "docs.python.org",
     "peps.python.org",
     # Language docs — Rust (crates.io registry above)
     "doc.rust-lang.org",
-    "rust-lang.org",
-    "docs.rs",
+    "www.rust-lang.org",
+    "www.docs.rs",
     # Language docs — Node.js / JavaScript (npm registry above)
-    "nodejs.org",
+    "www.nodejs.org",
     "developer.mozilla.org",  # MDN — also covers HTML / CSS / Web APIs
-    "npmjs.com",
-    "tc39.es",                # ECMAScript spec
+    "www.npmjs.com",
+    "tc39.es",     # ECMAScript spec
     # Language docs — TypeScript
-    "typescriptlang.org",
+    "www.typescriptlang.org",
     # Language docs — Go
     "go.dev",
     "pkg.go.dev",
     # Language docs — Java
     "docs.oracle.com",
     "openjdk.org",
-    "mvnrepository.com",
+    "www.mvnrepository.com",
     "search.maven.org",
     # Language docs — C# / .NET (also covers Azure, VS Code, TypeScript, etc.)
-    "learn.microsoft.com",
+    "www.learn.microsoft.com",
     # Language docs — C / C++
-    "en.cppreference.com",
-    "isocpp.org",
+    "www.en.cppreference.com",
+    "www.isocpp.org",
     # Language docs — Ruby
-    "ruby-lang.org",
-    "ruby-doc.org",
-    "rubygems.org",
+    "www.ruby-lang.org",
+    "www.ruby-doc.org",
+    "www.rubygems.org",
     # Language docs — PHP
-    "php.net",
-    "packagist.org",
+    "www.php.net",
+    "www.packagist.org",
     # Language docs — Swift / Apple
-    "swift.org",
-    "developer.apple.com",
+    "www.swift.org",
+    "www.developer.apple.com",
     # Language docs — Kotlin
-    "kotlinlang.org",
+    "www.kotlinlang.org",
     # Language docs — Other
-    "haskell.org",
-    "dart.dev",
-    "elixir-lang.org",
-    "hexdocs.pm",
-    "scala-lang.org",
-    "clojure.org",
-    "julialang.org",
-    "ocaml.org",
-    "erlang.org",
-    "r-project.org",
-    "cran.r-project.org",
-    "perl.org",
-    "perldoc.perl.org",
-    "lua.org",
+    "www.haskell.org",
+    "www.dart.dev",
+    "www.elixir-lang.org",
+    "www.hexdocs.pm",
+    "www.scala-lang.org",
+    "www.clojure.org",
+    "www.julialang.org",
+    "www.ocaml.org",
+    "www.erlang.org",
+    "www.r-project.org",
+    "www.cran.r-project.org",
+    "www.perl.org",
+    "www.perldoc.perl.org",
+    "www.lua.org",
     # Cloud / infra — AWS
     "docs.aws.amazon.com",
-    "aws.amazon.com",
-    "repost.aws",            # AWS re:Post Q&A
+    "www.aws.amazon.com",
+    "www.repost.aws",            # AWS re:Post Q&A
     # Cloud / infra — GCP
-    "cloud.google.com",
+    "www.cloud.google.com",
     "firebase.google.com",
     # Cloud / infra — Azure (learn.microsoft.com above)
-    "azure.microsoft.com",
+    "www.azure.microsoft.com",
     # Cloud / infra — Docker / Kubernetes / Helm
     "docs.docker.com",
-    "kubernetes.io",
-    "helm.sh",
+    "www.kubernetes.io",
+    "www.helm.sh",
     # Cloud / infra — HashiCorp (Terraform, Vault, Consul, Nomad)
     "developer.hashicorp.com",
     # Web standards
-    "whatwg.org",            # HTML / DOM / Fetch specs
-    "w3.org",                # W3C specs
-    "caniuse.com",           # browser compat tables
-    "web.dev",               # Google web best-practices
+    "www.whatwg.org",            # HTML / DOM / Fetch specs
+    "www.w3.org",                # W3C specs
+    "www.caniuse.com",           # browser compat tables
+    "www.web.dev",               # Google web best-practices
     # Frontend frameworks
-    "react.dev",
-    "vuejs.org",
-    "angular.dev",
-    "svelte.dev",
-    "nextjs.org",
-    "nuxt.com",
-    "remix.run",
-    "astro.build",
+    "www.react.dev",
+    "www.vuejs.org",
+    "www.angular.dev",
+    "www.svelte.dev",
+    "www.nextjs.org",
+    "www.nuxt.com",
+    "www.remix.run",
+    "www.astro.build",
     # Backend frameworks — Python
     "docs.djangoproject.com",
     "flask.palletsprojects.com",
     "fastapi.tiangolo.com",
     # Backend frameworks — Node
-    "expressjs.com",
-    "nestjs.com",
+    "www.expressjs.com",
+    "www.nestjs.com",
     # Backend frameworks — Java
-    "spring.io",
+    "www.spring.io",
     "docs.spring.io",
     # Backend frameworks — Ruby
-    "rubyonrails.org",
+    "www.rubyonrails.org",
     "guides.rubyonrails.org",
     # Backend frameworks — PHP
-    "laravel.com",
-    "symfony.com",
+    "www.laravel.com",
+    "www.symfony.com",
     # ML / data
-    "pytorch.org",
-    "tensorflow.org",
-    "scikit-learn.org",
-    "numpy.org",
+    "www.pytorch.org",
+    "www.tensorflow.org",
+    "www.scikit-learn.org",
+    "www.numpy.org",
     "pandas.pydata.org",
-    "jupyter.org",
-    "huggingface.co",
-    "arxiv.org",
+    "www.jupyter.org",
+    "www.huggingface.co",
+    "www.arxiv.org",
     "paperswithcode.com",
     # AI / LLM APIs (Anthropic API endpoints above)
     "docs.anthropic.com",
     "platform.openai.com",
     # Databases
-    "postgresql.org",
+    "www.postgresql.org",
     "dev.mysql.com",
-    "mariadb.com",
-    "sqlite.org",
-    "redis.io",
-    "mongodb.com",
-    "elastic.co",
+    "www.mariadb.com",
+    "www.sqlite.org",
+    "www.redis.io",
+    "www.mongodb.com",
+    "www.elastic.co",
     # Linux / systems
-    "man7.org",              # Linux man pages
-    "kernel.org",
+    "www.man7.org",              # Linux man pages
+    "www.kernel.org",
     "wiki.archlinux.org",    # general Linux setup info, even off-Arch
     "access.redhat.com",
-    "lwn.net",               # kernel and systems-internals reporting
+    "www.lwn.net",               # kernel and systems-internals reporting
     # Standards / RFCs
     "datatracker.ietf.org",
-    "rfc-editor.org",
+    "www.rfc-editor.org",
     "semver.org",
-    "json.org",
+    "www.json.org",
     # Build & tooling
-    "webpack.js.org",
-    "vite.dev",
-    "rollupjs.org",
-    "esbuild.github.io",
+    "www.webpack.js.org",
+    "www.vite.dev",
+    "www.rollupjs.org",
+    "www.esbuild.github.io",
     "cmake.org",
-    "ninja-build.org",
-    "git-scm.com",
+    "www.ninja-build.org",
+    "www.git-scm.com",
     # Reliable tutorial / reference sites
-    "realpython.com",        # Python
-    "baeldung.com",          # Java / Spring
-    "digitalocean.com",      # community tutorials
-    "css-tricks.com",        # web / CSS
-    "smashingmagazine.com",  # web / CSS
-    "learnxinyminutes.com",  # quick-reference cheat sheets per language
-    "martinfowler.com",      # architecture and refactoring
-    "fly.io",                # systems / networking writing on fly.io/blog
+    "www.realpython.com",        # Python
+    "www.baeldung.com",          # Java / Spring
+    "www.digitalocean.com",      # community tutorials
+    "www.css-tricks.com",        # web / CSS
+    "www.smashingmagazine.com",  # web / CSS
+    "www.learnxinyminutes.com",  # quick-reference cheat sheets per language
+    "www.martinfowler.com",      # architecture and refactoring
+    "www.fly.io",                # systems / networking writing on fly.io/blog
 ]
 
 
@@ -426,31 +425,24 @@ def _apply_dood():
 
 
 # === Firewall allowlist (used by {auto} mode) ===
-# The built-in domain list lives at the top of this file with the other
-# constants; resolved_whitelist_domains below combines it with the user's
-# whitelist, mirroring `www.`-prefixed entries to their non-www counterpart
-# (`www.foo.com` → also `foo.com`) and adding `www.X` for entries that are
-# registrable apexes (`foo.com` → also `www.foo.com`). Subdomain entries
-# without `www.` stay as-is (no bogus `www.api.foo.com` for init-firewall.sh
-# to waste time resolving).
+# resolved_whitelist_domains below merges BUILTIN_FIREWALL_DOMAINS with the
+# user's whitelist file, treating both alike: every entry is taken at face
+# value, no apex→www speculation. The only convenience is that a `www.X`
+# entry also implicitly allows `X` (the user typed `www.` explicitly, so we
+# trust both forms matter). A leading `*.` is silently stripped — lenient
+# rather than crashing on accidental wildcards.
 
 def resolved_whitelist_domains():
-    """Full domain list for the {auto} firewall. Each entry passes through; then:
-      - if it starts with `www.`, the non-www counterpart is also registered
-        (the user typed `www.` explicitly — trust both forms matter);
-      - otherwise, `www.X` is added only when X is a registrable apex per the
-        Public Suffix List (so `foo.com` and `foo.co.uk` qualify; `api.foo.com`
-        doesn't — adding `www.api.foo.com` would cause a DNS-resolution warning
-        at firewall init).
-    Deduped, sorted."""
+    """Full domain list for the {auto} firewall: BUILTIN_FIREWALL_DOMAINS ∪ user
+    whitelist, deduped and sorted. Every form needs to be listed explicitly
+    (no apex→www speculation); a single convenience adds the non-www counterpart
+    for any `www.X` entry. A leading `*.` on entries is silently stripped."""
     expanded = set()
     for d in set(BUILTIN_FIREWALL_DOMAINS) | set(parse_lines(FIREWALL_WHITELIST_FILE)):
-        d = d.removeprefix("*.")   # tolerate accidental wildcards: `*.foo.com` → `foo.com` (no expansion, but no crash)
+        d = d.removeprefix("*.")   # tolerate accidental wildcards: `*.foo.com` → `foo.com`
         expanded.add(d)
         if d.startswith("www."):
             expanded.add(d.removeprefix("www."))
-        elif get_sld(d) == d:
-            expanded.add("www." + d)
     return sorted(expanded)
 
 

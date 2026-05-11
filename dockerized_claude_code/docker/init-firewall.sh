@@ -63,25 +63,64 @@ iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 # user_additions.resolved_whitelist_domains(). Already deduped and apex/www
 # expanded — nothing to parse here.
 
+# Resolution + rule-write runs per-domain in parallel (xargs -P 16) so one
+# slow / dead domain doesn't stall the whole list. The firewall is iptables
+# (v4-only) and Docker's default bridge is v4-only too, so we resolve via
+# `getent ahostsv4` — skipping the AAAA query that `ahosts` would otherwise
+# issue alongside the A query (slow / hanging AAAA lookups were the main
+# cause of long silent stretches during firewall init). `iptables -w 10`
+# waits up to 10s for the xtables lock — concurrent workers' -A calls
+# serialise on it cleanly. Workers always return 0 (so xargs doesn't trip
+# the script's `set -e`); failure is tracked by appending to $FIREWALL_FAILED
+# instead, which the parent reads after the parallel pass. For domains that
+# don't resolve, the post-loop summary tells the user how to test whether a
+# skipped entry is actually IPv6-only.
 allow_domain() {
     local domain="$1"
     local ips
-    ips=$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+    ips=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
     if [ -z "$ips" ]; then
         echo "init-firewall.sh: warning: '$domain' did not resolve; skipping" >&2
-        return
+        echo "$domain" >> "$FIREWALL_FAILED"
+    else
+        for ip in $ips; do
+            iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
+            iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport 80  -j ACCEPT
+        done
     fi
-    for ip in $ips; do
-        iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
-        iptables -A OUTPUT -d "$ip" -p tcp --dport 80  -j ACCEPT
-    done
+    return 0
 }
+export -f allow_domain
 
-domain_count=0
-for domain in ${WHITELIST_DOMAINS:-}; do
-    allow_domain "$domain"
-    domain_count=$((domain_count + 1))
-done
+# Shared failure-tracking file across all parallel workers — `>>` appends are
+# atomic for short writes (< PIPE_BUF), so concurrent writes don't corrupt.
+FIREWALL_FAILED=$(mktemp)
+export FIREWALL_FAILED
+trap 'rm -f "$FIREWALL_FAILED"' EXIT
+
+total_count=$(echo ${WHITELIST_DOMAINS:-} | wc -w)
+echo "init-firewall.sh: resolving allowlist of ${total_count} domains (up to 16 in parallel)..."
+
+if [ "$total_count" -gt 0 ]; then
+    printf '%s\n' ${WHITELIST_DOMAINS:-} | xargs -n 1 -P 16 -I {} bash -c 'allow_domain "$@"' _ {}
+fi
+
+fail_count=$(wc -l < "$FIREWALL_FAILED")
+ok_count=$((total_count - fail_count))
+
+if [ "$fail_count" -gt 0 ]; then
+    echo "init-firewall.sh: resolved ${ok_count}/${total_count} domains; ${fail_count} skipped (see warnings above)."
+    echo "init-firewall.sh:   skipped entries may be typos / dead / IPv6-only — the firewall is IPv4-only, so a domain that exists only on IPv6 can't be routed regardless. To test the IPv6 hypothesis for a specific entry, run on the host:  getent ahostsv6 <domain>" >&2
+    # Pause so the user has a chance to read the skip list before Claude Code
+    # launches and scrolls everything off-screen. `</dev/tty` ensures we read
+    # from the controlling terminal even though the script runs under sudo;
+    # `|| true` so headless / non-TTY launches (rare — compose runs with -it)
+    # don't trip `set -e`.
+    read -n 1 -s -r -p "init-firewall.sh:   [press any key to continue] " _ </dev/tty || true
+    echo
+else
+    echo "init-firewall.sh: resolved all ${total_count} domains."
+fi
 
 # --- Catch-all REJECT -------------------------------------------------------
 # Belt-and-suspenders with the `iptables -P OUTPUT DROP` policy — under
@@ -120,5 +159,6 @@ if ! curl --connect-timeout 5 -s -o /dev/null -I https://api.anthropic.com; then
     echo "  The allowlist may have failed to resolve it at startup (check warnings above)." >&2
     exit 1
 fi
-
-echo "init-firewall.sh: enforcement verified — allowlist of ${domain_count} domains active, all other outbound rejected."
+# (No success line — the resolve-summary above already reports the counts, and
+# the self-test branches exit 1 loudly on failure. Reaching here is success by
+# inference.)
