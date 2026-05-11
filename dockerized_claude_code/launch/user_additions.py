@@ -1,11 +1,12 @@
 """User-side contributions to agent containers — skills (custom_skills/, <workspace>/.skills/)
-and optional credentials (~/.claude-agents/optional_creds/<service>/). Both follow the same
-pattern: scan a known host location, return -v flags for whatever's present. Collected here
-so run.py can stay focused on docker compose orchestration.
+and optional credentials (~/.claude-agents/user_extras/optional_creds/<service>/). Both
+follow the same pattern: scan a known host location, return -v flags for whatever's
+present. Collected here so run.py can stay focused on docker compose orchestration.
 
 Path constants for the host-side and container-side locations (FIREWALL_WHITELIST_FILE,
 OPTIONAL_CREDS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS,
-SKILLS_IN_CONTAINER, PROJECT_CUSTOM_SKILLS_DIR) live in paths.py."""
+SKILLS_IN_CONTAINER, PROJECT_CUSTOM_SKILLS_DIR) live in paths.py — the firewall
+whitelist file and the optional_creds dir both sit under USER_EXTRAS_DIR there."""
 
 from pathlib import Path
 
@@ -46,16 +47,16 @@ def aggregated_skills_mounts(workspace, state_path):
 
 
 # ============================================================
-# Optional credentials — ~/.claude-agents/optional_creds/<service>/
+# Optional credentials — ~/.claude-agents/user_extras/optional_creds/<service>/
 # ============================================================
 
 _OPTIONAL_CREDS_README = """\
 (Auto-generated on first launch by run.py — safe to edit or delete; only re-created if missing.)
 
-This directory holds credentials for cloud / dev CLI tools (aws, gcloud, gh, glab,
-kube, vercel, railway, jira, etc.). Each recognised entry below becomes a bind-mount
-into agent containers at the matching default path, so the corresponding CLI just
-works inside the container.
+This directory (`~/.claude-agents/user_extras/optional_creds/`) holds credentials
+for cloud / dev CLI tools (aws, gcloud, gh, glab, kube, vercel, railway, jira,
+etc.). Each recognised entry below becomes a bind-mount into agent containers at
+the matching default path, so the corresponding CLI just works inside the container.
 
 What goes in each entry — two patterns:
 
@@ -82,7 +83,7 @@ What goes in each entry — two patterns:
 Example — a populated directory (only services you actually use need to exist;
 this just shows both patterns side-by-side):
 
-  ~/.claude-agents/optional_creds/
+  ~/.claude-agents/user_extras/optional_creds/
   ├── README.txt          (this file)
   ├── aws/
   │   ├── credentials
@@ -106,8 +107,9 @@ compose.prog.yml). Service-to-env-var mapping lives in OPTIONAL_CREDS_TOKEN_ENV_
 
 
 def ensure_optional_creds_readme():
-    """Create ~/.claude-agents/optional_creds/ + a README on first launch, so users who
-    discover the directory know what to put in it. Idempotent — won't overwrite user edits."""
+    """Create ~/.claude-agents/user_extras/optional_creds/ + a README on first launch,
+    so users who discover the directory know what to put in it. Idempotent — won't
+    overwrite user edits."""
     OPTIONAL_CREDS_DIR.mkdir(parents=True, exist_ok=True)
     readme = OPTIONAL_CREDS_DIR / "README.txt"
     if not readme.exists():
@@ -115,7 +117,7 @@ def ensure_optional_creds_readme():
 
 
 def optional_creds_mounts():
-    """For each entry under ~/.claude-agents/optional_creds/ that matches a known service,
+    """For each entry under ~/.claude-agents/user_extras/optional_creds/ that matches a known service,
     emit a -v flag mounting it to the matching default path inside the container. Returns
     (mount_args, mounted_names). Missing entries are silently skipped — opt-in is via
     presence on the host."""
@@ -163,35 +165,51 @@ def optional_creds_token_env():
 # ============================================================
 
 _FIREWALL_WHITELIST_TEMPLATE = """\
-# User-defined firewall allowlist for {auto} mode.
+# User-defined firewall whitelist, active in {auto} mode.
 #
-# Each non-empty, non-comment line is treated as a domain to allow alongside
-# the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, plus DNS).
+# Each non-empty, non-comment line is treated as an address (domain or IPv4) to allow
+# alongside the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, ...).
 # See BUILTIN_FIREWALL_DOMAINS in launch/agent_composition.py for the full set.
 #
-# - Matching is by IP, not hostname.
-# - For an apex domain (`foo.com`, `foo.co.uk`), the launcher auto-adds the `www.` counterpart — both forms get allowed even when they resolve to different IPs (common on CDN-fronted sites).
-# - If you type the `www.` form yourself (`www.foo.com`, `www.api.foo.com`), the launcher also registers the non-www counterpart, so both forms are covered.
-# - Subdomain entries without `www.` (`api.foo.com`) are passed through as-is — no `www.` prefix is added.
-# - Wildcards like `*.foo.com` don't expand — each subdomain you want needs its own line. A leading `*.` is silently stripped, so `*.foo.com` is treated the same as `foo.com` (no crash, but no subdomain coverage either).
+# - Matching is by IP, not hostname — each entry is resolved once at firewall init.
+# - Specify `www.foo.com` to also include `foo.com`. The opposite doesn't apply: if you specify `foo.com`, no "www." variant would be included (since not every site has a CDN front).
+# - Wildcards like `*.foo.com` don't expand — each subdomain you want needs its own line. A leading `*.` is silently stripped, so `*.foo.com` is treated the same as `foo.com`.
+# - Raw IPv4 addresses and CIDR ranges are accepted too (e.g. `1.2.3.4` or `10.0.0.0/8`) — they skip DNS and go straight to iptables. Useful when you know the IP or subnet but the hostname doesn't resolve, want to pin one IP for a domain with rotating addresses, or need to allow a whole private range. ⚠ `0.0.0.0/0` allows ALL outbound — defeats the firewall.
 #
-# Examples — uncomment any line below to grant outbound access on the next
-# {auto} launch:
+# Examples — uncomment any line below to grant outbound access on the next {auto} launch:
 #
-# x.com
+# x.com                     # inline comments like these are fine
 # news.ycombinator.com
 # stackoverflow.com
-# docs.python.org
+# www.finance.yahoo.com     # will register WITH + WITHOUT the www. (2 different IP addresses)
+# docs.python.org           # already covered by default list; doesn't matter. Repetitions are fine.
+# 198.52.101.45             # raw IPv4 works too — this one is RFC-5737 docs-reserved, just illustrative
+# 198.51.100.0/24           # CIDR range too — covers 198.51.100.0 through 198.51.100.255
 #
-# Changes apply on the next {auto} launch — the firewall runs once at container
-# start and snapshots the resolved IPs for each domain.
+# Service integration examples — uncomment if you actually use these. Auth substrate
+# (Google OAuth + IAM, AWS STS) is shared across every API call to that provider;
+# service endpoints (GCS / S3 / Slack) only matter for users hitting that
+# specific service.
+#
+# oauth2.googleapis.com             # Google OAuth token endpoint (required for any gcloud / google-auth call)
+# accounts.google.com               # Google OAuth identity endpoint (interactive auth flows; ADC fallback paths)
+# iamcredentials.googleapis.com     # Google IAM service-account credential generation / impersonation
+# storage.googleapis.com            # Google Cloud Storage (GCS) buckets
+# sts.amazonaws.com                 # AWS STS — auth substrate, hit by any aws CLI / boto3 / IAM-Identity-Center call
+# iam.amazonaws.com                 # AWS IAM management API (users / roles / policies; global, not regional)
+# s3.amazonaws.com                  # AWS S3 global endpoint
+# s3.us-east-1.amazonaws.com        # AWS S3 regional endpoint — swap us-east-1 for your region (us-west-2, eu-west-1, …)
+# hooks.slack.com                   # Slack incoming webhooks (notifications from agents into a Slack channel)
+#
+# Changes apply on the next {auto} instance launch — the firewall runs at container startup, and snapshots
+# the resolved IPs for each domain.
 """
 
 
 def ensure_firewall_whitelist():
-    """Create ~/.claude-agents/firewall_whitelist.txt with a commented preamble on
-    first launch so users discovering the file know what to put in it. Idempotent —
-    won't overwrite user edits."""
+    """Create ~/.claude-agents/user_extras/firewall_whitelist.txt with a commented
+    preamble on first launch so users discovering the file know what to put in it.
+    Idempotent — won't overwrite user edits."""
     FIREWALL_WHITELIST_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not FIREWALL_WHITELIST_FILE.exists():
         FIREWALL_WHITELIST_FILE.write_text(_FIREWALL_WHITELIST_TEMPLATE)

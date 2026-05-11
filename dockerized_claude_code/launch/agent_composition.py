@@ -424,7 +424,7 @@ def _apply_dood():
     return {}
 
 
-# === Firewall allowlist (used by {auto} mode) ===
+# === Firewall whitelist (used by {auto} mode) ===
 # resolved_whitelist_domains below merges BUILTIN_FIREWALL_DOMAINS with the
 # user's whitelist file, treating both alike: every entry is taken at face
 # value, no apex→www speculation. The only convenience is that a `www.X`
@@ -448,7 +448,7 @@ def resolved_whitelist_domains():
 
 def _apply_auto():
     """{auto} mode: lets the agent run unattended (--dangerously-skip-permissions
-    is added in compose.auto.yml's entrypoint) behind an iptables outbound allowlist.
+    is added in compose.auto.yml's entrypoint) behind an iptables outbound whitelist.
     The Dockerfile.auto image carries iptables + sudo + a tightly-scoped sudoers
     entry; the firewall script + entrypoint wrapper get bind-mounted via compose.auto.yml.
     Side effect: hands the resolved domain list (built-ins + user entries +

@@ -82,7 +82,7 @@ Agent ideas:
 
 Dockerfile:
   - Revisit a multi-stage split (BUILD_TARGET, base vs dev) only if: (a) disk pressure matters, (b) Rust/build-tools edits disrupt light agents (golem, poet) too often, or (c) a specific domain genuinely needs a heavyweight system tool (LaTeX, ffmpeg, medical imaging libs) that shouldn't live in every image.
-  - Firewall for safe --dangerously-skip-permissions. Anthropic's init-firewall.sh (iptables allowlist: npm, GitHub, Claude API) is what makes unattended "YOLO" mode safe inside a container. Port it if you ever run an agent unattended. Ref: https://github.com/anthropics/claude-code/tree/main/.devcontainer
+  - Firewall for safe --dangerously-skip-permissions. Anthropic's init-firewall.sh (iptables whitelist: npm, GitHub, Claude API) is what makes unattended "YOLO" mode safe inside a container. Port it if you ever run an agent unattended. Ref: https://github.com/anthropics/claude-code/tree/main/.devcontainer
 
 
 Very low priority:
@@ -167,7 +167,7 @@ communications between agents (on same PC; maybe commonly mounted file?)
 
   Can confirmations work? Yes — three layers:
   - Claude Code's built-in permission system still applies, so risky actions (Bash, Write, Edit) prompt the user inside whichever agent's session is active.
-  - For unattended runs, --dangerously-skip-permissions + a tight --allowedTools allowlist (the worker only gets read tools, say) is the standard pattern. Anthropic's init-firewall.sh (already on your TODO) is what makes that safe.
+  - For unattended runs, --dangerously-skip-permissions + a tight --allowedTools whitelist (the worker only gets read tools, say) is the standard pattern. Anthropic's init-firewall.sh (already on your TODO) is what makes that safe.
   - For "manager wants worker's work confirmed by human": the manager's session shows the worker's output and the manager waits for your approval before proceeding. Just one human-in-the-loop point.
 
   For starting with just two, I'd start with the subprocess pattern. Concrete shape:
@@ -220,6 +220,9 @@ skills:
 
 add Anthropics skill marketplace
     Anthropic's GitHub skills?
+
+
+
 
 
 

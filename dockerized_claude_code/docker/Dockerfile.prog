@@ -7,7 +7,7 @@
 # claude-agents:base. The default below is the standalone case.
 #
 # Optional CLI installs at the end are gated by INSTALL_<TOOL>=1 build-args, set
-# by run.py based on which directories exist under ~/.claude-agents/optional_creds/.
+# by run.py based on which directories exist under ~/.claude-agents/user_extras/optional_creds/.
 # Each tool gets its own ARG/RUN so adding a new credential only invalidates that
 # tool's layer (downstream layers re-run as no-ops). Order matters: stable layers
 # (rustup, node) come BEFORE optional installs so opting into a new tool doesn't
@@ -67,7 +67,7 @@ RUN : "${INSTALL_GLAB}" \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Heavy install (~400-500MB); only paid by users who actually opt in via optional_creds/gcloud/.
+# Heavy install (~400-500MB); only paid by users who actually opt in via user_extras/optional_creds/gcloud/.
 ARG INSTALL_GCLOUD=0
 RUN : "${INSTALL_GCLOUD}" \
  && if [ "$INSTALL_GCLOUD" = "1" ]; then \

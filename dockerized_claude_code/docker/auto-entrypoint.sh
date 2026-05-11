@@ -10,7 +10,7 @@
 #   1. Run init-firewall.sh as root via sudo. The sudoers entry installed by
 #      Dockerfile.auto restricts the claude user to ONLY this exact command,
 #      and preserves WHITELIST_DOMAINS across the privilege boundary so the
-#      script can read the launcher-supplied allowlist.
+#      script can read the launcher-supplied whitelist.
 #   2. Invalidate sudo's credential cache so a runaway agent can't piggyback
 #      on it for additional sudo calls. Defense in depth — sudoers already
 #      restricts the scope, but invalidating is cheap and explicit.

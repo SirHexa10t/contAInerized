@@ -27,8 +27,15 @@ CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"             # shared API c
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
 AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # {instance_id: [mode, ...]}; only entries for instances with modes
 CACHE_ROOT = AGENTS_STATE / "cache"
-OPTIONAL_CREDS_DIR = AGENTS_STATE / "optional_creds"
-FIREWALL_WHITELIST_FILE = AGENTS_STATE / "firewall_whitelist.txt"
+
+# Everything under user_extras/ is for the user to populate with
+# non-project-specific configuration: extra firewall whitelist entries,
+# optional cred passthroughs for cloud CLIs, etc. Grouped under one dir so
+# launcher-managed state at the AGENTS_STATE root (OAuth, workspace map,
+# instance dirs) doesn't mix with hand-edited files.
+USER_EXTRAS_DIR = AGENTS_STATE / "user_extras"
+OPTIONAL_CREDS_DIR = USER_EXTRAS_DIR / "optional_creds"
+FIREWALL_WHITELIST_FILE = USER_EXTRAS_DIR / "firewall_whitelist.txt"
 
 
 # === Workspace selection ===

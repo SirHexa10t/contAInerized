@@ -24,7 +24,7 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      # Pass-through of the launcher's resolved allowlist (built-ins + user entries
+      # Pass-through of the launcher's resolved whitelist (built-ins + user entries
       # + apex/www counterparts, deduped, space-separated). init-firewall.sh
       # iterates it directly. The host-side source whitelist is NOT mounted in —
       # the container only sees the final list.

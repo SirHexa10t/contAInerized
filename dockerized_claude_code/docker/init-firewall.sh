@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# init-firewall.sh — iptables-based outbound allowlist for the {auto} mode.
+# init-firewall.sh — iptables-based outbound whitelist for the {auto} mode.
 #
 # Originally vendored from Anthropic's devcontainer reference (MIT-licensed):
 #   https://github.com/anthropics/claude-code/tree/main/.devcontainer
-# Now diverged: the launcher resolves the allowlist in Python (built-ins +
+# Now diverged: the launcher resolves the whitelist in Python (built-ins +
 # user's firewall_whitelist.txt + apex/www counterparts, deduped) and passes
 # it in via the WHITELIST_DOMAINS env var. This script just iterates it.
 #
@@ -36,7 +36,7 @@ touch "$MARKER"
 # DON'T flush the nat table — Docker's embedded DNS resolver at 127.0.0.11 is
 # a fake address redirected to dockerd via a NAT rule installed inside the
 # container's namespace. Flushing nat (`iptables -t nat -F`) destroys that
-# redirect; subsequent DNS lookups fail silently, no allowlist entries get
+# redirect; subsequent DNS lookups fail silently, no whitelist entries get
 # added, and outbound dies with ConnectionRefused once claude starts.
 iptables -F
 iptables -X
@@ -58,27 +58,44 @@ iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
-# --- Allowlist --------------------------------------------------------------
+# --- Whitelist --------------------------------------------------------------
 # WHITELIST_DOMAINS is space-separated, produced by the launcher via
 # user_additions.resolved_whitelist_domains(). Already deduped and apex/www
 # expanded — nothing to parse here.
 
-# Resolution + rule-write runs per-domain in parallel (xargs -P 16) so one
-# slow / dead domain doesn't stall the whole list. The firewall is iptables
-# (v4-only) and Docker's default bridge is v4-only too, so we resolve via
-# `getent ahostsv4` — skipping the AAAA query that `ahosts` would otherwise
-# issue alongside the A query (slow / hanging AAAA lookups were the main
-# cause of long silent stretches during firewall init). `iptables -w 10`
-# waits up to 10s for the xtables lock — concurrent workers' -A calls
-# serialise on it cleanly. Workers always return 0 (so xargs doesn't trip
-# the script's `set -e`); failure is tracked by appending to $FIREWALL_FAILED
-# instead, which the parent reads after the parallel pass. For domains that
-# don't resolve, the post-loop summary tells the user how to test whether a
-# skipped entry is actually IPv6-only.
+# Resolution + rule-write runs per-domain in parallel (xargs -P $((nproc * 8))
+# — DNS-bound waits scale up generously past core count since each worker is
+# almost always sleeping on `getent`) so one slow / dead domain doesn't stall
+# the whole list. Each lookup is also capped at 8s by `timeout` so a domain
+# whose auth server hangs can't hold its slot indefinitely. Entries that
+# already look like a literal IPv4 address or a CIDR range (`1.2.3.4`,
+# `10.0.0.0/8`) skip DNS entirely and go straight to iptables — iptables
+# accepts both forms natively as the `-d` argument. The firewall is
+# iptables (v4-only) and Docker's
+# default bridge is v4-only too, so we resolve via `getent ahostsv4` —
+# skipping the AAAA query that `ahosts` would otherwise issue alongside the
+# A query (slow / hanging AAAA lookups were the main cause of long silent
+# stretches during firewall init). `iptables -w 10` waits up to 10s for the
+# xtables lock — concurrent workers' -A calls serialise on it cleanly.
+# Workers always return 0 (so xargs doesn't trip the script's `set -e`);
+# failure is tracked by appending to $FIREWALL_FAILED instead, which the
+# parent reads after the parallel pass. For domains that don't resolve, the
+# post-loop summary tells the user how to test whether a skipped entry is
+# actually IPv6-only.
 allow_domain() {
     local domain="$1"
     local ips
-    ips=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+
+    # Literal IPv4 or CIDR — hand straight to iptables, no DNS. The regex is
+    # lenient (allows out-of-range octets / prefix lengths); iptables itself
+    # rejects anything actually invalid, so we don't pre-validate here.
+    if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+        iptables -w 10 -A OUTPUT -d "$domain" -p tcp --dport 443 -j ACCEPT
+        iptables -w 10 -A OUTPUT -d "$domain" -p tcp --dport 80  -j ACCEPT
+        return 0
+    fi
+
+    ips=$(timeout "$WAIT_SECONDS" getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
     if [ -z "$ips" ]; then
         echo "init-firewall.sh: warning: '$domain' did not resolve; skipping" >&2
         echo "$domain" >> "$FIREWALL_FAILED"
@@ -99,10 +116,16 @@ export FIREWALL_FAILED
 trap 'rm -f "$FIREWALL_FAILED"' EXIT
 
 total_count=$(echo ${WHITELIST_DOMAINS:-} | wc -w)
-echo "init-firewall.sh: resolving allowlist of ${total_count} domains (up to 16 in parallel)..."
+# Tunables for the parallel resolve loop. PARALLELISM scales with cores (DNS-
+# bound work — workers sleep on getent, so we go past core count); WAIT_SECONDS
+# caps each per-domain lookup so a hanging auth server can't hold its slot.
+PARALLELISM=$(( $(nproc) * 8 ))
+WAIT_SECONDS=8
+export WAIT_SECONDS   # allow_domain runs in child bash workers spawned by xargs; the function sees it through env
+echo "init-firewall.sh: resolving whitelist of ${total_count} domains (up to ${PARALLELISM} in parallel, ${WAIT_SECONDS}s timeout each)..."
 
 if [ "$total_count" -gt 0 ]; then
-    printf '%s\n' ${WHITELIST_DOMAINS:-} | xargs -n 1 -P 16 -I {} bash -c 'allow_domain "$@"' _ {}
+    printf '%s\n' ${WHITELIST_DOMAINS:-} | xargs -n 1 -P "${PARALLELISM}" -I {} bash -c 'allow_domain "$@"' _ {}
 fi
 
 fail_count=$(wc -l < "$FIREWALL_FAILED")
@@ -138,7 +161,7 @@ iptables -A FORWARD -j REJECT --reject-with icmp-port-unreachable
 # non-functional firewall.
 echo "init-firewall.sh: testing enforcement..."
 
-# Negative test: example.com is NOT in the allowlist; should be unreachable.
+# Negative test: example.com is NOT in the whitelist; should be unreachable.
 if curl --connect-timeout 3 -s -o /dev/null -I https://example.com; then
     echo "init-firewall.sh: ERROR: firewall not enforcing — https://example.com is reachable" >&2
     echo "  despite a default-deny policy and a final REJECT rule." >&2
@@ -156,7 +179,7 @@ fi
 # Positive test: api.anthropic.com SHOULD be reachable.
 if ! curl --connect-timeout 5 -s -o /dev/null -I https://api.anthropic.com; then
     echo "init-firewall.sh: ERROR: api.anthropic.com unreachable through the firewall." >&2
-    echo "  The allowlist may have failed to resolve it at startup (check warnings above)." >&2
+    echo "  The whitelist may have failed to resolve it at startup (check warnings above)." >&2
     exit 1
 fi
 # (No success line — the resolve-summary above already reports the counts, and

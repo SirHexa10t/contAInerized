@@ -1,12 +1,12 @@
 # Auto-mode image — extends its PARENT_IMAGE (default claude-agents:base) with
-# iptables (for the runtime allowlist firewall) and a tightly-scoped sudoers
+# iptables (for the runtime whitelist firewall) and a tightly-scoped sudoers
 # entry that lets the `claude` user run /usr/local/bin/init-firewall.sh as root.
 # No other sudo commands are allowed.
 #
 # Built when an instance has the {auto} mode set. The firewall script and the
 # entrypoint wrapper are bind-mounted at runtime by docker/compose.auto.yml
 # (so they can be edited without rebuilding the image); the wrapper sets up the
-# iptables allowlist on container start and then `exec claude "$@"`, with the
+# iptables whitelist on container start and then `exec claude "$@"`, with the
 # --dangerously-skip-permissions flag injected by compose.auto.yml's entrypoint.
 #
 # Chain note: PARENT_IMAGE is set by run.py based on what comes before {auto}
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Sudoers — give claude passwordless sudo for ONLY /usr/local/bin/init-firewall.sh,
 # and preserve WHITELIST_DOMAINS across the privilege boundary so the script can
-# read the launcher-supplied allowlist. Other sudo calls (apt, root shell, etc.)
+# read the launcher-supplied whitelist. Other sudo calls (apt, root shell, etc.)
 # are blocked, and the only env var passed through is the one the script needs.
 # The script itself is bind-mounted in by compose.auto.yml; this just authorises
 # calling it. Re-running with a tampered WHITELIST_DOMAINS is prevented by the

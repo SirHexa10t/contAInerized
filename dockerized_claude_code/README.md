@@ -30,7 +30,7 @@ isolated Docker container with persistent per-instance state.
   filename (e.g. `refactorer[prog](thinker).md`) to opt into the heavier
   Dockerfile stage with Rust + Node + uv. Modes are picked per instance at
   create/modify time: `{auto}` runs the agent unattended (`--dangerously-skip-permissions`)
-  behind an iptables outbound allowlist; `{DooD}` bind-mounts the host's
+  behind an iptables outbound whitelist; `{DooD}` bind-mounts the host's
   Docker socket. Tags + modes compose into a layered build chain
   (`base → prog → auto`, etc.) — each step has its own `Dockerfile.<name>`
   + `compose.<name>.yml`.
@@ -40,11 +40,14 @@ isolated Docker container with persistent per-instance state.
   benefit every later launch. Files older than 7 days are pruned from any
   cache that grows past 5 GB (skipped while a container is running).
 - **`{auto}`-mode firewall with user-extendable whitelist** — outbound
-  traffic from `{auto}` containers is restricted to a built-in domain list
-  (Anthropic API, GitHub, npm, PyPI, crates.io, plus DNS). Drop extra
-  domains, one per line, into `~/.claude-agents/firewall_whitelist.txt` to
-  allow them on the next launch. The firewall self-tests at container start
-  and refuses to launch the agent if enforcement isn't actually working.
+  traffic from `{auto}` containers is restricted to a curated built-in
+  domain list (~130 entries: Anthropic + GitHub + package registries, plus
+  language docs, cloud docs, dev-tooling sites, web standards, ML / data /
+  databases). Drop extra entries, one per line, into
+  `~/.claude-agents/user_extras/firewall_whitelist.txt` — domains, raw IPv4
+  addresses, or CIDR ranges (`10.0.0.0/8`) are all accepted. The firewall
+  resolves entries in parallel at container start, then self-tests and
+  refuses to launch the agent if enforcement isn't actually working.
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
 - **Project-wide key bindings** — `settings/keybindings.json` is mounted into
@@ -67,9 +70,9 @@ isolated Docker container with persistent per-instance state.
   warning when an instance ends up with both `{auto}` and `{DooD}` enabled.
 - **Optional credential passthrough** — drop your `~/.aws` (or `gcloud`,
   `kube`, `ssh`, `gh`, `.npmrc`, `.pypirc`) under
-  `~/.claude-agents/optional_creds/` and the matching CLI inside the
-  container picks it up automatically. See *Optional Host Mounts* below
-  for the full table.
+  `~/.claude-agents/user_extras/optional_creds/` and the matching CLI
+  inside the container picks it up automatically. See *Optional Host
+  Mounts* below for the full table.
 - **State auditor** — `python3 -m launch.audit` reports orphaned state dirs,
   drifted CLAUDE.md files, ghost workspace-map entries, and missing/empty
   OAuth files.
@@ -199,12 +202,14 @@ then drops you into Claude Code:
   Tags:             [prog]
   Modes:            {auto}
   Project skills:   2 loaded (custom_skills/ + .skills/ if present)
-  User whitelist:   3 domains (from ~/.claude-agents/firewall_whitelist.txt)
+  User whitelist:   3 domains (from ~/.claude-agents/user_extras/firewall_whitelist.txt)
   Building base → claude-agents:base...
   Building prog → claude-agents:prog...
   Building auto → claude-agents:prog.auto...
 [docker compose build output]
-init-firewall.sh: enforcement verified — allowlist of 15 domains active, all other outbound rejected.
+init-firewall.sh: resolving whitelist of 137 domains (up to 64 in parallel, 8s timeout each)...
+init-firewall.sh: resolved all 137 domains.
+init-firewall.sh: testing enforcement...
 [Claude Code starts; status line shows: ● Researcher - Myproject ( /path/to/workspace )]
 ```
 
@@ -221,6 +226,7 @@ they only appear when the relevant feature is in play.
 | Enter | Select |
 | Del | Delete the highlighted instance (with confirmation) |
 | F2 | Redefine an instance — walks through new session name and new workspace |
+| F8 | Toggle the composition legend — overlays a `Tags` + `Modes` table in the preview pane, explaining what each `[tag]` / `{mode}` marker means. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
 
 ### Audit
@@ -269,7 +275,7 @@ is wrong.
    **Modes** (prompted per instance, also re-prompted on F2-modify):
 
    - `{auto}` — `--dangerously-skip-permissions` behind an iptables outbound
-     allowlist (init-firewall.sh runs at container start). Lets the agent
+     whitelist (init-firewall.sh runs at container start). Lets the agent
      run unattended. ⚠ guardrail-only; combine with `{DooD}` and the agent
      can do anything on the host.
    - `{DooD}` — bind-mount `/var/run/docker.sock`. Lets the agent drive the
@@ -292,9 +298,10 @@ is wrong.
   .credentials.json                  # shared API credentials
   agent_workspace_map.json           # instance_id → workspace path
   agent_modes_map.json               # instance_id → list of opted-in modes (e.g. ["auto", "DooD"])
-  firewall_whitelist.txt             # user-managed extra domains for {auto} mode (auto-created with a template preamble; comments + one domain per line)
   cache/                             # shared toolchain caches (cargo, npm, …); mounted into [prog] agents only
-  optional_creds/                    # opt-in passthrough creds; see "Optional Host Mounts" below
+  user_extras/                       # hand-edited, non-project-specific user configuration
+    firewall_whitelist.txt           # user-managed extra domains for {auto} mode (auto-created with a template preamble; comments + one domain per line)
+    optional_creds/                  # opt-in passthrough creds; see "Optional Host Mounts" below
   <agent>__<session>/                # one per instance
     CLAUDE.md                        # copy of the agent's .md
     projects/-workspace/memory/MEMORY.md   # per-instance, regenerated each launch from memory/seek_summary.md + active mode addendums (preserves agent-added pointer entries outside the wrapped blocks)
@@ -313,14 +320,14 @@ Each is independent; nothing here is required for a basic launch.
 | Workspace skills | `<workspace>/.skills/<name>/` | `/home/claude/.claude/skills/<name>` | dir present in workspace; each becomes a `/<name>` slash command |
 | Workspace prompts | `<workspace>/.prompts/` | (left in-place at `/workspace/.prompts/`; surfaced by the in-container `man`) | dir present in workspace |
 | Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | agent filename includes `[prog]` |
-| Firewall whitelist | `~/.claude-agents/firewall_whitelist.txt` | `/usr/local/etc/firewall_whitelist.txt` (ro) | instance has `{auto}` mode enabled |
+| Firewall whitelist | `~/.claude-agents/user_extras/firewall_whitelist.txt` | `/usr/local/etc/firewall_whitelist.txt` (ro) | instance has `{auto}` mode enabled |
 | Docker socket | `/var/run/docker.sock` (host) | `/var/run/docker.sock` | instance has `{DooD}` mode enabled (asked at create/modify) |
-| Optional creds | `~/.claude-agents/optional_creds/<service>/` | varies by service (see below) | path exists on host |
+| Optional creds | `~/.claude-agents/user_extras/optional_creds/<service>/` | varies by service (see below) | path exists on host |
 
 ### Optional credentials (recognized services)
 
-Drop a directory or file under `~/.claude-agents/optional_creds/` and it
-gets bind-mounted into the container at the matching default location, so
+Drop a directory or file under `~/.claude-agents/user_extras/optional_creds/`
+and it gets bind-mounted into the container at the matching default location, so
 the corresponding CLI just works. Read-write (cloud CLIs need to refresh
 tokens, write cache, etc.). Anything not in this list is ignored — extend
 `OPTIONAL_CREDS_MOUNTS` in `launch/user_additions.py` to recognize more tools.
@@ -350,7 +357,7 @@ don't need cloud tools anyway).
 
 **Token files** (`<service>/token`): for services that authenticate via an
 env-var token (currently `jira` → `$JIRA_API_TOKEN`), put the secret in a
-plain-text file at `~/.claude-agents/optional_creds/<service>/token`. The
+plain-text file at `~/.claude-agents/user_extras/optional_creds/<service>/token`. The
 launcher reads its trimmed contents at launch and forwards as the matching
 env var (the CLI in the container picks it up the same way it does on your
 host). The token stays in `os.environ` and is passed via compose's
@@ -363,9 +370,9 @@ service, add one entry there and one passthrough line to `docker/compose.yml`'s
 To enable AWS in any `[prog]` agent, for example:
 
 ```bash
-mkdir -p ~/.claude-agents/optional_creds
-ln -s ~/.aws ~/.claude-agents/optional_creds/aws    # symlink so host edits propagate
-# or:  cp -r ~/.aws ~/.claude-agents/optional_creds/aws
+mkdir -p ~/.claude-agents/user_extras/optional_creds
+ln -s ~/.aws ~/.claude-agents/user_extras/optional_creds/aws    # symlink so host edits propagate
+# or:  cp -r ~/.aws ~/.claude-agents/user_extras/optional_creds/aws
 ```
 
 Next launch of any `[prog]` agent: the prog image rebuilds with `awscli`
@@ -377,11 +384,13 @@ installed, and the mounted creds make it ready to use.
 run.py                               # entry point + 7-stage launch() orchestrator
 launch/
   __init__.py
-  agent_composition.py               # filename grammar (parse_stem), conf loading, sort policy, tag/mode constants + handlers, build-chain composition (compute_chain, apply_composition)
+  paths.py                           # centralised path constants — host + container paths, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, CACHE_MOUNTS, DEFAULTING_DIRS (import root: zero internal deps)
+  utils.py                           # domain-neutral helpers (currently `parse_lines`); leaf module
+  agent_composition.py               # filename grammar (parse_stem), conf loading, sort keys, ORDERED_TAGS/MODES/MODEL_FAMILIES + handlers, BUILTIN_FIREWALL_DOMAINS + resolved_whitelist_domains, build-chain composition
   agents_crud.py                     # state-dir lifecycle, workspace + modes maps, sync_memory_templates, _force_remove (sudo+sudo-k fallback), picker-entry builders
-  docker_config.py                   # docker-side: env-var population, image build chain, run_compose, banner
-  user_additions.py                  # custom_skills + workspace .skills, optional credentials, firewall whitelist auto-create
-  menu_picker.py                     # picker UI + ask_for_workspace + prompt_modes + prompt_session
+  docker_config.py                   # docker-side: every os.environ write lives here (register_* per compose key), image build chain (ensure_image), run_compose
+  user_additions.py                  # custom_skills + workspace .skills, optional_creds_*, firewall whitelist + optional-creds README templates
+  menu_picker.py                     # picker UI + composition-legend overlay + ask_for_workspace + prompt_modes + prompt_session + print_launch_banner
   audit.py                           # state-checker (run as `python -m launch.audit`)
 agents/                              # agent definitions (.md + optional .conf)
 custom_commands/                     # shared slash commands (`/refactor`, `/unspaghettify`, `/write-readme`, `/write-summary`)
@@ -391,10 +400,10 @@ memory/
   seek_summary.md                    # always-active MEMORY.md template (points the agent at .claude_summary)
   auto-addendum.md                   # {auto}-mode addendum (firewall guidance)
 docker/
-  Dockerfile, compose.yml            # base image + base compose
-  Dockerfile.prog, compose.prog.yml  # [prog] tag layer (Rust + Node + uv)
+  Dockerfile, compose.yml            # base image + base compose (compose.yml uses `network: host` for builds to dodge BuildKit DNS issues)
+  Dockerfile.prog, compose.prog.yml  # [prog] tag layer (Rust + Node + uv); conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
   Dockerfile.auto, compose.auto.yml  # {auto} mode layer (iptables + sudo + entrypoint wrapper)
   Dockerfile.dood, compose.dood.yml  # {DooD} mode layer (docker.sock bind-mount)
-  init-firewall.sh                   # iptables outbound allowlist; bind-mounted into {auto} containers
+  init-firewall.sh                   # iptables outbound whitelist; parallel DNS resolution (xargs -P $((nproc*8)) with 8s per-query timeout); CIDR / literal-IP entries skip DNS
   auto-entrypoint.sh                 # runs init-firewall.sh, then claude with --dangerously-skip-permissions
 ```

@@ -571,7 +571,7 @@ def prompt_auto(default=False):
         body=[
             "Lets the agent run continuously without per-action permission prompts",
             "(passes --dangerously-skip-permissions to claude). The container runs",
-            "behind an iptables outbound allowlist, so the agent can only reach",
+            "behind an iptables outbound whitelist, so the agent can only reach",
             "Anthropic, GitHub, npm, PyPI, crates.io and DNS — anything else is",
             "dropped at the network layer.",
             "",
@@ -767,7 +767,7 @@ def print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_name
     if skill_mounts:
         print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
     if cred_names:
-        print(f"  Optional creds:   {', '.join(cred_names)} (from optional_creds/)")
+        print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
     if whitelist_count is not None:
         plural = "" if whitelist_count == 1 else "s"
         display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(Path.home()))
