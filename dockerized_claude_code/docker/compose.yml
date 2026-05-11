@@ -35,5 +35,10 @@ services:
       - TERM                # improves(?) terminal display colors
       - AGENT_STATUS_LINE   # pre-styled status-line text (cyan name + grey workspace)
       - BASH_ENV=/home/claude/.bashrc   # non-interactive bash sources this at startup
+      # Optional-creds tokens — listed explicitly so compose forwards them when set.
+      # Sourced by docker_config.register_optional_creds_tokens from each
+      # ~/.claude-agents/optional_creds/<service>/token file; mapping per service
+      # lives in paths.py:OPTIONAL_CREDS_TOKEN_ENV_VARS. Keep this list in sync.
+      - JIRA_API_TOKEN      # jira-cli (ankitpokhrel/jira-cli)
     # Optional: restrict network access for extra isolation
     # network_mode: none

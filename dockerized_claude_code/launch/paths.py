@@ -103,3 +103,12 @@ OPTIONAL_CREDS_MOUNTS = {
     "npmrc":   "/home/claude/.npmrc",
     "pypirc":  "/home/claude/.pypirc",
 }
+
+# Some services authenticate via an env-var token rather than (or alongside)
+# a config file. For those, the launcher reads `optional_creds/<name>/token`
+# on the host and forwards its contents as the corresponding env var inside
+# the container. Key matches OPTIONAL_CREDS_MOUNTS above; value is the env
+# var name the CLI looks for. Keep both maps in sync when adding a service.
+OPTIONAL_CREDS_TOKEN_ENV_VARS = {
+    "jira": "JIRA_API_TOKEN",
+}

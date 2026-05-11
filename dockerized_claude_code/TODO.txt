@@ -137,7 +137,6 @@ skills (or similar)
 check if user's skills should be mounted one by one, by scanning the contents of .skills/ (because I don't know if it'd work directly when user provides it as a symlink)
 
 
-Anthropic's GitHub skills?
 
 
 share image with claude code
@@ -218,6 +217,9 @@ skills:
 
 
 
+
+add Anthropics skill marketplace
+    Anthropic's GitHub skills?
 
 
 

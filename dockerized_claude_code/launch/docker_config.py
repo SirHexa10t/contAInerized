@@ -17,7 +17,7 @@ import sys
 from datetime import date
 
 from .paths import ACCOUNT_FILE, CREDENTIALS_FILE, PROJECT
-from .user_additions import optional_creds_install_env
+from .user_additions import optional_creds_install_env, optional_creds_token_env
 
 # Weekly cache buster for the Dockerfile's curl-piped downloads (uv, rich-cli,
 # Claude Code in `base`; rustup in `prog`). The value flips every Monday, so the
@@ -128,6 +128,15 @@ def register_install_creds_flags():
     os.environ.update(optional_creds_install_env())
 
 
+def register_optional_creds_tokens():
+    """Expose the API tokens read from `optional_creds/<name>/token` files as env
+    vars (e.g. `$JIRA_API_TOKEN`) so compose can forward them into the container.
+    Source of truth: OPTIONAL_CREDS_TOKEN_ENV_VARS in paths. Tokens stay in
+    os.environ rather than on the docker compose command line, so they don't
+    leak through `ps auxe` on the host."""
+    os.environ.update(optional_creds_token_env())
+
+
 def register_whitelist_domains(domains):
     """Expose `domains` to compose.auto.yml's $WHITELIST_DOMAINS substitution so
     init-firewall.sh inside the container can iterate it. Caller supplies the
@@ -165,6 +174,7 @@ def set_container_env(agent, session, workspace, state_path):
     register_workspace(workspace)
     register_oauth_files()
     register_install_creds_flags()
+    register_optional_creds_tokens()
 
 
 def ensure_image(chain):

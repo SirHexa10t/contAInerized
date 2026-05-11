@@ -333,7 +333,7 @@ tokens, write cache, etc.). Anything not in this list is ignored — extend
 | `ssh/`     | `/home/claude/.ssh/`                       | `ssh`, `git` over ssh | — already in `base` image |
 | `gh/`      | `/home/claude/.config/gh/`                 | `gh`      | ✓ via apt (GitHub apt repo) |
 | `glab/`    | `/home/claude/.config/glab-cli/`           | `glab`    | ✓ via apt (GitLab packagecloud repo) |
-| `jira/`    | `/home/claude/.config/.jira/`              | `jira` (ankitpokhrel/jira-cli) | ✓ static binary from GitHub releases — your Jira host (`<org>.atlassian.net`) needs to be in the {auto} whitelist for the CLI to reach it |
+| `jira/`    | `/home/claude/.config/.jira/`              | `jira` (ankitpokhrel/jira-cli) | ✓ static binary from GitHub releases. Drop `.config.yml` (server/login) here; put the API key in a plain-text file named `jira/token` — the launcher reads it and forwards as `$JIRA_API_TOKEN` (jira-cli's default token env var). Your Jira host (`<org>.atlassian.net`) needs to be in the {auto} whitelist for the CLI to reach it. |
 | `vercel/`  | `/home/claude/.local/share/com.vercel.cli/`| `vercel`  | ✓ via `npm install -g vercel` |
 | `railway/` | `/home/claude/.config/railway/`            | `railway` | ✓ via `npm install -g @railway/cli` |
 | `npmrc`    | `/home/claude/.npmrc`                      | `npm` (auth tokens) | — `npm` is in the prog image |
@@ -347,6 +347,18 @@ layers re-run as no-ops). Removing a credential reverses it on the next
 build. Auto-install only happens for `[prog]`-tagged agents; non-prog
 agents get the credentials passthrough but no CLI (those agents probably
 don't need cloud tools anyway).
+
+**Token files** (`<service>/token`): for services that authenticate via an
+env-var token (currently `jira` → `$JIRA_API_TOKEN`), put the secret in a
+plain-text file at `~/.claude-agents/optional_creds/<service>/token`. The
+launcher reads its trimmed contents at launch and forwards as the matching
+env var (the CLI in the container picks it up the same way it does on your
+host). The token stays in `os.environ` and is passed via compose's
+`environment:` block — never on the `docker compose` command line, so it
+doesn't appear in host-side `ps auxe`. Service→env-var mapping lives in
+`OPTIONAL_CREDS_TOKEN_ENV_VARS` (`launch/paths.py`); to add a new tokened
+service, add one entry there and one passthrough line to `docker/compose.yml`'s
+`environment:` block.
 
 To enable AWS in any `[prog]` agent, for example:
 
