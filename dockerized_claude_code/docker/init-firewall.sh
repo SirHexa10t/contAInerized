@@ -70,41 +70,60 @@ iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 # whose auth server hangs can't hold its slot indefinitely. Entries that
 # already look like a literal IPv4 address or a CIDR range (`1.2.3.4`,
 # `10.0.0.0/8`) skip DNS entirely and go straight to iptables — iptables
-# accepts both forms natively as the `-d` argument. The firewall is
-# iptables (v4-only) and Docker's
-# default bridge is v4-only too, so we resolve via `getent ahostsv4` —
-# skipping the AAAA query that `ahosts` would otherwise issue alongside the
-# A query (slow / hanging AAAA lookups were the main cause of long silent
-# stretches during firewall init). `iptables -w 10` waits up to 10s for the
-# xtables lock — concurrent workers' -A calls serialise on it cleanly.
-# Workers always return 0 (so xargs doesn't trip the script's `set -e`);
-# failure is tracked by appending to $FIREWALL_FAILED instead, which the
-# parent reads after the parallel pass. For domains that don't resolve, the
-# post-loop summary tells the user how to test whether a skipped entry is
-# actually IPv6-only.
+# accepts both forms natively as the `-d` argument. Each entry can optionally
+# carry a `:port` suffix (`db.example.com:3306`, `1.2.3.4:5432`); when present,
+# only that port is opened for the resolved IP(s). When absent, the default
+# HTTPS+HTTP pair (443/80) is opened — keeps every existing entry working
+# without modification while giving users an out for SQL / SSH / FTP / etc.
+# The firewall is iptables (v4-only) and Docker's default bridge is v4-only
+# too, so we resolve via `getent ahostsv4` — skipping the AAAA query that
+# `ahosts` would otherwise issue alongside the A query (slow / hanging AAAA
+# lookups were the main cause of long silent stretches during firewall init).
+# `iptables -w 10` waits up to 10s for the xtables lock — concurrent workers'
+# -A calls serialise on it cleanly. Workers always return 0 (so xargs doesn't
+# trip the script's `set -e`); failure is tracked by appending to
+# $FIREWALL_FAILED instead, which the parent reads after the parallel pass.
+# For domains that don't resolve, the post-loop summary tells the user how to
+# test whether a skipped entry is actually IPv6-only.
 allow_domain() {
-    local domain="$1"
-    local ips
+    local entry="$1"
+    local host port ips
+
+    # Optional `:port` suffix lets the user open something other than 80/443
+    # (e.g. `db.example.com:3306`, `1.2.3.4:5432`, `10.0.0.0/24:22`). Split on
+    # the *last* `:`; if no colon, port stays empty and we fall back to the
+    # default HTTPS/HTTP pair below. Port-value validity is left to iptables —
+    # a non-numeric or out-of-range value will surface as a loud failure.
+    if [[ "$entry" == *:* ]]; then
+        host="${entry%:*}"
+        port="${entry##*:}"
+    else
+        host="$entry"
+        port=""
+    fi
 
     # Literal IPv4 or CIDR — hand straight to iptables, no DNS. The regex is
     # lenient (allows out-of-range octets / prefix lengths); iptables itself
     # rejects anything actually invalid, so we don't pre-validate here.
-    if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
-        iptables -w 10 -A OUTPUT -d "$domain" -p tcp --dport 443 -j ACCEPT
-        iptables -w 10 -A OUTPUT -d "$domain" -p tcp --dport 80  -j ACCEPT
-        return 0
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+        ips="$host"
+    else
+        ips=$(timeout "$WAIT_SECONDS" getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u || true)
+        if [ -z "$ips" ]; then
+            echo "init-firewall.sh: warning: '$entry' did not resolve; skipping" >&2
+            echo "$entry" >> "$FIREWALL_FAILED"
+            return 0
+        fi
     fi
 
-    ips=$(timeout "$WAIT_SECONDS" getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
-    if [ -z "$ips" ]; then
-        echo "init-firewall.sh: warning: '$domain' did not resolve; skipping" >&2
-        echo "$domain" >> "$FIREWALL_FAILED"
-    else
-        for ip in $ips; do
+    for ip in $ips; do
+        if [ -n "$port" ]; then
+            iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport "$port" -j ACCEPT
+        else
             iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
             iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport 80  -j ACCEPT
-        done
-    fi
+        fi
+    done
     return 0
 }
 export -f allow_domain
