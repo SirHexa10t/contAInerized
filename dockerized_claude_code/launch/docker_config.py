@@ -18,6 +18,7 @@ from datetime import date
 
 from .paths import ACCOUNT_FILE, CREDENTIALS_FILE, PROJECT
 from .user_additions import optional_creds_install_env, optional_creds_token_env
+from .utils import read_json_field
 
 # Weekly cache buster for the Dockerfile's curl-piped downloads (uv, rich-cli,
 # Claude Code in `base`; rustup in `prog`). The value flips every Monday, so the
@@ -162,15 +163,29 @@ def read_workspace_pref():
 
 # === Orchestration ===
 
+def _build_status_line(agent, session, workspace):
+    """ANSI label for Claude Code's bottom status line — cyan agent + grey
+    workspace + green email + blue instance (`<agent>__<session>`). The
+    `<email> :` prefix drops out when .claude.json is missing or lacks a
+    recognisable email field."""
+    CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
+    session_complete = (f"{agent.replace('-', ' ').title()} - {session.replace('-', ' ').replace('_', ' ').title()}"
+                        f" {GREY}( {workspace} ){RESET}")
+    mail_at_instance = f"{BLUE}{agent}__{session}{RESET}"
+    email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
+    if email:
+        mail_at_instance = f"{GREEN}{email}{RESET} : {mail_at_instance}"
+    return f"{CYAN}● {session_complete}\t\t{mail_at_instance}"
+
+
 def set_container_env(agent, session, workspace, state_path):
     """Stage all per-launch compose vars in one shot — called by run.py before
     docker compose build/run. Each register_* called below has its own docstring
     covering the specific compose key it sets."""
-    pretty = f"{agent.replace('-', ' ').title()} - {session.replace('-', ' ').title()}"
     register_software_stack_refresh()
     register_agent_state(state_path)
     register_agent_name(agent)
-    register_agent_status_line(f"\033[36m● {pretty} \033[90m( {workspace} )\033[0m")
+    register_agent_status_line(_build_status_line(agent, session, workspace))
     register_workspace(workspace)
     register_oauth_files()
     register_install_creds_flags()
