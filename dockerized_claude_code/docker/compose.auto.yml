@@ -30,6 +30,6 @@ services:
       # the container only sees the final list.
       - WHITELIST_DOMAINS
     volumes:
-      - ../docker/init-firewall.sh:/usr/local/bin/init-firewall.sh:ro
-      - ../docker/auto-entrypoint.sh:/usr/local/bin/auto-entrypoint.sh:ro
+      - ${INIT_FIREWALL_SH}:/usr/local/bin/init-firewall.sh:ro
+      - ${AUTO_ENTRYPOINT_SH}:/usr/local/bin/auto-entrypoint.sh:ro
     entrypoint: ["/usr/local/bin/auto-entrypoint.sh", "--dangerously-skip-permissions"]

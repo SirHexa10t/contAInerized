@@ -223,7 +223,30 @@ add Anthropics skill marketplace
 
 
 
+tip: ctrl+v to paste image
+    otherwise, just leave your images in /workspace/
 
+
+phone notifications when AI is done ( {auto} mode only? )
+
+
+Do NOT summary-scan files excluded within .gitignore (specifically so that you won't read venv folders with all their packages/bloat)
+
+
+Add RETRY in firewall to failed domain register fails
+    round 1: 5 seconds, round 2: 12 seconds
+
+/summon <agent/instance> - start an instance of your choice
+    let the AI write into a file that's being monitored by a daemon (thread that sleeps and checks that file, runs an AI if the string matches an agent/instance)
+
+/test (this project's added skill, not present when workspace is other projects)
+    attempt to execute all commands and skills
+    check access to sites
+    see if all intended mounts are active
+
+Move the templates in file_access.py to @./launch/templates , as files
+
+skill that draws a dependency graph
 
 
 

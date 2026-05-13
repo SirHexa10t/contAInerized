@@ -1,35 +1,24 @@
-"""Generic helpers shared across launch/ modules. Domain-neutral — nothing
-here knows about agents, modes, paths, or docker.
+"""Domain-neutral helpers shared across launch/ modules. Currently a single
+display-formatter (relative_time) — disk-touching helpers used to live here
+too but moved to file_access.py once the "all file I/O lives in one place"
+rule was tightened.
 
-Imports nothing from sibling launch/ modules — kept as a leaf so it can be
-pulled in anywhere without circular-import risk."""
+Leaf module: imports nothing from sibling launch/ modules — kept pull-able
+from anywhere without circular-import risk.
+"""
 
-import json
-from pathlib import Path
-
-
-def parse_lines(path):
-    """Iterate non-empty, non-comment-only lines from `path`, with inline `#`
-    comments stripped and surrounding whitespace trimmed. Yields nothing if the
-    file is missing. Suits plain one-token-per-line config files (e.g. the
-    firewall whitelist) — see agent_composition.load_conf for `KEY=VALUE` style."""
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            yield line
+from datetime import datetime
 
 
-def read_json_field(path, *keys):
-    """Walk `keys` into the JSON document at `path` and return the value, or
-    None on any failure: file missing, unreadable, malformed JSON, missing key,
-    or a non-dict mid-walk. Callers wanting an optional field handle None as
-    "not found" rather than catching exceptions themselves."""
-    try:
-        cur = json.loads(Path(path).read_text())
-        for k in keys:
-            cur = cur[k]
-        return cur
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
-        return None
+def relative_time(mtime):
+    """Human-readable relative time from an epoch mtime (e.g. '3 days ago',
+    '5 minutes ago'). Display-only — used by the picker's Cont preview for
+    the 'Last used' line."""
+    delta = datetime.now() - datetime.fromtimestamp(mtime)
+    if delta.days >= 1:
+        return f"{delta.days} day{'s' if delta.days != 1 else ''} ago"
+    hours = delta.seconds // 3600
+    if hours >= 1:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    minutes = delta.seconds // 60
+    return f"{minutes} minute{'s' if minutes != 1 else ''} ago" if minutes else "just now"

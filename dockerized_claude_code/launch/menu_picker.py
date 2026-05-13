@@ -8,7 +8,7 @@ Public API:
       Run the agent/session picker (main menu + nested deletion submenu) until the
       user picks something or cancels. Discovers agents/instances and handles
       deletions internally.
-      -> ('new', agent_dict) | ('cont', instance_dict) | None on cancel/empty
+      -> ('new', AgentIdentity) | ('cont', SessionIdentity) | None on cancel/empty
 
   ask_for_workspace(agent, default=None)
       Line prompt for a workspace path; tab-completes against the host filesystem.
@@ -18,35 +18,40 @@ Public API:
       Line prompt for a session suffix; rejects collisions with existing instances.
       -> session suffix string
 
-  prompt_auto(default=False)
+  prompt_auto(current_modifiers)
       Y/N prompt for the {auto} mode opt-in (unattended-execution + firewall
       explainer); used by run.py on new instances and by select_agent's modify flow.
+      `current_modifiers` is the union of tags + active modes — used to pre-fill
+      the Y/N default. Thin wrapper over prompt_modifier.
       -> bool
 
-  prompt_dood(default=False)
+  prompt_dood(current_modifiers)
       Y/N prompt for the {DooD} mode opt-in (with security explainer); used by run.py
-      on new [prog] instances and by select_agent's modify flow.
+      on new [prog] instances and by select_agent's modify flow. Thin wrapper over
+      prompt_modifier.
       -> bool
 
   prompt_modes(tags, current_modes=())
-      Run all applicable mode prompts in ORDERED_MODES priority order (auto, then
+      Run all applicable mode prompts in InstanceModifiers.modes() priority order (auto, then
       DooD if [prog]); pre-fills defaults from the existing modes list. Used by
       run.py (new instances) and select_agent's modify flow.
       -> list[str] of newly-selected modes
 
   pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
       Generic full-screen picker primitive used by select_agent.
-      -> ('select', value) | ('delete', value) | ('modify', value) | (None, None)
+      -> (PickerAction.SELECT, value) | (PickerAction.DELETE, value)
+         | (PickerAction.MODIFY, value) | (None, None) on cancel
 
   confirm_dialog(message)
       Inline [y/N] prompt.
       -> bool
 
-  print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names, whitelist_count)
+  print_launch_banner(sess_id, cred_names, whitelist_count)
       Print the multi-line "about to launch" summary (agent definition, conf,
       tags, modes, skills, creds, user whitelist count) before docker compose
       builds the image. Conditional lines for tags/modes/skills/creds/whitelist
-      — only shown when applicable.
+      — only shown when applicable. md_path / conf_path / tags / modes all come
+      off the SessionIdentity.
 
 Generic-picker entry shape (pick_with_preview):
     {
@@ -84,27 +89,9 @@ STATUS_HEIGHT  = 2
 DIVIDER_WIDTH  = 1
 PAGE_JUMP      = 10  # rows skipped per PageUp/PageDown
 
-# ============================================================
-# Style class names + colors
-# ============================================================
-
-CLS_TITLE    = "picker-title"
-CLS_DIVIDER  = "picker-divider"
-CLS_STATUS   = "picker-status"
-CLS_FILTER   = "picker-filter"
-CLS_CURSOR   = "picker-cursor"
-CLS_PREVIEW  = "picker-preview"
-CLS_NO_MATCH = "picker-no-match"
-
-STYLE_DICT = {
-    CLS_TITLE:    "bold fg:ansibrightcyan",
-    CLS_DIVIDER:  "fg:ansibrightblack",
-    CLS_STATUS:   "fg:ansibrightblack",
-    CLS_FILTER:   "bold fg:ansiyellow",
-    CLS_CURSOR:   "reverse",
-    CLS_PREVIEW:  "",
-    CLS_NO_MATCH: "italic fg:ansibrightblack",
-}
+# Style class names + their corresponding style strings live as the
+# PickerClass enum below — defined after the imports because dataclass /
+# enum decorators need their stdlib modules in scope first.
 
 # ============================================================
 # Agent-picker UI strings
@@ -113,11 +100,9 @@ STYLE_DICT = {
 TITLE_AGENT_PICKER = "Select an agent:"
 TITLE_DELETE_MENU  = "‼️  DELETE AGENT INSTANCES  ‼️"
 
-MARKER_NEW    = "✨ Create"
-MARKER_CONT   = "🏷️ Cont."
-MARKER_DELMNU = "⚠️ DELETE‼️"
-MARKER_DLET   = "🗑 DELETE"
-MARKER_BACK   = "🚪  Back"
+# Row marker glyphs + their styles live on the PickerRowMarker enum (after the
+# imports). Cwd-relation labels ("(CURRENT DIR) " / "(DEFAULT DIR) ") live on
+# PickerCwdHint there too.
 
 DELMENU_LABEL  = "(Move onto deletions menu)"
 BACK_LABEL     = "(Move back to Agent Selection)"
@@ -129,23 +114,20 @@ CONFIRM_DELETE_FMT = "Delete '{name}'?"
 # Agent-picker styles (inline, applied per-segment)
 # ============================================================
 
-STYLE_NEW_MARKER     = "fg:ansigreen"
-STYLE_CONT_MARKER    = "fg:ansiyellow"
-STYLE_DEL_MARKER     = "fg:ansired"
 STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
-STYLE_CURRENT_DIR    = "bold fg:ansiyellow"
-STYLE_DEFAULT_DIR    = "bold fg:ansiyellow"   # same yellow as CURRENT DIR — kept as its own constant so colours can diverge later
 STYLE_TAG            = "fg:ansibrightgreen"
 STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" modes — visual warning that the instance has reduced isolation
 
 # ============================================================
 
+import dataclasses
 import glob
 import io
 import os
 import readline
+from enum import Enum
 from pathlib import Path
 
 from prompt_toolkit import Application                                     # pip install prompt_toolkit
@@ -161,15 +143,108 @@ from rich.console import Console                                           # pip
 from rich.markdown import Markdown
 from rich.theme import Theme
 
-from .agent_composition import (
-    MODE_AUTO, MODE_DESCRIPTIONS, MODE_DOOD, ORDERED_MODES, ORDERED_TAGS, TAG_DESCRIPTIONS,
-)
 from .agents_crud import (
-    DEFAULT_WORKSPACE,
-    creatable_agents, continuable_instances, delete_instance, instance_name, modify_instance,
-    state_dir,
+    DEFAULT_WORKSPACE, continuable_instances, creatable_agents, delete_instance,
+    modify_instance,
 )
-from .paths import AGENTS_STATE, FIREWALL_WHITELIST_FILE, PROJECT
+from .docker_config import staged_mounts
+from .paths import DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE, SKILLS_IN_CONTAINER
+from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers
+
+
+class PickerAction(Enum):
+    """Closed set of actions pick_with_preview returns alongside the selected
+    entry's value. None (returned for cancel/escape) sits outside the enum so
+    callers can branch on `if action is None` idiomatically."""
+    SELECT = "select"     # Enter — user picked a row
+    DELETE = "delete"     # Del   — user pressed delete on a row (only fires for deletable rows)
+    MODIFY = "modify"     # F2    — user pressed modify on a row (only fires for modifiable rows)
+
+
+class PickerClass(Enum):
+    """prompt_toolkit CSS-like class names + the style applied to spans tagged
+    with each. Bundling both on the enum member keeps the class name and its
+    style co-located (adding a new entry threads through STYLE_DICT below
+    without a second hand-maintained list). Members expose:
+      .cls_name — the CSS-like class string used in prompt_toolkit style refs
+      .style    — the prompt_toolkit style string applied to that class
+      .css      — `class:<cls_name>` — what span tuples want as the style key
+    """
+    TITLE    = ("picker-title",    "bold fg:ansibrightcyan")
+    DIVIDER  = ("picker-divider",  "fg:ansibrightblack")
+    STATUS   = ("picker-status",   "fg:ansibrightblack")
+    FILTER   = ("picker-filter",   "bold fg:ansiyellow")
+    CURSOR   = ("picker-cursor",   "reverse")
+    PREVIEW  = ("picker-preview",  "")
+    NO_MATCH = ("picker-no-match", "italic fg:ansibrightblack")
+
+    def __init__(self, cls_name, style):
+        self.cls_name = cls_name
+        self.style = style
+
+    @property
+    def css(self):
+        return f"class:{self.cls_name}"
+
+
+STYLE_DICT = {e.cls_name: e.style for e in PickerClass}
+
+
+class PickerRowMarker(Enum):
+    """Row prefix marker — pairs the glyph that prefixes a row with the style
+    applied to it. Bundling so that 'kind of row' is one named thing instead of
+    a (glyph, style) pair manually assembled at each call site. The shared
+    DEL_MARKER style is preserved by giving DELMNU and DLET the same colour
+    string — they're two different *markers* that happen to render the same.
+
+    Members expose:
+      .glyph      — the marker text (emoji + label)
+      .style      — prompt_toolkit style applied to the glyph
+      .fragment() — (style, glyph+suffix) tuple ready for a FormattedText segment
+    """
+    NEW    = ("✨ Create",       "fg:ansigreen")
+    CONT   = ("🏷️ Cont.",        "fg:ansiyellow")
+    DELMNU = ("⚠️ DELETE‼️",     "fg:ansired")
+    DLET   = ("🗑 DELETE",       "fg:ansired")
+    BACK   = ("🚪  Back",        "")
+
+    def __init__(self, glyph, style):
+        self.glyph = glyph
+        self.style = style
+
+    def fragment(self, suffix=""):
+        """Build the (style, text) tuple FormattedText expects — glyph then an
+        arbitrary suffix (spacing for column alignment, or extra trailing text
+        like the back-row's label) in this marker's style."""
+        return (self.style, f"{self.glyph}{suffix}")
+
+
+class PickerCwdHint(Enum):
+    """The cwd-relation tag shown on a Cont row when the instance's workspace
+    happens to coincide with where the launcher was invoked from. Same
+    bundling rationale as PickerRowMarker — the label text and its style are
+    a fixed pair, not two parallel constants. Both currently share a yellow
+    style; kept as separate enum members so the colours can diverge later
+    without re-threading call sites."""
+    CURRENT = ("(CURRENT DIR) ", "bold fg:ansiyellow")
+    DEFAULT = ("(DEFAULT DIR) ", "bold fg:ansiyellow")
+
+    def __init__(self, label, style):
+        self.label = label
+        self.style = style
+
+    @property
+    def fragment(self):
+        """(style, label) tuple ready for a FormattedText segment. Property
+        rather than method since the label is fixed — no per-call suffix."""
+        return (self.style, self.label)
+
+
+# Sentinel entry value signalling "open the delete submenu" — used in the
+# main picker where most rows hold an identity dataclass; this is the one
+# non-identity row, so a distinct singleton lets the dispatcher match by
+# `is` rather than tagging identities with extra metadata.
+_OPEN_DELMENU = object()
 
 
 def _render_md(text, *, theme=None):
@@ -192,12 +267,12 @@ def _build_composition_legend():
     `markdown.code` (green for tag names, bold red for mode names) — matching
     the picker's per-row marker colours (STYLE_TAG / STYLE_MODE_WARNING)."""
     rows_tags = "\n".join(
-        f"| `{tag}` | {TAG_DESCRIPTIONS.get(tag, '')} |"
-        for tag in ORDERED_TAGS
+        f"| `{m.value}` | {m.description} |"
+        for m in InstanceModifiers.tags()
     )
     rows_modes = "\n".join(
-        f"| `{mode}` | {MODE_DESCRIPTIONS.get(mode, '')} |"
-        for mode in ORDERED_MODES
+        f"| `{m.value}` | {m.description} |"
+        for m in InstanceModifiers.modes()
     )
     tags_md = (
         "# Tags\n\n"
@@ -229,27 +304,30 @@ def _agent_description(md_text):
 
 
 def _create_preview(agent):
-    """Build the Create-row preview markdown from a creatable_agents dict and render to ANSI.
-    Italic source line, horizontal rule, then the .md content as-is."""
+    """Build the Create-row preview markdown from a creatable_agents entry and
+    render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
+    agent_id = agent["identity"]
     return _render_md(
-        f"*Create a new instance of `{agent['agent_name']}` — `agents/{agent['md_path'].name}`*\n\n"
+        f"*Create a new instance of `{agent_id.agent}` — `agents/{agent['md_path'].name}`*\n\n"
         f"---\n\n"
         f"{agent['md_text']}"
     )
 
 
 def _cont_preview(inst):
-    """Build the Cont-row preview markdown from a continuable_instances dict and render to ANSI.
-    Italic lead-in, horizontal rule, then a YAML-fenced metadata block (rich syntax-colors keys/values)."""
+    """Build the Cont-row preview markdown from a continuable_instances entry and
+    render to ANSI. Italic lead-in, horizontal rule, then a YAML-fenced metadata
+    block (rich syntax-colors keys/values)."""
+    sess_id = inst["identity"]
     return _render_md(
-        f"*Continue session `{inst['id']}`.*\n\n"
+        f"*Continue session `{sess_id.instance}`.*\n\n"
         f"---\n\n"
         f"```yaml\n"
-        f"Agent:     {inst['agent_name']}\n"
-        f"Session:   {inst['session']}\n"
+        f"Agent:     {sess_id.agent}\n"
+        f"Session:   {sess_id.session}\n"
         f"Workspace: {inst['workspace_display']}\n"
         f"Modes:     {inst['modes_display']}\n"
-        f"State:     {inst['state_path']}\n"
+        f"State:     {sess_id.state_dir}\n"
         f"Last used: {inst['last_used_display']}\n"
         f"```\n"
     )
@@ -310,12 +388,12 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
 
     def list_fragments():
         if not state["shown"]:
-            return [(f"class:{CLS_NO_MATCH}", EMPTY_FILTER_MESSAGE)]
+            return [(PickerClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
         out = []
         for i in state["shown"]:
             segments = _normalize(entries[i]["display"])
             if i == state["cursor"]:
-                segments = [(f"class:{CLS_CURSOR} {style}".strip(), text)
+                segments = [(f"{PickerClass.CURSOR.css} {style}".strip(), text)
                             for style, text in segments]
             out.extend(segments)
             out.append(("", "\n"))
@@ -333,7 +411,7 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
         return ANSI(entries[state["cursor"]]["preview"])
 
     def title_fragments():
-        return [(f"class:{CLS_TITLE}", title)]
+        return [(PickerClass.TITLE.css, title)]
 
     def status_fragments():
         if state["legend_open"]:
@@ -346,9 +424,9 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
                 hint += HINT_MODIFY_SUFFIX
             if legend_text is not None:
                 hint += HINT_LEGEND_SUFFIX
-        out = [(f"class:{CLS_STATUS}", hint), ("", "\n")]
+        out = [(PickerClass.STATUS.css, hint), ("", "\n")]
         if state["filter"]:
-            out.append((f"class:{CLS_FILTER}", FILTER_LABEL))
+            out.append((PickerClass.FILTER.css, FILTER_LABEL))
             out.append(("", state["filter"]))
         return out
 
@@ -391,7 +469,7 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
     @kb.add("enter")
     def _(event):
         if state["shown"]:
-            state["result"] = ("select", entries[state["cursor"]]["value"])
+            state["result"] = (PickerAction.SELECT, entries[state["cursor"]]["value"])
             event.app.exit()
 
     @kb.add("escape")
@@ -433,7 +511,7 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
             entry = entries[state["cursor"]]
             if not entry.get("deletable", True):
                 return  # silently ignored — caller marked this row non-deletable
-            state["result"] = ("delete", entry["value"])
+            state["result"] = (PickerAction.DELETE, entry["value"])
             event.app.exit()
 
     if allow_modify:
@@ -444,21 +522,21 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
             entry = entries[state["cursor"]]
             if not entry.get("modifiable", True):
                 return  # silently ignored — caller marked this row non-modifiable
-            state["result"] = ("modify", entry["value"])
+            state["result"] = (PickerAction.MODIFY, entry["value"])
             event.app.exit()
 
     def accent_style():
         """Colour the preview's left-edge accent bar based on the selected row's kind:
-        green for Create rows, yellow for Cont rows, dim default for menu/back rows."""
+        green for Create rows (AgentIdentity), yellow for Cont rows (InstanceIdentity
+        and its SessionIdentity subclass), dim default for menu/back rows."""
         if not state["shown"]:
-            return f"class:{CLS_DIVIDER}"
+            return PickerClass.DIVIDER.css
         value = entries[state["cursor"]].get("value")
-        kind = value[0] if isinstance(value, tuple) and value else None
-        if kind == "new":
-            return STYLE_NEW_MARKER     # fg:ansigreen
-        if kind == "cont":
-            return STYLE_CONT_MARKER    # fg:ansiyellow
-        return f"class:{CLS_DIVIDER}"
+        if isinstance(value, InstanceIdentity):     # cont row — SessionIdentity is a subclass; checked before AgentIdentity since InstanceIdentity isa AgentIdentity
+            return PickerRowMarker.CONT.style       # fg:ansiyellow
+        if isinstance(value, AgentIdentity):        # new row — plain AgentIdentity only
+            return PickerRowMarker.NEW.style        # fg:ansigreen
+        return PickerClass.DIVIDER.css
 
     body = HSplit([
         Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
@@ -471,13 +549,13 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
                 wrap_lines=False,
                 width=D(weight=LIST_WEIGHT),
             ),
-            Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=f"class:{CLS_DIVIDER}"),
+            Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=PickerClass.DIVIDER.css),
             Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
             Window(
                 FormattedTextControl(preview_text),
                 wrap_lines=True,
                 width=D(weight=PREVIEW_WEIGHT),
-                style=f"class:{CLS_PREVIEW}",
+                style=PickerClass.PREVIEW.css,
             ),
         ]),
         Window(FormattedTextControl(status_fragments), height=STATUS_HEIGHT),
@@ -542,8 +620,8 @@ def prompt_session(agent, workspace):
         if not suffix:
             print("Session suffix cannot be empty.")
             continue
-        if state_dir(agent, suffix).exists():
-            print(f"Instance '{instance_name(agent, suffix)}' already exists. Pick another name.")
+        if InstanceIdentity.state_dir_for(agent, suffix).exists():
+            print(f"Instance '{InstanceIdentity.instance_name(agent, suffix)}' already exists. Pick another name.")
             continue
         return suffix
 
@@ -564,9 +642,27 @@ def prompt_yn(header, body, prompt_label, default=False):
     return answer in ("y", "yes")
 
 
-def prompt_auto(default=False):
-    """Y/N prompt for opting into {auto} mode."""
+def prompt_modifier(modifier, current_modifiers, *, header, body):
+    """Y/N prompt for opting into `modifier`. `current_modifiers` is an iterable
+    of canonical-string modifier names (typically the union of tags + currently
+    active modes) — used to pre-fill the Y/N default (True iff `modifier.value`
+    is in there). Header / body explain the modifier's effect; the prompt label
+    comes from the modifier's `.label` property. Shared body for prompt_auto /
+    prompt_dood / future prompts: keep the per-modifier UX boilerplate (security
+    explainer text) at the call site, keep the prompt mechanics here."""
     return prompt_yn(
+        header=header,
+        body=body,
+        prompt_label=modifier.label,
+        default=modifier.value in current_modifiers,
+    )
+
+
+def prompt_auto(current_modifiers):
+    """Y/N prompt for opting into {auto} mode."""
+    return prompt_modifier(
+        InstanceModifiers.MODE_AUTO,
+        current_modifiers,
         header="Auto / unattended mode?",
         body=[
             "Lets the agent run continuously without per-action permission prompts",
@@ -579,41 +675,40 @@ def prompt_auto(default=False):
             "  in its workspace and can run arbitrary code there. Use only for",
             "  tasks where you trust the agent to act on its own.",
         ],
-        prompt_label="{auto}",
-        default=default,
     )
 
 
-def prompt_dood(default=False):
+def prompt_dood(current_modifiers):
     """Y/N prompt for opting into {DooD} (Docker-out-of-Docker) mode."""
-    return prompt_yn(
-        header="Docker-out-of-Docker (DooD) mode?",
+    return prompt_modifier(
+        InstanceModifiers.MODE_DOOD,
+        current_modifiers,
+        header=f"Docker-out-of-Docker ({InstanceModifiers.MODE_DOOD.value}) mode?",
         body=[
             "This is for agents that need to run their own Docker containers",
             "(e.g., to test a project that uses docker compose). Without it,",
             "the agent can't reach the host's Docker daemon.",
             "",
-            "⚠ Avoid unless you actually need it. DooD bind-mounts",
+            f"⚠ Avoid unless you actually need it. {InstanceModifiers.MODE_DOOD.value} bind-mounts",
             "  /var/run/docker.sock, which gives the container effective root",
             "  on the host (it can start any container as root, read host",
             "  paths via volume mounts, etc.).",
         ],
-        prompt_label="{DooD}",
-        default=default,
     )
 
 
 def prompt_modes(tags, current_modes=()):
-    """Prompt for each mode in MODE_HANDLERS priority order, applying per-mode
-    applicability gates (DooD only fires for [prog] agents). `current_modes` is
-    the existing list (pre-fills the Y/N defaults — empty for new instances).
+    """Prompt for each mode in InstanceModifiers.modes() priority order, applying
+    per-mode applicability gates (DooD only fires for [prog] agents). `current_modes`
+    is the existing list (pre-fills the Y/N defaults — empty for new instances).
     Returns the new modes in priority order — used by run.py for new instances
     and by select_agent's modify flow."""
+    current_modifiers = [*tags, *current_modes]
     new_modes = []
-    if prompt_auto(default=(MODE_AUTO in current_modes)):
-        new_modes.append(MODE_AUTO)
-    if "prog" in tags and prompt_dood(default=(MODE_DOOD in current_modes)):
-        new_modes.append(MODE_DOOD)
+    if prompt_auto(current_modifiers):
+        new_modes.append(InstanceModifiers.MODE_AUTO.value)
+    if InstanceModifiers.TAG_PROG.value in current_modifiers and prompt_dood(current_modifiers):
+        new_modes.append(InstanceModifiers.MODE_DOOD.value)
     return new_modes
 
 
@@ -626,10 +721,10 @@ def select_agent():
 
         instances_by_agent = {}
         for inst in instances:
-            instances_by_agent.setdefault(inst["agent_name"], []).append(inst)
+            instances_by_agent.setdefault(inst["identity"].agent, []).append(inst)
 
-        agent_name_width = max(len(a["agent_name"]) for a in agents)
-        instance_name_width = max((len(i["id"]) for i in instances), default=0)
+        agent_name_width = max(len(a["identity"].agent) for a in agents)
+        instance_name_width = max((len(i["identity"].instance) for i in instances), default=0)
 
         # Shared tag/mode column: tags only appear on Create rows, modes only on Cont rows,
         # so they never collide and can occupy the same horizontal slot. Width is sized to
@@ -637,7 +732,7 @@ def select_agent():
         # Effect: a `{DooD}` mark on a Cont row sits at the same column as `[prog]` would
         # on a Create row (just nested by the Cont marker's longer prefix).
         tag_strs = [_tag_prefix_str(a.get("tags", [])) for a in agents]
-        mode_strs_by_inst = {i["id"]: _mode_prefix_str(i.get("modes", [])) for i in instances}
+        mode_strs_by_inst = {i["identity"].instance: _mode_prefix_str(i["identity"].modes) for i in instances}
         shared_col_width = max(
             [len(s) for s in tag_strs] + [len(s) for s in mode_strs_by_inst.values()],
             default=0,
@@ -645,46 +740,48 @@ def select_agent():
 
         entries = []
         for agent, tag_str in zip(agents, tag_strs):
+            agent_id = agent["identity"]
             entries.append({
                 "display": [
-                    (STYLE_NEW_MARKER, f"{MARKER_NEW}  "),
+                    PickerRowMarker.NEW.fragment("  "),
                     (STYLE_TAG, tag_str),
                     ("", " " * (shared_col_width - len(tag_str))),
-                    (STYLE_AGENT_NAME, f"{agent['agent_name']:<{agent_name_width}}"),
+                    (STYLE_AGENT_NAME, f"{agent_id.agent:<{agent_name_width}}"),
                     ("", f" — {_agent_description(agent['md_text'])}"),
                 ],
                 "preview": _create_preview(agent),
-                "value": ("new", agent),
+                "value": agent_id,
                 "deletable": False,
                 "modifiable": False,
             })
-            for inst in instances_by_agent.get(agent["agent_name"], []):
-                mode_str = mode_strs_by_inst[inst["id"]]
+            for inst in instances_by_agent.get(agent_id.agent, []):
+                sess_id = inst["identity"]
+                mode_str = mode_strs_by_inst[sess_id.instance]
                 cont_display = [
-                    (STYLE_CONT_MARKER, f"{MARKER_CONT}      "),
+                    PickerRowMarker.CONT.fragment("      "),
                     (STYLE_MODE_WARNING, mode_str),
                     ("", " " * (shared_col_width - len(mode_str))),
-                    (STYLE_AGENT_NAME, f"{inst['id']:<{instance_name_width}}"),
+                    (STYLE_AGENT_NAME, f"{sess_id.instance:<{instance_name_width}}"),
                     ("", "    "),
                 ]
                 if inst.get("is_current_dir"):
-                    cont_display.append((STYLE_CURRENT_DIR, "(CURRENT DIR) "))
+                    cont_display.append(PickerCwdHint.CURRENT.fragment)
                 elif inst.get("is_default_dir"):
-                    cont_display.append((STYLE_DEFAULT_DIR, "(DEFAULT DIR) "))
+                    cont_display.append(PickerCwdHint.DEFAULT.fragment)
                 cont_display.append((STYLE_WORKSPACE_HINT, inst["workspace_display"]))
                 entries.append({
                     "display": cont_display,
                     "preview": _cont_preview(inst),
-                    "value": ("cont", inst),
+                    "value": sess_id,
                 })
 
         entries.append({
             "display": [
-                (STYLE_DEL_MARKER, f"{MARKER_DELMNU}  "),
+                PickerRowMarker.DELMNU.fragment("  "),
                 ("", DELMENU_LABEL),
             ],
             "preview": DELMENU_PREVIEW,
-            "value": ("delmenu",),
+            "value": _OPEN_DELMENU,
             "deletable": False,
             "modifiable": False,
         })
@@ -693,32 +790,33 @@ def select_agent():
         if action is None:
             return None
 
-        if action == "delete":  # picker enforces deletability — only ('cont', inst) values reach here
-            inst = value[1]
-            if confirm_dialog(CONFIRM_DELETE_FMT.format(name=inst["id"])):
-                delete_instance(inst["id"])
+        if action == PickerAction.DELETE:  # picker enforces deletability — only cont rows (InstanceIdentity) reach here
+            if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
+                delete_instance(value)
             continue
 
-        if action == "modify":  # picker enforces modifiability — only ('cont', inst) values reach here
-            inst = value[1]
-            agent_name = inst["agent_name"]
+        if action == PickerAction.MODIFY:  # picker enforces modifiability — only cont rows reach here
+            old_inst_id = value
             while True:
-                new_session = input(f"New session suffix for '{agent_name}' [{inst['session']}]: ").strip() or inst["session"]
-                if new_session == inst["session"]:
+                new_session = input(f"New session suffix for '{old_inst_id.agent}' [{old_inst_id.session}]: ").strip() or old_inst_id.session
+                if new_session == old_inst_id.session:
                     break  # keeping the same session — no collision possible
-                if not (AGENTS_STATE / instance_name(agent_name, new_session)).exists():
+                if not InstanceIdentity.state_dir_for(old_inst_id.agent, new_session).exists():
                     break  # not colliding with an existing instance
-                print(f"Instance '{instance_name(agent_name, new_session)}' already exists. Pick another name.")
-            new_workspace = ask_for_workspace(agent_name, default=inst["workspace"])
-            new_modes = prompt_modes(inst.get("tags", []), inst.get("modes", []))
-            modify_instance(inst["id"], agent_name, new_session, new_workspace, new_modes)
+                print(f"Instance '{InstanceIdentity.instance_name(old_inst_id.agent, new_session)}' already exists. Pick another name.")
+            new_workspace = ask_for_workspace(old_inst_id.agent, default=old_inst_id.workspace)
+            new_modes = prompt_modes(old_inst_id.tags, old_inst_id.modes)
+            new_sess_id = dataclasses.replace(
+                old_inst_id, session=new_session, workspace=new_workspace, modes=tuple(new_modes)
+            )  # is_brand_new stays False via the dataclass replace
+            modify_instance(old_inst_id, new_sess_id)
             continue
 
-        if value[0] == "delmenu":
+        if value is _OPEN_DELMENU:
             _delete_submenu()
             continue
 
-        return value  # ('new', agent_dict) | ('cont', instance_dict)
+        return value  # AgentIdentity (new) | SessionIdentity (cont)
 
 
 def _delete_submenu():
@@ -729,16 +827,17 @@ def _delete_submenu():
             return
         entries = []
         for inst in instances:
+            sess_id = inst["identity"]
             entries.append({
                 "display": [
-                    (STYLE_DEL_MARKER, f"{MARKER_DLET}  "),
-                    (STYLE_DEL_NAME, inst["id"]),
+                    PickerRowMarker.DLET.fragment("  "),
+                    (STYLE_DEL_NAME, sess_id.instance),
                 ],
                 "preview": _cont_preview(inst),
-                "value": inst["id"],
+                "value": sess_id,
             })
         entries.append({
-            "display": [("", f"{MARKER_BACK}  {BACK_LABEL}")],
+            "display": [PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],
             "preview": BACK_PREVIEW,
             "value": None,
             "deletable": False,
@@ -747,25 +846,29 @@ def _delete_submenu():
         action, value = pick_with_preview(TITLE_DELETE_MENU, entries, allow_delete=True, legend_text=LEGEND_TEXT)
         if action is None or value is None:
             return
-        if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value)):
+        if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
             delete_instance(value)
 
 
-def print_launch_banner(md_path, conf_path, tags, modes, skill_mounts, cred_names, whitelist_count):
+def print_launch_banner(sess_id, cred_names, whitelist_count):
     """Print the multi-line summary that appears before docker compose builds the
     image — agent definition path, conf path, active tags + modes, and skills/creds
     counts when applicable. Each line is conditional on having something to show
     (no empty 'Tags: ' if there are none). `whitelist_count` is None for non-{auto}
     launches (line hidden); an integer count (possibly 0) when {auto} is active so
-    the user sees the file's existence and current size."""
-    print(f"  Agent definition: {md_path.relative_to(PROJECT)}")
-    print(f"  Configuration:    {conf_path.relative_to(PROJECT) if conf_path else '(none — using defaults)'}")
-    if tags:
-        print(f"  Tags:             {' '.join(f'[{t}]' for t in tags)}")
-    if modes:
-        print(f"  Modes:            {' '.join('{' + m + '}' for m in modes)}")
-    if skill_mounts:
-        print(f"  Project skills:   {len(skill_mounts) // 2} loaded (custom_skills/ + .skills/ if present)")
+    the user sees the file's existence and current size. Takes the launch's
+    SessionIdentity and pulls md_path / conf_path / tags / modes off it directly;
+    the skill count comes from the docker_config mount accumulator (skills are the
+    mounts whose target sits under SKILLS_IN_CONTAINER)."""
+    print(f"  Agent definition: {sess_id.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    print(f"  Configuration:    {sess_id.conf_path.relative_to(DOCKERIZED_CLAUDE_ROOT) if sess_id.conf_path else '(none — using defaults)'}")
+    if sess_id.tags:
+        print(f"  Tags:             {' '.join(f'[{t}]' for t in sess_id.tags)}")
+    if sess_id.modes:
+        print(f"  Modes:            {' '.join('{' + m + '}' for m in sess_id.modes)}")
+    skill_count = sum(1 for tgt in staged_mounts().values() if tgt.startswith(f"{SKILLS_IN_CONTAINER}/"))
+    if skill_count:
+        print(f"  Project skills:   {skill_count} loaded (custom_skills/ + .skills/ if present)")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
     if whitelist_count is not None:

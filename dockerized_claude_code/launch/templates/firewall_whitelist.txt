@@ -1,0 +1,43 @@
+# User-defined firewall whitelist, active in {auto} mode.
+#
+# Each non-empty, non-comment line is treated as an address (domain or IPv4) to allow
+# alongside the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, ...).
+# See BUILTIN_FIREWALL_DOMAINS in launch/agent_composition.py for the full set.
+#
+# - Matching is by IP, not hostname — each entry is resolved once at firewall init.
+# - Specify `www.foo.com` to also include `foo.com`. The opposite doesn't apply: if you specify `foo.com`, no "www." variant would be included (since not every site has a CDN front).
+# - Wildcards like `*.foo.com` don't expand — each subdomain you want needs its own line. A leading `*.` is silently stripped, so `*.foo.com` is treated the same as `foo.com`.
+# - Raw IPv4 addresses and CIDR ranges are accepted too (e.g. `1.2.3.4` or `10.0.0.0/8`) — they skip DNS and go straight to iptables. Useful when you know the IP or subnet but the hostname doesn't resolve, want to pin one IP for a domain with rotating addresses, or need to allow a whole private range. ⚠ `0.0.0.0/0` allows ALL outbound — defeats the firewall.
+# - Default ports opened per allowed IP are 443 (HTTPS) + 80 (HTTP). Append `:<port>` to an entry to open only that port instead (e.g. `db.example.com:3306` for MySQL, `1.2.3.4:5432` for Postgres, `10.0.0.0/24:22` for SSH on a private subnet). Without a suffix, every existing entry keeps the HTTPS+HTTP default.
+#
+# Examples — uncomment any line below to grant outbound access on the next {auto} launch:
+#
+# x.com                     # inline comments like these are fine
+# news.ycombinator.com
+# stackoverflow.com
+# www.finance.yahoo.com     # will register WITH + WITHOUT the www. (2 different IP addresses)
+# docs.python.org           # already covered by default list; doesn't matter. Repetitions are fine.
+# 198.52.101.45             # raw IPv4 works too — this one is RFC-5737 docs-reserved, just illustrative
+# 198.51.100.0/24           # CIDR range too — covers 198.51.100.0 through 198.51.100.255
+# 10.103.91.22:3306         # `:port` suffix opens only that port (MySQL here) — otherwise 443+80 are opened
+#
+#
+# Service integration examples — uncomment if you actually use these. Auth substrate
+# (Google OAuth + IAM, AWS STS) is shared across every API call to that provider;
+# service endpoints (GCS / S3 / Slack) only matter for users hitting that
+# specific service.
+#
+# hooks.slack.com                   # Slack incoming webhooks (notifications from agents into a Slack channel)
+# oauth2.googleapis.com             # Google OAuth token endpoint (required for any gcloud / google-auth call)
+# accounts.google.com               # Google OAuth identity endpoint (interactive auth flows; ADC fallback paths)
+# iamcredentials.googleapis.com     # Google IAM service-account credential generation / impersonation
+# storage.googleapis.com            # Google Cloud Storage (GCS) buckets
+# sts.amazonaws.com                 # AWS STS — auth substrate, hit by any aws CLI / boto3 / IAM-Identity-Center call
+# iam.amazonaws.com                 # AWS IAM management API (users / roles / policies; global, not regional)
+# s3.us-east-1.amazonaws.com        # AWS S3 regional endpoint — swap us-east-1 for your region (us-west-2, eu-west-1, …)
+#                                   #   be aware: this could resolve to many addresses; you'd need to cover multiple. Find out which, with a command like:
+#                                   #   curl -s https://ip-ranges.amazonaws.com/ip-ranges.json | jq -r '.prefixes[] | select(.service == "S3" and .region == "us-east-1") | .ip_prefix'
+# s3.amazonaws.com                  # AWS S3 global endpoint (won't save you from doing the above-mentioned lookup)
+#
+# Changes apply on the next {auto} instance launch — the firewall runs at container startup, and snapshots
+# the resolved IPs for each domain.

@@ -1,51 +1,56 @@
-"""Agent state CRUD: workspace mapping, state-dir lifecycle, the interactive
-session-suffix prompt, and the picker-entry builders (creatable_agents,
-continuable_instances, delete_instance, modify_instance) the menu_picker UI consumes.
+"""Agent state CRUD: every operation that mutates the launcher's persistent
+agent state, plus the factories that turn raw on-disk state into the identity
+/ picker-entry shapes the rest of the launcher consumes.
 
-Imports from agent_composition only; nothing from run.py or menu_picker — both import from here.
+Roughly grouped by section in this file:
+  - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
+  - update_workspace_map / set_instance_modes — single-entry writers
+  - warn_dood_with_auto — interactive prompt used by mode writers
+  - install_latest_md / sync_memory_templates / delete_instance /
+    modify_instance — per-instance state-dir writers
+  - resolve_pick — name-string → identity factory used by run.py's CLI parsing
+  - creatable_agents / continuable_instances — picker entry dict factories the
+    menu_picker UI consumes
+
+The JSON map load/save primitives (load_workspace_map, save_modes_map, etc.)
+live in file_access with module-level caches that refresh on save — this
+module just imports them and uses the load-mutate-save pattern. structs.py
+owns the dataclasses themselves (plus the InstanceModifiers taxonomy used
+here for the auto+DooD warning and sort-key ordering); this module imports
+those and constructs the dataclasses (resolve_pick + the picker builders).
+Picker-side sort keys (agent_sort_key / mode_sort_key / tag_sort_key) live
+here too — they're picker concerns, not composition concerns, so they sit
+next to the picker-entry factories that consume them. Imports from
+file_access (parse + map I/O + load_conf for the family sort), paths
+(read_workspace_pref for the host-shell $AI_WORKSPACE default, plus the
+usual path constants), structs, utils, and stdlib; nothing from
+agent_composition, run.py, or menu_picker — all of those import from here.
 """
 
-import json
 import os
-import shutil
+import re
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
-from .agent_composition import (
-    MD_EXT, MODE_AUTO, MODE_DOOD, ORDERED_MODES,
-    agent_sort_key, find_md_for_agent, mode_sort_key, parse_stem, tag_sort_key,
+from .file_access import (
+    copy_file, delete_file, delete_tree, find_md_for_agent,
+    load_conf, load_modes_map, load_workspace_map, move_path, parse_stem, read_text,
+    save_modes_map, save_workspace_map, write_text,
 )
-from .docker_config import read_workspace_pref
 from .paths import (
-    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
-    AGENTS_STATE, CREDENTIALS_FILE, DEFAULTING_DIRS, FALLBACK_WORKSPACE, MEMORY_DIR,
+    ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE,
+    DEFAULTING_DIRS, FALLBACK_WORKSPACE, INSTANCE_MEMORY_FILE_RELPATH, MD_EXT, MEMORY_DIR,
+    read_workspace_pref,
 )
+from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
+from .utils import relative_time
 
 DEFAULT_WORKSPACE = (
     read_workspace_pref()
     or (FALLBACK_WORKSPACE if os.getcwd() in DEFAULTING_DIRS else os.getcwd())
 )  # fall back to $PWD, except when $PWD is one of DEFAULTING_DIRS — then use FALLBACK_WORKSPACE
-SESSION_SEP = "__"
-NO_WORKSPACE_DISPLAY = "?"  # subtitle placeholder for instances with no valid workspace
-
-
-def instance_name(agent, session):
-    """Compose the canonical state-dir id `<agent>__<session>` from a clean agent
-    name + session suffix. (The (parent) conf-alias suffix is stripped before agent
-    names ever reach this — see creatable_agents / parse_cli.)"""
-    return f"{agent}{SESSION_SEP}{session}"
-
-
-def state_dir(agent, session):
-    """Path to an instance's state directory under AGENTS_STATE."""
-    return AGENTS_STATE / instance_name(agent, session)
-
-
-def state_md(agent, session):
-    """Path to the CLAUDE.md inside an instance's state directory."""
-    return state_dir(agent, session) / "CLAUDE.md"
+NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
 
 
 def list_all_instances():
@@ -56,53 +61,56 @@ def list_all_instances():
     return [d.name for d in AGENTS_STATE.iterdir() if d.is_dir() and SESSION_SEP in d.name]
 
 
-def _load_json_map(path):
-    """Parse a JSON-mapping file into a dict. Missing or empty files yield {}.
-    Shared by load_workspace_map and load_modes_map — same shape, different paths."""
-    if not path.exists():
-        return {}
-    content = path.read_text().strip()
-    return json.loads(content) if content else {}
+# ============================================================
+# Single-entry writers
+# ============================================================
 
-
-def _save_json_map(path, mapping):
-    """Write a dict as pretty-printed JSON to `path`. Creates AGENTS_STATE if missing.
-    Shared by save_workspace_map and save_modes_map — same shape, different paths."""
-    AGENTS_STATE.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping, indent=4, sort_keys=True) + "\n")
-
-
-def load_workspace_map():           return _load_json_map(AGENT_WORKSPACE_MAP_FILE)
-def save_workspace_map(mapping):    _save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
-def load_modes_map():               return _load_json_map(AGENT_MODES_MAP_FILE)
-def save_modes_map(mapping):        _save_json_map(AGENT_MODES_MAP_FILE, mapping)
-
-
-def update_workspace_map(instance_id, workspace):
-    """Persist (instance_id → workspace) in agent_workspace_map.json. No-op if the
-    entry is already set to this value — avoids rewriting the file on every cont
-    relaunch when the workspace hasn't changed."""
+def update_workspace_map(inst_id):
+    """Persist (inst_id.instance → inst_id.workspace) in agent_workspace_map.json.
+    No-op if the entry is already set to this value — avoids rewriting the file on
+    every cont relaunch when the workspace hasn't changed."""
     m = load_workspace_map()
-    if m.get(instance_id) != workspace:
-        m[instance_id] = workspace
+    if m.get(inst_id.instance) != inst_id.workspace:
+        m[inst_id.instance] = inst_id.workspace
         save_workspace_map(m)
 
 
-def validate_stored_workspace(instance_id, workspace):
-    """Exit if a stored workspace path is a non-existent directory (stale
-    agent_workspace_map.json entry). None passes through so the caller can
-    decide to prompt for a new value instead of treating absence as an error."""
-    if workspace is not None and not Path(workspace).is_dir():
-        sys.exit(
-            f"Workspace for '{instance_id}' is not a valid directory: {workspace}\n"
-            f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
-        )
+def _write_modes_entry(m, sess_id):
+    """Mutate `m` (a modes-map dict) to reflect sess_id's modes for sess_id.instance:
+    set the list when modes are non-empty, pop the entry otherwise. Pure dict
+    mutation — callers bracket with their own load/save so a multi-edit pass
+    can batch into a single disk write (see modify_instance)."""
+    if sess_id.modes:
+        m[sess_id.instance] = list(sess_id.modes)
+    else:
+        m.pop(sess_id.instance, None)
 
 
-def get_instance_modes(instance_id):
-    """Return the modes list for an instance (empty if none set)."""
-    return load_modes_map().get(instance_id, [])
+def _is_auto_and_dood(modes):
+    """True iff `modes` includes both {auto} and {DooD} — the dangerous combo
+    that triggers warn_dood_with_auto. Defined once so set_instance_modes and
+    modify_instance share one predicate; adding another dangerous combo
+    becomes a single-place change."""
+    return (InstanceModifiers.MODE_AUTO.value in modes
+            and InstanceModifiers.MODE_DOOD.value in modes)
 
+
+def set_instance_modes(sess_id):
+    """Persist the modes list for an instance, taken off the passed SessionIdentity
+    (which carries both the instance key and its resolved modes). An empty modes
+    tuple removes the entry from the map (we don't store empty entries — keeps the
+    file small and the 'no modes' case explicit by absence). Warns on the
+    {auto}+{DooD} combination."""
+    m = load_modes_map()
+    _write_modes_entry(m, sess_id)
+    save_modes_map(m)
+    if _is_auto_and_dood(sess_id.modes):
+        warn_dood_with_auto()
+
+
+# ============================================================
+# Interactive warning (writer-adjacent)
+# ============================================================
 
 def warn_dood_with_auto():
     """Stern red warning when an instance ends up with both {auto} and {DooD}
@@ -111,7 +119,7 @@ def warn_dood_with_auto():
     anything on the host, unattended. Blocks until the user presses any key
     so the warning isn't silently scrolled past."""
     print()
-    print("\033[1;31m  ⚠ YOU'VE ENABLED BOTH {auto} AND {DooD} - PROCEED WITH CAUTION,")
+    print(f"\033[1;31m  ⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_AUTO.label} AND {InstanceModifiers.MODE_DOOD.label} - PROCEED WITH CAUTION,")
     print("    AS THE AI AGENT HAS THE POWER TO DO ANYTHING ON YOUR COMPUTER,")
     print("    AND DOESN'T REQUIRE PERMISSION!\033[0m")
     print()
@@ -130,57 +138,22 @@ def warn_dood_with_auto():
     print()
 
 
-def set_instance_modes(instance_id, modes):
-    """Persist the modes list for an instance. An empty list removes the entry
-    from the map (we don't store empty entries — keeps the file small and the
-    'no modes' case explicit by absence). Warns on the {auto}+{DooD} combination."""
-    m = load_modes_map()
-    if modes:
-        m[instance_id] = modes
-    else:
-        m.pop(instance_id, None)
-    save_modes_map(m)
-    if MODE_AUTO in modes and MODE_DOOD in modes:
-        warn_dood_with_auto()
+# ============================================================
+# Per-instance state-dir writers
+# ============================================================
 
-
-def resolve_pick(name):
-    """Resolve a name string into a launch payload tuple matching select_agent's
-    return shape. Two cases:
-        '<agent>__<session>' with a state dir on disk → ('cont', {...})
-        '<agent>'           with a matching .md       → ('new', {...})
-    Returns None if neither matches (orphan state dir without .md, typo, etc.).
-
-    Used by run.py's parse_cli to convert sys.argv[1] into the same (kind, payload)
-    tuple the picker would have returned, so launch's downstream flow is uniform."""
-    if SESSION_SEP in name and (AGENTS_STATE / name).is_dir():
-        agent, _, session = name.partition(SESSION_SEP)
-        md_path = find_md_for_agent(agent)
-        if md_path is not None:
-            return ("cont", {
-                "agent_name": agent,
-                "md_path": md_path,
-                "session": session,
-                "workspace": load_workspace_map().get(name),
-            })
-    md_path = find_md_for_agent(name)
-    if md_path is not None:
-        return ("new", {"agent_name": name, "md_path": md_path})
-    return None
-
-
-def install_latest_md(agent, session, md_path):
-    """Copy the agent's `.md` into the state dir as CLAUDE.md (creating the dir if needed),
-    and ensure the shared OAuth files exist so docker's bind-mount doesn't auto-create them
-    as root. Returns the state dir."""
-    sd = state_dir(agent, session)
-    (sd / "projects" / "-workspace" / "memory").mkdir(parents=True, exist_ok=True)
-    state_md(agent, session).write_text(md_path.read_text())
+def install_latest_md(inst_id):
+    """Copy the agent's `.md` into the state dir as CLAUDE.md (refreshed each
+    launch so a source-side edit propagates), and ensure the shared OAuth files
+    exist so docker's bind-mount doesn't auto-create them as root. copy_file
+    and write_text both auto-create the state dir + AGENTS_STATE as needed
+    (via ensure_parent_dir inside the primitives). Returns the state dir."""
+    copy_file(inst_id.md_path, inst_id.state_md, overwrite_if_dest=True)
     if not ACCOUNT_FILE.exists():
-        ACCOUNT_FILE.write_text("{}")
+        write_text(ACCOUNT_FILE, "{}")
     if not CREDENTIALS_FILE.exists():
-        CREDENTIALS_FILE.write_text("{}")
-    return sd
+        write_text(CREDENTIALS_FILE, "{}")
+    return inst_id.state_dir
 
 
 def _force_remove(path, *, name=None):
@@ -207,9 +180,9 @@ def _force_remove(path, *, name=None):
 
     try:
         if path.is_symlink() or not path.is_dir():
-            path.unlink(missing_ok=True)
+            delete_file(path)
         else:
-            shutil.rmtree(path)
+            delete_tree(path)
         return True
     except FileNotFoundError:
         return True   # raced with another removal; consider it done
@@ -229,19 +202,15 @@ def _force_remove(path, *, name=None):
     return False
 
 
-def sync_memory_templates(state_path, modes):
-    """Reconcile per-instance MEMORY.md with the templates whose activation
-    condition is currently true. Each template's first and last lines act as
-    wrapper markers that locate the block in MEMORY.md without inline marker
-    comments. Anything *outside* the wrapped blocks is preserved verbatim —
-    that's where agent-added auto-memory pointer entries live."""
-    templates = [
-        # always-active templates (one entry per filename)
-        ("seek_summary.md", True),
-        # mode-conditional addendums (one entry per mode in ORDERED_MODES)
-        *((f"{mode.lower()}-addendum.md", mode in modes) for mode in ORDERED_MODES),
-    ]
-    memory_path = state_path / "projects" / "-workspace" / "memory" / "MEMORY.md"
+def sync_memory_templates(sess_id, templates):
+    """Reconcile per-instance MEMORY.md with the caller-supplied `templates`
+    list of `(filename, active)` pairs. Each template's first and last lines
+    act as wrapper markers that locate the block in MEMORY.md without inline
+    marker comments. Anything *outside* the wrapped blocks is preserved
+    verbatim — that's where agent-added auto-memory pointer entries live.
+    Caller decides what's in the list (always-active + mode-conditional, etc.)
+    — this function is generic over template provenance."""
+    memory_path = sess_id.state_dir / INSTANCE_MEMORY_FILE_RELPATH
 
     # Defensive cleanup for pre-existing instances. When MEMORY.md was a project-
     # wide read-only bind-mount, Docker may have left an artifact at this path —
@@ -253,14 +222,14 @@ def sync_memory_templates(state_path, modes):
     if memory_path.is_symlink() or (memory_path.exists() and not memory_path.is_file()):
         _force_remove(memory_path)
 
-    original = memory_path.read_text() if memory_path.exists() else ""
+    original = read_text(memory_path) if memory_path.exists() else ""
     content = original
 
     for filename, active in templates:
         template_file = MEMORY_DIR / filename
         if not template_file.exists():
             continue
-        template = template_file.read_text().strip()   # also drops leading/trailing newlines so lines[0]/[-1] are real wrappers
+        template = read_text(template_file).strip()   # also drops leading/trailing newlines so lines[0]/[-1] are real wrappers
         lines = template.splitlines()
         if len(lines) < 2:
             continue   # need at least a start- and end-wrapper line
@@ -292,189 +261,220 @@ def sync_memory_templates(state_path, modes):
         content = content[:s_idx] + new_block + content[end_pos:]
 
     if content != original:
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            memory_path.write_text(content)
+            write_text(memory_path, content)
         except PermissionError:
             # Stale file with restrictive perms (typically a root-owned bind-mount
             # leftover that survived the cleanup above because it was a regular file).
             # Force-remove and retry; sudo fallback inside _force_remove handles the
-            # root-owned case.
+            # root-owned case. (write_text auto-creates the parent dir tree as
+            # needed before each attempt.)
             _force_remove(memory_path)
-            memory_path.write_text(content)
+            write_text(memory_path, content)
 
 
-# === Picker entries — return dicts the menu_picker UI renders directly. ===
+def delete_instance(inst_id):
+    """Remove this instance's state dir and its workspace + modes mapping entries.
+    Path removal goes through `_force_remove(name=...)` which logs the removal,
+    handles root-owned Docker bind-mount leftovers via sudo, and pauses for
+    keypress on failure. Already-gone state dirs are treated as success so the
+    map entries are still cleaned up."""
+    if not _force_remove(inst_id.state_dir, name=inst_id.instance):
+        return   # _force_remove printed errors and waited for keypress
+    m = load_workspace_map()
+    if inst_id.instance in m:
+        del m[inst_id.instance]
+        save_workspace_map(m)
+    m = load_modes_map()
+    if inst_id.instance in m:
+        del m[inst_id.instance]
+        save_modes_map(m)
+
+
+def modify_instance(old_inst_id, new_sess_id):
+    """Move an instance's state dir to its new SessionIdentity (renaming if the
+    instance id differs) and update both the workspace and modes mappings to
+    match. No-op for the rename if old and new ids match; the maps are always
+    rewritten so callers can change modes/workspace without renaming."""
+    renaming = new_sess_id.instance != old_inst_id.instance
+    if renaming:
+        if new_sess_id.state_dir.exists():
+            raise ValueError(f"Instance '{new_sess_id.instance}' already exists.")
+        move_path(old_inst_id.state_dir, new_sess_id.state_dir)
+    # workspace map
+    m = load_workspace_map()
+    if renaming:
+        m.pop(old_inst_id.instance, None)
+    m[new_sess_id.instance] = new_sess_id.workspace
+    save_workspace_map(m)
+    # modes map — single load/save (mirrors set_instance_modes' shape via the
+    # shared helpers so a rename costs one file write instead of two), plus the
+    # same {auto}+{DooD} warning at the end so both persistence paths surface it.
+    m = load_modes_map()
+    if renaming:
+        m.pop(old_inst_id.instance, None)
+    _write_modes_entry(m, new_sess_id)
+    save_modes_map(m)
+    if _is_auto_and_dood(new_sess_id.modes):
+        warn_dood_with_auto()
+
+
+# ============================================================
+# Picker-entry sort keys
+# ============================================================
+# Used by creatable_agents (tag + family/version sort) and continuable_instances
+# (mode + family/version/session sort). Kept here rather than in agent_composition
+# because they're picker output concerns — composition handlers don't sort
+# anything. Tag/mode position comes from InstanceModifiers (in structs);
+# ORDERED_MODEL_FAMILIES is picker-only so it lives here as a local constant.
+
+ORDERED_MODEL_FAMILIES = ["opus", "sonnet", "haiku"]
+_FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
+
+
+def parse_model_id(model):
+    """Extract (family, major, minor) from a model ID like 'claude-opus-4-7'.
+    Returns None when no recognized family is present. The regex's family
+    alternation is derived from ORDERED_MODEL_FAMILIES, so a new family means
+    one list-entry change — no parallel regex to update."""
+    m = _FAMILY_RE.search(model)
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)), int(m.group(3) or 0)
+
+
+def _ordering_index_or_end(value, ordering):
+    """Position of `value` in `ordering`, or `len(ordering)` if absent — pushes
+    unknowns past the end when used as a sort-key element."""
+    return ordering.index(value) if value in ordering else len(ordering)
+
+
+def agent_sort_key(item):
+    """Sort by family (ORDERED_MODEL_FAMILIES order — opus first, haiku last),
+    then version desc, then name asc. Agents whose .conf has no recognisable
+    model sink past all known families via the sentinel index."""
+    name, path = item
+    _, conf = load_conf(path)
+    family, major, minor = parse_model_id(conf.get("ANTHROPIC_MODEL", "")) or (None, 0, 0)
+    return (_ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
+
+
+def tag_sort_key(tags):
+    """Sort key for agents grouped by tag set, following InstanceModifiers.tags()
+    declaration order. Untagged ([]) → empty tuple, which sorts before any non-
+    empty key. Unknown tags sink past the end via a sentinel index so typo'd tags
+    don't mix into the untagged group."""
+    return tuple(sorted(_ordering_index_or_end(t, InstanceModifiers.tag_values()) for t in tags))
+
+
+def mode_sort_key(modes):
+    """Sort key for instances grouped by mode set, following InstanceModifiers.modes()
+    declaration order. Mode-less ([]) → empty tuple, which sorts before any non-empty
+    key. Unknown modes sink past the end via a sentinel index."""
+    return tuple(sorted(_ordering_index_or_end(m, InstanceModifiers.mode_values()) for m in modes))
+
+
+# ============================================================
+# Identity factories — name-string / disk-scan → identity
+# ============================================================
+
+def resolve_pick(name):
+    """Resolve a name string into an identity matching select_agent's return shape.
+    Two cases:
+        '<agent>__<session>' with a state dir on disk → SessionIdentity (is_brand_new=False)
+        '<agent>'           with a matching .md       → AgentIdentity
+    Returns None if neither matches (orphan state dir without .md, typo, etc.).
+
+    The cont path packages stored workspace + modes into the identity so the
+    downstream flow doesn't need a second pass over the maps; the workspace may
+    still be None (missing-map entry) — resolve_target validates / re-prompts.
+    Whether this is a brand-new vs continuing launch is encoded by the returned
+    type (and by is_brand_new for InstanceIdentity-shaped picks), so callers
+    don't carry a parallel `kind` string alongside.
+
+    Used by run.py's parse_cli to convert sys.argv[1] into the same shape the
+    picker would have returned, so launch's downstream flow is uniform."""
+    if SESSION_SEP in name and (AGENTS_STATE / name).is_dir():
+        agent, _, session = name.partition(SESSION_SEP)
+        if find_md_for_agent(agent) is not None:
+            return SessionIdentity(
+                agent=agent,
+                session=session,
+                workspace=load_workspace_map().get(name),
+                is_brand_new=False,
+                modes=tuple(load_modes_map().get(name, [])),
+            )
+    if find_md_for_agent(name) is not None:
+        return AgentIdentity(agent=name)
+    return None
+
 
 def creatable_agents():
     """Agent dicts for the picker's Create rows. Sorted first by tag set
-    (untagged first, then groups ordered by each tag's position in ORDERED_TAGS);
-    within each tag group, the existing model family/version sort applies. Raw
-    fields only — `menu_picker` derives display values (description, preview) from md_text."""
+    (untagged first, then groups ordered by each tag's position in InstanceModifiers.tags());
+    within each tag group, the existing model family/version sort applies. Each
+    entry carries an AgentIdentity (`identity`) the picker hands back as the
+    selection value, plus picker-private caches (`tags`, `md_path`, `md_text`)
+    so sort comparisons and previews don't re-glob AGENTS_DIR per row."""
     out = []
     for path in AGENTS_DIR.glob(f"*{MD_EXT}"):
         name, tags, _ = parse_stem(path.stem)
         if name == "default":
             continue
         out.append({
-            "agent_name": name,                       # the agent's clean identifier; used everywhere downstream
+            "identity": AgentIdentity(agent=name),    # the value the picker hands back on selection
             "tags": tags,                             # filename-grammar tags (e.g. ["prog"]); rendered prefixed in green by menu_picker
-            "md_path": path,
-            "md_text": path.read_text(),              # raw .md content; menu_picker uses it for both description and preview
+            "md_path": path,                          # display only — the picker uses this for the agents/ relative path in previews
+            "md_text": read_text(path),               # raw .md content; menu_picker uses it for both description and preview
         })
     out.sort(key=lambda d: (
-        tag_sort_key(d["tags"]),                                  # untagged sinks to top; the rest follow ORDERED_TAGS positions
-        agent_sort_key((d["agent_name"], d["md_path"])),          # within each tag group: family/version/name
+        tag_sort_key(d["tags"]),                                       # untagged sinks to top; the rest follow InstanceModifiers.tags() positions
+        agent_sort_key((d["identity"].agent, d["md_path"])),           # within each tag group: family/version/name
     ))
     return out
-
-
-def relative_time(mtime):
-    """Human-readable relative time from an epoch mtime (e.g. '3 days ago', '5 minutes ago')."""
-    delta = datetime.now() - datetime.fromtimestamp(mtime)
-    if delta.days >= 1:
-        return f"{delta.days} day{'s' if delta.days != 1 else ''} ago"
-    hours = delta.seconds // 3600
-    if hours >= 1:
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
-    minutes = delta.seconds // 60
-    return f"{minutes} minute{'s' if minutes != 1 else ''} ago" if minutes else "just now"
-
-
-def _last_used_mtime(instance_id):
-    """Return mtime of the latest history.jsonl under the instance state dir, or None if absent."""
-    files = list((AGENTS_STATE / instance_id).rglob("history.jsonl"))
-    return max((f.stat().st_mtime for f in files), default=None)
-
-
-def has_continuable_history(instance_id):
-    """Whether an instance has any actual conversation transcript that
-    `claude --continue` can load. Claude Code writes input events to
-    `projects/<encoded-workspace>/history.jsonl` (used by the picker for the
-    'Last used' timestamp) regardless of whether a conversation actually
-    occurred — but the conversation itself lives in a session-UUID JSONL file
-    alongside it. If the only thing on disk is `history.jsonl` (or all other
-    JSONLs are 0-byte), `--continue` will fail with 'No conversation found
-    to continue' and exit. This check lets the launcher fall back to a fresh
-    session in that case instead of crashing."""
-    projects_dir = AGENTS_STATE / instance_id / "projects"
-    if not projects_dir.is_dir():
-        return False
-    for jsonl in projects_dir.rglob("*.jsonl"):
-        if jsonl.name == "history.jsonl":
-            continue
-        try:
-            if jsonl.stat().st_size > 0:
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def continuable_instances():
     """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped.
     Sorted first by mode set (mode-less first, then groups ordered by each mode's
-    position in ORDERED_MODES); within each mode group, sorted by (agent rank,
+    position in InstanceModifiers.modes()); within each mode group, sorted by (agent rank,
     session) as before. Marks instances whose workspace resolves to the current
-    working directory (for the picker's CURRENT DIR hint), and surfaces tags
-    (from the .md filename) and modes (from agent_modes_map.json) so the picker
-    can style the row and the modify flow can decide which prompts to show."""
+    working directory (for the picker's CURRENT DIR hint). Each entry carries a
+    SessionIdentity (`identity`) — stored workspace + modes are baked in so the
+    modify flow's pre-fill can read them straight off the identity. Remaining
+    fields are display-only (workspace_display, modes_display, last_used_display,
+    is_current_dir, is_default_dir) — the picker reads them and they never leave
+    menu_picker."""
+    # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
+    # when one symlinks to the other. Subdirs deliberately don't count — being in a
+    # project under $HOME doesn't make /ai_workspace your "default" workspace.
     cwd = Path.cwd().resolve()
-    defaulting_dirs_resolved = {Path(d).resolve() for d in DEFAULTING_DIRS}
+    defaulting_dir_active = cwd in {Path(d).resolve() for d in DEFAULTING_DIRS}
     fallback_resolved = Path(FALLBACK_WORKSPACE).resolve()
-    # True when cwd resolves to one of DEFAULTING_DIRS (symlinks normalized via .resolve(),
-    # so e.g. /home/<user> matches /var/users/<user> if the latter symlinks to the former).
-    # Subdirectories deliberately don't count — being in a project under $HOME doesn't make
-    # /ai_workspace your "default" in any meaningful way.
-    cwd_is_defaulting_dir = cwd in defaulting_dirs_resolved
-    mapping = load_workspace_map()
+    workspace_map = load_workspace_map()
     modes_map = load_modes_map()
+
     out = []
     for dir_name in list_all_instances():
         agent, _, session = dir_name.partition(SESSION_SEP)
-        md_path = find_md_for_agent(agent)
-        if md_path is None:
+        if find_md_for_agent(agent) is None:
             continue
-        _, tags, _ = parse_stem(md_path.stem)
-        instance = instance_name(agent, session)
-        modes = modes_map.get(instance, [])
-        ws = mapping.get(instance)
-        ws_valid = bool(ws and Path(ws).is_dir())
-        ws_display = ws if ws_valid else NO_WORKSPACE_DISPLAY
-        ws_resolved = Path(ws).resolve() if ws_valid else None
-        is_current_dir = ws_valid and ws_resolved == cwd
-        is_default_dir = ws_valid and cwd_is_defaulting_dir and ws_resolved == fallback_resolved
-        last_mtime = _last_used_mtime(instance)
-        last_used_display = relative_time(last_mtime) if last_mtime is not None else "(never)"
-        modes_display = ", ".join(modes) if modes else "(none)"
+        modes = tuple(modes_map.get(dir_name, []))
+        ws = workspace_map.get(dir_name)
+        ws_resolved = Path(ws).resolve() if ws and Path(ws).is_dir() else None
+        sess_id = SessionIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
+        last_mtime = sess_id.last_used_mtime
         out.append({
-            "id": instance,
-            "agent_name": agent,
-            "session": session,
-            "md_path": md_path,
-            "tags": tags,
-            "modes": modes,
-            "modes_display": modes_display,        # comma-joined or "(none)"; menu_picker uses it verbatim
-            "workspace": ws,                       # raw — None if missing from map; may be invalid path string
-            "workspace_display": ws_display,
-            "is_current_dir": is_current_dir,
-            "is_default_dir": is_default_dir,      # cwd ∈ DEFAULTING_DIRS and ws is FALLBACK_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
-            "state_path": AGENTS_STATE / instance, # ~/.claude-agents/<id>; shown in the preview pane
-            "last_used_display": last_used_display,
+            "identity": sess_id,
+            "modes_display":     ", ".join(modes) or "(none)",
+            "workspace_display": ws if ws_resolved else NO_WORKSPACE_DISPLAY,    # "?" sentinel when the map entry is missing or stale
+            "is_current_dir":    ws_resolved == cwd,
+            "is_default_dir":    defaulting_dir_active and ws_resolved == fallback_resolved,    # cwd ∈ DEFAULTING_DIRS and ws is FALLBACK_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
+            "last_used_display": relative_time(last_mtime) if last_mtime is not None else "(never)",
         })
     out.sort(key=lambda d: (
-        mode_sort_key(d["modes"]),                                # mode-less sinks to top; the rest follow ORDERED_MODES positions
-        agent_sort_key((d["agent_name"], d["md_path"])),          # within each mode group: family/version/name
-        d["session"],                                             # then session for tiebreak between instances of the same agent
+        mode_sort_key(d["identity"].modes),                                   # mode-less sinks to top; the rest follow InstanceModifiers.modes() positions
+        agent_sort_key((d["identity"].agent, d["identity"].md_path)),         # within each mode group: family/version/name
+        d["identity"].session,                                                # then session for tiebreak between instances of the same agent
     ))
     return out
-
-
-def delete_instance(instance_id):
-    """Remove an instance's state dir and its workspace + modes mapping entries.
-    Path removal goes through `_force_remove(name=...)` which logs the removal,
-    handles root-owned Docker bind-mount leftovers via sudo, and pauses for
-    keypress on failure. Already-gone state dirs are treated as success so the
-    map entries are still cleaned up."""
-    state_path = AGENTS_STATE / instance_id
-    if not _force_remove(state_path, name=instance_id):
-        return   # _force_remove printed errors and waited for keypress
-    m = load_workspace_map()
-    if instance_id in m:
-        del m[instance_id]
-        save_workspace_map(m)
-    m = load_modes_map()
-    if instance_id in m:
-        del m[instance_id]
-        save_modes_map(m)
-
-
-def modify_instance(old_id, agent, new_session, new_workspace, new_modes):
-    """Move an instance's state dir to a new (agent, session) and update both the
-    workspace and modes mappings. No-op for the rename if old and new ids match;
-    the maps are always rewritten so callers can change modes without renaming."""
-    new_id = instance_name(agent, new_session)
-    if new_id != old_id:
-        new_dir = AGENTS_STATE / new_id
-        if new_dir.exists():
-            raise ValueError(f"Instance '{new_id}' already exists.")
-        (AGENTS_STATE / old_id).rename(new_dir)
-    # workspace map
-    m = load_workspace_map()
-    if new_id != old_id:
-        m.pop(old_id, None)
-    m[new_id] = new_workspace
-    save_workspace_map(m)
-    # modes map — single load/save (mirrors set_instance_modes' shape inline so a
-    # rename costs one file write instead of two), plus the same {auto}+{DooD}
-    # warning at the end so both persistence paths surface it consistently.
-    m = load_modes_map()
-    if new_id != old_id:
-        m.pop(old_id, None)
-    if new_modes:
-        m[new_id] = new_modes
-    else:
-        m.pop(new_id, None)
-    save_modes_map(m)
-    if MODE_AUTO in new_modes and MODE_DOOD in new_modes:
-        warn_dood_with_auto()

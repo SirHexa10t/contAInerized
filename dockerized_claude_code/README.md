@@ -235,8 +235,6 @@ Inspect persistent state for issues:
 
 ```bash
 python3 -m launch.audit
-# or:
-python3 launch/audit.py
 ```
 
 Reports orphans, drifted CLAUDE.md files, ghost mapping entries, missing or
@@ -330,7 +328,7 @@ Drop a directory or file under `~/.claude-agents/user_extras/optional_creds/`
 and it gets bind-mounted into the container at the matching default location, so
 the corresponding CLI just works. Read-write (cloud CLIs need to refresh
 tokens, write cache, etc.). Anything not in this list is ignored — extend
-`OPTIONAL_CREDS_MOUNTS` in `launch/user_additions.py` to recognize more tools.
+`OPTIONAL_CREDS_MOUNTS` in `launch/paths.py` to recognize more tools.
 
 | `optional_creds/` entry | Container path | CLI | Auto-installed in `[prog]` |
 |---|---|---|---|
@@ -384,12 +382,14 @@ installed, and the mounted creds make it ready to use.
 run.py                               # entry point + 7-stage launch() orchestrator
 launch/
   __init__.py
-  paths.py                           # centralised path constants — host + container paths, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, CACHE_MOUNTS, DEFAULTING_DIRS (import root: zero internal deps)
-  utils.py                           # domain-neutral helpers (currently `parse_lines`); leaf module
-  agent_composition.py               # filename grammar (parse_stem), conf loading, sort keys, ORDERED_TAGS/MODES/MODEL_FAMILIES + handlers, BUILTIN_FIREWALL_DOMAINS + resolved_whitelist_domains, build-chain composition
-  agents_crud.py                     # state-dir lifecycle, workspace + modes maps, sync_memory_templates, _force_remove (sudo+sudo-k fallback), picker-entry builders
-  docker_config.py                   # docker-side: every os.environ write lives here (register_* per compose key), image build chain (ensure_image), run_compose
-  user_additions.py                  # custom_skills + workspace .skills, optional_creds_*, firewall whitelist + optional-creds README templates
+  paths.py                           # centralised path constants + read_workspace_pref — host + container paths, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, CACHE_MOUNTS, DEFAULTING_DIRS (import root: zero internal deps)
+  utils.py                           # domain-neutral helpers (parse_lines, read_json_field, load_json_map, relative_time); leaf module
+  file_access.py                     # the launcher's file-access layer: agent filename grammar (parse_stem) + .md/.conf lookup (find_md_for_agent, conf_path_for, load_conf), plus the cached load/save of agent_workspace_map.json + agent_modes_map.json. lru_cache on the hot reads; manual caches with invalidation on save for the JSON maps.
+  structs.py                         # identity dataclasses — AgentIdentity / InstanceIdentity / SessionIdentity (inheritance chain with derived properties: instance, state_dir, md_path, conf_path, tags, stored_modes, has_continuable_history, last_used_mtime); SESSION_SEP constant
+  agent_composition.py               # tag/mode definitions (ORDERED_TAGS/MODES/MODEL_FAMILIES + TAG/MODE_DESCRIPTIONS + handlers), BUILTIN_FIREWALL_DOMAINS + resolved_whitelist_domains, build-chain composition (compute_chain, apply_composition), sort keys (agent/tag/mode), cache pruning
+  docker_config.py                   # docker-side: compose env-key constants (TARGET_IMAGE, AGENT_STATE, …) + accumulator (_compose_env, stage_compose_env), image-chain naming, _build_status_line, set_container_env, ensure_image, run_compose. Never writes to os.environ; the accumulator gets passed to docker compose subprocesses via env=.
+  agents_crud.py                     # agent-state mutations + picker-entry factories: install_latest_md, sync_memory_templates, _force_remove (sudo + sudo -k fallback), delete_instance, modify_instance, resolve_pick, creatable_agents, continuable_instances. JSON map I/O lives in file_access; this module just calls into it.
+  user_additions.py                  # custom_skills + workspace .skills mounts, optional_creds_* (mounts, install env flags, token env vars), firewall whitelist count, README + whitelist file templates created on first launch
   menu_picker.py                     # picker UI + composition-legend overlay + ask_for_workspace + prompt_modes + prompt_session + print_launch_banner
   audit.py                           # state-checker (run as `python -m launch.audit`)
 agents/                              # agent definitions (.md + optional .conf)

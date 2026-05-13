@@ -4,33 +4,26 @@ services:
   claude-code:
     image: ${TARGET_IMAGE:-claude-agents:base}   # set by run.py per chain step; default is the bare base build.
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: ${DOCKERIZED_CLAUDE_ROOT}          # repo root — staged by docker_config.set_container_env from paths.DOCKERIZED_CLAUDE_ROOT
+      dockerfile: docker/Dockerfile               # relative to the context above
       network: host   # use host's network namespace for the build — BuildKit's own bridge has had DNS failures resolving curl/apt repo hosts on some setups
       args:
         SOFTWARE_STACK_REFRESH: ${SOFTWARE_STACK_REFRESH:-bootstrap}
     container_name: claude-code_${AGENT_NAME}
     stdin_open: true   # -i (interactive)
     tty: true          # -t (allocate pseudo-TTY)
-    volumes:
-      - ${AI_WORKSPACE}:/workspace
-      - ${AGENT_STATE}:/home/claude/.claude
-      - ${ACCOUNT_FILE}:/home/claude/.claude.json  # same onboarding info for all agents
-      - ${CREDENTIALS_FILE}:/home/claude/.claude/.credentials.json  # same api-token info for all agents
-      - ../custom_commands:/home/claude/.claude/commands:ro          # shared slash commands for all agents
-      - ../settings/statusline.sh:/home/claude/.claude/statusline.sh:ro  # shared status-line script for all agents
-      - ../settings/bashrc.sh:/home/claude/.bashrc:ro                    # sourced by every non-interactive bash (via BASH_ENV)
-      - ../settings/_summary.py:/home/claude/.claude/_summary.py:ro      # backs summary_diff / summary_save_manifest in bashrc
-      - ../settings/settings.json:/home/claude/.claude/settings.json:ro  # registers the status-line script (and any other shared settings)
-      - ../settings/keybindings.json:/home/claude/.claude/keybindings.json:ro  # project-wide key bindings (Shift+Enter newline, etc.); auto-detected on edit
-      # MEMORY.md is NOT mounted: each instance gets its own writable copy under
-      # AGENT_STATE/projects/-workspace/memory/MEMORY.md, populated/synced by
-      # launch/agents_crud.py:sync_memory_templates from memory/seek_summary.md
-      # + active-mode addendums. Writable so the agent can persist its own
-      # pointer entries (auto-memory step 2) below the launcher-managed blocks.
-      # Shared toolchain caches mount in only for [prog]-tagged agents — the base
-      # image has no Rust/Node toolchain to use them. The mount args are produced
-      # by apply_tags() in launch/agent_composition.py (see CACHE_MOUNTS there).
+    # All bind-mounts are staged from Python via launch/docker_config.py's
+    # add_docker_mount and appended to `docker compose run` as `-v` flags:
+    #   - paths.BASE_MOUNTS (set_container_mounts) — OAuth files, shared
+    #     commands, statusline, bashrc, summary helper, settings, keybindings.
+    #   - per-instance workspace + state dir (set_container_mounts) — sources
+    #     vary per launch, so they can't live in a static dict.
+    #   - per-mode/-tag contributions ([prog] caches, skills, optional creds)
+    #     — staged by their respective handlers / facades.
+    # MEMORY.md is not bind-mounted: each instance gets its own writable copy
+    # under <state>/projects/-workspace/memory/MEMORY.md, populated/synced by
+    # launch/agents_crud.py:sync_memory_templates from memory/seek_summary.md
+    # + active-mode addendums.
     environment:
       - TERM                # improves(?) terminal display colors
       - AGENT_STATUS_LINE   # pre-styled status-line text (cyan name + grey workspace)
