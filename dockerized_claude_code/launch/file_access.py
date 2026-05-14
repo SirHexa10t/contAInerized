@@ -451,9 +451,9 @@ def user_firewall_whitelist_lines():
     """Return the user's firewall_whitelist.txt parsed lines as a tuple,
     ensuring the file exists first (creates from template if absent — so
     parse_lines below never sees a missing file). Cached for the launcher
-    process lifetime, so the two callers — resolved_whitelist_domains in
-    agent_composition and firewall_whitelist_count below — share one read
-    + parse instead of doing it independently."""
+    process lifetime, so the two callers — start_whitelist_resolution in
+    network and firewall_whitelist_count below — share one read + parse
+    instead of doing it independently."""
     ensure_firewall_whitelist()
     return tuple(parse_lines(FIREWALL_WHITELIST_FILE))
 

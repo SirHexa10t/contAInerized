@@ -2,7 +2,7 @@
 #
 # Each non-empty, non-comment line is treated as an address (domain or IPv4) to allow
 # alongside the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, ...).
-# See BUILTIN_FIREWALL_DOMAINS in launch/agent_composition.py for the full set.
+# See BUILTIN_FIREWALL_DOMAINS in launch/network.py for the full set.
 #
 # - Matching is by IP, not hostname — each entry is resolved once at firewall init.
 # - Specify `www.foo.com` to also include `foo.com`. The opposite doesn't apply: if you specify `foo.com`, no "www." variant would be included (since not every site has a CDN front).

@@ -43,6 +43,21 @@ AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
 AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # {instance_id: [mode, ...]}; only entries for instances with modes
 CACHE_ROOT = AGENTS_STATE / "cache"
 
+# {auto}-mode firewall whitelist — two files, separate purposes:
+#   • DOMAINS_PENDING_RESOLVE_FILENAME — lives inside the per-instance state
+#     dir (bind-mounted into the container at /home/claude/.claude/).
+#     auto-addendum.md points the agent here to classify "I hit a connection
+#     refused" → pending / failed / not-listed. Holds status + pending list +
+#     failed list.
+#   • RESOLVED_DOMAINS_CACHE_FILE — global cross-launch DNS cache at the
+#     AGENTS_STATE root. Hosts already in this file (when it's fresh — the
+#     TTL gate lives with the cache logic in network.py) short-circuit DNS
+#     resolution: the launcher reuses the cached IPs directly. Rewritten at
+#     end of every {auto} launch with the full resolved set, so successive
+#     launches keep accumulating coverage while they stay within the TTL.
+DOMAINS_PENDING_RESOLVE_FILENAME = "domains_pending_resolve.yml"
+RESOLVED_DOMAINS_CACHE_FILE = AGENTS_STATE / "resolved_domains.txt"
+
 # Everything under user_extras/ is for the user to populate with
 # non-project-specific configuration: extra firewall whitelist entries,
 # optional cred passthroughs for cloud CLIs, etc. Grouped under one dir so

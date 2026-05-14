@@ -23,7 +23,7 @@ Imports from paths (filesystem constants, with the few still-used compose ${...}
 sources renamed on import to avoid colliding with same-named env-key constants)
 and file_access (the optional-creds primitives, plus read_json_field for the
 OAuth-email lookup the status line uses). agent_composition imports
-stage_compose_env / add_docker_mount (plus WHITELIST_DOMAINS / DOCKER_GID) from
+stage_compose_env / add_docker_mount (plus WHITELIST_ADDRESSES / DOCKER_GID) from
 here; run.py is the top-level consumer.
 """
 
@@ -34,6 +34,7 @@ import sys
 from datetime import date
 
 from .file_access import optional_cred_tokens, present_optional_cred_services, read_json_field
+from .network import is_critical_pending, start_firewall_updater, wait_for_critical_addresses
 from .paths import (
     # Paths used by name as compose env-var values — aliased on import to free
     # the bare name for the same-named env-key constant below. Only the auto
@@ -63,7 +64,7 @@ AGENT_NAME             = "AGENT_NAME"              # agent's clean name — subs
 AGENT_STATUS_LINE      = "AGENT_STATUS_LINE"       # pre-styled ANSI status line at the bottom of Claude Code (forwarded into container)
 
 # --- Mode-driven keys ---
-WHITELIST_DOMAINS      = "WHITELIST_DOMAINS"       # {auto}-mode firewall list (space-joined) — read by init-firewall.sh inside the container
+WHITELIST_ADDRESSES    = "WHITELIST_ADDRESSES"      # {auto}-mode firewall list of pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens (space-joined) — read by init-firewall.sh inside the container
 DOCKER_GID             = "DOCKER_GID"              # host docker group GID — Dockerfile.dood build-arg for /var/run/docker.sock access
 
 # --- Build/launch wiring (still referenced by ${...} in compose YAMLs) ---
@@ -272,13 +273,35 @@ def run_compose(chain, instance, claude_args, resume_flag, conf):
     `docker compose run`. By the time we get here every bind-mount has been
     staged via add_docker_mount (base set, per-instance workspace/state,
     [prog] caches, skills, optional creds) — flatten _docker_mounts into `-v`
-    flags inline. sys.exits with the container's return code."""
+    flags inline. sys.exits with the container's return code.
+
+    {auto}-mode firewall coordination: block on Phase 1 (critical Anthropic
+    DNS) to get the initial WHITELIST_ADDRESSES, then spawn the firewall
+    updater daemon thread BEFORE `subprocess.call` so it can drain Phase 2
+    results into the running container's iptables via `docker exec` while
+    Claude Code starts up. `--name` is set explicitly to a deterministic
+    string so the updater knows where to point — `docker compose run` would
+    otherwise generate a random suffix and we'd have no way to find it from
+    outside without polling `docker compose ps`."""
     ensure_image(chain)
     stage_compose_env(TARGET_IMAGE, chain_image_tag(chain))
     compose_args = chain_compose_files(chain)
     print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
+    # Phase 1 await: block for critical Anthropic addresses, stage them as the
+    # initial WHITELIST_ADDRESSES. Phase 2 (rest of the whitelist) is still
+    # resolving in the background; the updater thread (spawned below) handles
+    # it via `docker exec` once the container is up.
+    if is_critical_pending():
+        print("  Waiting for critical {auto}-mode firewall addresses...", flush=True)
+    if (addresses := wait_for_critical_addresses()) is not None:
+        stage_compose_env(WHITELIST_ADDRESSES, " ".join(addresses))
+    container_name = f"claude-code_{instance}"
+    # Spawn the updater BEFORE subprocess.call (which blocks for the container's
+    # lifetime) — the daemon thread will see the container come up shortly and
+    # start draining Phase 2 results onto iptables. No-op for non-{auto} launches.
+    start_firewall_updater(container_name)
     cmd = (
-        ["docker", "compose"] + compose_args + ["run", "--rm", "-it"]
+        ["docker", "compose"] + compose_args + ["run", "--rm", "-it", "--name", container_name]
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
         + conf_env_args(conf)     # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]

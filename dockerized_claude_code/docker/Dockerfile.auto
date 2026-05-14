@@ -24,14 +24,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Sudoers — give claude passwordless sudo for ONLY /usr/local/bin/init-firewall.sh,
-# and preserve WHITELIST_DOMAINS across the privilege boundary so the script can
+# and preserve WHITELIST_ADDRESSES across the privilege boundary so the script can
 # read the launcher-supplied whitelist. Other sudo calls (apt, root shell, etc.)
 # are blocked, and the only env var passed through is the one the script needs.
 # The script itself is bind-mounted in by compose.auto.yml; this just authorises
-# calling it. Re-running with a tampered WHITELIST_DOMAINS is prevented by the
+# calling it. Re-running with a tampered WHITELIST_ADDRESSES is prevented by the
 # init-once marker inside init-firewall.sh, not by sudoers.
 RUN { \
-      echo 'Defaults env_keep += "WHITELIST_DOMAINS"'; \
+      echo 'Defaults env_keep += "WHITELIST_ADDRESSES"'; \
       echo 'claude ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh'; \
     } > /etc/sudoers.d/claude-firewall \
  && chmod 0440 /etc/sudoers.d/claude-firewall

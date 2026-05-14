@@ -9,12 +9,12 @@
 # Flow:
 #   1. Run init-firewall.sh as root via sudo. The sudoers entry installed by
 #      Dockerfile.auto restricts the claude user to ONLY this exact command,
-#      and preserves WHITELIST_DOMAINS across the privilege boundary so the
+#      and preserves WHITELIST_ADDRESSES across the privilege boundary so the
 #      script can read the launcher-supplied whitelist.
 #   2. Invalidate sudo's credential cache so a runaway agent can't piggyback
 #      on it for additional sudo calls. Defense in depth — sudoers already
 #      restricts the scope, but invalidating is cheap and explicit.
-#   3. Drop WHITELIST_DOMAINS from the env so claude (and anything it spawns)
+#   3. Drop WHITELIST_ADDRESSES from the env so claude (and anything it spawns)
 #      can't read or replay it. The firewall is already in place; the var has
 #      done its job. Re-run protection inside init-firewall.sh would block
 #      tampering anyway, but unsetting closes the leak proactively.
@@ -26,6 +26,6 @@ set -euo pipefail
 
 sudo /usr/local/bin/init-firewall.sh
 sudo -k
-unset WHITELIST_DOMAINS
+unset WHITELIST_ADDRESSES
 
 exec claude "$@"

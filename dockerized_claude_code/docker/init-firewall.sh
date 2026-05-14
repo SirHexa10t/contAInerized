@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # init-firewall.sh — iptables-based outbound whitelist for the {auto} mode.
 #
-# Originally vendored from Anthropic's devcontainer reference (MIT-licensed):
-#   https://github.com/anthropics/claude-code/tree/main/.devcontainer
-# Now diverged: the launcher resolves the whitelist in Python (built-ins +
-# user's firewall_whitelist.txt + apex/www counterparts, deduped) and passes
-# it in via the WHITELIST_DOMAINS env var. This script just iterates it.
+# All DNS resolution happens on the host, in launch/network.py:
+# resolved_whitelist_domains(). The pre-resolved entries arrive here as a
+# space-separated $WHITELIST_ADDRESSES env var — each one is `<ip>[:port]`
+# or `<cidr>[:port]`, ready for iptables -A directly. This script just writes
+# rules: no DNS, no parallelism, no timeouts to babysit.
 #
 # Invoked by docker/auto-entrypoint.sh on container start (via sudo). The
 # sudoers entry installed by Dockerfile.auto restricts claude to ONLY this
-# command, and `Defaults env_keep += "WHITELIST_DOMAINS"` preserves the env
+# command, and `Defaults env_keep += "WHITELIST_ADDRESSES"` preserves the env
 # var across the privilege boundary.
 #
 # Re-run protection: a marker in /var/run blocks any second invocation, so an
-# attacker can't set their own WHITELIST_DOMAINS and reapply a permissive
+# attacker can't set their own WHITELIST_ADDRESSES and reapply a permissive
 # firewall after the first (legitimate) run has finished. /var/run is
 # root-owned; the marker is created here (running as root via sudo) and the
 # claude user can't remove it.
@@ -36,8 +36,8 @@ touch "$MARKER"
 # DON'T flush the nat table — Docker's embedded DNS resolver at 127.0.0.11 is
 # a fake address redirected to dockerd via a NAT rule installed inside the
 # container's namespace. Flushing nat (`iptables -t nat -F`) destroys that
-# redirect; subsequent DNS lookups fail silently, no whitelist entries get
-# added, and outbound dies with ConnectionRefused once claude starts.
+# redirect; subsequent DNS lookups by claude (and anything it spawns) fail
+# silently, and outbound dies with ConnectionRefused once it starts.
 iptables -F
 iptables -X
 
@@ -54,115 +54,27 @@ iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# DNS — required to resolve the domains below
+# DNS — needed so claude (and tools it spawns) can resolve hostnames AFTER
+# the firewall is in place. The whitelist itself doesn't need DNS — the
+# launcher pre-resolved everything — but the agent still talks to services
+# by hostname and needs the resolver path through to 127.0.0.11 / dockerd.
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
 # --- Whitelist --------------------------------------------------------------
-# WHITELIST_DOMAINS is space-separated, produced by the launcher via
-# user_additions.resolved_whitelist_domains(). Already deduped and apex/www
-# expanded — nothing to parse here.
-
-# Resolution + rule-write runs per-domain in parallel (xargs -P $((nproc * 8))
-# — DNS-bound waits scale up generously past core count since each worker is
-# almost always sleeping on `getent`) so one slow / dead domain doesn't stall
-# the whole list. Each lookup is also capped at 8s by `timeout` so a domain
-# whose auth server hangs can't hold its slot indefinitely. Entries that
-# already look like a literal IPv4 address or a CIDR range (`1.2.3.4`,
-# `10.0.0.0/8`) skip DNS entirely and go straight to iptables — iptables
-# accepts both forms natively as the `-d` argument. Each entry can optionally
-# carry a `:port` suffix (`db.example.com:3306`, `1.2.3.4:5432`); when present,
-# only that port is opened for the resolved IP(s). When absent, the default
-# HTTPS+HTTP pair (443/80) is opened — keeps every existing entry working
-# without modification while giving users an out for SQL / SSH / FTP / etc.
-# The firewall is iptables (v4-only) and Docker's default bridge is v4-only
-# too, so we resolve via `getent ahostsv4` — skipping the AAAA query that
-# `ahosts` would otherwise issue alongside the A query (slow / hanging AAAA
-# lookups were the main cause of long silent stretches during firewall init).
-# `iptables -w 10` waits up to 10s for the xtables lock — concurrent workers'
-# -A calls serialise on it cleanly. Workers always return 0 (so xargs doesn't
-# trip the script's `set -e`); failure is tracked by appending to
-# $FIREWALL_FAILED instead, which the parent reads after the parallel pass.
-# For domains that don't resolve, the post-loop summary tells the user how to
-# test whether a skipped entry is actually IPv6-only.
-allow_domain() {
-    local entry="$1"
-    local host port ips
-
-    # Optional `:port` suffix lets the user open something other than 80/443
-    # (e.g. `db.example.com:3306`, `1.2.3.4:5432`, `10.0.0.0/24:22`). Split on
-    # the *last* `:`; if no colon, port stays empty and we fall back to the
-    # default HTTPS/HTTP pair below. Port-value validity is left to iptables —
-    # a non-numeric or out-of-range value will surface as a loud failure.
+# Each entry is `<ip>[:port]` or `<cidr>[:port]` (pre-resolved by the launcher).
+# `:port` opens only that one port; absent → defaults to HTTPS (443) + HTTP (80).
+# iptables accepts both raw IPv4 and CIDR ranges natively as -d arguments.
+for entry in ${WHITELIST_ADDRESSES:-}; do
     if [[ "$entry" == *:* ]]; then
-        host="${entry%:*}"
+        ip="${entry%:*}"
         port="${entry##*:}"
+        iptables -A OUTPUT -d "$ip" -p tcp --dport "$port" -j ACCEPT
     else
-        host="$entry"
-        port=""
+        iptables -A OUTPUT -d "$entry" -p tcp --dport 443 -j ACCEPT
+        iptables -A OUTPUT -d "$entry" -p tcp --dport 80  -j ACCEPT
     fi
-
-    # Literal IPv4 or CIDR — hand straight to iptables, no DNS. The regex is
-    # lenient (allows out-of-range octets / prefix lengths); iptables itself
-    # rejects anything actually invalid, so we don't pre-validate here.
-    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
-        ips="$host"
-    else
-        ips=$(timeout "$WAIT_SECONDS" getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u || true)
-        if [ -z "$ips" ]; then
-            echo "init-firewall.sh: warning: '$entry' did not resolve; skipping" >&2
-            echo "$entry" >> "$FIREWALL_FAILED"
-            return 0
-        fi
-    fi
-
-    for ip in $ips; do
-        if [ -n "$port" ]; then
-            iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport "$port" -j ACCEPT
-        else
-            iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
-            iptables -w 10 -A OUTPUT -d "$ip" -p tcp --dport 80  -j ACCEPT
-        fi
-    done
-    return 0
-}
-export -f allow_domain
-
-# Shared failure-tracking file across all parallel workers — `>>` appends are
-# atomic for short writes (< PIPE_BUF), so concurrent writes don't corrupt.
-FIREWALL_FAILED=$(mktemp)
-export FIREWALL_FAILED
-trap 'rm -f "$FIREWALL_FAILED"' EXIT
-
-total_count=$(echo ${WHITELIST_DOMAINS:-} | wc -w)
-# Tunables for the parallel resolve loop. PARALLELISM scales with cores (DNS-
-# bound work — workers sleep on getent, so we go past core count); WAIT_SECONDS
-# caps each per-domain lookup so a hanging auth server can't hold its slot.
-PARALLELISM=$(( $(nproc) * 8 ))
-WAIT_SECONDS=8
-export WAIT_SECONDS   # allow_domain runs in child bash workers spawned by xargs; the function sees it through env
-echo "init-firewall.sh: resolving whitelist of ${total_count} domains (up to ${PARALLELISM} in parallel, ${WAIT_SECONDS}s timeout each)..."
-
-if [ "$total_count" -gt 0 ]; then
-    printf '%s\n' ${WHITELIST_DOMAINS:-} | xargs -n 1 -P "${PARALLELISM}" -I {} bash -c 'allow_domain "$@"' _ {}
-fi
-
-fail_count=$(wc -l < "$FIREWALL_FAILED")
-ok_count=$((total_count - fail_count))
-
-if [ "$fail_count" -gt 0 ]; then
-    echo "init-firewall.sh: resolved ${ok_count}/${total_count} domains; ${fail_count} skipped (see warnings above)."
-    echo "init-firewall.sh:   skipped entries may be typos / dead / IPv6-only — the firewall is IPv4-only, so a domain that exists only on IPv6 can't be routed regardless. To test the IPv6 hypothesis for a specific entry, run on the host:  getent ahostsv6 <domain>" >&2
-    # Pause so the user has a chance to read the skip list before Claude Code
-    # launches and scrolls everything off-screen. `</dev/tty` ensures we read
-    # from the controlling terminal even though the script runs under sudo;
-    # `|| true` so headless / non-TTY launches (rare — compose runs with -it)
-    # don't trip `set -e`.
-    read -n 1 -s -r -p "init-firewall.sh:   [press any key to continue] " _ </dev/tty || true
-    echo
-else
-    echo "init-firewall.sh: resolved all ${total_count} domains."
-fi
+done
 
 # --- Catch-all REJECT -------------------------------------------------------
 # Belt-and-suspenders with the `iptables -P OUTPUT DROP` policy — under
@@ -195,12 +107,14 @@ if curl --connect-timeout 3 -s -o /dev/null -I https://example.com; then
     exit 1
 fi
 
-# Positive test: api.anthropic.com SHOULD be reachable.
+# Positive test: api.anthropic.com SHOULD be reachable. Note this depends on
+# the container's DNS now returning an IP that the launcher's host-side resolve
+# also saw — if they diverge (CDN POP rotation, etc.), this fails and would be
+# the first symptom of the "DNS-pin drift" caveat documented in network.py.
 if ! curl --connect-timeout 5 -s -o /dev/null -I https://api.anthropic.com; then
     echo "init-firewall.sh: ERROR: api.anthropic.com unreachable through the firewall." >&2
-    echo "  The whitelist may have failed to resolve it at startup (check warnings above)." >&2
+    echo "  Likely cause: the IP this container's DNS just returned doesn't match what" >&2
+    echo "  the launcher's host-side resolve pinned at launch (CDN POP drift). Re-launch" >&2
+    echo "  to refresh, or add the tenant explicitly to the user whitelist." >&2
     exit 1
 fi
-# (No success line — the resolve-summary above already reports the counts, and
-# the self-test branches exit 1 loudly on failure. Reaching here is success by
-# inference.)

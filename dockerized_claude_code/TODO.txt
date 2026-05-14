@@ -221,6 +221,12 @@ skills:
 add Anthropics skill marketplace
     Anthropic's GitHub skills?
 
+Anthropic's /goal skill
+    https://x.com/i/status/2054351031279186040
+
+Multi-agent manager
+    https://x.com/i/status/2053940934736228454
+
 
 
 tip: ctrl+v to paste image
@@ -247,6 +253,14 @@ Add RETRY in firewall to failed domain register fails
 Move the templates in file_access.py to @./launch/templates , as files
 
 skill that draws a dependency graph
+
+
+whitelist:
+    cheatsheetseries.owasp.org
+
+Add to memory: knowledge of services and CLI credentials present
+
+/for-each - do something for each appropriate file in the project)
 
 
 
