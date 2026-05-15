@@ -5,8 +5,9 @@ $AI_WORKSPACE override read at startup), and the bind-mount source paths the
 docker compose YAMLs consume via ${...} substitutions.
 
 Imports nothing from sibling launch/ modules — kept as the import root so it
-can be pulled in anywhere without circular-import risk. Pure data + one small
-env-var reader (read_workspace_pref) that fits the workspace-selection group."""
+can be pulled in anywhere without circular-import risk. Pure data + a couple
+of host-environment reads (`$AI_WORKSPACE`, `os.getcwd()`) folded into the
+DEFAULT_WORKSPACE expression."""
 
 import os
 from pathlib import Path
@@ -29,6 +30,8 @@ DEFAULT_CONF = AGENTS_DIR / "default.conf"
 PROJECT_CUSTOM_SKILLS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_skills"   # project-bundled skills (paired with workspace .skills/)
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
 TEMPLATES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "templates"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
+OPTIONAL_CREDS_README_TEMPLATE = TEMPLATES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME on first launch
+FIREWALL_WHITELIST_TEMPLATE    = TEMPLATES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
 DOCKER_DIR = DOCKERIZED_CLAUDE_ROOT / "docker"                    # Dockerfile + compose.yml + per-layer Dockerfile.<x> / compose.<x>.yml
 
 
@@ -71,13 +74,12 @@ FIREWALL_WHITELIST_FILE = USER_EXTRAS_DIR / "firewall_whitelist.txt"
 # ============================================================
 # Workspace selection
 # ============================================================
-# FALLBACK_WORKSPACE — shared sandbox path used when launching from a "neutral"
-# directory (one in DEFAULTING_DIRS — typically $HOME), so the launcher never
-# silently bind-mounts something like the user's whole home dir.
-# DEFAULTING_DIRS — directories that divert workspace selection to
-# FALLBACK_WORKSPACE; same list also drives the picker's `(DEFAULT DIR)` tagging.
+# DEFAULTING_DIRS — directories that count as "neutral" launch points (typically
+# $HOME, /tmp, etc.). Launching from one of these diverts workspace selection
+# to a shared sandbox path (`/ai_workspace`) so the launcher never silently
+# bind-mounts something like the user's whole home dir. Same list drives the
+# picker's `(DEFAULT DIR)` tagging.
 
-FALLBACK_WORKSPACE = "/ai_workspace"
 _HOME = Path.home()
 DEFAULTING_DIRS = [
     str(_HOME),
@@ -92,13 +94,23 @@ DEFAULTING_DIRS = [
 ]
 
 
-def read_workspace_pref():
-    """The user's optional shell-side $AI_WORKSPACE default — read at startup
-    to seed DEFAULT_WORKSPACE in agents_crud. Same env-key name as the compose
-    substitution the launcher writes per launch, but distinct in direction:
-    this reads what the user set in their shell, whereas docker_config writes
-    the same key into the compose-env accumulator per launch."""
-    return os.environ.get("AI_WORKSPACE")
+# Workspace to suggest when prompting for a new instance. Primary choice is
+# $AI_WORKSPACE (user's host-shell preference; same env-key the launcher writes
+# to compose per launch but opposite direction) or — when launching from a
+# DEFAULTING_DIR like $HOME — the /ai_workspace shared sandbox so the launcher
+# never silently bind-mounts something like the user's whole home dir.
+DEFAULT_WORKSPACE = (
+    os.environ.get("AI_WORKSPACE")
+    or ("/ai_workspace" if os.getcwd() in DEFAULTING_DIRS else os.getcwd())
+)
+
+# Safety net: fall back to $PWD when the primary choice doesn't resolve to a
+# real directory (typo'd env, missing /ai_workspace sandbox, dangling symlink).
+# `is_dir()` follows symlinks, so a symlink-to-dir passes through. menu_picker.
+# ask_for_workspace re-validates the user's submitted path, so this is a UX
+# nicety, not the correctness gate.
+if not Path(DEFAULT_WORKSPACE).is_dir():
+    DEFAULT_WORKSPACE = os.getcwd()
 
 
 # ============================================================
@@ -120,17 +132,39 @@ RO_MOUNT_OPTION = "ro"
 
 
 # ============================================================
-# {auto}-mode bind-mount sources
+# {auto}-mode bind-mounts
 # ============================================================
-# Host-side script paths referenced by compose.auto.yml as ${...} substitutions
-# — these can't move into DOCKER_BASE_MOUNTS because their mounts must remain
-# conditional via the compose layer (compose.auto.yml only loads when {auto} is
-# active). Matching env-key constants live in docker_config so the launcher
-# feeds the substitution at run time; without this indirection the YAML would
-# carry a fragile `../init-firewall.sh` traversal.
+# Mounts staged when {auto} is in the chain — bind-mount the firewall init
+# script + entrypoint wrapper into well-known paths inside the container.
+# agent_composition._apply_auto iterates DOCKER_AUTO_MOUNTS via add_docker_mount;
+# gated by the handler being called, not by a YAML overlay. Mirror of the
+# DOCKER_BASE_MOUNTS pattern below, scoped to the {auto} chain step.
+#
+# Walrus bindings on the keys publish `INIT_FIREWALL_SH` and `AUTO_ENTRYPOINT_SH`
+# as module attributes without a separate top-level statement, so the dict
+# stays the single declaration site while the names remain importable for any
+# future external use (currently none).
 
-INIT_FIREWALL_SH = DOCKER_DIR / "init-firewall.sh"
-AUTO_ENTRYPOINT_SH = DOCKER_DIR / "auto-entrypoint.sh"
+LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # container target dir for the {auto} scripts
+
+DOCKER_AUTO_MOUNTS = {
+    (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"{LOCAL_BIN_IN_CONTAINER}/init-firewall.sh:{RO_MOUNT_OPTION}",
+    (AUTO_ENTRYPOINT_SH := DOCKER_DIR / "auto-entrypoint.sh"): f"{LOCAL_BIN_IN_CONTAINER}/auto-entrypoint.sh:{RO_MOUNT_OPTION}",
+}
+
+
+# ============================================================
+# {DooD}-mode bind-mounts
+# ============================================================
+# Bind-mount the host's Docker socket into the container at the same path so
+# the agent's `docker` CLI can drive the host's Docker daemon. Read-write —
+# the socket needs both directions. The matching DOCKER_GID build-arg (staged
+# by agent_composition._apply_dood) makes the in-image `docker` group match
+# the host's so claude can read/write this socket. Iterated by _apply_dood.
+
+DOCKER_DOOD_MOUNTS = {
+    Path("/var/run/docker.sock"): "/var/run/docker.sock",
+}
 
 
 # ============================================================
@@ -189,8 +223,7 @@ INSTANCE_CLAUDE_MD_FILENAME = "CLAUDE.md"
 INSTANCE_PROJECTS_RELPATH = Path("projects")
 
 # Relpath inside an instance's state dir holding the per-instance MEMORY.md.
-INSTANCE_MEMORY_RELPATH = INSTANCE_PROJECTS_RELPATH / "-workspace" / "memory"
-INSTANCE_MEMORY_FILE_RELPATH = INSTANCE_MEMORY_RELPATH / "MEMORY.md"
+INSTANCE_MEMORY_FILE_RELPATH = INSTANCE_PROJECTS_RELPATH / "-workspace" / "memory" / "MEMORY.md"
 
 # Relpath inside an instance's state dir under which skill mount-points are
 # pre-created (so Docker doesn't auto-create them as root).
@@ -200,6 +233,7 @@ INSTANCE_SKILLS_RELPATH = Path("skills")
 SKILL_MARKER_FILENAME = "SKILL.md"                   # required inside a skill dir for it to be recognised
 WORKSPACE_SKILLS_DIRNAME = ".skills"                 # per-workspace skills folder name
 OPTIONAL_CREDS_README_FILENAME = "README.txt"        # auto-created in optional_creds/ on first launch
+OPTIONAL_CREDS_README_PATH     = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME   # full host path the README is planted at
 OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text token (e.g. jira/token → $JIRA_API_TOKEN)
 
 # Memory-template filenames in MEMORY_DIR — synced into per-instance MEMORY.md
@@ -207,11 +241,11 @@ OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text to
 SEEK_SUMMARY_FILENAME = "seek_summary.md"            # always-active template
 ADDENDUM_SUFFIX = "-addendum.md"                     # `<mode>{ADDENDUM_SUFFIX}` — mode-specific addendum filename (e.g. auto-addendum.md)
 
-# Compose-file naming. The base file is always included; per-layer files use
-# the `compose.<step>.yml` pattern — written inline at the one call site in
-# docker_config.chain_compose_files since centralising the f-string adds more
-# fragmentation than it saves.
+# Compose-file naming. The base file is `compose.yml`; per-layer files follow
+# `compose.<step>.yml` (built by the `compose_layer_path` lambda at the bottom
+# of this file).
 COMPOSE_FILE_NAME = "compose.yml"
+COMPOSE_FILE_PATH = DOCKER_DIR / COMPOSE_FILE_NAME   # full repo-relative path to the base compose.yml
 
 
 # ============================================================
@@ -247,8 +281,8 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACH
 # bind-mounted to the matching location inside the container so the
 # corresponding CLI (aws/gcloud/gh/etc.) just works. Read-write — cloud CLIs
 # need to refresh tokens / write cache; presence on host is the opt-in.
-# (The matching INSTALL_<TOOL> build-arg semantics live with
-# optional_creds_install_env in user_additions.)
+# (The matching INSTALL_<TOOL> build-arg semantics — install_creds_flags
+# in docker_config — are spread into the compose env in set_container_env.)
 
 OPTIONAL_CREDS_MOUNTS = {
     "aws":     f"{CLAUDE_HOME_IN_CONTAINER}/.aws",
@@ -272,3 +306,46 @@ OPTIONAL_CREDS_MOUNTS = {
 OPTIONAL_CREDS_TOKEN_ENV_VARS = {
     "jira": "JIRA_API_TOKEN",
 }
+
+
+# ============================================================
+# Path builders — every dynamic "var / constant" path lives here
+# ============================================================
+# When a filesystem path is determined at runtime (an instance's state dir, a
+# typed service name, a chain step, etc.) the join is parameterised below as
+# a lambda. Callers do `from .paths import <name>` and call the lambda; they
+# never construct paths via `/` themselves. Fully-static composite paths
+# (`OPTIONAL_CREDS_README_PATH`, `COMPOSE_FILE_PATH`, the DOCKER_*_MOUNTS
+# values, etc.) live with their constituent constants further up the file
+# rather than down here, since they don't need parameters. Net effect: every
+# filesystem path the launcher touches is named in this file, just at the
+# layer that earns its space.
+#
+# Naming convention: `_path` suffix on every builder (file or dir — the name
+# describes WHAT, the type system handles HOW). Group comments call out what's
+# being built.
+
+# Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/)
+state_md_path           = lambda state_dir:       state_dir / INSTANCE_CLAUDE_MD_FILENAME
+state_memory_path       = lambda state_dir:       state_dir / INSTANCE_MEMORY_FILE_RELPATH
+state_projects_path     = lambda state_dir:       state_dir / INSTANCE_PROJECTS_RELPATH
+state_skill_subdir_path = lambda state_dir, name: state_dir / INSTANCE_SKILLS_RELPATH / name
+state_pending_yml_path  = lambda state_dir:       state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
+
+# Per-instance state directory itself (one level up from the per-state-dir files)
+instance_state_dir_path = lambda instance:        AGENTS_STATE / instance
+
+# Workspace-side skills (workspace is a runtime-provided host path)
+workspace_skills_path   = lambda workspace:       Path(workspace) / WORKSPACE_SKILLS_DIRNAME
+skill_marker_path       = lambda skill_dir:       skill_dir / SKILL_MARKER_FILENAME
+
+# Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys)
+optional_creds_service_path = lambda service:     OPTIONAL_CREDS_DIR / service
+optional_creds_token_path   = lambda service:     OPTIONAL_CREDS_DIR / service / OPTIONAL_CREDS_TOKEN_FILENAME
+
+# Memory + agent file lookups (filename / name supplied by caller)
+memory_template_path    = lambda filename:        MEMORY_DIR / filename
+agent_conf_path         = lambda name:            AGENTS_DIR / f"{name}{CONF_EXT}"
+
+# Docker compose-layer YAML (step ∈ InstanceModifiers value strings, lowercased)
+compose_layer_path      = lambda step:            DOCKER_DIR / f"compose.{step.lower()}.yml"

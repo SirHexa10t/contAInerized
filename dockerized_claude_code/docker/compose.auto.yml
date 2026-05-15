@@ -1,12 +1,18 @@
 # Compose layer for the {auto} chain step. Swaps in docker/Dockerfile.auto
 # (which adds iptables, sudo, and a tightly-scoped sudoers entry to its
-# PARENT_IMAGE), bind-mounts the firewall script + entrypoint wrapper, adds
-# CAP_NET_ADMIN so iptables can apply rules, and overrides the entrypoint to
-# run the firewall as the container's first action followed by claude itself.
+# PARENT_IMAGE), adds CAP_NET_ADMIN so iptables can apply rules, and overrides
+# the entrypoint to run the firewall as the container's first action followed
+# by claude itself.
 #
 # `--dangerously-skip-permissions` is appended to the entrypoint here (rather
 # than baked into auto-entrypoint.sh) so all flag composition stays visible in
 # config — the wrapper just forwards "$@" and doesn't make claude-flag decisions.
+#
+# Bind-mounts for the firewall script + entrypoint wrapper are Python-staged
+# via paths.DOCKER_AUTO_MOUNTS (iterated by agent_composition._apply_auto and
+# appended to `docker compose run` as `-v` flags) — not declared here, so the
+# YAML is purely about build args, capabilities, env pass-through, and the
+# entrypoint command.
 #
 # Defaults reflect the standalone case (auto directly on top of base):
 #   PARENT_IMAGE = claude-agents:base
@@ -30,7 +36,4 @@ services:
       # in the container's firewall hot path. The host-side source whitelist is
       # NOT mounted in; the container only sees the resolved address list.
       - WHITELIST_ADDRESSES
-    volumes:
-      - ${INIT_FIREWALL_SH}:/usr/local/bin/init-firewall.sh:ro
-      - ${AUTO_ENTRYPOINT_SH}:/usr/local/bin/auto-entrypoint.sh:ro
     entrypoint: ["/usr/local/bin/auto-entrypoint.sh", "--dangerously-skip-permissions"]

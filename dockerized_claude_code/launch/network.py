@@ -36,11 +36,10 @@ the full resolved set from this launch (cache hits + fresh DNS results),
 so successive launches keep accumulating coverage while inside the TTL
 window. A stale file is ignored on read and rebuilt from scratch.
 
-Why split out from agent_composition: the resolution policy + curated domain
-list aren't "composition" concerns (chain composition / handler dispatch);
-they're network-layer policy + DNS plumbing. Co-locating future network-shaped
-logic here (port scans, host reachability checks, etc.) keeps the file shape
-coherent.
+Module boundary vs agent_composition: the resolution policy + curated domain
+list are network-layer policy + DNS plumbing, not chain composition / handler
+dispatch — different concerns, different module. Future network-shaped logic
+(port scans, host reachability checks, etc.) co-locates here.
 
 Caveat — DNS-by-IP-pinning risk: the launcher resolves hostnames to IPs on the
 host, then iptables allows exactly those IPs. If the container's DNS resolver
@@ -57,7 +56,15 @@ Imports nothing heavy: file_access for the user's whitelist file + atomic
 write helper, paths for the two status-file locations, stdlib for subprocess
 + threading. agent_composition._apply_auto is the entry point caller (calls
 start_whitelist_resolution during compose_chain); docker_config.run_compose
-pairs the await + updater-spawn."""
+pairs the await + updater-spawn.
+
+Cycle note: docker_config imports this module (for is_critical_pending /
+wait_for_critical_addresses / start_firewall_updater), and the updater code
+below needs docker_config's docker-subprocess helpers (wait_for_container_running
++ docker_exec_root) to inject iptables rules into the running container. The
+two functions that need them (_updater_worker, _insert_iptables_accept) do
+lazy `from .docker_config import ...` at call time so import-time evaluation
+doesn't hit a half-loaded module."""
 
 import os
 import queue
@@ -65,13 +72,14 @@ import re
 import subprocess
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from .file_access import parse_lines, user_firewall_whitelist_lines, write_text
-from .paths import DOMAINS_PENDING_RESOLVE_FILENAME, RESOLVED_DOMAINS_CACHE_FILE
-from .utils import is_file_recent
+from .file_access import (
+    is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
+)
+from .paths import RESOLVED_DOMAINS_CACHE_FILE, state_pending_yml_path
+from .utils import split_host_port
 
 
 # ============================================================
@@ -283,6 +291,11 @@ BUILTIN_FIREWALL_DOMAINS = [
 
 _IP_OR_CIDR_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$")
 
+# Reason string written to the status file's `failed:` section when a host
+# exhausts every cascade stage. One constant so phase 1 + phase 2 emit
+# identical text — the agent / user can grep for it.
+_FAILED_RESOLVE_REASON = "DNS resolution failed after all cascade stages"
+
 # Cascade timeouts: a host that fails resolution at pass N is retried at pass
 # N+1 with the next (larger) per-host timeout. The cascade exists to recover
 # from contention-induced false negatives — see _resolve_with_cascade below
@@ -291,10 +304,9 @@ _IP_OR_CIDR_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$")
 _RESOLVE_TIMEOUT_STAGES = (3, 5, 8, 13, 21)
 
 # Parallelism heuristic: DNS-bound work (workers mostly sleeping on getent),
-# so we go well past core count. nproc * 8 matches the original bash-side
-# init-firewall.sh script that this code replaced — each worker is almost
-# always idle waiting for the resolver, so threads above core count don't
-# starve CPU and they do shorten total wall time.
+# so we go well past core count — each worker is almost always idle waiting
+# for the resolver, so threads above core count don't starve CPU and do
+# shorten total wall time. nproc * 8 works well empirically.
 _RESOLVE_PARALLELISM = (os.cpu_count() or 1) * 8
 
 # Cross-launch DNS cache TTL — how long RESOLVED_DOMAINS_CACHE_FILE is treated
@@ -312,20 +324,13 @@ _RESOLUTION_CACHE_TTL_SECONDS = 3 * 60 * 60
 _resolution_cache = {}
 
 
-def _split_port(entry):
-    """`host:port` / `cidr:port` → (host, port); `host` → (host, '')."""
-    host, sep, port = entry.rpartition(":")
-    return (host, port) if sep else (entry, "")
-
-
 def _resolve_a_records(host, timeout):
     """Resolve `host` to its IPv4 A records — cross-launch cache first, then
-    `getent ahostsv4` (same backend the in-container script used to use —
-    runs against the host's resolver chain with whatever caching it has).
-    Returns sorted IPs, or [] on timeout / NXDOMAIN / IPv6-only domains.
-    subprocess + timeout gives cleaner cancellation than socket.getaddrinfo,
-    which has no kwarg timeout. `timeout` is per-call, supplied by
-    _resolve_with_cascade per cascade stage."""
+    `getent ahostsv4` (runs against the host's resolver chain with whatever
+    caching it has). Returns sorted IPs, or [] on timeout / NXDOMAIN /
+    IPv6-only domains. subprocess + timeout gives cleaner cancellation than
+    socket.getaddrinfo, which has no kwarg timeout. `timeout` is per-call,
+    supplied by _resolve_with_cascade per cascade stage."""
     if host in _resolution_cache:
         return list(_resolution_cache[host])
     try:
@@ -445,12 +450,9 @@ def _cascade(hosts, on_resolved, on_terminal_failure):
 #     running container's iptables — BEFORE the catch-all REJECT, so the
 #     order in which rules arrive doesn't matter.
 #
-# Status surface: <state_dir>/<DOMAINS_PENDING_RESOLVE_FILENAME>, bind-mounted
-# into the container at /home/claude/.claude/. auto-addendum.md points the
-# agent here for classification (status / pending / failed). Rewritten
-# atomically as the picture changes. Separate from the cross-launch
-# RESOLVED_DOMAINS_CACHE_FILE (host-side; see _load/save_resolution_cache),
-# which lives at AGENTS_STATE root and isn't mounted.
+# Per-resolution progress lands on the agent-visible status surface — see the
+# `_WhitelistResolutionStatus` section below. Cross-launch DNS results land
+# in RESOLVED_DOMAINS_CACHE_FILE at AGENTS_STATE root (host-side, not mounted).
 #
 # Security model: the host-side `docker exec` route bypasses the container's
 # sudoers (claude can't sudo iptables, but the launcher running outside the
@@ -462,17 +464,131 @@ def _cascade(hosts, on_resolved, on_terminal_failure):
 
 _CRITICAL_HOSTS = ("api.anthropic.com", "console.anthropic.com")
 
-# Status-file shared state — single source of truth for what gets atomically
-# written. The lock guards both the dict and the file writes to prevent torn
-# updates from Phase 1, Phase 2, and updater threads racing.
-_status_lock = threading.Lock()
-_pending_path = None      # <state_dir>/domains_pending_resolve.yml — agent-facing classification file
-_status = {
-    "status":   "uninit",  # → "resolving" while host work is in flight, "complete" at end
-    "resolved": {},        # host → [ip, ...]
-    "pending":  [],        # list of hosts still waiting on DNS
-    "failed":   {},        # host → reason string
-}
+# HTTPS + HTTP — opened for any whitelist entry that doesn't specify :port.
+_DEFAULT_OPEN_PORTS = ("443", "80")
+
+
+# === Agent-visible whitelist-resolution status ===
+# The `domains_pending_resolve.yml` file (under each instance's state dir,
+# bind-mounted into the container at /home/claude/.claude/) is the runtime
+# surface the agent reads to classify a `ConnectionRefused`: pending vs.
+# failed vs. neither. memory/auto-addendum.md points the agent here.
+#
+# Phase 1, Phase 2, and the docker-exec updater all mutate the same in-memory
+# state and rewrite the file from it — the class below bundles the lock, the
+# dict, and the file path so those invariants stay co-located (lock guards
+# both the dict mutation AND the file write; missing path = no-op write).
+# All public methods take the lock themselves; callers don't.
+
+class _WhitelistResolutionStatus:
+    """Tracks DNS resolution progress for the {auto}-mode firewall whitelist
+    and mirrors the in-memory state to `domains_pending_resolve.yml`. Single-
+    process singleton (one launcher = one resolution = one tracker)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._path = None
+        self._data = {
+            "status":   "uninit",  # → "resolving" while host work is in flight, "complete" at end
+            "resolved": {},        # host → [ip, ...]
+            "pending":  [],        # hosts still waiting on DNS
+            "failed":   {},        # host → reason string
+        }
+
+    def init(self, state_dir):
+        """Reset to a clean 'resolving' state and record where to write — wipes
+        any leftover from a previous run on this instance so the agent never
+        observes stale content. Called once at the start of every {auto} launch
+        from start_whitelist_resolution, gated by that function's idempotency
+        check."""
+        with self._lock:
+            self._path = state_pending_yml_path(state_dir)
+            self._data = {"status": "resolving", "resolved": {}, "pending": [], "failed": {}}
+            self._write()
+
+    def set_pending(self, hosts):
+        """Replace the pending-host list (called once at start_whitelist_resolution
+        after the full whitelist is assembled)."""
+        with self._lock:
+            self._data["pending"] = sorted(hosts)
+            self._write()
+
+    def mark_resolved(self, host, ips):
+        """Move `host` from pending → resolved; file the IPs."""
+        with self._lock:
+            self._data["resolved"][host] = list(ips)
+            if host in self._data["pending"]:
+                self._data["pending"].remove(host)
+            self._write()
+
+    def mark_failed(self, host, reason):
+        """Move `host` from pending → failed with `reason`."""
+        with self._lock:
+            self._data["failed"][host] = reason
+            if host in self._data["pending"]:
+                self._data["pending"].remove(host)
+            self._write()
+
+    def complete(self):
+        """Flip top-level status to 'complete' — every entry has been
+        resolved or terminally failed; no more updates coming."""
+        with self._lock:
+            self._data["status"] = "complete"
+            self._write()
+
+    def resolved_snapshot(self):
+        """Read-only snapshot of {host: [ip, ...]} for callers that need to
+        persist the full resolution map (used by _phase2_worker to feed
+        _save_resolution_cache)."""
+        with self._lock:
+            return dict(self._data["resolved"])
+
+    def _write(self):
+        """Atomic rewrite of the pending-status file. Caller holds the lock.
+        No-op before init() has set a path — defensive against spurious
+        early calls."""
+        if self._path is None:
+            return
+        write_text(self._path, self._format_yml())
+
+    def _format_yml(self):
+        """Render the agent-visible YAML body. Caller holds the lock. Sections
+        explicitly commented so the agent can interpret each state correctly
+        without reading the launcher's source."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        lines = [
+            "# {auto}-mode firewall whitelist — pending/failed view",
+            "# Auto-generated by the host launcher; updated as DNS resolution",
+            "# progresses. The agent uses this file to classify a connection",
+            "# refused: still pending vs. terminally failed vs. neither.",
+            "",
+            f"status: {self._data['status']}    # 'resolving' = host still working;  'complete' = every entry resolved or terminally failed",
+            f"last_updated: {now}",
+            "",
+            "# Pending — host is still resolving these. Rule may arrive within seconds;",
+            "# if you can't reach a pending host, retry shortly before surfacing to the user.",
+            "pending:",
+        ]
+        for host in sorted(self._data["pending"]):
+            lines.append(f"  - {host}")
+        lines.append("")
+        lines.append("# Failed — DNS resolution failed terminally for these (likely IPv6-only,")
+        lines.append("# dead host, typo, or transient error). Won't be reachable this session;")
+        lines.append("# surface to the user if you need one — a re-launch may succeed.")
+        lines.append("failed:")
+        for host in sorted(self._data["failed"]):
+            lines.append(f"  {host}: {self._data['failed'][host]}")
+        return "\n".join(lines) + "\n"
+
+
+_status = _WhitelistResolutionStatus()
+
+
+# === Thread/concurrency plumbing — kept as flat module-level globals ===
+# These are the executors / futures / queues / threads that orchestrate
+# Phase 1 + Phase 2 + the iptables-updater. They don't share invariants the
+# way the status surface does (no shared lock; each piece has independent
+# lifecycle), so they stay as globals here.
 
 # Phase 1 (critical) — synchronous from the caller's perspective via a
 # blocking await on _phase1_future.result().
@@ -490,81 +606,6 @@ _phase2_thread = None
 _updater_thread = None
 
 
-def _format_pending_yml():
-    """Render the agent-visible slice of `_status` — top-level status, pending
-    list, failed list (no resolved details). Caller holds `_status_lock`.
-    Sections explicitly commented so the agent can interpret each state
-    correctly without reading the launcher's source."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    lines = [
-        "# {auto}-mode firewall whitelist — pending/failed view",
-        "# Auto-generated by the host launcher; updated as DNS resolution",
-        "# progresses. The agent uses this file to classify a connection",
-        "# refused: still pending vs. terminally failed vs. neither.",
-        "",
-        f"status: {_status['status']}    # 'resolving' = host still working;  'complete' = every entry resolved or terminally failed",
-        f"last_updated: {now}",
-        "",
-        "# Pending — host is still resolving these. Rule may arrive within seconds;",
-        "# if you can't reach a pending host, retry shortly before surfacing to the user.",
-        "pending:",
-    ]
-    for host in sorted(_status["pending"]):
-        lines.append(f"  - {host}")
-    lines.append("")
-    lines.append("# Failed — DNS resolution failed terminally for these (likely IPv6-only,")
-    lines.append("# dead host, typo, or transient error). Won't be reachable this session;")
-    lines.append("# surface to the user if you need one — a re-launch may succeed.")
-    lines.append("failed:")
-    for host in sorted(_status["failed"]):
-        lines.append(f"  {host}: {_status['failed'][host]}")
-    return "\n".join(lines) + "\n"
-
-
-def _write_status():
-    """Atomic rewrite of the pending-status file. Caller holds `_status_lock`.
-    write_text auto-creates the parent dir, so the state dir materialises on
-    first write. No-op before clear_firewall_status_files has set _pending_path
-    (so spurious updates before initialisation are silent rather than crash)."""
-    if _pending_path is None:
-        return
-    write_text(_pending_path, _format_pending_yml())
-
-
-def _mark_resolved(host, ips):
-    """Status-file update: move `host` from pending → resolved. Used by both
-    Phase 1 and Phase 2 callbacks."""
-    with _status_lock:
-        _status["resolved"][host] = list(ips)
-        if host in _status["pending"]:
-            _status["pending"].remove(host)
-        _write_status()
-
-
-def _mark_failed(host, reason):
-    """Status-file update: move `host` from pending → failed."""
-    with _status_lock:
-        _status["failed"][host] = reason
-        if host in _status["pending"]:
-            _status["pending"].remove(host)
-        _write_status()
-
-
-def clear_firewall_status_files(state_dir):
-    """Overwrite the pending-status file with empty 'resolving' state. Called
-    by agent_composition._apply_auto at the start of every {auto} launch so
-    any leftovers from a previous run on this instance are wiped before the
-    agent (or anything else) gets a chance to read them. Idempotent."""
-    global _pending_path
-    with _status_lock:
-        _pending_path = state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
-        _status["status"] = "resolving"
-        _status["resolved"] = {}
-        _status["pending"] = []
-        _status["failed"] = {}
-        _write_status()
-
-
 def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames):
     """Phase 1 body: cascade through critical hosts (Anthropic), then kick off
     Phase 2 in its own thread before returning. Result is the list of address
@@ -576,7 +617,7 @@ def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames):
     critical_failed = []
 
     def on_ok(host, ips):
-        _mark_resolved(host, ips)
+        _status.mark_resolved(host, ips)
         # Match resolved host back to its entries (multiple entries may share a host
         # if e.g. the user wrote `api.anthropic.com:443` and we also have it via apex/www).
         for entry, h, port in critical_hostnames:
@@ -585,7 +626,7 @@ def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames):
                     critical_addresses.append(f"{ip}:{port}" if port else ip)
 
     def on_fail(host):
-        _mark_failed(host, "DNS resolution failed after all cascade stages")
+        _status.mark_failed(host, _FAILED_RESOLVE_REASON)
         critical_failed.append(host)
 
     _cascade([h for _, h, _ in critical_hostnames], on_ok, on_fail)
@@ -616,7 +657,7 @@ def _phase2_worker(rest_hostnames):
     resolution cache with everything resolved this launch (cache hits + fresh
     DNS) so the next launch's is_file_recent check sees a freshened mtime."""
     def on_ok(host, ips):
-        _mark_resolved(host, ips)
+        _status.mark_resolved(host, ips)
         # Find every (entry, host, port) tuple that uses this host — multiple
         # entries can share a host with different ports.
         for entry, h, port in rest_hostnames:
@@ -624,24 +665,22 @@ def _phase2_worker(rest_hostnames):
                 _phase2_queue.put((entry, host, port, ips))
 
     def on_fail(host):
-        _mark_failed(host, "DNS resolution failed after all cascade stages")
+        _status.mark_failed(host, _FAILED_RESOLVE_REASON)
 
     _cascade([h for _, h, _ in rest_hostnames], on_ok, on_fail)
 
-    with _status_lock:
-        _status["status"] = "complete"
-        _write_status()
-        _save_resolution_cache(dict(_status["resolved"]))
+    _status.complete()
+    _save_resolution_cache(_status.resolved_snapshot())
     _phase2_queue.put(_phase2_done)
 
 
 def start_whitelist_resolution(state_dir):
-    """Fire Phase 1 (critical Anthropic — synchronous from the caller's
-    perspective via wait_for_critical_addresses); once that finishes Phase 2
-    (the rest, streaming) kicks off automatically. The pending status file
-    must already exist with cleared 'resolving' state — agent_composition.
-    _apply_auto calls clear_firewall_status_files(state_dir) immediately
-    before this. Idempotent; re-calling is a no-op past the first.
+    """Reset the agent-visible status surface to a clean 'resolving' state,
+    then fire Phase 1 (critical Anthropic — synchronous from the caller's
+    perspective via wait_for_critical_addresses); once Phase 1 finishes
+    Phase 2 (the rest, streaming) kicks off automatically. Idempotent;
+    re-calling is a no-op past the first (so a re-call won't wipe the
+    in-flight status either).
 
     Loads the cross-launch resolution cache up front so _resolve_a_records
     short-circuits any host that's been resolved recently. The cache file
@@ -656,6 +695,7 @@ def start_whitelist_resolution(state_dir):
     if _phase1_future is not None:
         return   # idempotent
 
+    _status.init(state_dir)
     _load_resolution_cache()
 
     # Expand the whitelist (BUILTIN + user file, apex/www, *.X stripping).
@@ -669,7 +709,7 @@ def start_whitelist_resolution(state_dir):
     literals = []
     hostnames = []   # list of (entry, host, port)
     for entry in sorted(deduped):
-        host, port = _split_port(entry)
+        host, port = split_host_port(entry)
         if _IP_OR_CIDR_RE.match(host):
             literals.append(entry)
         else:
@@ -680,9 +720,7 @@ def start_whitelist_resolution(state_dir):
 
     # Populate the pending list now that we've assembled it (clearing already
     # zeroed everything else in _status).
-    with _status_lock:
-        _status["pending"] = sorted({host for _, host, _ in hostnames})
-        _write_status()
+    _status.set_pending({host for _, host, _ in hostnames})
 
     _phase2_queue = queue.Queue()
 
@@ -743,27 +781,17 @@ def start_firewall_updater(container_name):
 def _updater_worker(container_name):
     """Daemon body for the updater. Wait briefly for the container to be
     running (docker compose run takes a moment to spin it up), then drain
-    `_phase2_queue` and exec iptables rules into the running container."""
-    # Poll for "container is running" — up to a few seconds. docker compose run
-    # creates and starts the container almost immediately, but there's a small
-    # window where `docker inspect` returns "container not found".
-    for _ in range(100):   # 100 × 100ms = 10s ceiling
-        r = subprocess.run(
-            ["docker", "inspect", "--format={{.State.Running}}", container_name],
-            capture_output=True, text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip() == "true":
-            break
-        time.sleep(0.1)
-    else:
+    `_phase2_queue` and exec iptables rules into the running container.
+    Lazy import of wait_for_container_running breaks the docker_config↔network
+    import cycle (see module-top docstring)."""
+    from .docker_config import wait_for_container_running
+
+    if not wait_for_container_running(container_name):
         # Container never came up; nothing to update. Caller's docker compose
         # run will already have surfaced the underlying error.
         return
 
-    while True:
-        item = _phase2_queue.get()
-        if item is _phase2_done:
-            return
+    for item in iter(_phase2_queue.get, _phase2_done):
         _entry, _host, port, ips = item
         for ip in ips:
             _insert_iptables_accept(container_name, ip, port)
@@ -773,14 +801,16 @@ def _insert_iptables_accept(container_name, ip, port):
     """Insert an iptables ACCEPT rule at position 1 of the OUTPUT chain (i.e.
     BEFORE the catch-all REJECT) for `ip`. If `port` is empty, opens the
     default HTTPS+HTTP pair; otherwise just that one port. Best-effort —
-    warns on failure but doesn't raise."""
-    targets = [port] if port else ("443", "80")
+    warns on failure but doesn't raise. Lazy import of docker_exec_root breaks
+    the docker_config↔network import cycle (see module-top docstring)."""
+    from .docker_config import docker_exec_root
+
+    targets = [port] if port else _DEFAULT_OPEN_PORTS
     for p in targets:
-        r = subprocess.run(
-            ["docker", "exec", "--user", "root", container_name,
-             "iptables", "-I", "OUTPUT", "1",
-             "-d", ip, "-p", "tcp", "--dport", str(p), "-j", "ACCEPT"],
-            capture_output=True, text=True,
+        r = docker_exec_root(
+            container_name,
+            "iptables", "-I", "OUTPUT", "1",
+            "-d", ip, "-p", "tcp", "--dport", str(p), "-j", "ACCEPT",
         )
         if r.returncode != 0:
             print(

@@ -46,30 +46,19 @@ imports from them.
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from functools import cache
 from pathlib import Path
 
 from .file_access import (
-    conf_path_for, find_md_for_agent, has_continuable_jsonl, last_history_mtime,
-    load_modes_map, parse_stem,
+    conf_path_for, find_md_for_agent, has_continuable_jsonl, is_dir,
+    last_history_mtime, load_modes_map, parse_stem,
 )
-from .paths import AGENT_WORKSPACE_MAP_FILE, AGENTS_STATE, INSTANCE_CLAUDE_MD_FILENAME
+from .paths import AGENT_WORKSPACE_MAP_FILE, instance_state_dir_path, state_md_path
 
 
 # ============================================================
 # Modifier taxonomy
 # ============================================================
-
-# Subset-view caches for InstanceModifiers.tags() / .modes() / .tag_values() /
-# .mode_values() — populated on first call, returned by identity thereafter so
-# callers can use the classmethods directly without buffering their own copies.
-# Same pattern as file_access._workspace_map_cache / _modes_map_cache (compute
-# once, hand out the same object). No invalidation hook because the enum's
-# members and their name-prefix kind are immutable for the process's lifetime.
-_tags_cache = None
-_modes_cache = None
-_tag_values_cache = None
-_mode_values_cache = None
-
 
 class InstanceModifiers(Enum):
     """Every build-chain modifier — filename-derived [tags] and per-instance
@@ -106,39 +95,52 @@ class InstanceModifiers(Enum):
         return f"[{self.value}]" if self.name.startswith("TAG_") else f"{{{self.value}}}"
 
     @classmethod
+    def format_prefix(cls, values):
+        """Render an iterable of modifier value strings (any mix of tag and
+        mode values) as space-separated bracketed labels with a trailing
+        space: '[prog] {auto} ' / '' for empty input. Wrapping comes from
+        each member's `.label` (tags → `[..]`, modes → `{..}`), so the
+        wrapping convention lives on the enum and callers don't replicate
+        it. Unknown values fall back to `[v]` rendering — covers typo'd
+        filename tags (the more common origin of strays); compose_chain
+        rejects unknowns separately at launch time."""
+        if not values:
+            return ""
+        labels = {m.value: m.label for m in cls}
+        return "".join(labels.get(v, f"[{v}]") + " " for v in values)
+
+    # The four subset-view classmethods below are memoized via @functools.cache
+    # (key = cls; single-class system → 100% hit rate after the first call). The
+    # enum's members and their name-prefix kind are immutable for the process's
+    # lifetime, so no invalidation is ever needed. Pattern: @classmethod outside,
+    # @cache inside — the cache wraps the underlying function; classmethod
+    # forwards `cls` as the cache key.
+
+    @classmethod
+    @cache
     def tags(cls):
-        """Tuple of tag members (name prefix `TAG_`) in declaration order. Memoized."""
-        global _tags_cache
-        if _tags_cache is None:
-            _tags_cache = tuple(m for m in cls if m.name.startswith("TAG_"))
-        return _tags_cache
+        """Tuple of tag members (name prefix `TAG_`) in declaration order."""
+        return tuple(m for m in cls if m.name.startswith("TAG_"))
 
     @classmethod
+    @cache
     def modes(cls):
-        """Tuple of mode members (name prefix `MODE_`) in declaration order. Memoized."""
-        global _modes_cache
-        if _modes_cache is None:
-            _modes_cache = tuple(m for m in cls if m.name.startswith("MODE_"))
-        return _modes_cache
+        """Tuple of mode members (name prefix `MODE_`) in declaration order."""
+        return tuple(m for m in cls if m.name.startswith("MODE_"))
 
     @classmethod
+    @cache
     def tag_values(cls):
         """Tuple of canonical `.value` strings for the tag members, declaration
-        order. Memoized. Use when comparing against on-disk strings (filename
-        parser output, JSON contents, sort-key ordering lists)."""
-        global _tag_values_cache
-        if _tag_values_cache is None:
-            _tag_values_cache = tuple(m.value for m in cls.tags())
-        return _tag_values_cache
+        order. Use when comparing against on-disk strings (filename parser
+        output, JSON contents, sort-key ordering lists)."""
+        return tuple(m.value for m in cls.tags())
 
     @classmethod
+    @cache
     def mode_values(cls):
-        """Tuple of canonical `.value` strings for the mode members, declaration
-        order. Memoized."""
-        global _mode_values_cache
-        if _mode_values_cache is None:
-            _mode_values_cache = tuple(m.value for m in cls.modes())
-        return _mode_values_cache
+        """Tuple of canonical `.value` strings for the mode members, declaration order."""
+        return tuple(m.value for m in cls.modes())
 
 SESSION_SEP = "__"
 
@@ -207,7 +209,7 @@ class InstanceIdentity(AgentIdentity):
     def state_md(self) -> Path:
         """Path to the CLAUDE.md inside this instance's state dir — written by
         install_latest_md on each launch from the source agent .md."""
-        return self.state_dir / INSTANCE_CLAUDE_MD_FILENAME
+        return state_md_path(self.state_dir)
 
     @property
     def stored_modes(self) -> list:
@@ -239,7 +241,7 @@ class InstanceIdentity(AgentIdentity):
         directory (stale agent_workspace_map.json entry). Workspace=None passes
         through silently so the caller can decide to prompt for a new value
         instead of treating absence as an error."""
-        if self.workspace is not None and not Path(self.workspace).is_dir():
+        if self.workspace is not None and not is_dir(self.workspace):
             sys.exit(
                 f"Workspace for '{self.instance}' is not a valid directory: {self.workspace}\n"
                 f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
@@ -268,7 +270,7 @@ class InstanceIdentity(AgentIdentity):
         """Path to an instance's state directory from raw strings. Complement
         to the `state_dir` property — same prompt-side use case as
         instance_name. `_for` suffix avoids name-collision with the property."""
-        return AGENTS_STATE / InstanceIdentity.instance_name(agent, session)
+        return instance_state_dir_path(InstanceIdentity.instance_name(agent, session))
 
 
 @dataclass(frozen=True)

@@ -14,66 +14,96 @@ Two sister accumulators live here:
     flattened inline by run_compose into `-v` flags. staged_mounts() exposes
     read-only access for the launch banner.
 
-Compose env-var keys are module-level UPPERCASE string constants (TARGET_IMAGE,
-AGENT_NAME, …). External callers import the constant by name and pass it to
-stage_compose_env, so a typo surfaces as ImportError rather than a silently-
-missing $VAR.
+Compose env-var keys are members of the `ComposeEnvKey` enum (a str-subclass
+enum so members work transparently in dict keys, f-strings, and subprocess
+env). External callers import `ComposeEnvKey` and pass `ComposeEnvKey.TARGET_IMAGE`
+etc. to stage_compose_env — typos surface as AttributeError, and the set is
+grepp-able in one place.
 
-Imports from paths (filesystem constants, with the few still-used compose ${...}
-sources renamed on import to avoid colliding with same-named env-key constants)
-and file_access (the optional-creds primitives, plus read_json_field for the
-OAuth-email lookup the status line uses). agent_composition imports
-stage_compose_env / add_docker_mount (plus WHITELIST_ADDRESSES / DOCKER_GID) from
-here; run.py is the top-level consumer.
+Imports from paths (filesystem constants — none of them collide with env-key
+names now that ComposeEnvKey scopes the latter) and file_access (the optional-
+creds primitives). agent_composition imports stage_compose_env / add_docker_mount
+plus ComposeEnvKey from here; run.py is the top-level consumer.
 """
 
 import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import date
+from enum import Enum
 
-from .file_access import optional_cred_tokens, present_optional_cred_services, read_json_field
+from .claude_code_config import build_status_line, set_terminal_title
+from .file_access import optional_cred_tokens, present_optional_cred_services
 from .network import is_critical_pending, start_firewall_updater, wait_for_critical_addresses
 from .paths import (
-    # Paths used by name as compose env-var values — aliased on import to free
-    # the bare name for the same-named env-key constant below. Only the auto
-    # mode's scripts + the build-context root still travel this route; the
-    # rest of the always-on mount sources reach docker via Python (DOCKER_BASE_MOUNTS
-    # + set_container_mounts), so no aliasing is needed for them.
-    AUTO_ENTRYPOINT_SH as _AUTO_ENTRYPOINT_SH_PATH,
-    DOCKERIZED_CLAUDE_ROOT as _DOCKERIZED_CLAUDE_ROOT_PATH,
-    INIT_FIREWALL_SH as _INIT_FIREWALL_SH_PATH,
-    # Paths used directly — no collision with an env-key constant.
-    ACCOUNT_FILE, CLAUDE_CONFIG_IN_CONTAINER, COMPOSE_FILE_NAME, DOCKER_BASE_MOUNTS,
-    DOCKER_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS,
+    CLAUDE_CONFIG_IN_CONTAINER, CLAUDE_HOME_IN_CONTAINER, COMPOSE_FILE_PATH,
+    DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT, OPTIONAL_CREDS_MOUNTS,
+    OPTIONAL_CREDS_TOKEN_ENV_VARS, compose_layer_path,
 )
 
 
 # ============================================================
 # Compose env-var keys
 # ============================================================
+# Every static compose / container env-var name the launcher stages or
+# emits, collected here so the set is grepp-able and IDE-completable.
+# Members are str-subclasses (via `class X(str, Enum)`), so each member
+# transparently works as a dict key, in subprocess env, and as a `==`
+# comparator against a string. The `__str__` override makes f-strings emit
+# the value (`"TARGET_IMAGE"`), not the enum repr (`"ComposeEnvKey.TARGET_IMAGE"`)
+# — that's important for the `-e KEY=VALUE` flag emission in run_compose.
+#
+# Dynamic env-var names (per-service tokens from OPTIONAL_CREDS_TOKEN_ENV_VARS,
+# build-arg INSTALL_<TOOL> flags) are not enumerated here — they're derived
+# at run time from paths-side configuration.
 
-# --- Image build chain ---
-TARGET_IMAGE           = "TARGET_IMAGE"            # compose.yml `image:` — current step's tag (set per chain step + once more in run_compose)
-PARENT_IMAGE           = "PARENT_IMAGE"            # compose.<step>.yml `FROM ${PARENT_IMAGE}` — prior step's tag; not set on base
-SOFTWARE_STACK_REFRESH = "SOFTWARE_STACK_REFRESH"  # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup)
+class ComposeEnvKey(str, Enum):
+    # Image build chain — driven into compose-YAML ${...} substitution
+    TARGET_IMAGE           = "TARGET_IMAGE"            # compose.yml `image:` — current step's tag (set per chain step + once more in run_compose)
+    PARENT_IMAGE           = "PARENT_IMAGE"            # compose.<step>.yml `FROM ${PARENT_IMAGE}` — prior step's tag; not set on base
+    SOFTWARE_STACK_REFRESH = "SOFTWARE_STACK_REFRESH"  # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup)
+    # Per-instance identity
+    AGENT_NAME             = "AGENT_NAME"              # agent's clean name — substituted into compose.yml's `container_name:`
+    # Mode-driven keys
+    WHITELIST_ADDRESSES    = "WHITELIST_ADDRESSES"     # {auto}-mode firewall list of pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens (space-joined) — read by init-firewall.sh inside the container
+    DOCKER_GID             = "DOCKER_GID"              # host docker group GID — Dockerfile.dood build-arg for /var/run/docker.sock access
+    # Build/launch wiring (compose-YAML ${...} substitution)
+    DOCKERIZED_CLAUDE_ROOT = "DOCKERIZED_CLAUDE_ROOT"  # repo root — `context: ${DOCKERIZED_CLAUDE_ROOT}` in every build block
+    # Container-side env vars (emitted by run_compose as `-e KEY=VALUE` flags)
+    AGENT_STATUS_LINE      = "AGENT_STATUS_LINE"       # pre-styled ANSI status line at the bottom of Claude Code
+    BASH_ENV               = "BASH_ENV"                # path to the bashrc that non-interactive bash sources at startup
 
-# --- Per-instance identity / forwarded env ---
-AGENT_NAME             = "AGENT_NAME"              # agent's clean name — substituted into compose.yml's `container_name:`
-AGENT_STATUS_LINE      = "AGENT_STATUS_LINE"       # pre-styled ANSI status line at the bottom of Claude Code (forwarded into container)
+    def __str__(self):                                 # `f"{key}"` → "TARGET_IMAGE", not "ComposeEnvKey.TARGET_IMAGE"
+        return self.value
 
-# --- Mode-driven keys ---
-WHITELIST_ADDRESSES    = "WHITELIST_ADDRESSES"      # {auto}-mode firewall list of pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens (space-joined) — read by init-firewall.sh inside the container
-DOCKER_GID             = "DOCKER_GID"              # host docker group GID — Dockerfile.dood build-arg for /var/run/docker.sock access
 
-# --- Build/launch wiring (still referenced by ${...} in compose YAMLs) ---
-# Most always-on mount sources now reach docker via Python (DOCKER_BASE_MOUNTS
-# + add_docker_mount); only the auto-mode bind-mount sources and the build-context
-# root still travel as compose env-var substitutions, so this block is short.
-DOCKERIZED_CLAUDE_ROOT = "DOCKERIZED_CLAUDE_ROOT"   # repo root — `context: ${DOCKERIZED_CLAUDE_ROOT}` in every build block
-INIT_FIREWALL_SH       = "INIT_FIREWALL_SH"         # docker/init-firewall.sh — {auto}-mode iptables script
-AUTO_ENTRYPOINT_SH     = "AUTO_ENTRYPOINT_SH"       # docker/auto-entrypoint.sh — {auto}-mode container entrypoint wrapper
+# ============================================================
+# Container env-var emissions — appended as `-e` flags in run_compose
+# ============================================================
+# Container env-vars are emitted as `-e KEY=VALUE` flags on the `docker
+# compose run` command by run_compose, rather than declared in compose.yml's
+# `environment:` block. Same shape as the bind-mount accumulation pattern in
+# this module: declarative wiring lives in Python, with compose YAMLs reserved
+# for the build graph + the build-context root substitution.
+#
+# CONTAINER_ENV_FORWARDS holds keys whose values are already in `_compose_env`
+# (staged by stage_compose_env elsewhere — AGENT_STATUS_LINE from set_container_env,
+# and the optional-creds token vars from token_env_dict). Keys absent from
+# `_compose_env` at run_compose time are silently skipped — that's how the
+# JIRA_API_TOKEN passthrough stays conditional on optional_creds/jira/token
+# being present.
+#
+# CONTAINER_ENV_FIXED holds key→value pairs with constant in-container values
+# (BASH_ENV). Emitted unconditionally.
+#
+# TERM is intentionally *not* here — it's purely shell-inherited (whatever the
+# user's terminal sets), so compose.yml's `environment: [- TERM]` pass-through
+# is the natural fit.
+
+CONTAINER_ENV_FORWARDS = (ComposeEnvKey.AGENT_STATUS_LINE, *OPTIONAL_CREDS_TOKEN_ENV_VARS.values())
+CONTAINER_ENV_FIXED    = {ComposeEnvKey.BASH_ENV: f"{CLAUDE_HOME_IN_CONTAINER}/.bashrc"}
 
 
 # ============================================================
@@ -146,9 +176,9 @@ def chain_image_tag(chain):
 def chain_compose_files(chain):
     """The compose `-f <path>` arg list for a chain. Always includes compose.yml;
     adds compose.<step>.yml (lowercased) for each non-base step in order."""
-    args = ["-f", str(DOCKER_DIR / COMPOSE_FILE_NAME)]
+    args = ["-f", str(COMPOSE_FILE_PATH)]
     for step in chain[1:]:
-        args += ["-f", str(DOCKER_DIR / f"compose.{step.lower()}.yml")]
+        args += ["-f", str(compose_layer_path(step))]
     return args
 
 
@@ -165,6 +195,87 @@ def conf_env_args(conf):
     list of `-e KEY=VALUE` args for `docker compose run`. Each conf entry becomes
     a runtime env var inside the container."""
     return [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]
+
+
+# ============================================================
+# Docker subprocess helpers
+# ============================================================
+# Every direct invocation of the `docker` CLI flows through this section
+# (the `docker compose build/run` calls in ensure_image / run_compose live
+# below in the orchestration section since they're tied to per-launch state).
+# CONTAINER_NAME_PREFIX is the one place the per-launch container name format
+# is defined — run_compose builds container names from it, and
+# any_agent_container_running filters `docker ps` by the same prefix; keeping
+# them consistent is a one-line change here.
+
+CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_compose) and the filter used to detect a running agent (any_agent_container_running)
+
+
+def detect_docker_gid():
+    """Return the host's docker group GID as a string, or None if no docker
+    group exists (or `getent` is unavailable — e.g. non-Linux hosts). Used by
+    agent_composition._apply_dood to stage DOCKER_GID for Dockerfile.dood, so
+    claude can read/write the bind-mounted /var/run/docker.sock."""
+    try:
+        result = subprocess.run(
+            ["getent", "group", "docker"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return None  # no getent (e.g., not Linux)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().split(":")[2]
+    return None
+
+
+def wait_for_container_running(container_name, timeout_seconds=10):
+    """Poll `docker inspect` until the named container reports State.Running==true
+    or `timeout_seconds` passes. Returns True if the container came up in time,
+    False on timeout. `docker compose run` creates the container almost
+    immediately but `docker inspect` returns 'not found' for a small window
+    after — hence the poll. Used by the {auto}-mode firewall updater (in
+    network._updater_worker) before it starts issuing `docker exec` calls."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["docker", "inspect", "--format={{.State.Running}}", container_name],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0 and r.stdout.strip() == "true":
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def docker_exec_root(container_name, *cmd):
+    """Run `docker exec --user root <container_name> <cmd...>` and return the
+    CompletedProcess (capture_output=True, text=True so callers can inspect
+    returncode + stdout/stderr).
+
+    The `--user root` flag is the privileged-operation pattern: it grants
+    root inside the container *from outside the container's namespace*,
+    bypassing whatever sudoers restrictions are in place for the in-container
+    user. Used by the {auto}-mode firewall updater (in network._insert_iptables_accept)
+    to inject iptables ACCEPT rules into the running container as Phase 2 DNS
+    resolutions complete. Centralised here so privileged docker-exec calls
+    have a single audit point."""
+    return subprocess.run(
+        ["docker", "exec", "--user", "root", container_name, *cmd],
+        capture_output=True, text=True,
+    )
+
+
+def any_agent_container_running():
+    """True if any container whose name starts with CONTAINER_NAME_PREFIX is
+    currently running, OR if `docker ps` failed (conservative — treat the
+    unknown state as 'might be running' so caller skips its cleanup). Used
+    by agent_composition.prune_caches as the 'is it safe to delete cache
+    files' guard."""
+    r = subprocess.run(
+        ["docker", "ps", "--filter", f"name={CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    return r.returncode != 0 or bool(r.stdout.strip())
 
 
 # ============================================================
@@ -198,23 +309,6 @@ def token_env_dict(tokens):
 # Orchestration
 # ============================================================
 
-def _build_status_line(inst_id):
-    """ANSI label for Claude Code's bottom status line — cyan agent + grey
-    workspace + green email + blue instance (`<agent>__<session>`). The
-    `<email> :` prefix drops out when .claude.json is missing or lacks a
-    recognisable email field. Accepts any InstanceIdentity (or subclass —
-    SessionIdentity works too); only reads .agent / .session / .workspace /
-    .instance."""
-    CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
-    session_complete = (f"{inst_id.agent.replace('-', ' ').title()} - {inst_id.session.replace('-', ' ').replace('_', ' ').title()}"
-                        f" {GREY}( {inst_id.workspace} ){RESET}")
-    mail_at_instance = f"{BLUE}{inst_id.instance}{RESET}"
-    email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
-    if email:
-        mail_at_instance = f"{GREEN}{email}{RESET} : {mail_at_instance}"
-    return f"{CYAN}● {session_complete}\t\t{mail_at_instance}"
-
-
 def set_container_env(inst_id):
     """Stage per-launch compose env vars in one bulk dict-update — called by run.py
     before docker compose build/run. Sister to set_container_mounts (env vars vs
@@ -222,12 +316,10 @@ def set_container_env(inst_id):
     InstanceIdentity (or subclass); only reads .agent for the container name,
     plus what the status-line builder consumes."""
     _compose_env.update({
-        SOFTWARE_STACK_REFRESH: date.today().strftime("%Y-W%W"),
-        AGENT_NAME:             inst_id.agent,
-        AGENT_STATUS_LINE:      _build_status_line(inst_id),
-        DOCKERIZED_CLAUDE_ROOT: _DOCKERIZED_CLAUDE_ROOT_PATH,
-        INIT_FIREWALL_SH:       _INIT_FIREWALL_SH_PATH,
-        AUTO_ENTRYPOINT_SH:     _AUTO_ENTRYPOINT_SH_PATH,
+        ComposeEnvKey.SOFTWARE_STACK_REFRESH: date.today().strftime("%Y-W%W"),
+        ComposeEnvKey.AGENT_NAME:             inst_id.agent,
+        ComposeEnvKey.AGENT_STATUS_LINE:      build_status_line(inst_id),
+        ComposeEnvKey.DOCKERIZED_CLAUDE_ROOT: DOCKERIZED_CLAUDE_ROOT,
         # Dynamic-key updates from optional_creds/
         **install_creds_flags(present_optional_cred_services()),   # INSTALL_<TOOL>=0|1 build flags
         **token_env_dict(optional_cred_tokens()),                  # per-service tokens (e.g. JIRA_API_TOKEN)
@@ -257,9 +349,9 @@ def ensure_image(chain):
     for i, step in enumerate(chain):
         target = chain_image_tag(chain[:i + 1])
         compose_files = chain_compose_files(["base"] if step == "base" else ["base", step])
-        stage_compose_env(TARGET_IMAGE, target)
+        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, target)
         if prev_tag:
-            stage_compose_env(PARENT_IMAGE, prev_tag)
+            stage_compose_env(ComposeEnvKey.PARENT_IMAGE, prev_tag)
         print(f"  Building {step} → {target}...")
         ret = subprocess.call(["docker", "compose"] + compose_files + ["build"], env=_subprocess_env())
         if ret != 0:
@@ -284,9 +376,9 @@ def run_compose(chain, instance, claude_args, resume_flag, conf):
     otherwise generate a random suffix and we'd have no way to find it from
     outside without polling `docker compose ps`."""
     ensure_image(chain)
-    stage_compose_env(TARGET_IMAGE, chain_image_tag(chain))
+    stage_compose_env(ComposeEnvKey.TARGET_IMAGE, chain_image_tag(chain))
     compose_args = chain_compose_files(chain)
-    print(f"\033]0;Claude Code — {instance}\007", end="", flush=True)
+    set_terminal_title(instance)
     # Phase 1 await: block for critical Anthropic addresses, stage them as the
     # initial WHITELIST_ADDRESSES. Phase 2 (rest of the whitelist) is still
     # resolving in the background; the updater thread (spawned below) handles
@@ -294,15 +386,25 @@ def run_compose(chain, instance, claude_args, resume_flag, conf):
     if is_critical_pending():
         print("  Waiting for critical {auto}-mode firewall addresses...", flush=True)
     if (addresses := wait_for_critical_addresses()) is not None:
-        stage_compose_env(WHITELIST_ADDRESSES, " ".join(addresses))
-    container_name = f"claude-code_{instance}"
+        stage_compose_env(ComposeEnvKey.WHITELIST_ADDRESSES, " ".join(addresses))
+    container_name = f"{CONTAINER_NAME_PREFIX}{instance}"
     # Spawn the updater BEFORE subprocess.call (which blocks for the container's
     # lifetime) — the daemon thread will see the container come up shortly and
     # start draining Phase 2 results onto iptables. No-op for non-{auto} launches.
     start_firewall_updater(container_name)
+    container_env_args = [
+        arg
+        for k in CONTAINER_ENV_FORWARDS if k in _compose_env
+        for arg in ("-e", f"{k}={_compose_env[k]}")
+    ] + [
+        arg
+        for k, v in CONTAINER_ENV_FIXED.items()
+        for arg in ("-e", f"{k}={v}")
+    ]
     cmd = (
         ["docker", "compose"] + compose_args + ["run", "--rm", "-it", "--name", container_name]
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
+        + container_env_args      # per-key -e flags from CONTAINER_ENV_FORWARDS / CONTAINER_ENV_FIXED
         + conf_env_args(conf)     # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
         + resume_flag             # present if a resumed session

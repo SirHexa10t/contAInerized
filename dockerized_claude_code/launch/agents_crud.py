@@ -21,44 +21,38 @@ those and constructs the dataclasses (resolve_pick + the picker builders).
 Picker-side sort keys (agent_sort_key / mode_sort_key / tag_sort_key) live
 here too — they're picker concerns, not composition concerns, so they sit
 next to the picker-entry factories that consume them. Imports from
-file_access (parse + map I/O + load_conf for the family sort), paths
-(read_workspace_pref for the host-shell $AI_WORKSPACE default, plus the
-usual path constants), structs, utils, and stdlib; nothing from
-agent_composition, run.py, or menu_picker — all of those import from here.
+file_access (parse + map I/O + load_conf for the family sort), paths (path
+constants), structs, utils, and stdlib; nothing from agent_composition,
+run.py, or menu_picker — all of those import from here.
 """
 
-import os
 import re
 import subprocess
-import sys
-from pathlib import Path
 
+from .agent_composition import warn_if_dangerous_modes
 from .file_access import (
-    copy_file, delete_file, delete_tree, find_md_for_agent,
-    load_conf, load_modes_map, load_workspace_map, move_path, parse_stem, read_text,
+    copy_file, find_md_for_agent, is_dir, is_file, is_symlink, iter_subdirs,
+    load_conf, load_modes_map, load_workspace_map, move_path, parse_stem,
+    path_exists, read_text, remove_path, resolved_cwd, resolved_path,
     save_modes_map, save_workspace_map, write_text,
 )
 from .paths import (
     ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE,
-    DEFAULTING_DIRS, FALLBACK_WORKSPACE, INSTANCE_MEMORY_FILE_RELPATH, MD_EXT, MEMORY_DIR,
-    read_workspace_pref,
+    DEFAULT_WORKSPACE, DEFAULTING_DIRS, MD_EXT, instance_state_dir_path,
+    memory_template_path, state_memory_path,
 )
 from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
-from .utils import relative_time
+from .utils import ordering_index_or_end, relative_time, splice_block
 
-DEFAULT_WORKSPACE = (
-    read_workspace_pref()
-    or (FALLBACK_WORKSPACE if os.getcwd() in DEFAULTING_DIRS else os.getcwd())
-)  # fall back to $PWD, except when $PWD is one of DEFAULTING_DIRS — then use FALLBACK_WORKSPACE
 NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
 
 
 def list_all_instances():
     """Return every `{agent}__{session}` dir under AGENTS_STATE (filesystem order;
     callers that need a specific order sort themselves)."""
-    if not AGENTS_STATE.exists():
+    if not path_exists(AGENTS_STATE):
         return []
-    return [d.name for d in AGENTS_STATE.iterdir() if d.is_dir() and SESSION_SEP in d.name]
+    return [d.name for d in iter_subdirs(AGENTS_STATE) if SESSION_SEP in d.name]
 
 
 # ============================================================
@@ -86,56 +80,18 @@ def _write_modes_entry(m, sess_id):
         m.pop(sess_id.instance, None)
 
 
-def _is_auto_and_dood(modes):
-    """True iff `modes` includes both {auto} and {DooD} — the dangerous combo
-    that triggers warn_dood_with_auto. Defined once so set_instance_modes and
-    modify_instance share one predicate; adding another dangerous combo
-    becomes a single-place change."""
-    return (InstanceModifiers.MODE_AUTO.value in modes
-            and InstanceModifiers.MODE_DOOD.value in modes)
-
-
 def set_instance_modes(sess_id):
     """Persist the modes list for an instance, taken off the passed SessionIdentity
     (which carries both the instance key and its resolved modes). An empty modes
     tuple removes the entry from the map (we don't store empty entries — keeps the
-    file small and the 'no modes' case explicit by absence). Warns on the
-    {auto}+{DooD} combination."""
+    file small and the 'no modes' case explicit by absence). Routes through
+    agent_composition.warn_if_dangerous_modes for the {auto}+{DooD} warning —
+    the dangerous-combination judgement lives with modifier semantics, this
+    writer just persists state and triggers the post-write check."""
     m = load_modes_map()
     _write_modes_entry(m, sess_id)
     save_modes_map(m)
-    if _is_auto_and_dood(sess_id.modes):
-        warn_dood_with_auto()
-
-
-# ============================================================
-# Interactive warning (writer-adjacent)
-# ============================================================
-
-def warn_dood_with_auto():
-    """Stern red warning when an instance ends up with both {auto} and {DooD}
-    enabled. {auto} drops Claude Code's permission prompts; {DooD} hands the
-    agent the host's Docker daemon. Together the agent can do effectively
-    anything on the host, unattended. Blocks until the user presses any key
-    so the warning isn't silently scrolled past."""
-    print()
-    print(f"\033[1;31m  ⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_AUTO.label} AND {InstanceModifiers.MODE_DOOD.label} - PROCEED WITH CAUTION,")
-    print("    AS THE AI AGENT HAS THE POWER TO DO ANYTHING ON YOUR COMPUTER,")
-    print("    AND DOESN'T REQUIRE PERMISSION!\033[0m")
-    print()
-    print("  [press any key to continue] ", end="", flush=True)
-    try:
-        import termios, tty
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)        # cbreak keeps Ctrl+C working — raw would swallow it
-            sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    except (ImportError, OSError):   # non-Linux/macOS or no tty → fallback requires Enter
-        input()
-    print()
+    warn_if_dangerous_modes(sess_id.modes)
 
 
 # ============================================================
@@ -146,12 +102,12 @@ def install_latest_md(inst_id):
     """Copy the agent's `.md` into the state dir as CLAUDE.md (refreshed each
     launch so a source-side edit propagates), and ensure the shared OAuth files
     exist so docker's bind-mount doesn't auto-create them as root. copy_file
-    and write_text both auto-create the state dir + AGENTS_STATE as needed
-    (via ensure_parent_dir inside the primitives). Returns the state dir."""
+    and write_text both auto-create the destination's parent directories as
+    needed (via ensure_dir inside the primitives). Returns the state dir."""
     copy_file(inst_id.md_path, inst_id.state_md, overwrite_if_dest=True)
-    if not ACCOUNT_FILE.exists():
+    if not path_exists(ACCOUNT_FILE):
         write_text(ACCOUNT_FILE, "{}")
-    if not CREDENTIALS_FILE.exists():
+    if not path_exists(CREDENTIALS_FILE):
         write_text(CREDENTIALS_FILE, "{}")
     return inst_id.state_dir
 
@@ -171,18 +127,15 @@ def _force_remove(path, *, name=None):
 
     Returns True on success (including "already absent"); False if even sudo
     couldn't remove the path."""
-    if not path.exists() and not path.is_symlink():
+    if not path_exists(path) and not is_symlink(path):
         return True
 
-    kind = "symlink" if path.is_symlink() else ("dir" if path.is_dir() else "file")
+    kind = "symlink" if is_symlink(path) else ("dir" if is_dir(path) else "file")
     descriptor = "" if name else "stale "
     print(f"  Removing {descriptor}{kind}: {path}")
 
     try:
-        if path.is_symlink() or not path.is_dir():
-            delete_file(path)
-        else:
-            delete_tree(path)
+        remove_path(path)
         return True
     except FileNotFoundError:
         return True   # raced with another removal; consider it done
@@ -210,55 +163,26 @@ def sync_memory_templates(sess_id, templates):
     verbatim — that's where agent-added auto-memory pointer entries live.
     Caller decides what's in the list (always-active + mode-conditional, etc.)
     — this function is generic over template provenance."""
-    memory_path = sess_id.state_dir / INSTANCE_MEMORY_FILE_RELPATH
+    memory_path = state_memory_path(sess_id.state_dir)
 
-    # Defensive cleanup for pre-existing instances. When MEMORY.md was a project-
-    # wide read-only bind-mount, Docker may have left an artifact at this path —
-    # a symlink, an auto-created placeholder, an empty directory, a root-owned
-    # file, or in some setups even a regular file with stale content. Anything
-    # other than a regular non-symlink file gets removed here so the read/write
-    # below operates on a clean slate; a write-time PermissionError later (e.g.
-    # a regular but root-owned leftover) triggers another removal + retry.
-    if memory_path.is_symlink() or (memory_path.exists() and not memory_path.is_file()):
+    # Defensive cleanup: anything other than a regular non-symlink file at this
+    # path is removed before the read/write below, so the operation starts on a
+    # clean slate. Older state dirs (created back when MEMORY.md was a project-
+    # wide read-only bind-mount) may carry leftover symlinks / auto-created
+    # placeholders / empty dirs / root-owned files from that arrangement. A
+    # write-time PermissionError further down (e.g. a regular but root-owned
+    # leftover) triggers another removal + retry.
+    if is_symlink(memory_path) or (path_exists(memory_path) and not is_file(memory_path)):
         _force_remove(memory_path)
 
-    original = read_text(memory_path) if memory_path.exists() else ""
+    original = read_text(memory_path) if path_exists(memory_path) else ""
     content = original
 
     for filename, active in templates:
-        template_file = MEMORY_DIR / filename
-        if not template_file.exists():
+        template_file = memory_template_path(filename)
+        if not path_exists(template_file):
             continue
-        template = read_text(template_file).strip()   # also drops leading/trailing newlines so lines[0]/[-1] are real wrappers
-        lines = template.splitlines()
-        if len(lines) < 2:
-            continue   # need at least a start- and end-wrapper line
-        start, end = lines[0], lines[-1]
-
-        s_idx = content.find(start)
-        e_idx = content.find(end)
-        in_memory = s_idx != -1 and s_idx < e_idx
-
-        if not active and not in_memory:
-            continue   # nothing to add or remove
-
-        if in_memory:
-            end_pos = e_idx + len(end)
-        else:
-            # Treat append as "splice into the empty range at end-of-content".
-            s_idx = end_pos = len(content)
-
-        # Walk past any newlines immediately before s_idx — keeps the leading "\n\n"
-        # separator from stacking onto existing newlines (a removal then drops the
-        # block's leading blank lines cleanly; an append onto trailing-newline content
-        # produces exactly one "\n\n" separator instead of three).
-        while s_idx > 0 and content[s_idx - 1] == "\n":
-            s_idx -= 1
-
-        # Lead with "\n\n" only when there's preceding content — keeps the first template
-        # at the top of the file from getting a stray leading blank line.
-        new_block = (("\n\n" if s_idx > 0 else "") + template) if active else ""
-        content = content[:s_idx] + new_block + content[end_pos:]
+        content = splice_block(content, read_text(template_file), keep=active)
 
     if content != original:
         try:
@@ -298,7 +222,7 @@ def modify_instance(old_inst_id, new_sess_id):
     rewritten so callers can change modes/workspace without renaming."""
     renaming = new_sess_id.instance != old_inst_id.instance
     if renaming:
-        if new_sess_id.state_dir.exists():
+        if path_exists(new_sess_id.state_dir):
             raise ValueError(f"Instance '{new_sess_id.instance}' already exists.")
         move_path(old_inst_id.state_dir, new_sess_id.state_dir)
     # workspace map
@@ -315,8 +239,7 @@ def modify_instance(old_inst_id, new_sess_id):
         m.pop(old_inst_id.instance, None)
     _write_modes_entry(m, new_sess_id)
     save_modes_map(m)
-    if _is_auto_and_dood(new_sess_id.modes):
-        warn_dood_with_auto()
+    warn_if_dangerous_modes(new_sess_id.modes)
 
 
 # ============================================================
@@ -343,12 +266,6 @@ def parse_model_id(model):
     return m.group(1), int(m.group(2)), int(m.group(3) or 0)
 
 
-def _ordering_index_or_end(value, ordering):
-    """Position of `value` in `ordering`, or `len(ordering)` if absent — pushes
-    unknowns past the end when used as a sort-key element."""
-    return ordering.index(value) if value in ordering else len(ordering)
-
-
 def agent_sort_key(item):
     """Sort by family (ORDERED_MODEL_FAMILIES order — opus first, haiku last),
     then version desc, then name asc. Agents whose .conf has no recognisable
@@ -356,7 +273,7 @@ def agent_sort_key(item):
     name, path = item
     _, conf = load_conf(path)
     family, major, minor = parse_model_id(conf.get("ANTHROPIC_MODEL", "")) or (None, 0, 0)
-    return (_ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
+    return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
 
 
 def tag_sort_key(tags):
@@ -364,14 +281,14 @@ def tag_sort_key(tags):
     declaration order. Untagged ([]) → empty tuple, which sorts before any non-
     empty key. Unknown tags sink past the end via a sentinel index so typo'd tags
     don't mix into the untagged group."""
-    return tuple(sorted(_ordering_index_or_end(t, InstanceModifiers.tag_values()) for t in tags))
+    return tuple(sorted(ordering_index_or_end(t, InstanceModifiers.tag_values()) for t in tags))
 
 
 def mode_sort_key(modes):
     """Sort key for instances grouped by mode set, following InstanceModifiers.modes()
     declaration order. Mode-less ([]) → empty tuple, which sorts before any non-empty
     key. Unknown modes sink past the end via a sentinel index."""
-    return tuple(sorted(_ordering_index_or_end(m, InstanceModifiers.mode_values()) for m in modes))
+    return tuple(sorted(ordering_index_or_end(m, InstanceModifiers.mode_values()) for m in modes))
 
 
 # ============================================================
@@ -394,7 +311,7 @@ def resolve_pick(name):
 
     Used by run.py's parse_cli to convert sys.argv[1] into the same shape the
     picker would have returned, so launch's downstream flow is uniform."""
-    if SESSION_SEP in name and (AGENTS_STATE / name).is_dir():
+    if SESSION_SEP in name and is_dir(instance_state_dir_path(name)):
         agent, _, session = name.partition(SESSION_SEP)
         if find_md_for_agent(agent) is not None:
             return SessionIdentity(
@@ -448,9 +365,9 @@ def continuable_instances():
     # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
     # when one symlinks to the other. Subdirs deliberately don't count — being in a
     # project under $HOME doesn't make /ai_workspace your "default" workspace.
-    cwd = Path.cwd().resolve()
-    defaulting_dir_active = cwd in {Path(d).resolve() for d in DEFAULTING_DIRS}
-    fallback_resolved = Path(FALLBACK_WORKSPACE).resolve()
+    cwd = resolved_cwd()
+    defaulting_dir_active = cwd in {resolved_path(d) for d in DEFAULTING_DIRS}
+    default_workspace_resolved = resolved_path(DEFAULT_WORKSPACE)
     workspace_map = load_workspace_map()
     modes_map = load_modes_map()
 
@@ -461,7 +378,7 @@ def continuable_instances():
             continue
         modes = tuple(modes_map.get(dir_name, []))
         ws = workspace_map.get(dir_name)
-        ws_resolved = Path(ws).resolve() if ws and Path(ws).is_dir() else None
+        ws_resolved = resolved_path(ws) if ws and is_dir(ws) else None
         sess_id = SessionIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
         last_mtime = sess_id.last_used_mtime
         out.append({
@@ -469,7 +386,7 @@ def continuable_instances():
             "modes_display":     ", ".join(modes) or "(none)",
             "workspace_display": ws if ws_resolved else NO_WORKSPACE_DISPLAY,    # "?" sentinel when the map entry is missing or stale
             "is_current_dir":    ws_resolved == cwd,
-            "is_default_dir":    defaulting_dir_active and ws_resolved == fallback_resolved,    # cwd ∈ DEFAULTING_DIRS and ws is FALLBACK_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
+            "is_default_dir":    defaulting_dir_active and ws_resolved == default_workspace_resolved,    # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
             "last_used_display": relative_time(last_mtime) if last_mtime is not None else "(never)",
         })
     out.sort(key=lambda d: (

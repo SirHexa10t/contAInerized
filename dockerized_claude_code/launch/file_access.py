@@ -15,10 +15,12 @@ Grouped by section in this file:
   - Workspace skills discovery (discover_workspace_skills,
     prepare_skill_mount_dirs)
   - Optional credentials (present_optional_cred_services [cached],
-    optional_cred_tokens, ensure_optional_creds_readme — template body at
-    launch/templates/optional_creds_readme.txt)
-  - User firewall whitelist (ensure_firewall_whitelist — template body at
-    launch/templates/firewall_whitelist.txt, firewall_whitelist_count)
+    optional_cred_tokens)
+  - User firewall whitelist (user_firewall_whitelist_lines [cached, self-plants
+    from FIREWALL_WHITELIST_TEMPLATE on first read]). The {auto}-mode first-
+    launch plant of firewall_whitelist.txt + the always-on plant of
+    optional_creds_readme.txt live in user_additions.plant_user_extras so
+    they happen at the right point in run.py's launch flow.
 
 Caching strategy:
   - `find_md_for_agent` and `load_conf` are LRU-cached for the launcher
@@ -31,8 +33,9 @@ Caching strategy:
     refresh the cache on every `save_*_map`. The picker's modify/delete
     flows otherwise re-read each map ~5× per launch.
   - `present_optional_cred_services` LRU-caches the present-services set
-    so optional_creds_mounts + optional_creds_install_env consume it
-    without duplicate stat calls.
+    so its two consumers (user_additions.optional_creds_mounts +
+    docker_config.set_container_env's install_creds_flags / token_env_dict
+    spread) don't redo the stat sweep.
   - Same-process lifetime is the cache window across all of the above —
     each `python3 run.py` invocation is a fresh process.
   - Particularly helps when AGENTS_DIR sits on a remote / networked
@@ -45,9 +48,12 @@ without pulling in heavier modules. agent_composition, agents_crud, audit,
 structs, user_additions, and run.py all import from here.
 """
 
+import glob
 import json
+import os
 import re
 import shutil
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -55,24 +61,25 @@ from dotenv import dotenv_values  # pip install python-dotenv
 
 from .paths import (
     AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR, AGENTS_STATE,
-    CONF_EXT, DEFAULT_CONF, FIREWALL_WHITELIST_FILE, HISTORY_JSONL_FILENAME,
-    INSTANCE_PROJECTS_RELPATH, INSTANCE_SKILLS_RELPATH, JSONL_EXT, MD_EXT,
-    OPTIONAL_CREDS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_README_FILENAME,
-    OPTIONAL_CREDS_TOKEN_ENV_VARS, OPTIONAL_CREDS_TOKEN_FILENAME,
-    PROJECT_CUSTOM_SKILLS_DIR, SKILL_MARKER_FILENAME, TEMPLATES_DIR,
-    WORKSPACE_SKILLS_DIRNAME,
+    DEFAULT_CONF, FIREWALL_WHITELIST_FILE, FIREWALL_WHITELIST_TEMPLATE,
+    HISTORY_JSONL_FILENAME, JSONL_EXT, MD_EXT, OPTIONAL_CREDS_MOUNTS,
+    OPTIONAL_CREDS_TOKEN_ENV_VARS, PROJECT_CUSTOM_SKILLS_DIR, agent_conf_path,
+    optional_creds_service_path, optional_creds_token_path, skill_marker_path,
+    state_projects_path, state_skill_subdir_path, workspace_skills_path,
 )
 
 # ============================================================
-# Filesystem primitives
+# Filesystem primitives — every disk-touching syscall flows through this file
 # ============================================================
-# Every disk-touching syscall the launcher does lives here — other modules
-# call these wrappers instead of `.mkdir()` / `.unlink()` / `.read_text()` /
-# `.write_text()` / etc. directly, so the "who can touch the filesystem"
-# rule is locally enforceable. file_access does not own removal *policy*
-# (the sudo fallback + interactive press-Enter prompt for Docker-bind-mount
-# leftovers lives in agents_crud._force_remove); these are just the low-level
-# operations the policy uses.
+# Other modules call these wrappers instead of `.mkdir()` / `.unlink()` /
+# `.read_text()` / `.write_text()` / `.exists()` / `.is_dir()` / etc. directly,
+# so the "who can touch the filesystem" rule is locally enforceable. file_access
+# does NOT own removal *policy* (the sudo fallback + interactive press-Enter
+# prompt for Docker-bind-mount leftovers lives in agents_crud._force_remove);
+# these are just the low-level operations the policy uses.
+#
+# Inside this module, Path methods are called directly (we ARE the file-access
+# layer); the wrappers exist for external callers.
 
 # --- Mutations ---
 
@@ -82,24 +89,18 @@ def ensure_dir(path):
     path.mkdir(parents=True, exist_ok=True)
 
 
-def ensure_parent_dir(path):
-    """Same as ensure_dir but on `path.parent` — useful before writing a
-    file where the parent dir might not yet exist."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def delete_file(path):
-    """Remove a single file or symlink. No-op if absent (missing_ok=True).
-    For whole directory trees, use delete_tree."""
-    path.unlink(missing_ok=True)
-
-
-def delete_tree(path):
-    """Remove a directory and everything inside it (`rm -rf` semantics).
-    Caller must ensure path is a directory; for ambiguous cases (file vs.
-    dir vs. symlink) use agents_crud._force_remove, which handles the
-    sudo-escalation policy too."""
-    shutil.rmtree(path)
+def remove_path(path):
+    """Remove `path` — file, symlink, or directory. No-op if absent. Dispatches
+    on what's at `path` so callers don't need a parallel ladder of is_dir /
+    is_symlink checks. For paths that may be root-owned (Docker bind-mount
+    leftovers), use agents_crud._force_remove instead — it wraps this one
+    with a sudo-escalation policy."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(path)
 
 
 def move_path(src, dst):
@@ -112,9 +113,9 @@ def move_path(src, dst):
 def write_text(path, content):
     """Write `content` to `path` as text (overwriting if present). Auto-creates
     the parent directory tree if missing, so callers don't need a separate
-    ensure_parent_dir call. Use ensure_dir directly only for non-write reasons
+    ensure_dir call. Use ensure_dir directly only for non-write reasons
     (creating a directory that's a bind-mount target / mount point, etc.)."""
-    ensure_parent_dir(path)
+    ensure_dir(path.parent)
     path.write_text(content)
 
 
@@ -123,12 +124,116 @@ def copy_file(src, dest, overwrite_if_dest=False):
     By default, no-op when `dest` already exists — pass overwrite_if_dest=True
     when the caller wants a fresh copy each time (e.g. install_latest_md's
     per-launch refresh of the agent's CLAUDE.md). Auto-creates dest's parent
-    directory tree, matching write_text's convention; callers don't need a
-    separate ensure_parent_dir step."""
+    directory tree, matching write_text's convention."""
     if dest.exists() and not overwrite_if_dest:
         return
-    ensure_parent_dir(dest)
+    ensure_dir(dest.parent)
     shutil.copy2(src, dest)
+
+
+# --- Existence + kind queries ---
+# All accept Path or str (internally `Path(path)`-coerced) so callers don't
+# have to think about which they're holding.
+
+def path_exists(path):
+    """True iff something exists at `path` (file, dir, or symlink-to-anything)."""
+    return Path(path).exists()
+
+
+def is_dir(path):
+    """True iff `path` exists and is a directory."""
+    return Path(path).is_dir()
+
+
+def is_file(path):
+    """True iff `path` exists and is a regular file (not a directory or symlink-to-dir)."""
+    return Path(path).is_file()
+
+
+def is_symlink(path):
+    """True iff `path` is a symlink (regardless of what — or nothing — it points to)."""
+    return Path(path).is_symlink()
+
+
+# --- Listing + searching ---
+
+def iter_subdirs(parent):
+    """Yield immediate subdirectories of `parent` (filesystem order).
+    Callers wanting all entries should call parent.iterdir() — but no caller
+    currently does, so the filter is folded in here."""
+    for entry in parent.iterdir():
+        if entry.is_dir():
+            yield entry
+
+
+def rglob_paths(parent, pattern):
+    """Recursive glob — yield every path under `parent` matching `pattern`.
+    Thin wrapper around `parent.rglob(pattern)`."""
+    return parent.rglob(pattern)
+
+
+def tab_complete_paths(text_prefix):
+    """Host filesystem glob for readline tab-completion. Returns list of
+    string matches (~-expanded), each with `os.sep` appended if it's a
+    directory. Used by menu_picker._path_completer."""
+    matches = glob.glob(os.path.expanduser(text_prefix) + "*")
+    return [m + os.sep if os.path.isdir(m) else m for m in matches]
+
+
+# --- Stats ---
+
+def file_mtime(path):
+    """Mtime of `path` as epoch seconds, or None if it doesn't exist or
+    can't be stat'd. Single point of stat-call truth so callers don't deal
+    with `path.stat().st_mtime` and the OSError surface directly."""
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return None
+
+
+def iter_file_stats(parent):
+    """Yield `(path, size, mtime)` for every regular file under `parent`.
+    Used by agent_composition.prune_caches for the size+age cache walk —
+    bundling the rglob + is_file filter + stat call so the caller doesn't
+    juggle three filesystem operations."""
+    for f in parent.rglob("*"):
+        if f.is_file():
+            s = f.stat()
+            yield f, s.st_size, s.st_mtime
+
+
+def is_file_recent(path, max_age_seconds):
+    """True iff `path` exists and its mtime is within the last `max_age_seconds`.
+    Missing / unreadable / stale all → False, so callers can use this as a
+    single truthy 'use this cache?' gate. Backs the {auto}-mode resolved-domains
+    cache TTL gate in network.py."""
+    mtime = file_mtime(path)
+    return mtime is not None and time.time() - mtime <= max_age_seconds
+
+
+# --- Host paths ---
+
+def resolved_path(p):
+    """Path(p) with symlinks resolved and ~ expanded."""
+    return Path(p).resolve()
+
+
+def resolved_cwd():
+    """Path.cwd() with symlinks resolved — what the launcher really thinks
+    its working dir is, used by the picker for cwd/workspace matching."""
+    return Path.cwd().resolve()
+
+
+def home_dir():
+    """User's home directory as a Path."""
+    return Path.home()
+
+
+def expand_user_path(s):
+    """Expand `~` in `s` and make it absolute; returns a string. For user-typed
+    workspace paths where we want the literal expanded form (not symlink-resolved)."""
+    return os.path.abspath(os.path.expanduser(s))
 
 
 # --- Reads ---
@@ -235,7 +340,7 @@ def conf_path_for(md_path):
     is read, only existence-checked — so AgentIdentity.conf_path can call it
     on every access."""
     name, _, parent = parse_stem(md_path.stem)
-    specific = AGENTS_DIR / f"{(parent or name)}{CONF_EXT}"
+    specific = agent_conf_path(parent or name)
     return specific if specific.exists() else (DEFAULT_CONF if DEFAULT_CONF.exists() else None)
 
 
@@ -280,49 +385,31 @@ def load_conf(md_path):
 # between load and save are visible to any other load that happens in
 # between — which is fine in single-threaded Python.
 
-_workspace_map_cache = None
-_modes_map_cache = None
+_json_map_cache = {}   # {Path: dict} — single per-process cache shared by every JSON-map file
 
 
-def load_workspace_map():
-    """Return the agent_workspace_map.json contents as a dict, populating
-    the module-private cache on first call. See section comment above for
-    cache semantics."""
-    global _workspace_map_cache
-    if _workspace_map_cache is None:
-        _workspace_map_cache = load_json_map(AGENT_WORKSPACE_MAP_FILE)
-    return _workspace_map_cache
+def _cached_load_json_map(path):
+    """Load a JSON map from `path`, caching the result by path. Subsequent
+    calls return the cached dict by reference (so callers' in-place mutations
+    before save_*_map are visible to other loaders too — see section comment
+    above)."""
+    if path not in _json_map_cache:
+        _json_map_cache[path] = load_json_map(path)
+    return _json_map_cache[path]
 
 
-def load_modes_map():
-    """Return the agent_modes_map.json contents as a dict, populating the
-    module-private cache on first call. See section comment above for
-    cache semantics."""
-    global _modes_map_cache
-    if _modes_map_cache is None:
-        _modes_map_cache = load_json_map(AGENT_MODES_MAP_FILE)
-    return _modes_map_cache
-
-
-def _save_json_map(path, mapping):
-    """Write a dict as pretty-printed JSON to `path`. Shared body for
-    save_workspace_map and save_modes_map below — same shape, different paths.
-    AGENTS_STATE is auto-created by write_text via ensure_parent_dir."""
+def _cached_save_json_map(path, mapping):
+    """Write `mapping` to `path` as pretty-printed JSON and refresh the cache
+    entry for that path. AGENTS_STATE is auto-created by write_text via the
+    internal ensure_dir call."""
     write_text(path, json.dumps(mapping, indent=4, sort_keys=True) + "\n")
+    _json_map_cache[path] = mapping
 
 
-def save_workspace_map(mapping):
-    """Persist the workspace map to disk and refresh the cache to match."""
-    global _workspace_map_cache
-    _save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
-    _workspace_map_cache = mapping
-
-
-def save_modes_map(mapping):
-    """Persist the modes map to disk and refresh the cache to match."""
-    global _modes_map_cache
-    _save_json_map(AGENT_MODES_MAP_FILE, mapping)
-    _modes_map_cache = mapping
+def load_workspace_map(): return _cached_load_json_map(AGENT_WORKSPACE_MAP_FILE)
+def load_modes_map():     return _cached_load_json_map(AGENT_MODES_MAP_FILE)
+def save_workspace_map(mapping): _cached_save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
+def save_modes_map(mapping):     _cached_save_json_map(AGENT_MODES_MAP_FILE, mapping)
 
 
 # ============================================================
@@ -336,7 +423,7 @@ def has_continuable_jsonl(state_dir):
     InstanceIdentity.has_continuable_history property is a thin wrapper around
     this; pulling the disk-walk out of the dataclass keeps structs.py a pure
     data layer."""
-    projects_dir = state_dir / INSTANCE_PROJECTS_RELPATH
+    projects_dir = state_projects_path(state_dir)
     if not projects_dir.is_dir():
         return False
     for jsonl in projects_dir.rglob(f"*{JSONL_EXT}"):
@@ -368,11 +455,11 @@ def discover_workspace_skills(workspace):
     containing a SKILL.md. Returns `{name: source_path}`; when the same name
     appears in both sources, the workspace's wins (last-write)."""
     skills = {}
-    for source_dir in (PROJECT_CUSTOM_SKILLS_DIR, Path(workspace) / WORKSPACE_SKILLS_DIRNAME):
+    for source_dir in (PROJECT_CUSTOM_SKILLS_DIR, workspace_skills_path(workspace)):
         if not source_dir.is_dir():
             continue
         for skill in source_dir.iterdir():
-            if skill.is_dir() and (skill / SKILL_MARKER_FILENAME).is_file():
+            if skill.is_dir() and skill_marker_path(skill).is_file():
                 skills[skill.name] = skill   # workspace overrides project-bundled
     return skills
 
@@ -381,9 +468,8 @@ def prepare_skill_mount_dirs(state_path, names):
     """Pre-create `<state_path>/skills/<name>` on the host for each entry in
     `names` so Docker doesn't auto-create them as root (which would otherwise
     leave undeletable dirs blocking `delete_instance`'s rmtree)."""
-    skills_root = state_path / INSTANCE_SKILLS_RELPATH
     for name in names:
-        ensure_dir(skills_root / name)
+        ensure_dir(state_skill_subdir_path(state_path, name))
 
 
 # ============================================================
@@ -394,12 +480,12 @@ def prepare_skill_mount_dirs(state_path, names):
 def present_optional_cred_services():
     """Frozenset of OPTIONAL_CREDS_MOUNTS service names whose host dir is
     present. LRU-cached for the launcher process lifetime — both
-    optional_creds_mounts and optional_creds_install_env consume it, so
-    without dedupe each would independently stat-check every service
-    (~11 × 2 = ~22 stats per launch)."""
+    user_additions.optional_creds_mounts and docker_config.set_container_env
+    (via install_creds_flags) consume it, so without dedupe each would
+    independently stat-check every service (~11 × 2 = ~22 stats per launch)."""
     return frozenset(
         name for name in OPTIONAL_CREDS_MOUNTS
-        if (OPTIONAL_CREDS_DIR / name).exists()
+        if optional_creds_service_path(name).exists()
     )
 
 
@@ -411,7 +497,7 @@ def optional_cred_tokens():
     files are silently skipped."""
     out = {}
     for name in OPTIONAL_CREDS_TOKEN_ENV_VARS:
-        token_file = OPTIONAL_CREDS_DIR / name / OPTIONAL_CREDS_TOKEN_FILENAME
+        token_file = optional_creds_token_path(name)
         if token_file.is_file():
             value = read_text(token_file).strip()
             if value:
@@ -419,47 +505,20 @@ def optional_cred_tokens():
     return out
 
 
-def ensure_optional_creds_readme():
-    """Create ~/.claude-agents/user_extras/optional_creds/ + a README on first
-    launch, so users who discover the directory know what to put in it. The
-    README body lives at launch/templates/optional_creds_readme.txt — edit it
-    there, not here. Idempotent: won't overwrite user edits to the planted
-    copy. The destination directory tree is auto-created by write_text via
-    ensure_parent_dir."""
-    readme = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME
-    if not readme.exists():
-        copy_file(TEMPLATES_DIR / "optional_creds_readme.txt", readme)
-
-
 # ============================================================
 # User firewall whitelist (~/.claude-agents/user_extras/firewall_whitelist.txt)
 # ============================================================
 
-def ensure_firewall_whitelist():
-    """Create ~/.claude-agents/user_extras/firewall_whitelist.txt with a
-    commented preamble on first launch so users discovering the file know
-    what to put in it. The preamble lives at launch/templates/firewall_whitelist.txt
-    — edit it there, not here. Idempotent: won't overwrite user edits to the
-    planted copy. The destination's parent directory is auto-created by
-    write_text via ensure_parent_dir."""
-    if not FIREWALL_WHITELIST_FILE.exists():
-        copy_file(TEMPLATES_DIR / "firewall_whitelist.txt", FIREWALL_WHITELIST_FILE)
-
-
 @lru_cache(maxsize=None)
 def user_firewall_whitelist_lines():
     """Return the user's firewall_whitelist.txt parsed lines as a tuple,
-    ensuring the file exists first (creates from template if absent — so
-    parse_lines below never sees a missing file). Cached for the launcher
-    process lifetime, so the two callers — start_whitelist_resolution in
-    network and firewall_whitelist_count below — share one read + parse
-    instead of doing it independently."""
-    ensure_firewall_whitelist()
+    self-planting from FIREWALL_WHITELIST_TEMPLATE on first read so parse_lines
+    never sees a missing file. (copy_file is a no-op when the destination
+    already exists, so this stays cheap on subsequent launches; the
+    user_additions.plant_user_extras call in setup_state also lands on it
+    idempotently.) Cached for the launcher process lifetime, so the two
+    callers — network.start_whitelist_resolution and the launch-banner count
+    in menu_picker.print_launch_banner — share one read + parse instead of
+    doing it independently."""
+    copy_file(FIREWALL_WHITELIST_TEMPLATE, FIREWALL_WHITELIST_FILE)
     return tuple(parse_lines(FIREWALL_WHITELIST_FILE))
-
-
-def firewall_whitelist_count():
-    """Count active entries in the user's firewall_whitelist.txt — for the
-    launch banner. Excludes built-ins and the auto-added apex/www
-    counterparts; this is 'how many entries did the user write themselves'."""
-    return len(user_firewall_whitelist_lines())

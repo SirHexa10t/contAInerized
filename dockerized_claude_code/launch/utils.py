@@ -1,15 +1,21 @@
-"""Domain-neutral helpers shared across launch/ modules. Time-side helpers —
-relative_time for picker-side display, is_file_recent for freshness gating
-on cache-style files. Disk-touching helpers (read/write/stat wrappers) live
-in file_access.py per the "all file I/O lives in one place" rule; the stat
-call here is a freshness *check*, not a read/write of the contents.
+"""Domain-neutral helpers shared across launch/ modules — the project's home
+for cross-cutting regex / sorting / parsing / formatting work that doesn't
+belong to any one domain. Anything that touches the filesystem lives in
+file_access.py instead per the "all file I/O lives in one place" rule.
 
 Leaf module: imports nothing from sibling launch/ modules — kept pull-able
 from anywhere without circular-import risk.
 """
 
-import time
 from datetime import datetime
+
+
+# === Formatting ===
+
+def plural(n):
+    """English plural marker: '' for n==1, 's' otherwise. So '{n} day{plural(n)}'
+    yields '1 day' / '2 days' / '0 days'."""
+    return "" if n == 1 else "s"
 
 
 def relative_time(mtime):
@@ -18,21 +24,70 @@ def relative_time(mtime):
     the 'Last used' line."""
     delta = datetime.now() - datetime.fromtimestamp(mtime)
     if delta.days >= 1:
-        return f"{delta.days} day{'s' if delta.days != 1 else ''} ago"
+        return f"{delta.days} day{plural(delta.days)} ago"
     hours = delta.seconds // 3600
     if hours >= 1:
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        return f"{hours} hour{plural(hours)} ago"
     minutes = delta.seconds // 60
-    return f"{minutes} minute{'s' if minutes != 1 else ''} ago" if minutes else "just now"
+    return f"{minutes} minute{plural(minutes)} ago" if minutes else "just now"
 
 
-def is_file_recent(path, max_age_seconds):
-    """True iff `path` exists and its mtime is within the last `max_age_seconds`.
-    False for missing files, stale files, or anything that fails to stat (so
-    callers can use a single truthy check as a 'use cache?' gate). Used by the
-    {auto}-mode resolved-domains cache to decide whether to reuse previously-
-    resolved IPs instead of running a fresh DNS pass."""
-    try:
-        return time.time() - path.stat().st_mtime <= max_age_seconds
-    except OSError:
-        return False
+# === Sorting ===
+
+def ordering_index_or_end(value, ordering):
+    """Position of `value` in `ordering`, or `len(ordering)` if absent —
+    pushes unknowns past the end when used as a sort-key element. Backs the
+    picker's tag-set and mode-set sort keys in agents_crud."""
+    return ordering.index(value) if value in ordering else len(ordering)
+
+
+# === Parsing ===
+
+def split_host_port(entry):
+    """Parse a host:port (or cidr:port) string. Returns (host, port) when a
+    trailing `:port` is present, else (entry, ''). rpartition-based so an
+    IPv4 with port (`1.2.3.4:80`), a CIDR with port (`10.0.0.0/8:443`), and
+    a bare host (`foo.com`) all dispatch correctly."""
+    host, sep, port = entry.rpartition(":")
+    return (host, port) if sep else (entry, "")
+
+
+def splice_block(content, block_text, keep=True):
+    """Reconcile a marker-bounded region of `content` against `block_text`.
+    `block_text`'s first and last lines (after stripping leading/trailing
+    whitespace) serve as the wrapper markers used to locate the region.
+
+      - `keep=True` (default): ensure the block is present — replace the
+        existing region if both markers are already found in order, or
+        append the block at the end (with a blank-line separator) if not.
+      - `keep=False`: ensure the block is absent — remove the region if it's
+        there, or no-op if it isn't.
+
+    Leading whitespace before the splice point is absorbed so the result has
+    at most one blank-line separator; the leading `"\\n\\n"` is omitted at
+    position 0 so a fresh document doesn't get a stray top blank line.
+
+    Backs agents_crud.sync_memory_templates' per-template reconcile of MEMORY.md."""
+    block = block_text.strip()                       # also lets us treat lines[0]/lines[-1] as real wrappers
+    lines = block.splitlines()
+    if len(lines) < 2:
+        return content                               # need at least a start- and end-wrapper line
+    start, end = lines[0], lines[-1]
+    s_idx = content.find(start)
+    e_idx = content.find(end)
+    in_content = s_idx != -1 and s_idx < e_idx
+    if not keep and not in_content:
+        return content                               # nothing to remove and nothing to add
+    if in_content:
+        end_pos = e_idx + len(end)
+    else:
+        # Treat append as "splice into the empty range at end-of-content".
+        s_idx = end_pos = len(content)
+    # Walk past trailing newlines before the splice point — keeps the leading
+    # "\n\n" separator from stacking onto existing newlines.
+    while s_idx > 0 and content[s_idx - 1] == "\n":
+        s_idx -= 1
+    if not keep:
+        return content[:s_idx] + content[end_pos:]
+    prefix = "\n\n" if s_idx > 0 else ""
+    return content[:s_idx] + prefix + block + content[end_pos:]

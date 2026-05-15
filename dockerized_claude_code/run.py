@@ -18,10 +18,9 @@ from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
 from launch.paths import AGENTS_DIR, SEEK_SUMMARY_FILENAME
-from launch.structs import InstanceIdentity, InstanceModifiers
+from launch.structs import InstanceIdentity
 from launch.user_additions import (
-    aggregated_skills_mounts, ensure_firewall_whitelist, ensure_optional_creds_readme,
-    firewall_whitelist_count, optional_creds_mounts,
+    aggregated_skills_mounts, optional_creds_mounts, plant_user_extras,
 )
 
 require_docker()
@@ -155,8 +154,7 @@ def setup_state(sess_id):
     set_container_mounts(sess_id)
     _, conf = load_conf(sess_id.md_path)
     aggregated_skills_mounts(sess_id.workspace, sess_id.state_dir)
-    ensure_optional_creds_readme()
-    ensure_firewall_whitelist()
+    plant_user_extras(sess_id.modes)
     cred_names = optional_creds_mounts()
     return conf, cred_names
 
@@ -174,8 +172,7 @@ def launch():
     modes, chain = compose_runtime(inst_id)
     sess_id = inst_id.with_modes(modes)
     conf, cred_names = setup_state(sess_id)
-    whitelist_count = firewall_whitelist_count() if InstanceModifiers.MODE_AUTO.value in sess_id.modes else None
-    print_launch_banner(sess_id, cred_names, whitelist_count)
+    print_launch_banner(sess_id, cred_names)
     run_compose(chain, sess_id.instance, claude_args, resume_flag, conf)
 
 

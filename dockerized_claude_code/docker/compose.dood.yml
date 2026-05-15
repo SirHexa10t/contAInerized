@@ -1,6 +1,12 @@
 # Compose layer for the {DooD} (Docker-out-of-Docker) chain step. Swaps in
 # docker/Dockerfile.dood (Docker CLI + Compose plugin + claude in the docker
-# group), bind-mounts /var/run/docker.sock, parameterises PARENT_IMAGE/TARGET_IMAGE.
+# group), parameterises PARENT_IMAGE/TARGET_IMAGE, and threads the host
+# docker-group GID through as a build arg.
+#
+# The /var/run/docker.sock bind-mount is Python-staged via paths.DOCKER_DOOD_MOUNTS
+# (iterated by agent_composition._apply_dood and appended to `docker compose
+# run` as a `-v` flag) — not declared here, so the YAML is purely about
+# build wiring.
 #
 # Defaults reflect the standalone case (DooD directly on top of prog):
 #   PARENT_IMAGE = claude-agents:prog
@@ -8,8 +14,9 @@
 # run.py overrides both when chain has more steps between prog and dood
 # (e.g. PARENT_IMAGE = claude-agents:prog.auto when {auto} sits between).
 #
-# DOCKER_GID is detected on the host via getent and exported by run.py before
-# the build, so the in-image `docker` group's GID matches the host's.
+# DOCKER_GID is detected on the host via docker_config.detect_docker_gid and
+# staged by _apply_dood before the build, so the in-image `docker` group's
+# GID matches the host's.
 
 services:
   claude-code:
@@ -19,5 +26,3 @@ services:
       args:
         PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:prog}
         DOCKER_GID: ${DOCKER_GID:-999}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock

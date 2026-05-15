@@ -46,12 +46,13 @@ Public API:
       Inline [y/N] prompt.
       -> bool
 
-  print_launch_banner(sess_id, cred_names, whitelist_count)
+  print_launch_banner(sess_id, cred_names)
       Print the multi-line "about to launch" summary (agent definition, conf,
       tags, modes, skills, creds, user whitelist count) before docker compose
       builds the image. Conditional lines for tags/modes/skills/creds/whitelist
       — only shown when applicable. md_path / conf_path / tags / modes all come
-      off the SessionIdentity.
+      off the SessionIdentity. The user-whitelist line counts
+      user_firewall_whitelist_lines() on demand only when {auto} is in modes.
 
 Generic-picker entry shape (pick_with_preview):
     {
@@ -123,9 +124,7 @@ STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" mod
 # ============================================================
 
 import dataclasses
-import glob
 import io
-import os
 import readline
 from enum import Enum
 from pathlib import Path
@@ -144,12 +143,19 @@ from rich.markdown import Markdown
 from rich.theme import Theme
 
 from .agents_crud import (
-    DEFAULT_WORKSPACE, continuable_instances, creatable_agents, delete_instance,
-    modify_instance,
+    continuable_instances, creatable_agents, delete_instance, modify_instance,
 )
 from .docker_config import staged_mounts
-from .paths import DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE, SKILLS_IN_CONTAINER
+from .file_access import (
+    expand_user_path, home_dir, is_dir, path_exists, tab_complete_paths,
+    user_firewall_whitelist_lines,
+)
+from .paths import (
+    DEFAULT_WORKSPACE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE,
+    SKILLS_IN_CONTAINER,
+)
 from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers
+from .utils import plural
 
 
 class PickerAction(Enum):
@@ -338,21 +344,6 @@ def _normalize(display):
     if isinstance(display, str):
         return [("", display)]
     return list(display)
-
-
-def _tag_prefix_str(tags):
-    """'[t1] [t2] ' for a non-empty tag list, '' for empty. Used to size the tag column
-    consistently across Create rows (so agent names line up regardless of tags)."""
-    return "".join(f"[{t}] " for t in tags) if tags else ""
-
-
-def _mode_prefix_str(modes):
-    """'{m1} {m2} ' for a non-empty mode list, '' for empty. Curly braces (vs.
-    square brackets used by tags) distinguish modes — tags come from the agent's
-    filename grammar, modes are per-instance opt-ins like DooD. Sizes the mode
-    column on Cont rows so instance IDs align whether or not the instance has
-    elevated modes."""
-    return "".join(f"{{{m}}} " for m in modes) if modes else ""
 
 
 def _plain(display):
@@ -579,8 +570,7 @@ def confirm_dialog(message):
 
 def _path_completer(text, state):
     """Tab-complete `text` as a host filesystem path; expands `~` for matching."""
-    matches = glob.glob(os.path.expanduser(text) + "*")
-    matches = [m + os.sep if os.path.isdir(m) else m for m in matches]
+    matches = tab_complete_paths(text)
     return matches[state] if state < len(matches) else None
 
 
@@ -602,8 +592,8 @@ def ask_for_workspace(agent, default=None):
             entered = input(
                 f"Workspace path for '{agent}' instance [{default}]: "
             ).strip() or default
-            absolute = os.path.abspath(os.path.expanduser(entered))
-            if Path(absolute).is_dir():
+            absolute = expand_user_path(entered)
+            if is_dir(absolute):
                 return absolute
             print(f"Not a directory: {absolute}")
     finally:
@@ -620,7 +610,7 @@ def prompt_session(agent, workspace):
         if not suffix:
             print("Session suffix cannot be empty.")
             continue
-        if InstanceIdentity.state_dir_for(agent, suffix).exists():
+        if path_exists(InstanceIdentity.state_dir_for(agent, suffix)):
             print(f"Instance '{InstanceIdentity.instance_name(agent, suffix)}' already exists. Pick another name.")
             continue
         return suffix
@@ -731,8 +721,8 @@ def select_agent():
         # the widest of either so the agent-name / instance-ID column still lines up.
         # Effect: a `{DooD}` mark on a Cont row sits at the same column as `[prog]` would
         # on a Create row (just nested by the Cont marker's longer prefix).
-        tag_strs = [_tag_prefix_str(a.get("tags", [])) for a in agents]
-        mode_strs_by_inst = {i["identity"].instance: _mode_prefix_str(i["identity"].modes) for i in instances}
+        tag_strs = [InstanceModifiers.format_prefix(a.get("tags", [])) for a in agents]
+        mode_strs_by_inst = {i["identity"].instance: InstanceModifiers.format_prefix(i["identity"].modes) for i in instances}
         shared_col_width = max(
             [len(s) for s in tag_strs] + [len(s) for s in mode_strs_by_inst.values()],
             default=0,
@@ -801,7 +791,7 @@ def select_agent():
                 new_session = input(f"New session suffix for '{old_inst_id.agent}' [{old_inst_id.session}]: ").strip() or old_inst_id.session
                 if new_session == old_inst_id.session:
                     break  # keeping the same session — no collision possible
-                if not InstanceIdentity.state_dir_for(old_inst_id.agent, new_session).exists():
+                if not path_exists(InstanceIdentity.state_dir_for(old_inst_id.agent, new_session)):
                     break  # not colliding with an existing instance
                 print(f"Instance '{InstanceIdentity.instance_name(old_inst_id.agent, new_session)}' already exists. Pick another name.")
             new_workspace = ask_for_workspace(old_inst_id.agent, default=old_inst_id.workspace)
@@ -850,28 +840,27 @@ def _delete_submenu():
             delete_instance(value)
 
 
-def print_launch_banner(sess_id, cred_names, whitelist_count):
+def print_launch_banner(sess_id, cred_names):
     """Print the multi-line summary that appears before docker compose builds the
     image — agent definition path, conf path, active tags + modes, and skills/creds
     counts when applicable. Each line is conditional on having something to show
-    (no empty 'Tags: ' if there are none). `whitelist_count` is None for non-{auto}
-    launches (line hidden); an integer count (possibly 0) when {auto} is active so
-    the user sees the file's existence and current size. Takes the launch's
+    (no empty 'Tags: ' if there are none). The user-whitelist line counts
+    user_firewall_whitelist_lines() inline — only when {auto} is in modes, so
+    non-{auto} launches don't touch the file at all. Takes the launch's
     SessionIdentity and pulls md_path / conf_path / tags / modes off it directly;
-    the skill count comes from the docker_config mount accumulator (skills are the
-    mounts whose target sits under SKILLS_IN_CONTAINER)."""
+    the skill count comes from the docker_config mount accumulator (skills are
+    the mounts whose target sits under SKILLS_IN_CONTAINER)."""
     print(f"  Agent definition: {sess_id.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
     print(f"  Configuration:    {sess_id.conf_path.relative_to(DOCKERIZED_CLAUDE_ROOT) if sess_id.conf_path else '(none — using defaults)'}")
     if sess_id.tags:
         print(f"  Tags:             {' '.join(f'[{t}]' for t in sess_id.tags)}")
     if sess_id.modes:
         print(f"  Modes:            {' '.join('{' + m + '}' for m in sess_id.modes)}")
-    skill_count = sum(1 for tgt in staged_mounts().values() if tgt.startswith(f"{SKILLS_IN_CONTAINER}/"))
-    if skill_count:
+    if skill_count := sum(1 for tgt in staged_mounts().values() if tgt.startswith(f"{SKILLS_IN_CONTAINER}/")):
         print(f"  Project skills:   {skill_count} loaded (custom_skills/ + .skills/ if present)")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
-    if whitelist_count is not None:
-        plural = "" if whitelist_count == 1 else "s"
-        display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(Path.home()))
-        print(f"  User whitelist:   {whitelist_count} domain{plural} (from {display_path})")
+    if InstanceModifiers.MODE_AUTO.value in sess_id.modes:
+        whitelist_count = len(user_firewall_whitelist_lines())
+        display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))
+        print(f"  User whitelist:   {whitelist_count} domain{plural(whitelist_count)} (from {display_path})")

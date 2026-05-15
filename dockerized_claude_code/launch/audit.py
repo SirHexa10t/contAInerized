@@ -14,13 +14,15 @@ Run from the project root:
 """
 
 import json
-from pathlib import Path
 
-from .agents_crud import list_all_instances, load_workspace_map
-from .file_access import find_md_for_agent, read_text
+from .agents_crud import list_all_instances
+from .file_access import (
+    find_md_for_agent, is_dir, load_workspace_map, path_exists, read_text,
+    rglob_paths,
+)
 from .paths import (
     ACCOUNT_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_STATE, CREDENTIALS_FILE,
-    HISTORY_JSONL_FILENAME, INSTANCE_CLAUDE_MD_FILENAME,
+    HISTORY_JSONL_FILENAME, instance_state_dir_path, state_md_path,
 )
 from .structs import InstanceIdentity, SESSION_SEP
 
@@ -28,7 +30,7 @@ from .structs import InstanceIdentity, SESSION_SEP
 def _check_json_file(path):
     """Return an issue string if the file is missing, empty, has invalid JSON, or holds an
     empty object/array; None otherwise."""
-    if not path.exists():
+    if not path_exists(path):
         return "file is missing"
     text = read_text(path).strip()
     if not text:
@@ -46,7 +48,7 @@ def main():
     issues = []
 
     # Workspace map file (file may legitimately not exist on a fresh install — still report it).
-    if not AGENT_WORKSPACE_MAP_FILE.exists():
+    if not path_exists(AGENT_WORKSPACE_MAP_FILE):
         issues.append(("ws_map", AGENT_WORKSPACE_MAP_FILE.name, "file is missing"))
         mapping = {}
     else:
@@ -57,10 +59,10 @@ def main():
             mapping = {}
 
     # Shared OAuth files — these must be populated after login.
-    for label, path in (("claude.json", ACCOUNT_FILE), ("credentials.json", CREDENTIALS_FILE)):
+    for path in (ACCOUNT_FILE, CREDENTIALS_FILE):
         msg = _check_json_file(path)
         if msg is not None:
-            issues.append(("oauth", label, msg))
+            issues.append(("oauth", path.name.lstrip("."), msg))
 
     instances = list_all_instances()
     actual = set(instances)
@@ -72,10 +74,10 @@ def main():
         if md_path is None:
             issues.append(("orphan", dir_name, f"agent '{agent}' has no .md file"))
             continue
-        sm = InstanceIdentity.state_dir_for(agent, session) / INSTANCE_CLAUDE_MD_FILENAME
-        if sm.exists() and read_text(sm) != read_text(md_path):
+        sm = state_md_path(InstanceIdentity.state_dir_for(agent, session))
+        if path_exists(sm) and read_text(sm) != read_text(md_path):
             issues.append(("drifted", dir_name, f"CLAUDE.md differs from {md_path.name}"))
-        if not list((AGENTS_STATE / dir_name).rglob(HISTORY_JSONL_FILENAME)):
+        if not list(rglob_paths(instance_state_dir_path(dir_name), HISTORY_JSONL_FILENAME)):
             issues.append(("no_history", dir_name, f"no {HISTORY_JSONL_FILENAME} found (instance never started?)"))
 
     # Workspace-map entries — same shape: `dir_name` is the map key, a `<agent>__<session>` string.
@@ -83,7 +85,7 @@ def main():
         if dir_name not in actual:
             issues.append(("ghost", dir_name, "workspace-map entry has no state dir"))
             continue
-        if not ws or not Path(ws).is_dir():
+        if not ws or not is_dir(ws):
             issues.append(("badworkspace", dir_name, f"workspace not a directory: {ws}"))
 
     if not issues:
