@@ -236,10 +236,14 @@ OPTIONAL_CREDS_README_FILENAME = "README.txt"        # auto-created in optional_
 OPTIONAL_CREDS_README_PATH     = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME   # full host path the README is planted at
 OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text token (e.g. jira/token → $JIRA_API_TOKEN)
 
-# Memory-template filenames in MEMORY_DIR — synced into per-instance MEMORY.md
-# at each launch by agents_crud.sync_memory_templates.
-SEEK_SUMMARY_FILENAME = "seek_summary.md"            # always-active template
-ADDENDUM_SUFFIX = "-addendum.md"                     # `<mode>{ADDENDUM_SUFFIX}` — mode-specific addendum filename (e.g. auto-addendum.md)
+# Memory templates in MEMORY_DIR — synced into per-instance MEMORY.md at each
+# launch by agent_composition.sync_memory_templates. Each template's content is
+# wrapped with start/end marker lines (banner + name) generated at sync time;
+# the template files themselves hold content only, no inline markers. Marker
+# format (banner string + wrap function) lives in agent_composition — it's a
+# composition concern, not a path concern.
+SEEK_SUMMARY_PATH = MEMORY_DIR / "seek_summary.md"   # always-active template (project-wide)
+ADDENDUM_SUFFIX = "-addendum.md"                     # `<modifier_filename_form>{ADDENDUM_SUFFIX}` — per-modifier addendum (e.g. auto-addendum.md, prog-addendum.md)
 
 # Compose-file naming. The base file is `compose.yml`; per-layer files follow
 # `compose.<step>.yml` (built by the `compose_layer_path` lambda at the bottom
@@ -283,19 +287,26 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACH
 # need to refresh tokens / write cache; presence on host is the opt-in.
 # (The matching INSTALL_<TOOL> build-arg semantics — install_creds_flags
 # in docker_config — are spread into the compose env in set_container_env.)
+#
+# Value tuple: (container_mount_target, cli_name). `cli_name` is the binary
+# name of the CLI installed by Dockerfile.prog for this service (e.g. "kubectl"
+# for the "kube" service) — surfaced into the [prog] memory addendum so the
+# agent knows which tools its provided creds unlock. `None` for services that
+# only contribute config to an existing tool rather than installing a new one
+# (ssh uses the system ssh, npmrc/pypirc tune existing npm/pip behavior).
 
 OPTIONAL_CREDS_MOUNTS = {
-    "aws":     f"{CLAUDE_HOME_IN_CONTAINER}/.aws",
-    "gcloud":  f"{CLAUDE_HOME_IN_CONTAINER}/.config/gcloud",
-    "kube":    f"{CLAUDE_HOME_IN_CONTAINER}/.kube",
-    "ssh":     f"{CLAUDE_HOME_IN_CONTAINER}/.ssh",
-    "gh":      f"{CLAUDE_HOME_IN_CONTAINER}/.config/gh",
-    "glab":    f"{CLAUDE_HOME_IN_CONTAINER}/.config/glab-cli",
-    "jira":    f"{CLAUDE_HOME_IN_CONTAINER}/.config/.jira",
-    "vercel":  f"{CLAUDE_HOME_IN_CONTAINER}/.local/share/com.vercel.cli",
-    "railway": f"{CLAUDE_HOME_IN_CONTAINER}/.config/railway",
-    "npmrc":   f"{CLAUDE_HOME_IN_CONTAINER}/.npmrc",
-    "pypirc":  f"{CLAUDE_HOME_IN_CONTAINER}/.pypirc",
+    "aws":     (f"{CLAUDE_HOME_IN_CONTAINER}/.aws",                       "aws"),
+    "gcloud":  (f"{CLAUDE_HOME_IN_CONTAINER}/.config/gcloud",             "gcloud"),
+    "kube":    (f"{CLAUDE_HOME_IN_CONTAINER}/.kube",                      "kubectl"),
+    "ssh":     (f"{CLAUDE_HOME_IN_CONTAINER}/.ssh",                       None),
+    "gh":      (f"{CLAUDE_HOME_IN_CONTAINER}/.config/gh",                 "gh"),
+    "glab":    (f"{CLAUDE_HOME_IN_CONTAINER}/.config/glab-cli",           "glab"),
+    "jira":    (f"{CLAUDE_HOME_IN_CONTAINER}/.config/.jira",              "jira"),
+    "vercel":  (f"{CLAUDE_HOME_IN_CONTAINER}/.local/share/com.vercel.cli", "vercel"),
+    "railway": (f"{CLAUDE_HOME_IN_CONTAINER}/.config/railway",            "railway"),
+    "npmrc":   (f"{CLAUDE_HOME_IN_CONTAINER}/.npmrc",                     None),
+    "pypirc":  (f"{CLAUDE_HOME_IN_CONTAINER}/.pypirc",                    None),
 }
 
 # Some services authenticate via an env-var token rather than (or alongside)
@@ -343,8 +354,8 @@ skill_marker_path       = lambda skill_dir:       skill_dir / SKILL_MARKER_FILEN
 optional_creds_service_path = lambda service:     OPTIONAL_CREDS_DIR / service
 optional_creds_token_path   = lambda service:     OPTIONAL_CREDS_DIR / service / OPTIONAL_CREDS_TOKEN_FILENAME
 
-# Memory + agent file lookups (filename / name supplied by caller)
-memory_template_path    = lambda filename:        MEMORY_DIR / filename
+# Per-modifier memory addendum template (modifier ∈ InstanceModifiers.filename_form values)
+memory_template_path    = lambda modifier:        MEMORY_DIR / f"{modifier}{ADDENDUM_SUFFIX}"
 agent_conf_path         = lambda name:            AGENTS_DIR / f"{name}{CONF_EXT}"
 
 # Docker compose-layer YAML (step ∈ InstanceModifiers value strings, lowercased)

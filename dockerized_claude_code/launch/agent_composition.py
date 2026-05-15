@@ -1,9 +1,9 @@
 """Agent composition layer: computes the docker build chain (base → modifiers in
 InstanceModifiers declaration order) and runs each active modifier's handler
 contributions (volume mounts + compose env staging) in a single pass via
-compose_chain. Also owns the mode-conditional memory-template list
-(mode_memory_templates) that agents_crud.sync_memory_templates consumes, and
-the dangerous-combination warning (warn_if_dangerous_modes) that
+compose_chain. Also owns the per-instance MEMORY.md reconcile (sync_memory_templates
++ its modifier_memory_templates feeder, both keyed off the modifier taxonomy)
+and the dangerous-combination warning (warn_if_dangerous_modes) that
 agents_crud's writers call after persisting a new mode set.
 
 The modifier taxonomy itself (InstanceModifiers + tags() / modes() views +
@@ -12,26 +12,37 @@ from there. Sort keys for the picker (agent/mode/tag sort) live in agents_crud �
 they're picker-side concerns and don't belong in the composition layer.
 
 Imports path constants from paths, the file_access primitives needed by
-prune_caches / prepare_caches (ensure_dir, iter_file_stats, path_exists,
-remove_path), env-/mount-staging helpers + docker subprocess wrappers from
-docker_config, the {auto}-mode firewall entry points from network, and the
-InstanceModifiers taxonomy from structs; agents_crud, menu_picker, and run.py
-import from here.
+prune_caches / prepare_caches + sync_memory_templates (ensure_dir,
+iter_file_stats, path_exists, remove_path, read_text, write_text,
+installed_cred_clis), env-/mount-staging helpers + docker subprocess wrappers
+from docker_config, the {auto}-mode firewall entry points from network, the
+InstanceModifiers taxonomy from structs, and splice_block from utils;
+agents_crud, menu_picker, and run.py import from here.
 """
 
 import sys
 import time
 
-from .file_access import ensure_dir, iter_file_stats, path_exists, remove_path
+from .file_access import (
+    ensure_dir, installed_cred_clis, iter_file_stats, path_exists, read_text,
+    remove_path, write_text,
+)
 from .docker_config import (
     ComposeEnvKey, add_docker_mount, any_agent_container_running,
     detect_docker_gid, stage_compose_env,
 )
 from .network import start_whitelist_resolution
 from .paths import (
-    ADDENDUM_SUFFIX, CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
+    CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
+    SEEK_SUMMARY_PATH, memory_template_path, state_memory_path,
 )
 from .structs import InstanceModifiers
+from .utils import splice_block
+
+# Wrapper banner around `<name>-instructions-{start,end}` marker lines in the
+# spliced MEMORY.md blocks — visual cue that the line is a machine-managed
+# comment, not memory instructions for the agent.
+MEMORY_BLOCK_WRAPPER_BANNER = "#" * 21
 
 # === Modifier taxonomy + chain-composition ordering ===
 # The InstanceModifiers enum (in structs.py) is the canonical ordered taxonomy
@@ -174,20 +185,72 @@ def warn_if_dangerous_modes(modes):
     print()
 
 
-# === Mode-conditional memory addendums ===
-# Each mode optionally has a `memory/<mode_lower>-addendum.md` template that
-# agents_crud.sync_memory_templates splices into per-instance MEMORY.md when
-# the mode is active (and removes when it's not). Missing template files are
-# no-ops in sync_memory_templates, so a mode without an addendum costs nothing.
+# === Per-instance MEMORY.md reconcile (modifier-keyed addendums + seek_summary) ===
+# Each modifier optionally has a `memory/<filename_form>-addendum.md` template
+# that sync_memory_templates splices into per-instance MEMORY.md when the
+# modifier is active, and removes when it's not. seek_summary.md is the only
+# always-active template; it's project-wide rather than modifier-conditional.
+# Template files hold content only — start/end wrapper marker lines are
+# generated at sync time from the filename via _wrap_block, so the marker
+# convention lives in code (one source of truth) rather than spread across
+# template files.
 
-def mode_memory_templates(modes):
-    """Build `(filename, active)` pairs for each `<mode>-addendum.md` template
-    in MEMORY_DIR, one entry per InstanceModifiers.modes() member — `active` is
-    True iff that mode's `.value` is in `modes` (which holds canonical strings
-    as stored in agent_modes_map.json). agents_crud.sync_memory_templates
-    processes the returned list after the always-active seek_summary entry."""
-    return [(f"{m.filename_form}{ADDENDUM_SUFFIX}", m.value in modes)
-            for m in InstanceModifiers.modes()]
+def modifier_memory_templates(sess_id):
+    """Build `(filename_form, active)` pairs for each modifier that has a
+    matching `<filename_form>-addendum.md` template on disk. Iterates ALL
+    `InstanceModifiers` (both tags and modes) so we also emit `active=False`
+    entries for currently-inactive modes — those drive cleanup of orphaned
+    blocks left behind after a previous launch removed the mode. Tags can't
+    be turned off (they're filename-derived and immutable for the instance's
+    lifetime), so for tags `active` is always True; the unified loop keeps
+    the iteration shape consistent. Modifiers without an addendum template
+    file are skipped here so the splicing loop doesn't need to recheck."""
+    active = set(sess_id.tags) | set(sess_id.modes)
+    return [(m.filename_form, m.value in active)
+            for m in InstanceModifiers
+            if path_exists(memory_template_path(m.filename_form))]
+
+
+def _wrap_block(name, content):
+    """Wrap `content` with banner-decorated `<name>-instructions-{start,end}`
+    marker lines. The banner is purely a visual cue that the line is a
+    machine-managed comment, not memory instructions for the agent. Single
+    source of truth for the marker format — every wrapped block in MEMORY.md
+    comes through here, and splice_block's marker detection keys on these
+    exact lines."""
+    banner = MEMORY_BLOCK_WRAPPER_BANNER
+    return (f"{banner} {name}-instructions-start {banner}\n"
+            f"{content.strip()}\n"
+            f"{banner} {name}-instructions-end {banner}")
+
+
+def sync_memory_templates(sess_id):
+    """Reconcile per-instance MEMORY.md with the current modifier set. One
+    read + at most one write per launch. Always-active seek_summary first,
+    then each modifier addendum (active → spliced in / refreshed; inactive →
+    spliced out). The [prog] addendum gets the installed cred-CLI names
+    appended inline so the agent learns which credentialed tools are ready
+    to use this launch. Content outside the wrapped blocks is preserved
+    verbatim — that's where agent-added auto-memory pointer entries live.
+
+    No defensive cleanup of unusual file types at memory_path — if read or
+    write fails on a malformed state dir the caller can just delete the
+    instance and create a new one."""
+    memory_path = state_memory_path(sess_id.state_dir)
+    original = read_text(memory_path) if path_exists(memory_path) else ""
+    content = splice_block(original, _wrap_block("seek_summary", read_text(SEEK_SUMMARY_PATH)), keep=True)
+
+    for modifier, active in modifier_memory_templates(sess_id):
+        text = read_text(memory_template_path(modifier))
+        if modifier == InstanceModifiers.TAG_PROG.filename_form:
+            if clis := installed_cred_clis():
+                text = text.rstrip() + " " + clis
+            else:
+                active = False   # no creds → nothing to advertise; drop the block
+        content = splice_block(content, _wrap_block(modifier, text), keep=active)
+
+    if content != original:
+        write_text(memory_path, content)
 
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===

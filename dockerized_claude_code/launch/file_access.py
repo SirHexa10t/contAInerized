@@ -53,6 +53,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -73,10 +74,10 @@ from .paths import (
 # ============================================================
 # Other modules call these wrappers instead of `.mkdir()` / `.unlink()` /
 # `.read_text()` / `.write_text()` / `.exists()` / `.is_dir()` / etc. directly,
-# so the "who can touch the filesystem" rule is locally enforceable. file_access
-# does NOT own removal *policy* (the sudo fallback + interactive press-Enter
-# prompt for Docker-bind-mount leftovers lives in agents_crud._force_remove);
-# these are just the low-level operations the policy uses.
+# so the "who can touch the filesystem" rule is locally enforceable. The
+# sudo-escalation policy used for Docker-bind-mount leftovers lives in
+# `force_remove` further down — it wraps `remove_path` with the fallback
+# logic so callers don't have to thread sudo handling themselves.
 #
 # Inside this module, Path methods are called directly (we ARE the file-access
 # layer); the wrappers exist for external callers.
@@ -93,14 +94,57 @@ def remove_path(path):
     """Remove `path` — file, symlink, or directory. No-op if absent. Dispatches
     on what's at `path` so callers don't need a parallel ladder of is_dir /
     is_symlink checks. For paths that may be root-owned (Docker bind-mount
-    leftovers), use agents_crud._force_remove instead — it wraps this one
-    with a sudo-escalation policy."""
+    leftovers), use `force_remove` instead — it wraps this one with a
+    sudo-escalation policy."""
     if not path.exists() and not path.is_symlink():
         return
     if path.is_symlink() or not path.is_dir():
         path.unlink(missing_ok=True)
     else:
         shutil.rmtree(path)
+
+
+def force_remove(path, *, name=None):
+    """Best-effort removal of `path` (file, symlink, or directory). Logs what's
+    being removed, falls back to `sudo rm -rf` for root-owned artifacts (Docker
+    bind-mount leftovers), and follows up with `sudo -k` so cached credentials
+    don't linger past this single operation.
+
+    `name` is an optional human-friendly identifier — when provided, the path
+    is treated as user-initiated removal (no "stale" descriptor in the log)
+    and a sudo failure pauses for keypress so the user can read the failure
+    before the function returns (used by `agents_crud.delete_instance`, mid-
+    picker UX). Without `name`, the removal is logged as "stale" cleanup and
+    the function returns silently on failure.
+
+    Returns True on success (including "already absent"); False if even sudo
+    couldn't remove the path."""
+    if not path.exists() and not path.is_symlink():
+        return True
+
+    kind = "symlink" if path.is_symlink() else ("dir" if path.is_dir() else "file")
+    descriptor = "" if name else "stale "
+    print(f"  Removing {descriptor}{kind}: {path}")
+
+    try:
+        remove_path(path)
+        return True
+    except FileNotFoundError:
+        return True   # raced with another removal; consider it done
+    except (PermissionError, OSError):
+        pass          # fall through to sudo escalation
+
+    print(f"\n  Permission denied — root-owned (Docker bind-mount artifact). Elevating with sudo...")
+    result = subprocess.run(["sudo", "rm", "-rf", str(path)], check=False)
+    subprocess.run(["sudo", "-k"], check=False)   # clear cached credentials
+    if result.returncode == 0:
+        return True
+
+    print(f"\n  sudo cleanup failed (exit {result.returncode}).")
+    print(f"  Manual cleanup:  sudo rm -rf '{path}'")
+    if name:
+        input("\n  Press Enter to continue...")
+    return False
 
 
 def move_path(src, dst):
@@ -486,6 +530,19 @@ def present_optional_cred_services():
     return frozenset(
         name for name in OPTIONAL_CREDS_MOUNTS
         if optional_creds_service_path(name).exists()
+    )
+
+
+def installed_cred_clis():
+    """Space-joined CLI names for present optional-cred services that install
+    a CLI in Dockerfile.prog (cli != None in OPTIONAL_CREDS_MOUNTS). Order
+    follows the OPTIONAL_CREDS_MOUNTS declaration so the addendum reads in a
+    stable order across launches. Drives the [prog] memory addendum's
+    tool-list suffix in agent_composition.sync_memory_templates."""
+    present = present_optional_cred_services()
+    return " ".join(
+        cli for name, (_, cli) in OPTIONAL_CREDS_MOUNTS.items()
+        if cli is not None and name in present
     )
 
 

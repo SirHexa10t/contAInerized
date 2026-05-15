@@ -6,8 +6,9 @@ Roughly grouped by section in this file:
   - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
   - update_workspace_map / set_instance_modes — single-entry writers
   - warn_dood_with_auto — interactive prompt used by mode writers
-  - install_latest_md / sync_memory_templates / delete_instance /
-    modify_instance — per-instance state-dir writers
+  - install_latest_md / delete_instance / modify_instance — per-instance
+    state-dir writers (sync_memory_templates is in agent_composition since it
+    keys off the modifier taxonomy)
   - resolve_pick — name-string → identity factory used by run.py's CLI parsing
   - creatable_agents / continuable_instances — picker entry dict factories the
     menu_picker UI consumes
@@ -27,22 +28,20 @@ run.py, or menu_picker — all of those import from here.
 """
 
 import re
-import subprocess
 
 from .agent_composition import warn_if_dangerous_modes
 from .file_access import (
-    copy_file, find_md_for_agent, is_dir, is_file, is_symlink, iter_subdirs,
+    copy_file, find_md_for_agent, force_remove, is_dir, iter_subdirs,
     load_conf, load_modes_map, load_workspace_map, move_path, parse_stem,
-    path_exists, read_text, remove_path, resolved_cwd, resolved_path,
+    path_exists, read_text, resolved_cwd, resolved_path,
     save_modes_map, save_workspace_map, write_text,
 )
 from .paths import (
     ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE,
     DEFAULT_WORKSPACE, DEFAULTING_DIRS, MD_EXT, instance_state_dir_path,
-    memory_template_path, state_memory_path,
 )
 from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
-from .utils import ordering_index_or_end, relative_time, splice_block
+from .utils import ordering_index_or_end, relative_time
 
 NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
 
@@ -112,99 +111,14 @@ def install_latest_md(inst_id):
     return inst_id.state_dir
 
 
-def _force_remove(path, *, name=None):
-    """Best-effort removal of `path` (file, symlink, or directory). Logs what's
-    being removed, falls back to `sudo rm -rf` for root-owned artifacts (Docker
-    bind-mount leftovers), and follows up with `sudo -k` so cached credentials
-    don't linger past this single operation.
-
-    `name` is an optional human-friendly identifier — when provided, the path
-    is treated as user-initiated removal (no "stale" descriptor in the log)
-    and a sudo failure pauses for keypress so the user can read the failure
-    before the function returns (used by `delete_instance`, mid-picker UX).
-    Without `name`, the removal is logged as "stale" cleanup and the function
-    returns silently on failure (used by `sync_memory_templates`).
-
-    Returns True on success (including "already absent"); False if even sudo
-    couldn't remove the path."""
-    if not path_exists(path) and not is_symlink(path):
-        return True
-
-    kind = "symlink" if is_symlink(path) else ("dir" if is_dir(path) else "file")
-    descriptor = "" if name else "stale "
-    print(f"  Removing {descriptor}{kind}: {path}")
-
-    try:
-        remove_path(path)
-        return True
-    except FileNotFoundError:
-        return True   # raced with another removal; consider it done
-    except (PermissionError, OSError):
-        pass          # fall through to sudo escalation
-
-    print(f"\n  Permission denied — root-owned (Docker bind-mount artifact). Elevating with sudo...")
-    result = subprocess.run(["sudo", "rm", "-rf", str(path)], check=False)
-    subprocess.run(["sudo", "-k"], check=False)   # clear cached credentials
-    if result.returncode == 0:
-        return True
-
-    print(f"\n  sudo cleanup failed (exit {result.returncode}).")
-    print(f"  Manual cleanup:  sudo rm -rf '{path}'")
-    if name:
-        input("\n  Press Enter to continue...")
-    return False
-
-
-def sync_memory_templates(sess_id, templates):
-    """Reconcile per-instance MEMORY.md with the caller-supplied `templates`
-    list of `(filename, active)` pairs. Each template's first and last lines
-    act as wrapper markers that locate the block in MEMORY.md without inline
-    marker comments. Anything *outside* the wrapped blocks is preserved
-    verbatim — that's where agent-added auto-memory pointer entries live.
-    Caller decides what's in the list (always-active + mode-conditional, etc.)
-    — this function is generic over template provenance."""
-    memory_path = state_memory_path(sess_id.state_dir)
-
-    # Defensive cleanup: anything other than a regular non-symlink file at this
-    # path is removed before the read/write below, so the operation starts on a
-    # clean slate. Older state dirs (created back when MEMORY.md was a project-
-    # wide read-only bind-mount) may carry leftover symlinks / auto-created
-    # placeholders / empty dirs / root-owned files from that arrangement. A
-    # write-time PermissionError further down (e.g. a regular but root-owned
-    # leftover) triggers another removal + retry.
-    if is_symlink(memory_path) or (path_exists(memory_path) and not is_file(memory_path)):
-        _force_remove(memory_path)
-
-    original = read_text(memory_path) if path_exists(memory_path) else ""
-    content = original
-
-    for filename, active in templates:
-        template_file = memory_template_path(filename)
-        if not path_exists(template_file):
-            continue
-        content = splice_block(content, read_text(template_file), keep=active)
-
-    if content != original:
-        try:
-            write_text(memory_path, content)
-        except PermissionError:
-            # Stale file with restrictive perms (typically a root-owned bind-mount
-            # leftover that survived the cleanup above because it was a regular file).
-            # Force-remove and retry; sudo fallback inside _force_remove handles the
-            # root-owned case. (write_text auto-creates the parent dir tree as
-            # needed before each attempt.)
-            _force_remove(memory_path)
-            write_text(memory_path, content)
-
-
 def delete_instance(inst_id):
     """Remove this instance's state dir and its workspace + modes mapping entries.
-    Path removal goes through `_force_remove(name=...)` which logs the removal,
+    Path removal goes through `force_remove(name=...)` which logs the removal,
     handles root-owned Docker bind-mount leftovers via sudo, and pauses for
     keypress on failure. Already-gone state dirs are treated as success so the
     map entries are still cleaned up."""
-    if not _force_remove(inst_id.state_dir, name=inst_id.instance):
-        return   # _force_remove printed errors and waited for keypress
+    if not force_remove(inst_id.state_dir, name=inst_id.instance):
+        return   # force_remove printed errors and waited for keypress
     m = load_workspace_map()
     if inst_id.instance in m:
         del m[inst_id.instance]

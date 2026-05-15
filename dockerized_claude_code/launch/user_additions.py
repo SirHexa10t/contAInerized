@@ -79,8 +79,10 @@ def optional_creds_mounts():
     path inside the container. Read-write — cloud CLIs refresh tokens / write
     cache. Missing entries are silently skipped — opt-in is via presence on
     the host. Returns the sorted list of mounted service names (for the
-    launch banner)."""
+    launch banner). Tuple unpack discards the cli-name half — that's a
+    [prog]-addendum concern, not a mount concern."""
     services = sorted(present_optional_cred_services())
     for name in services:
-        add_docker_mount(optional_creds_service_path(name), OPTIONAL_CREDS_MOUNTS[name])
+        mount_target, _ = OPTIONAL_CREDS_MOUNTS[name]
+        add_docker_mount(optional_creds_service_path(name), mount_target)
     return services

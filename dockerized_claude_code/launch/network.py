@@ -235,7 +235,7 @@ BUILTIN_FIREWALL_DOMAINS = [
     "www.jupyter.org",
     "www.huggingface.co",
     "www.arxiv.org",
-    "paperswithcode.com",
+    "www.paperswithcode.com",
     # AI / LLM APIs (Anthropic API endpoints above)
     "docs.anthropic.com",
     "platform.openai.com",
@@ -256,14 +256,14 @@ BUILTIN_FIREWALL_DOMAINS = [
     # Standards / RFCs
     "datatracker.ietf.org",
     "www.rfc-editor.org",
-    "semver.org",
+    "www.semver.org",
     "www.json.org",
     # Build & tooling
     "www.webpack.js.org",
     "www.vite.dev",
     "www.rollupjs.org",
     "www.esbuild.github.io",
-    "cmake.org",
+    "www.cmake.org",
     "www.ninja-build.org",
     "www.git-scm.com",
     # Reliable tutorial / reference sites
@@ -273,6 +273,7 @@ BUILTIN_FIREWALL_DOMAINS = [
     "www.css-tricks.com",        # web / CSS
     "www.smashingmagazine.com",  # web / CSS
     "www.learnxinyminutes.com",  # quick-reference cheat sheets per language
+    "cheatsheetseries.owasp.org",  # web / app security cheat sheets
     "www.martinfowler.com",      # architecture and refactoring
     "www.fly.io",                # systems / networking writing on fly.io/blog
 ]
@@ -314,7 +315,7 @@ _RESOLVE_PARALLELISM = (os.cpu_count() or 1) * 8
 # A records on the order of an hour, so a few hours buys cheap launches across
 # a working day while bounding stale-IP risk. Refresh on read happens via
 # is_file_recent in utils; the launcher itself never inspects time.
-_RESOLUTION_CACHE_TTL_SECONDS = 3 * 60 * 60
+_RESOLUTION_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 # In-process cache: {host: [ip, ...]} loaded from RESOLVED_DOMAINS_CACHE_FILE
 # at the start of start_whitelist_resolution, consulted by _resolve_a_records

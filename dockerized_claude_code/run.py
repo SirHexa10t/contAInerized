@@ -4,11 +4,11 @@ import dataclasses
 import sys
 
 from launch.agent_composition import (
-    compose_chain, mode_memory_templates,
+    compose_chain, sync_memory_templates,
 )
 from launch.agents_crud import (
     creatable_agents, install_latest_md, resolve_pick, set_instance_modes,
-    sync_memory_templates, update_workspace_map,
+    update_workspace_map,
 )
 from launch.docker_config import (
     require_docker, run_compose, set_container_env, set_container_mounts,
@@ -17,7 +17,7 @@ from launch.file_access import load_conf
 from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
-from launch.paths import AGENTS_DIR, SEEK_SUMMARY_FILENAME
+from launch.paths import AGENTS_DIR
 from launch.structs import InstanceIdentity
 from launch.user_additions import (
     aggregated_skills_mounts, optional_creds_mounts, plant_user_extras,
@@ -138,18 +138,18 @@ def compose_runtime(inst_id):
 
 def setup_state(sess_id):
     """Stage 6 — Setup. Install the agent's .md into its state dir, sync per-
-    instance MEMORY.md to the current modes (adds/refreshes/removes mode
-    addendums while preserving agent-added pointer entries outside the wrapped
-    blocks), populate the env vars compose substitutes at build/run time, stage
-    the per-launch bind-mounts (base set + per-instance workspace/state),
-    load the per-agent conf, and stage the skill + optional-creds bind-mounts
-    (with the auto-readme touch). Takes a SessionIdentity — the modes-bearing
-    variant is needed here because sync_memory_templates keys off the active
-    mode addendums. Returns (conf, cred_names) — mounts have all been staged
-    via docker_config.add_docker_mount and don't need to flow through this return."""
+    instance MEMORY.md to the current modifier set (adds/refreshes/removes
+    addendum blocks while preserving agent-added pointer entries outside the
+    wrapped blocks), populate the env vars compose substitutes at build/run
+    time, stage the per-launch bind-mounts (base set + per-instance
+    workspace/state), load the per-agent conf, and stage the skill +
+    optional-creds bind-mounts (with the auto-readme touch). Takes a
+    SessionIdentity — the modifier-bearing variant is needed here because
+    sync_memory_templates keys off the active modifier set (tags ∪ modes).
+    Returns (conf, cred_names) — mounts have all been staged via
+    docker_config.add_docker_mount and don't need to flow through this return."""
     install_latest_md(sess_id)
-    templates = [(SEEK_SUMMARY_FILENAME, True), *mode_memory_templates(sess_id.modes)]
-    sync_memory_templates(sess_id, templates)
+    sync_memory_templates(sess_id)
     set_container_env(sess_id)
     set_container_mounts(sess_id)
     _, conf = load_conf(sess_id.md_path)
