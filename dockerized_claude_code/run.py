@@ -23,11 +23,9 @@ from launch.user_additions import (
     aggregated_skills_mounts, optional_creds_mounts, plant_user_extras,
 )
 
-require_docker()
-
 
 def parse_cli():
-    """Parse the launcher's CLI. Returns (picked, claude_args):
+    """Parse the launcher's CLI. Returns (picked, claude_args, dry_run):
         picked      — AgentIdentity (new) | SessionIdentity (cont, is_brand_new=False)
                       if a known agent/instance name was given as the positional arg,
                       else None (picker will run).
@@ -35,6 +33,11 @@ def parse_cli():
                       the positional if it didn't resolve to a known target. These
                       get appended to the `docker compose run … claude-code` command
                       so they reach claude inside the container.
+        dry_run     — `--dry-run` flag. When True, launch() runs every stage
+                      (state setup, mount staging, etc.) but skips the final
+                      `docker compose run`. Lets tests exercise the launch
+                      pipeline end-to-end without actually building / running
+                      the container.
 
     Use `--` to force args through to claude even when they look like our own flags
     (e.g. `python3 run.py poet -- --help` runs poet and passes --help to claude).
@@ -56,30 +59,36 @@ def parse_cli():
         nargs="?",
         help="Agent name (e.g. 'poet') or instance id (e.g. 'poet__myproject').",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run all state setup but skip the final `docker compose run` step.",
+    )
     args, claude_args = parser.parse_known_args()
     if args.target is None:
-        return None, claude_args
+        return None, claude_args, args.dry_run
     picked = resolve_pick(args.target)
     if picked is None:
         # Unknown name — pass it through to claude as a positional, picker still runs.
-        return None, [args.target] + claude_args
-    return picked, claude_args
+        return None, [args.target] + claude_args, args.dry_run
+    return picked, claude_args, args.dry_run
 
 
 def select_pick():
     """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
     back to the interactive picker if no target was given on the command line, exit
-    cleanly if the user cancels. Returns (picked, claude_args) — `picked` is an
-    AgentIdentity for new and a SessionIdentity for cont. The new/cont distinction
-    is encoded in the returned type (and downstream in inst_id.is_brand_new), so no
-    parallel kind string is threaded alongside."""
+    cleanly if the user cancels. Returns (picked, claude_args, dry_run) — `picked`
+    is an AgentIdentity for new and a SessionIdentity for cont. The new/cont
+    distinction is encoded in the returned type (and downstream in
+    inst_id.is_brand_new), so no parallel kind string is threaded alongside.
+    `dry_run` comes straight off the CLI flag — see parse_cli."""
     if not creatable_agents():
         sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
-    picked, claude_args = parse_cli()
+    picked, claude_args, dry_run = parse_cli()
     picked = picked or select_agent()
     if picked is None:
         sys.exit(0)
-    return picked, claude_args
+    return picked, claude_args, dry_run
 
 
 def resolve_target(picked):
@@ -164,14 +173,22 @@ def launch():
     → persist → categorise (modes/chain) → setup (state/env/mounts) → run. One
     call per stage so a future operation slots in at the right point with
     localised changes. Whether the launch is new vs continuing is carried on
-    the identity itself (inst_id.is_brand_new), not threaded as a separate arg."""
-    picked, claude_args = select_pick()
+    the identity itself (inst_id.is_brand_new), not threaded as a separate arg.
+    `--dry-run` short-circuits the final stage — all state setup still happens
+    so test runs can inspect side effects, but the container build + run is
+    skipped."""
+    picked, claude_args, dry_run = select_pick()
+    if not dry_run:
+        require_docker()   # state setup doesn't need docker; only the final run_compose does
     inst_id = resolve_target(picked)
     resume_flag = compute_resume_flag(inst_id)
     update_workspace_map(inst_id)
     sess_id, chain = compose_runtime(inst_id)
     conf, cred_names = setup_state(sess_id)
     print_launch_banner(sess_id, cred_names)
+    if dry_run:
+        print("  (--dry-run: state setup complete; skipping docker compose run.)")
+        return
     run_compose(chain, sess_id.instance, claude_args, resume_flag, conf)
 
 
