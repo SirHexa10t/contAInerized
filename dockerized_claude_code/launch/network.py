@@ -72,8 +72,9 @@ import re
 import subprocess
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .file_access import (
     is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
@@ -322,10 +323,10 @@ _RESOLUTION_CACHE_TTL_SECONDS = 6 * 60 * 60
 # to short-circuit DNS. Empty when the on-disk cache is missing or stale.
 # Read-only from cascade worker threads (only the main thread writes, before
 # the pool starts), so no lock needed on this dict.
-_resolution_cache = {}
+_resolution_cache: dict[str, list[str]] = {}
 
 
-def _resolve_a_records(host, timeout):
+def _resolve_a_records(host: str, timeout: float) -> list[str]:
     """Resolve `host` to its IPv4 A records — cross-launch cache first, then
     `getent ahostsv4` (runs against the host's resolver chain with whatever
     caching it has). Returns sorted IPs, or [] on timeout / NXDOMAIN /
@@ -346,7 +347,7 @@ def _resolve_a_records(host, timeout):
     return sorted({line.split()[0] for line in r.stdout.splitlines() if line.strip()})
 
 
-def _load_resolution_cache():
+def _load_resolution_cache() -> None:
     """Populate the in-process resolution cache from RESOLVED_DOMAINS_CACHE_FILE
     when the file is fresh (is_file_recent checks mtime). A stale or missing
     file leaves the cache empty — every host then goes through the full DNS
@@ -364,7 +365,7 @@ def _load_resolution_cache():
                 _resolution_cache[host.strip()] = ips
 
 
-def _save_resolution_cache(resolved):
+def _save_resolution_cache(resolved: dict[str, list[str]]) -> None:
     """Rewrite RESOLVED_DOMAINS_CACHE_FILE from `resolved` (a {host: [ip, ...]}
     snapshot). Called at end of Phase 2 with the full resolved set from this
     launch — cache hits roll through unchanged, fresh DNS hits get persisted.
@@ -384,7 +385,7 @@ def _save_resolution_cache(resolved):
     write_text(RESOLVED_DOMAINS_CACHE_FILE, "\n".join(lines) + "\n")
 
 
-def _cascade(hosts, on_resolved, on_terminal_failure):
+def _cascade(hosts, on_resolved, on_terminal_failure) -> None:
     """Run cascading-timeout resolution over `hosts`. For each host, invoke
     `on_resolved(host, ips)` exactly once on success or `on_terminal_failure(host)`
     if every cascade stage exhausted its budget. Subsequent passes operate
@@ -486,17 +487,17 @@ class _WhitelistResolutionStatus:
     and mirrors the in-memory state to `domains_pending_resolve.yml`. Single-
     process singleton (one launcher = one resolution = one tracker)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._path = None
-        self._data = {
+        self._path: Path | None = None
+        self._data: dict = {
             "status":   "uninit",  # → "resolving" while host work is in flight, "complete" at end
             "resolved": {},        # host → [ip, ...]
             "pending":  [],        # hosts still waiting on DNS
             "failed":   {},        # host → reason string
         }
 
-    def init(self, state_dir):
+    def init(self, state_dir) -> None:
         """Reset to a clean 'resolving' state and record where to write — wipes
         any leftover from a previous run on this instance so the agent never
         observes stale content. Called once at the start of every {auto} launch
@@ -507,14 +508,14 @@ class _WhitelistResolutionStatus:
             self._data = {"status": "resolving", "resolved": {}, "pending": [], "failed": {}}
             self._write()
 
-    def set_pending(self, hosts):
+    def set_pending(self, hosts) -> None:
         """Replace the pending-host list (called once at start_whitelist_resolution
         after the full whitelist is assembled)."""
         with self._lock:
             self._data["pending"] = sorted(hosts)
             self._write()
 
-    def mark_resolved(self, host, ips):
+    def mark_resolved(self, host: str, ips: list[str]) -> None:
         """Move `host` from pending → resolved; file the IPs."""
         with self._lock:
             self._data["resolved"][host] = list(ips)
@@ -522,7 +523,7 @@ class _WhitelistResolutionStatus:
                 self._data["pending"].remove(host)
             self._write()
 
-    def mark_failed(self, host, reason):
+    def mark_failed(self, host: str, reason: str) -> None:
         """Move `host` from pending → failed with `reason`."""
         with self._lock:
             self._data["failed"][host] = reason
@@ -530,21 +531,21 @@ class _WhitelistResolutionStatus:
                 self._data["pending"].remove(host)
             self._write()
 
-    def complete(self):
+    def complete(self) -> None:
         """Flip top-level status to 'complete' — every entry has been
         resolved or terminally failed; no more updates coming."""
         with self._lock:
             self._data["status"] = "complete"
             self._write()
 
-    def resolved_snapshot(self):
+    def resolved_snapshot(self) -> dict[str, list[str]]:
         """Read-only snapshot of {host: [ip, ...]} for callers that need to
         persist the full resolution map (used by _phase2_worker to feed
         _save_resolution_cache)."""
         with self._lock:
             return dict(self._data["resolved"])
 
-    def _write(self):
+    def _write(self) -> None:
         """Atomic rewrite of the pending-status file. Caller holds the lock.
         No-op before init() has set a path — defensive against spurious
         early calls."""
@@ -552,7 +553,7 @@ class _WhitelistResolutionStatus:
             return
         write_text(self._path, self._format_yml())
 
-    def _format_yml(self):
+    def _format_yml(self) -> str:
         """Render the agent-visible YAML body. Caller holds the lock. Sections
         explicitly commented so the agent can interpret each state correctly
         without reading the launcher's source."""
@@ -592,22 +593,24 @@ _status = _WhitelistResolutionStatus()
 # lifecycle), so they stay as globals here.
 
 # Phase 1 (critical) — synchronous from the caller's perspective via a
-# blocking await on _phase1_future.result().
-_phase1_executor = None
-_phase1_future = None      # → list of address strings ready for WHITELIST_ADDRESSES
+# blocking await on _phase1_future.result(). All three are set together
+# inside start_whitelist_resolution; the public-API guards key off
+# _phase1_future / _phase2_queue is None for "not started yet".
+_phase1_executor: ThreadPoolExecutor | None = None
+_phase1_future: "Future[list[str]] | None" = None      # → list of address strings ready for WHITELIST_ADDRESSES
 
 # Phase 2 (rest) — producer thread writes (host, ips) tuples to this queue,
 # updater thread consumes them.
-_phase2_queue = None
+_phase2_queue: queue.Queue | None = None
 _phase2_done = object()    # sentinel: end-of-stream
-_phase2_thread = None
+_phase2_thread: threading.Thread | None = None
 
 # Firewall updater — daemon thread; lifetime bounded by the launcher process,
 # which itself blocks inside `docker compose run` for the container's lifetime.
-_updater_thread = None
+_updater_thread: threading.Thread | None = None
 
 
-def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames):
+def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames) -> list[str]:
     """Phase 1 body: cascade through critical hosts (Anthropic), then kick off
     Phase 2 in its own thread before returning. Result is the list of address
     strings to stage as WHITELIST_ADDRESSES for the initial firewall — that's
@@ -649,7 +652,7 @@ def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames):
     return critical_addresses + list(literal_entries)
 
 
-def _phase2_worker(rest_hostnames):
+def _phase2_worker(rest_hostnames) -> None:
     """Phase 2 body: cascade through non-critical hosts. For each successful
     resolution, push (host, ips) onto `_phase2_queue` for the updater to
     docker-exec into the container; for each terminal failure, just log via
@@ -657,13 +660,21 @@ def _phase2_worker(rest_hostnames):
     flips the status file to 'complete', and rewrites the cross-launch
     resolution cache with everything resolved this launch (cache hits + fresh
     DNS) so the next launch's is_file_recent check sees a freshened mtime."""
+    # Spawned only from _phase1_worker (which itself runs inside
+    # start_whitelist_resolution's executor — created after _phase2_queue
+    # was initialized). The assertion narrows the Optional for the type
+    # checker AND would surface a programming error if any future caller
+    # ever bypasses start_whitelist_resolution.
+    assert _phase2_queue is not None
+    q = _phase2_queue
+
     def on_ok(host, ips):
         _status.mark_resolved(host, ips)
         # Find every (entry, host, port) tuple that uses this host — multiple
         # entries can share a host with different ports.
         for entry, h, port in rest_hostnames:
             if h == host:
-                _phase2_queue.put((entry, host, port, ips))
+                q.put((entry, host, port, ips))
 
     def on_fail(host):
         _status.mark_failed(host, _FAILED_RESOLVE_REASON)
@@ -672,10 +683,10 @@ def _phase2_worker(rest_hostnames):
 
     _status.complete()
     _save_resolution_cache(_status.resolved_snapshot())
-    _phase2_queue.put(_phase2_done)
+    q.put(_phase2_done)
 
 
-def start_whitelist_resolution(state_dir):
+def start_whitelist_resolution(state_dir) -> None:
     """Reset the agent-visible status surface to a clean 'resolving' state,
     then fire Phase 1 (critical Anthropic — synchronous from the caller's
     perspective via wait_for_critical_addresses); once Phase 1 finishes
@@ -731,7 +742,7 @@ def start_whitelist_resolution(state_dir):
     _phase1_future = _phase1_executor.submit(_phase1_worker, critical, literals, rest)
 
 
-def is_critical_pending():
+def is_critical_pending() -> bool:
     """True iff Phase 1 (critical Anthropic resolve) is in flight but not yet
     finished. docker_config.run_compose uses this to print a 'still resolving'
     indicator before the blocking await — so the user doesn't see a silent
@@ -739,7 +750,7 @@ def is_critical_pending():
     return _phase1_future is not None and not _phase1_future.done()
 
 
-def wait_for_critical_addresses():
+def wait_for_critical_addresses() -> list[str] | None:
     """Block until Phase 1 (critical Anthropic) completes and return the
     list of address strings to stage as WHITELIST_ADDRESSES for the initial
     in-container firewall. Returns None if start_whitelist_resolution() was
@@ -750,13 +761,16 @@ def wait_for_critical_addresses():
     global _phase1_executor, _phase1_future
     if _phase1_future is None:
         return None
+    # _phase1_executor is set alongside _phase1_future in start_whitelist_resolution;
+    # if we reached this branch they're both initialized.
+    assert _phase1_executor is not None
     try:
         return _phase1_future.result()
     finally:
         _phase1_executor.shutdown(wait=False)
 
 
-def start_firewall_updater(container_name):
+def start_firewall_updater(container_name: str) -> None:
     """Spawn a daemon thread that consumes Phase 2's `_phase2_queue` and runs
     `docker exec --user root <container_name> iptables -I OUTPUT 1 -d <ip>
     -p tcp --dport <port> -j ACCEPT` for each newly-resolved address — so
@@ -779,7 +793,7 @@ def start_firewall_updater(container_name):
     _updater_thread.start()
 
 
-def _updater_worker(container_name):
+def _updater_worker(container_name: str) -> None:
     """Daemon body for the updater. Wait briefly for the container to be
     running (docker compose run takes a moment to spin it up), then drain
     `_phase2_queue` and exec iptables rules into the running container.
@@ -792,13 +806,16 @@ def _updater_worker(container_name):
         # run will already have surfaced the underlying error.
         return
 
+    # Updater is spawned only from start_firewall_updater, which guards on
+    # `_phase2_queue is None` — so by this point the queue is initialized.
+    assert _phase2_queue is not None
     for item in iter(_phase2_queue.get, _phase2_done):
         _entry, _host, port, ips = item
         for ip in ips:
             _insert_iptables_accept(container_name, ip, port)
 
 
-def _insert_iptables_accept(container_name, ip, port):
+def _insert_iptables_accept(container_name: str, ip: str, port: str) -> None:
     """Insert an iptables ACCEPT rule at position 1 of the OUTPUT chain (i.e.
     BEFORE the catch-all REJECT) for `ip`. If `port` is empty, opens the
     default HTTPS+HTTP pair; otherwise just that one port. Best-effort —

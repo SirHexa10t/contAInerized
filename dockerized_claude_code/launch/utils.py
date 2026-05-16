@@ -12,13 +12,13 @@ from datetime import datetime
 
 # === Formatting ===
 
-def plural(n):
+def plural(n: int) -> str:
     """English plural marker: '' for n==1, 's' otherwise. So '{n} day{plural(n)}'
     yields '1 day' / '2 days' / '0 days'."""
     return "" if n == 1 else "s"
 
 
-def relative_time(mtime):
+def relative_time(mtime: float) -> str:
     """Human-readable relative time from an epoch mtime (e.g. '3 days ago',
     '5 minutes ago'). Display-only — used by the picker's Cont preview for
     the 'Last used' line."""
@@ -34,7 +34,7 @@ def relative_time(mtime):
 
 # === Sorting ===
 
-def ordering_index_or_end(value, ordering):
+def ordering_index_or_end(value, ordering) -> int:
     """Position of `value` in `ordering`, or `len(ordering)` if absent —
     pushes unknowns past the end when used as a sort-key element. Backs the
     picker's tag-set and mode-set sort keys in agents_crud."""
@@ -43,7 +43,7 @@ def ordering_index_or_end(value, ordering):
 
 # === Parsing ===
 
-def split_host_port(entry):
+def split_host_port(entry: str) -> tuple[str, str]:
     """Parse a host:port (or cidr:port) string. Returns (host, port) when a
     trailing `:port` is present, else (entry, ''). rpartition-based so an
     IPv4 with port (`1.2.3.4:80`), a CIDR with port (`10.0.0.0/8:443`), and
@@ -52,7 +52,7 @@ def split_host_port(entry):
     return (host, port) if sep else (entry, "")
 
 
-def splice_block(content, block_text, keep=True):
+def splice_block(content: str, block_text: str, keep: bool = True) -> str:
     """Reconcile a marker-bounded region of `content` against `block_text`.
     `block_text`'s first and last lines (after stripping leading/trailing
     whitespace) serve as the wrapper markers used to locate the region.

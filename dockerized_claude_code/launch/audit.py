@@ -27,7 +27,7 @@ from .paths import (
 from .structs import InstanceIdentity, SESSION_SEP
 
 
-def _check_json_file(path):
+def _check_json_file(path) -> str | None:
     """Return an issue string if the file is missing, empty, has invalid JSON, or holds an
     empty object/array; None otherwise."""
     if not path_exists(path):
@@ -44,7 +44,7 @@ def _check_json_file(path):
     return None
 
 
-def main():
+def main() -> None:
     issues = []
 
     # Workspace map file (file may legitimately not exist on a fresh install — still report it).

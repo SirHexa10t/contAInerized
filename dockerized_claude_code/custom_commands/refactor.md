@@ -161,6 +161,29 @@ Common candidates:
 - `# removed for X` markers next to deleted code. Delete; git history is for that.
 - Half-finished/commented-out blocks. Delete or finish.
 
+### 13. Lint / type-check after applying
+
+Once any of the above passes have actually been applied, run the language's
+lint + type-check tools against the modified file and address whatever they
+flag. Different stacks, different tools — use what the project already runs;
+install the missing one if there's no baseline. Common starting points:
+
+- **Python** — `mypy <file>` (static type checking; sharper still: `pyright`)
+  and `ruff check <file>` for lint smells `/refactor` doesn't catch
+  (unused vars/args, shadowed names, walrus misuse, etc.).
+- **JavaScript/TypeScript** — `tsc --noEmit <file>` + `eslint <file>`.
+- **Rust** — `cargo clippy --fix` + `cargo check`.
+- **Go** — `go vet ./...` + `staticcheck`.
+
+Treat tool findings as the same kind of evidence as the earlier passes: real
+issues get a fix, known false positives get a targeted ignore comment that
+names the rule (`# type: ignore[arg-type]`, `// eslint-disable-next-line ...`).
+Bulk-suppressing warnings is a smell of its own — if a whole category is
+noisy, fix the root cause or scope the suppression narrowly.
+
+A clean tool-run on the modified file is part of "done". Wave-of-new-warnings
+after a refactor means the refactor isn't finished yet.
+
 ## Output
 
 For each finding, report:

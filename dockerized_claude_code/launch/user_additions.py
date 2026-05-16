@@ -31,7 +31,7 @@ from .structs import InstanceModifiers
 # First-launch template files (~/.claude-agents/user_extras/...)
 # ============================================================
 
-def plant_user_extras(modes):
+def plant_user_extras(modes) -> None:
     """Idempotently drop the user-facing helper files into ~/.claude-agents/
     user_extras/ so users discovering the directories know what to put in
     them:
@@ -52,7 +52,7 @@ def plant_user_extras(modes):
 # Skills — project-bundled (custom_skills/) + per-workspace (.skills/)
 # ============================================================
 
-def aggregated_skills_mounts(workspace, state_path):
+def aggregated_skills_mounts(workspace, state_path) -> None:
     """Surface skills from `custom_skills/` (this project's bundled skills) and
     `<workspace>/.skills/` (the user's per-workspace skills) as the agent's skills
     directory. Each `<name>/SKILL.md` becomes a `/<name>` slash command. When both
@@ -73,7 +73,7 @@ def aggregated_skills_mounts(workspace, state_path):
 # Optional credentials — ~/.claude-agents/user_extras/optional_creds/<service>/
 # ============================================================
 
-def optional_creds_mounts():
+def optional_creds_mounts() -> list[str]:
     """For each entry under ~/.claude-agents/user_extras/optional_creds/ that
     matches a known service, stage a bind-mount onto the CLI's default config
     path inside the container. Read-write — cloud CLIs refresh tokens / write

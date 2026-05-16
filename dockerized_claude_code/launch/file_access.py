@@ -55,13 +55,15 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from dotenv import dotenv_values  # pip install python-dotenv
 
 from .paths import (
-    AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR, AGENTS_STATE,
+    AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
     DEFAULT_CONF, FIREWALL_WHITELIST_FILE, FIREWALL_WHITELIST_TEMPLATE,
     HISTORY_JSONL_FILENAME, JSONL_EXT, MD_EXT, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS, PROJECT_CUSTOM_SKILLS_DIR, agent_conf_path,
@@ -84,13 +86,13 @@ from .paths import (
 
 # --- Mutations ---
 
-def ensure_dir(path):
+def ensure_dir(path: Path) -> None:
     """`mkdir -p` equivalent: create the directory and any missing parents
     if absent; no-op if already present."""
     path.mkdir(parents=True, exist_ok=True)
 
 
-def remove_path(path):
+def remove_path(path: Path) -> None:
     """Remove `path` — file, symlink, or directory. No-op if absent. Dispatches
     on what's at `path` so callers don't need a parallel ladder of is_dir /
     is_symlink checks. For paths that may be root-owned (Docker bind-mount
@@ -104,7 +106,7 @@ def remove_path(path):
         shutil.rmtree(path)
 
 
-def force_remove(path, *, name=None):
+def force_remove(path: Path, *, name: str | None = None) -> bool:
     """Best-effort removal of `path` (file, symlink, or directory). Logs what's
     being removed, falls back to `sudo rm -rf` for root-owned artifacts (Docker
     bind-mount leftovers), and follows up with `sudo -k` so cached credentials
@@ -134,7 +136,7 @@ def force_remove(path, *, name=None):
     except (PermissionError, OSError):
         pass          # fall through to sudo escalation
 
-    print(f"\n  Permission denied — root-owned (Docker bind-mount artifact). Elevating with sudo...")
+    print("\n  Permission denied — root-owned (Docker bind-mount artifact). Elevating with sudo...")
     result = subprocess.run(["sudo", "rm", "-rf", str(path)], check=False)
     subprocess.run(["sudo", "-k"], check=False)   # clear cached credentials
     if result.returncode == 0:
@@ -147,14 +149,14 @@ def force_remove(path, *, name=None):
     return False
 
 
-def move_path(src, dst):
+def move_path(src: Path, dst: Path) -> None:
     """Rename `src` to `dst`. Works for both files and directories.
     Used by agents_crud.modify_instance to relocate state dirs after a
     session-suffix rename."""
     src.rename(dst)
 
 
-def write_text(path, content):
+def write_text(path: Path, content: str) -> None:
     """Write `content` to `path` as text (overwriting if present). Auto-creates
     the parent directory tree if missing, so callers don't need a separate
     ensure_dir call. Use ensure_dir directly only for non-write reasons
@@ -163,7 +165,7 @@ def write_text(path, content):
     path.write_text(content)
 
 
-def copy_file(src, dest, overwrite_if_dest=False):
+def copy_file(src: Path, dest: Path, overwrite_if_dest: bool = False) -> None:
     """Copy `src` to `dest` (content + permissions + metadata, via shutil.copy2).
     By default, no-op when `dest` already exists — pass overwrite_if_dest=True
     when the caller wants a fresh copy each time (e.g. install_latest_md's
@@ -179,29 +181,29 @@ def copy_file(src, dest, overwrite_if_dest=False):
 # All accept Path or str (internally `Path(path)`-coerced) so callers don't
 # have to think about which they're holding.
 
-def path_exists(path):
+def path_exists(path) -> bool:
     """True iff something exists at `path` (file, dir, or symlink-to-anything)."""
     return Path(path).exists()
 
 
-def is_dir(path):
+def is_dir(path) -> bool:
     """True iff `path` exists and is a directory."""
     return Path(path).is_dir()
 
 
-def is_file(path):
+def is_file(path) -> bool:
     """True iff `path` exists and is a regular file (not a directory or symlink-to-dir)."""
     return Path(path).is_file()
 
 
-def is_symlink(path):
+def is_symlink(path) -> bool:
     """True iff `path` is a symlink (regardless of what — or nothing — it points to)."""
     return Path(path).is_symlink()
 
 
 # --- Listing + searching ---
 
-def iter_subdirs(parent):
+def iter_subdirs(parent: Path) -> Iterator[Path]:
     """Yield immediate subdirectories of `parent` (filesystem order).
     Callers wanting all entries should call parent.iterdir() — but no caller
     currently does, so the filter is folded in here."""
@@ -210,13 +212,13 @@ def iter_subdirs(parent):
             yield entry
 
 
-def rglob_paths(parent, pattern):
+def rglob_paths(parent: Path, pattern: str) -> Iterator[Path]:
     """Recursive glob — yield every path under `parent` matching `pattern`.
     Thin wrapper around `parent.rglob(pattern)`."""
     return parent.rglob(pattern)
 
 
-def tab_complete_paths(text_prefix):
+def tab_complete_paths(text_prefix: str) -> list[str]:
     """Host filesystem glob for readline tab-completion. Returns list of
     string matches (~-expanded), each with `os.sep` appended if it's a
     directory. Used by menu_picker._path_completer."""
@@ -226,7 +228,7 @@ def tab_complete_paths(text_prefix):
 
 # --- Stats ---
 
-def file_mtime(path):
+def file_mtime(path) -> float | None:
     """Mtime of `path` as epoch seconds, or None if it doesn't exist or
     can't be stat'd. Single point of stat-call truth so callers don't deal
     with `path.stat().st_mtime` and the OSError surface directly."""
@@ -236,7 +238,7 @@ def file_mtime(path):
         return None
 
 
-def iter_file_stats(parent):
+def iter_file_stats(parent: Path) -> Iterator[tuple[Path, int, float]]:
     """Yield `(path, size, mtime)` for every regular file under `parent`.
     Used by agent_composition.prune_caches for the size+age cache walk —
     bundling the rglob + is_file filter + stat call so the caller doesn't
@@ -247,7 +249,7 @@ def iter_file_stats(parent):
             yield f, s.st_size, s.st_mtime
 
 
-def is_file_recent(path, max_age_seconds):
+def is_file_recent(path, max_age_seconds: float) -> bool:
     """True iff `path` exists and its mtime is within the last `max_age_seconds`.
     Missing / unreadable / stale all → False, so callers can use this as a
     single truthy 'use this cache?' gate. Backs the {auto}-mode resolved-domains
@@ -258,23 +260,23 @@ def is_file_recent(path, max_age_seconds):
 
 # --- Host paths ---
 
-def resolved_path(p):
+def resolved_path(p) -> Path:
     """Path(p) with symlinks resolved and ~ expanded."""
     return Path(p).resolve()
 
 
-def resolved_cwd():
+def resolved_cwd() -> Path:
     """Path.cwd() with symlinks resolved — what the launcher really thinks
     its working dir is, used by the picker for cwd/workspace matching."""
     return Path.cwd().resolve()
 
 
-def home_dir():
+def home_dir() -> Path:
     """User's home directory as a Path."""
     return Path.home()
 
 
-def expand_user_path(s):
+def expand_user_path(s: str) -> str:
     """Expand `~` in `s` and make it absolute; returns a string. For user-typed
     workspace paths where we want the literal expanded form (not symlink-resolved)."""
     return os.path.abspath(os.path.expanduser(s))
@@ -282,7 +284,7 @@ def expand_user_path(s):
 
 # --- Reads ---
 
-def read_text(path):
+def read_text(path: Path) -> str:
     """Read the entire contents of `path` as a string. Raises
     FileNotFoundError if absent (no missing_ok concept here — callers
     that expect the file might not exist should either .exists()-check
@@ -291,7 +293,7 @@ def read_text(path):
     return path.read_text()
 
 
-def parse_lines(path):
+def parse_lines(path: Path) -> Iterator[str]:
     """Iterate non-empty, non-comment-only lines from `path`, with inline
     `#` comments stripped and surrounding whitespace trimmed. Suits plain
     one-token-per-line config files (e.g. the firewall whitelist).
@@ -306,7 +308,7 @@ def parse_lines(path):
             yield line
 
 
-def read_json_field(path, *keys):
+def read_json_field(path, *keys: str) -> Any:
     """Walk `keys` into the JSON document at `path` and return the value, or
     None on any failure: file missing, unreadable, malformed JSON, missing
     key, or a non-dict mid-walk. Callers wanting an optional field handle
@@ -320,7 +322,7 @@ def read_json_field(path, *keys):
         return None
 
 
-def load_json_map(path):
+def load_json_map(path: Path) -> dict:
     """Parse a JSON-mapping file into a dict. Missing or empty files yield
     {}. Used for state-file readers where the top-level shape is a single
     JSON object (e.g. agent_workspace_map.json, agent_modes_map.json) —
@@ -331,7 +333,7 @@ def load_json_map(path):
     return json.loads(content) if content else {}
 
 
-def parse_stem(stem):
+def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
     """Parse a filename stem into (name, tags, parent).
 
     Grammar: <name>(<bracketed-tag>|<parenthesized-parent>)*
@@ -362,7 +364,7 @@ def parse_stem(stem):
 
 
 @lru_cache(maxsize=None)
-def find_md_for_agent(agent_name):
+def find_md_for_agent(agent_name: str) -> Path | None:
     """Locate an agent's .md by its clean name; handles any [tag]/(parent) suffix combination
     in the filename. Glob can't express the new grammar (`[` is a glob metacharacter), so we
     enumerate `.md` files and match on the parsed stem — cheap with the project's agent count.
@@ -377,7 +379,7 @@ def find_md_for_agent(agent_name):
     return None
 
 
-def conf_path_for(md_path):
+def conf_path_for(md_path: Path) -> Path | None:
     """Locate an agent's .conf path. A '(parent)' suffix in the filename aliases
     to '<parent>.conf'; otherwise '<name>.conf'; falls back to DEFAULT_CONF, or
     None if even that's absent. Tags are ignored here. Cheap — no file body
@@ -389,7 +391,7 @@ def conf_path_for(md_path):
 
 
 @lru_cache(maxsize=None)
-def load_conf(md_path):
+def load_conf(md_path: Path) -> tuple[Path | None, dict]:
     """Locate and load an agent's .conf. Returns (path_or_None, values_dict).
     Path resolution lives in conf_path_for above; this wrapper adds the dotenv
     parse for the values dict.
@@ -429,10 +431,10 @@ def load_conf(md_path):
 # between load and save are visible to any other load that happens in
 # between — which is fine in single-threaded Python.
 
-_json_map_cache = {}   # {Path: dict} — single per-process cache shared by every JSON-map file
+_json_map_cache: dict[Path, dict] = {}   # {Path: dict} — single per-process cache shared by every JSON-map file
 
 
-def _cached_load_json_map(path):
+def _cached_load_json_map(path: Path) -> dict:
     """Load a JSON map from `path`, caching the result by path. Subsequent
     calls return the cached dict by reference (so callers' in-place mutations
     before save_*_map are visible to other loaders too — see section comment
@@ -442,7 +444,7 @@ def _cached_load_json_map(path):
     return _json_map_cache[path]
 
 
-def _cached_save_json_map(path, mapping):
+def _cached_save_json_map(path: Path, mapping: dict) -> None:
     """Write `mapping` to `path` as pretty-printed JSON and refresh the cache
     entry for that path. AGENTS_STATE is auto-created by write_text via the
     internal ensure_dir call."""
@@ -450,17 +452,17 @@ def _cached_save_json_map(path, mapping):
     _json_map_cache[path] = mapping
 
 
-def load_workspace_map(): return _cached_load_json_map(AGENT_WORKSPACE_MAP_FILE)
-def load_modes_map():     return _cached_load_json_map(AGENT_MODES_MAP_FILE)
-def save_workspace_map(mapping): _cached_save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
-def save_modes_map(mapping):     _cached_save_json_map(AGENT_MODES_MAP_FILE, mapping)
+def load_workspace_map() -> dict: return _cached_load_json_map(AGENT_WORKSPACE_MAP_FILE)
+def load_modes_map() -> dict:     return _cached_load_json_map(AGENT_MODES_MAP_FILE)
+def save_workspace_map(mapping: dict) -> None: _cached_save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
+def save_modes_map(mapping: dict) -> None:     _cached_save_json_map(AGENT_MODES_MAP_FILE, mapping)
 
 
 # ============================================================
 # Per-instance state-dir queries (helpers for InstanceIdentity properties)
 # ============================================================
 
-def has_continuable_jsonl(state_dir):
+def has_continuable_jsonl(state_dir: Path) -> bool:
     """True iff `state_dir` has at least one non-empty session JSONL — i.e.,
     something `claude --continue` can load. Excludes `history.jsonl` (the per-
     turn input log that exists even when no real conversation happened). The
@@ -481,7 +483,7 @@ def has_continuable_jsonl(state_dir):
     return False
 
 
-def last_history_mtime(state_dir):
+def last_history_mtime(state_dir: Path) -> float | None:
     """Mtime of the most-recently-written history.jsonl under `state_dir`, or
     None if no history file exists yet. InstanceIdentity.last_used_mtime is
     a thin wrapper around this (same reason as above)."""
@@ -493,7 +495,7 @@ def last_history_mtime(state_dir):
 # User-contributed skills (custom_skills/ + <workspace>/.skills/)
 # ============================================================
 
-def discover_workspace_skills(workspace):
+def discover_workspace_skills(workspace) -> dict[str, Path]:
     """Walk PROJECT_CUSTOM_SKILLS_DIR (project-bundled) and
     `<workspace>/<WORKSPACE_SKILLS_DIRNAME>` (per-workspace) for subdirectories
     containing a SKILL.md. Returns `{name: source_path}`; when the same name
@@ -508,7 +510,7 @@ def discover_workspace_skills(workspace):
     return skills
 
 
-def prepare_skill_mount_dirs(state_path, names):
+def prepare_skill_mount_dirs(state_path: Path, names) -> None:
     """Pre-create `<state_path>/skills/<name>` on the host for each entry in
     `names` so Docker doesn't auto-create them as root (which would otherwise
     leave undeletable dirs blocking `delete_instance`'s rmtree)."""
@@ -521,7 +523,7 @@ def prepare_skill_mount_dirs(state_path, names):
 # ============================================================
 
 @lru_cache(maxsize=None)
-def present_optional_cred_services():
+def present_optional_cred_services() -> frozenset[str]:
     """Frozenset of OPTIONAL_CREDS_MOUNTS service names whose host dir is
     present. LRU-cached for the launcher process lifetime — both
     user_additions.optional_creds_mounts and docker_config.set_container_env
@@ -533,7 +535,7 @@ def present_optional_cred_services():
     )
 
 
-def installed_cred_clis():
+def installed_cred_clis() -> str:
     """Space-joined CLI names for present optional-cred services that install
     a CLI in Dockerfile.prog (cli != None in OPTIONAL_CREDS_MOUNTS). Order
     follows the OPTIONAL_CREDS_MOUNTS declaration so the addendum reads in a
@@ -546,7 +548,7 @@ def installed_cred_clis():
     )
 
 
-def optional_cred_tokens():
+def optional_cred_tokens() -> dict[str, str]:
     """Return `{service_name: token_string}` for every service in
     OPTIONAL_CREDS_TOKEN_ENV_VARS that has a non-empty `<service>/token`
     file on the host. Tokens are stripped of leading/trailing whitespace
@@ -567,7 +569,7 @@ def optional_cred_tokens():
 # ============================================================
 
 @lru_cache(maxsize=None)
-def user_firewall_whitelist_lines():
+def user_firewall_whitelist_lines() -> tuple[str, ...]:
     """Return the user's firewall_whitelist.txt parsed lines as a tuple,
     self-planting from FIREWALL_WHITELIST_TEMPLATE on first read so parse_lines
     never sees a missing file. (copy_file is a no-op when the destination

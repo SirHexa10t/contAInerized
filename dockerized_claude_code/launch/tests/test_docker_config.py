@@ -1,12 +1,15 @@
-"""Tests for launch.docker_config — chain naming, compose-file selection,
-and the optional-creds → INSTALL_<TOOL> / env-var maps."""
+"""Tests for launch.docker_config — chain naming + compose-file selection +
+set_container_mounts (workspace fallback).
+
+Env-formatter tests (install_creds_flags, token_env_dict, etc.) live in
+test_compose_env.py since that's where the formatters were moved."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from launch import paths
-from launch.docker_config import (
-    chain_compose_files, chain_image_tag, install_creds_flags, token_env_dict,
-)
+from launch.docker_config import chain_compose_files, chain_image_tag, set_container_mounts
 
 
 class TestChainImageTag(unittest.TestCase):
@@ -58,61 +61,38 @@ class TestChainComposeFiles(unittest.TestCase):
         self.assertIn(str(paths.DOCKER_DIR / "compose.dood.yml"), result)
 
 
-class TestInstallCredsFlags(unittest.TestCase):
-    """install_creds_flags(present_services) → {INSTALL_<TOOL>: '1'|'0'} build-args.
-    One entry per OPTIONAL_CREDS_MOUNTS service; '1' when in `present_services`."""
+class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
+    """Regression: set_container_mounts must never try to bind-mount a None
+    workspace. If inst_id.workspace is None (stale workspace-map entry that
+    slipped past resolve_target's re-prompt), fall back to DEFAULT_WORKSPACE."""
 
-    def test_no_creds_all_zero(self):
-        flags = install_creds_flags(set())
-        # Every service represented; every value is '0'
-        for name in paths.OPTIONAL_CREDS_MOUNTS:
-            with self.subTest(service=name):
-                self.assertEqual(flags[f"INSTALL_{name.upper()}"], "0")
+    def _capture_mounts(self, inst_id):
+        """Drive set_container_mounts through a patched add_docker_mount that
+        records every (source, target) pair. Returns the list of pairs in
+        call order."""
+        recorded = []
+        with patch("launch.docker_config.add_docker_mount", side_effect=lambda s, t: recorded.append((str(s), str(t)))):
+            set_container_mounts(inst_id)
+        return recorded
 
-    def test_one_cred_flips_only_its_flag(self):
-        flags = install_creds_flags({"gh"})
-        self.assertEqual(flags["INSTALL_GH"], "1")
-        # Spot-check that an unrelated flag stayed at 0
-        self.assertEqual(flags["INSTALL_AWS"], "0")
-        self.assertEqual(flags["INSTALL_KUBE"], "0")
+    def test_workspace_set_uses_provided_path(self):
+        inst_id = SimpleNamespace(workspace="/some/host/path", state_dir="/tmp/state")
+        mounts = self._capture_mounts(inst_id)
+        workspace_pair = next(p for p in mounts if p[1] == "/workspace")
+        self.assertEqual(workspace_pair[0], "/some/host/path")
 
-    def test_multiple_creds_set_independently(self):
-        flags = install_creds_flags({"aws", "kube"})
-        self.assertEqual(flags["INSTALL_AWS"], "1")
-        self.assertEqual(flags["INSTALL_KUBE"], "1")
-        self.assertEqual(flags["INSTALL_GH"], "0")
+    def test_workspace_none_falls_back_to_default(self):
+        inst_id = SimpleNamespace(workspace=None, state_dir="/tmp/state")
+        mounts = self._capture_mounts(inst_id)
+        workspace_pair = next(p for p in mounts if p[1] == "/workspace")
+        self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
-    def test_keys_are_uppercased_service_names(self):
-        flags = install_creds_flags(set())
-        for name in paths.OPTIONAL_CREDS_MOUNTS:
-            self.assertIn(f"INSTALL_{name.upper()}", flags)
-
-    def test_unknown_services_dont_create_flags(self):
-        # Even if `present_services` contains something not in OPTIONAL_CREDS_MOUNTS,
-        # only known services produce flags.
-        flags = install_creds_flags({"bogus_service"})
-        self.assertNotIn("INSTALL_BOGUS_SERVICE", flags)
-
-
-class TestTokenEnvDict(unittest.TestCase):
-    """token_env_dict({service: token}) → {env_var: token}, translating each
-    service via OPTIONAL_CREDS_TOKEN_ENV_VARS."""
-
-    def test_empty(self):
-        self.assertEqual(token_env_dict({}), {})
-
-    def test_jira_token(self):
-        result = token_env_dict({"jira": "xyz123"})
-        self.assertEqual(result, {"JIRA_API_TOKEN": "xyz123"})
-
-    def test_unknown_service_dropped(self):
-        # service not in OPTIONAL_CREDS_TOKEN_ENV_VARS → silently skipped
-        result = token_env_dict({"aws": "shouldnt-appear"})
-        self.assertEqual(result, {})
-
-    def test_mix_known_and_unknown(self):
-        result = token_env_dict({"jira": "good", "aws": "ignored"})
-        self.assertEqual(result, {"JIRA_API_TOKEN": "good"})
+    def test_workspace_empty_string_falls_back_to_default(self):
+        # `or` covers None AND empty string — both treated as "no workspace".
+        inst_id = SimpleNamespace(workspace="", state_dir="/tmp/state")
+        mounts = self._capture_mounts(inst_id)
+        workspace_pair = next(p for p in mounts if p[1] == "/workspace")
+        self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
 
 if __name__ == "__main__":

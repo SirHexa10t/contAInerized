@@ -43,6 +43,8 @@ agent_composition or agents_crud — those import from here; nothing here
 imports from them.
 """
 
+from __future__ import annotations
+
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -84,16 +86,16 @@ class InstanceModifiers(Enum):
     MODE_AUTO = ("auto", "autonomous; Doesn't need permission to perform actions. Built with a firewall slightly increased security. Danger: hard to control!")
     MODE_DOOD = ("DooD", "Docker outside-of Docker; Can run Docker. Danger: authority to do anything (effectively host-root)!")
 
-    def __init__(self, value, description):
+    def __init__(self, value: str, description: str) -> None:
         self._value_ = value
         self.description = description
 
     @property
-    def slug(self):
+    def slug(self) -> str:
         return self.value.lower()
 
     @property
-    def label(self):
+    def label(self) -> str:
         """User-facing label with the kind-distinguishing wrapping: `[prog]` for
         tags (square brackets — the filename-grammar form), `{auto}` / `{DooD}`
         for modes (curly braces). Single source of truth for any picker prompt
@@ -107,7 +109,7 @@ class InstanceModifiers(Enum):
         return self.value
 
     @classmethod
-    def format_prefix(cls, values):
+    def format_prefix(cls, values) -> str:
         """Render an iterable of modifier value strings (any mix of tag and
         mode values) as space-separated bracketed labels with a trailing
         space: '[prog] {auto} ' / '' for empty input. Wrapping comes from
@@ -133,19 +135,19 @@ class InstanceModifiers(Enum):
 
     @classmethod
     @cache
-    def tags(cls):
+    def tags(cls) -> tuple["InstanceModifiers", ...]:
         """Tuple of tag members (name prefix `TAG_`) in declaration order."""
         return tuple(m for m in cls if m.name.startswith("TAG_"))
 
     @classmethod
     @cache
-    def modes(cls):
+    def modes(cls) -> tuple["InstanceModifiers", ...]:
         """Tuple of mode members (name prefix `MODE_`) in declaration order."""
         return tuple(m for m in cls if m.name.startswith("MODE_"))
 
     @classmethod
     @cache
-    def tag_values(cls):
+    def tag_values(cls) -> tuple[str, ...]:
         """Tuple of canonical `.value` strings for the tag members, declaration
         order. Use when comparing against on-disk strings (filename parser
         output, JSON contents, sort-key ordering lists)."""
@@ -153,7 +155,7 @@ class InstanceModifiers(Enum):
 
     @classmethod
     @cache
-    def mode_values(cls):
+    def mode_values(cls) -> tuple[str, ...]:
         """Tuple of canonical `.value` strings for the mode members, declaration order."""
         return tuple(m.value for m in cls.modes())
 
@@ -178,18 +180,22 @@ class AgentIdentity:
         (parent) — the conf_path / tags properties parse those out. Re-globbed
         on each access (cheap: AGENTS_DIR is typically tiny). Identity is
         constructed after the agent's existence has been verified upstream, so
-        this won't return None in practice."""
-        return find_md_for_agent(self.agent)
+        this won't return None in practice — the assert narrows the
+        find_md_for_agent's Optional and would also surface a callsite that
+        skipped the upstream verification."""
+        md = find_md_for_agent(self.agent)
+        assert md is not None, f"AgentIdentity({self.agent!r}) has no .md file — verify upstream"
+        return md
 
     @property
-    def conf_path(self) -> Path:
+    def conf_path(self) -> Path | None:
         """Path to the .conf file backing this agent: '(parent).conf' if the
         filename had a (parent) suffix, otherwise '<agent>.conf', falling back
         to default.conf. None if even the default is absent."""
         return conf_path_for(self.md_path)
 
     @property
-    def tags(self) -> tuple:
+    def tags(self) -> tuple[str, ...]:
         """Filename-grammar tags from the .md's stem (e.g. ('prog',) for
         `name[prog].md`). Tuple so the dataclass stays hashable should we ever
         want it as a dict key."""
@@ -205,7 +211,7 @@ class InstanceIdentity(AgentIdentity):
     workspace are known, and used by everything up to (and including) the
     modes resolution step."""
     session: str                        # user-chosen suffix differentiating parallel instances of the same agent
-    workspace: str                      # host-side path bind-mounted into the container at /workspace
+    workspace: str | None               # host-side path bind-mounted into the container at /workspace; None when continuable_instances built us from a stale workspace-map entry (resolve_target re-prompts; set_container_mounts also falls back to DEFAULT_WORKSPACE)
     is_brand_new: bool                  # True for a freshly-promoted AgentIdentity, False for a cont pick — drives resume + modes-resolution branches
 
     @property
@@ -227,7 +233,7 @@ class InstanceIdentity(AgentIdentity):
         return state_md_path(self.state_dir)
 
     @property
-    def stored_modes(self) -> list:
+    def stored_modes(self) -> list[str]:
         """Modes persisted in agent_modes_map.json for this instance (empty
         list if no entry). Used by compose_runtime on cont launches to pick up
         whatever the modify flow last persisted. Reads through file_access's
@@ -244,14 +250,14 @@ class InstanceIdentity(AgentIdentity):
         return has_continuable_jsonl(self.state_dir)
 
     @property
-    def last_used_mtime(self):
+    def last_used_mtime(self) -> float | None:
         """Mtime of the most-recently-written history.jsonl under this instance's
         state dir, or None if no history file exists yet. Used by the picker's
         Cont row preview for the 'Last used' relative timestamp. Delegates the
         rglob + stat to file_access."""
         return last_history_mtime(self.state_dir)
 
-    def validate_workspace(self):
+    def validate_workspace(self) -> None:
         """Exit if the workspace path is set but doesn't resolve to a real
         directory (stale agent_workspace_map.json entry). Workspace=None passes
         through silently so the caller can decide to prompt for a new value
@@ -262,7 +268,7 @@ class InstanceIdentity(AgentIdentity):
                 f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
             )
 
-    def with_modes(self, modes) -> "SessionIdentity":
+    def with_modes(self, modes) -> SessionIdentity:
         """Promote this InstanceIdentity into a full SessionIdentity by
         attaching the resolved modes — called once compose_runtime has prompted
         (for brand-new) or loaded (for cont) the per-instance mode list.
@@ -273,7 +279,7 @@ class InstanceIdentity(AgentIdentity):
         )
 
     @staticmethod
-    def instance_name(agent, session):
+    def instance_name(agent: str, session: str) -> str:
         """Compose the canonical state-dir id `<agent>__<session>` from raw
         strings. Complement to the `instance` property — used by picker prompts
         that don't have an identity in hand yet (e.g. validating a freshly-
@@ -281,7 +287,7 @@ class InstanceIdentity(AgentIdentity):
         return f"{agent}{SESSION_SEP}{session}"
 
     @staticmethod
-    def state_dir_for(agent, session):
+    def state_dir_for(agent: str, session: str) -> Path:
         """Path to an instance's state directory from raw strings. Complement
         to the `state_dir` property — same prompt-side use case as
         instance_name. `_for` suffix avoids name-collision with the property."""
@@ -298,7 +304,7 @@ class SessionIdentity(InstanceIdentity):
     modes: tuple                        # per-instance opt-ins like ('auto',) or ('auto', 'DooD'); tuple keeps the dataclass hashable
 
     @property
-    def chain(self) -> tuple:
+    def chain(self) -> tuple[str, ...]:
         """Active modifier values for this session in InstanceModifiers
         declaration order — BASE always first, then the session's tags,
         then its modes. Drives both the docker image build order (returned

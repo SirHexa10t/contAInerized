@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 from launch import agent_composition, memory_addendums
 from launch.agent_composition import compose_chain, sync_memory_templates
-from launch.memory_addendums import _wrap_block
 from launch.structs import InstanceModifiers, SessionIdentity
 
 

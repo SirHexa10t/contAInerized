@@ -184,12 +184,12 @@ class PickerClass(Enum):
     PREVIEW  = ("picker-preview",  "")
     NO_MATCH = ("picker-no-match", "italic fg:ansibrightblack")
 
-    def __init__(self, cls_name, style):
+    def __init__(self, cls_name: str, style: str) -> None:
         self.cls_name = cls_name
         self.style = style
 
     @property
-    def css(self):
+    def css(self) -> str:
         return f"class:{self.cls_name}"
 
 
@@ -214,11 +214,11 @@ class PickerRowMarker(Enum):
     DLET   = ("🗑 DELETE",       "fg:ansired")
     BACK   = ("🚪  Back",        "")
 
-    def __init__(self, glyph, style):
+    def __init__(self, glyph: str, style: str) -> None:
         self.glyph = glyph
         self.style = style
 
-    def fragment(self, suffix=""):
+    def fragment(self, suffix: str = "") -> tuple[str, str]:
         """Build the (style, text) tuple FormattedText expects — glyph then an
         arbitrary suffix (spacing for column alignment, or extra trailing text
         like the back-row's label) in this marker's style."""
@@ -235,12 +235,12 @@ class PickerCwdHint(Enum):
     CURRENT = ("(CURRENT DIR) ", "bold fg:ansiyellow")
     DEFAULT = ("(DEFAULT DIR) ", "bold fg:ansiyellow")
 
-    def __init__(self, label, style):
+    def __init__(self, label: str, style: str) -> None:
         self.label = label
         self.style = style
 
     @property
-    def fragment(self):
+    def fragment(self) -> tuple[str, str]:
         """(style, label) tuple ready for a FormattedText segment. Property
         rather than method since the label is fixed — no per-call suffix."""
         return (self.style, self.label)
@@ -253,7 +253,7 @@ class PickerCwdHint(Enum):
 _OPEN_DELMENU = object()
 
 
-def _render_md(text, *, theme=None):
+def _render_md(text: str, *, theme: dict | None = None) -> str:
     """Render markdown text to an ANSI-encoded string for the picker's preview pane.
     Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower. Optional
     `theme` (dict of Rich style names → style strings) overrides Markdown's defaults
@@ -266,7 +266,7 @@ def _render_md(text, *, theme=None):
     return buf.getvalue()
 
 
-def _build_composition_legend():
+def _build_composition_legend() -> str:
     """Build the F8 'composition legend' shown over the preview pane. Rendered
     via _render_md so it matches Create-row previews stylistically. Tags and
     Modes are rendered as two separate markdown documents so each can override
@@ -303,13 +303,13 @@ def _build_composition_legend():
 LEGEND_TEXT = _build_composition_legend()   # module-level so the picker doesn't rebuild on every keypress
 
 
-def _agent_description(md_text):
+def _agent_description(md_text: str) -> str:
     """First line of an agent .md, stripped of any markdown heading marker — used as
     the right-hand description on a Create row in the picker."""
     return md_text.splitlines()[0].lstrip("# ").strip()
 
 
-def _create_preview(agent):
+def _create_preview(agent: dict) -> str:
     """Build the Create-row preview markdown from a creatable_agents entry and
     render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
     agent_id = agent["identity"]
@@ -320,7 +320,7 @@ def _create_preview(agent):
     )
 
 
-def _cont_preview(inst):
+def _cont_preview(inst: dict) -> str:
     """Build the Cont-row preview markdown from a continuable_instances entry and
     render to ANSI. Italic lead-in, horizontal rule, then a YAML-fenced metadata
     block (rich syntax-colors keys/values)."""
@@ -339,19 +339,19 @@ def _cont_preview(inst):
     )
 
 
-def _normalize(display):
+def _normalize(display) -> list[tuple[str, str]]:
     """Coerce any accepted display form into a list of (style, text) tuples."""
     if isinstance(display, str):
         return [("", display)]
     return list(display)
 
 
-def _plain(display):
+def _plain(display) -> str:
     """Plain-text view of a display, used for filter matching."""
     return "".join(text for _, text in _normalize(display))
 
 
-def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False, legend_text=None):
+def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None):
     """Render a full-screen picker; block until the user picks or cancels.
 
     legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
@@ -562,19 +562,19 @@ def pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False,
     return state["result"]
 
 
-def confirm_dialog(message):
+def confirm_dialog(message: str) -> bool:
     """Inline yes/no prompt rendered below the (now-closed) picker."""
     answer = input(CONFIRM_PROMPT_FMT.format(message=message)).strip().lower()
     return answer in CONFIRM_YES_ANSWERS
 
 
-def _path_completer(text, state):
+def _path_completer(text: str, state: int) -> str | None:
     """Tab-complete `text` as a host filesystem path; expands `~` for matching."""
     matches = tab_complete_paths(text)
     return matches[state] if state < len(matches) else None
 
 
-def ask_for_workspace(agent, default=None):
+def ask_for_workspace(agent: str, default: str | None = None) -> str:
     """Prompt for a workspace path; Enter uses `default` (or DEFAULT_WORKSPACE).
     Tab completes against the host filesystem. Returns the absolute path with `~`
     expanded but symlinks preserved — the form the user typed is what gets stored."""
@@ -601,7 +601,7 @@ def ask_for_workspace(agent, default=None):
         readline.set_completer_delims(prior_delims)
 
 
-def prompt_session(agent, workspace):
+def prompt_session(agent: str, workspace: str) -> str:
     """Prompt for a session suffix; default = last segment of the workspace path.
     Rejects collisions with existing `{agent}__{suffix}` state dirs."""
     default = Path(workspace).name
@@ -616,7 +616,7 @@ def prompt_session(agent, workspace):
         return suffix
 
 
-def prompt_yn(header, body, prompt_label, default=False):
+def prompt_yn(header: str, body, prompt_label: str, default: bool = False) -> bool:
     """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
     list of explanation/caveat lines (empty strings render as blank lines for
     visual separation), and `prompt_label` is what shows in the actual y/N input
@@ -632,7 +632,7 @@ def prompt_yn(header, body, prompt_label, default=False):
     return answer in ("y", "yes")
 
 
-def prompt_modifier(modifier, current_modifiers, *, header, body):
+def prompt_modifier(modifier, current_modifiers, *, header: str, body) -> bool:
     """Y/N prompt for opting into `modifier`. `current_modifiers` is an iterable
     of canonical-string modifier names (typically the union of tags + currently
     active modes) — used to pre-fill the Y/N default (True iff `modifier.value`
@@ -648,7 +648,7 @@ def prompt_modifier(modifier, current_modifiers, *, header, body):
     )
 
 
-def prompt_auto(current_modifiers):
+def prompt_auto(current_modifiers) -> bool:
     """Y/N prompt for opting into {auto} mode."""
     return prompt_modifier(
         InstanceModifiers.MODE_AUTO,
@@ -668,7 +668,7 @@ def prompt_auto(current_modifiers):
     )
 
 
-def prompt_dood(current_modifiers):
+def prompt_dood(current_modifiers) -> bool:
     """Y/N prompt for opting into {DooD} (Docker-out-of-Docker) mode."""
     return prompt_modifier(
         InstanceModifiers.MODE_DOOD,
@@ -687,22 +687,22 @@ def prompt_dood(current_modifiers):
     )
 
 
-def prompt_modes(tags, current_modes=()):
+def prompt_modes(tags, current_modes: tuple = ()) -> list[str]:
     """Prompt for each mode in InstanceModifiers.modes() priority order, applying
     per-mode applicability gates (DooD only fires for [prog] agents). `current_modes`
     is the existing list (pre-fills the Y/N defaults — empty for new instances).
     Returns the new modes in priority order — used by run.py for new instances
     and by select_agent's modify flow."""
     current_modifiers = [*tags, *current_modes]
-    new_modes = []
+    new_modes: list[str] = []
     if prompt_auto(current_modifiers):
-        new_modes.append(InstanceModifiers.MODE_AUTO.value)
+        new_modes.append(InstanceModifiers.MODE_AUTO.value)   # type: ignore[arg-type]
     if InstanceModifiers.TAG_PROG.value in current_modifiers and prompt_dood(current_modifiers):
-        new_modes.append(InstanceModifiers.MODE_DOOD.value)
+        new_modes.append(InstanceModifiers.MODE_DOOD.value)   # type: ignore[arg-type]
     return new_modes
 
 
-def select_agent():
+def select_agent():   # returns AgentIdentity | SessionIdentity | None — too dynamic for a tight annotation
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
     Caller must ensure at least one agent .md exists before invoking."""
     while True:
@@ -809,7 +809,7 @@ def select_agent():
         return value  # AgentIdentity (new) | SessionIdentity (cont)
 
 
-def _delete_submenu():
+def _delete_submenu() -> None:
     """Flat deletion submenu — every row red. Loops until Esc / Back."""
     while True:
         instances = continuable_instances()
@@ -840,7 +840,7 @@ def _delete_submenu():
             delete_instance(value)
 
 
-def print_launch_banner(sess_id, cred_names):
+def print_launch_banner(sess_id, cred_names) -> None:
     """Print the multi-line summary that appears before docker compose builds the
     image — agent definition path, conf path, active tags + modes, and skills/creds
     counts when applicable. Each line is conditional on having something to show

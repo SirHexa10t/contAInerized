@@ -22,7 +22,7 @@ from .file_access import read_json_field
 from .paths import ACCOUNT_FILE
 
 
-def build_status_line(inst_id):
+def build_status_line(inst_id) -> str:
     """ANSI label for Claude Code's bottom status line — cyan agent + grey
     workspace + green email + blue instance (`<agent>__<session>`). The
     `<email> :` prefix drops out when .claude.json is missing or lacks a
@@ -39,7 +39,7 @@ def build_status_line(inst_id):
     return f"{CYAN}● {session_complete}\t\t{mail_at_instance}"
 
 
-def set_terminal_title(name):
+def set_terminal_title(name: str) -> None:
     """Send an OSC 0 escape so the terminal emulator's window/tab title
     becomes `Claude Code — <name>`. Helps the user tell concurrent agent
     tabs apart. Called by docker_config.run_compose just before exec'ing

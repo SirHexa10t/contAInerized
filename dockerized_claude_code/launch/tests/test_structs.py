@@ -1,11 +1,9 @@
 """Tests for launch.structs — InstanceModifiers taxonomy + identity dataclasses."""
 
 import unittest
-from pathlib import Path
 
 from launch.structs import (
-    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP,
-    SessionIdentity,
+    InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
 )
 
 

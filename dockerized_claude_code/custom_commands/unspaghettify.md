@@ -85,7 +85,25 @@ After phases 2–3, the structural moves become visible. Surface them as four op
 
 For each operation: list the files and contents involved, the rationale, and the resulting one-sentence role of each affected file.
 
-### 5. Role check — the finish line
+### 5. Lint / static-check the result
+
+After any structural change actually lands, run the project's lint + static-check
+tools and address whatever they flag. Different ecosystems, different tools — pick
+what fits the project and what's already installed; install the missing one if the
+project lacks a baseline. A few common starting points:
+
+- **Python** — `ruff check .` (linter; replaces flake8 + pyflakes + isort) and
+  `mypy .` (type checker). `pyright` is a faster alternative to mypy.
+- **JavaScript/TypeScript** — `eslint` + `tsc --noEmit`.
+- **Rust** — `cargo clippy` + `cargo check`.
+- **Go** — `go vet` + `staticcheck`.
+
+Treat tool findings as the same kind of evidence as the earlier phases: real
+issues get fixed, known false positives get suppressed with a targeted ignore
+comment that names the rule. A clean run on the modified scope is part of "done"
+— a restructure that introduces fresh lint noise hasn't earned its keep yet.
+
+### 6. Role check — the finish line
 
 For every file in the (modified) scope, write a one-sentence role:
 

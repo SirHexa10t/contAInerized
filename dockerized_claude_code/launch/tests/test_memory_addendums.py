@@ -9,7 +9,6 @@ list."""
 import unittest
 from unittest.mock import patch
 
-from launch import memory_addendums as ma
 from launch.memory_addendums import (
     CREDENTIALS_NOTICE, FIREWALL_NOTICE, MEMORY_BLOCK_WRAPPER_BANNER,
     MODIFIER_ADDENDUMS, SEEK_SUMMARY, _wrap_block, _wrapper_end_line,

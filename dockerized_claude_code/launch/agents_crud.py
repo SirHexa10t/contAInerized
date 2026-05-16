@@ -46,7 +46,7 @@ from .utils import ordering_index_or_end, relative_time
 NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
 
 
-def list_all_instances():
+def list_all_instances() -> list[str]:
     """Return every `{agent}__{session}` dir under AGENTS_STATE (filesystem order;
     callers that need a specific order sort themselves)."""
     if not path_exists(AGENTS_STATE):
@@ -58,7 +58,7 @@ def list_all_instances():
 # Single-entry writers
 # ============================================================
 
-def update_workspace_map(inst_id):
+def update_workspace_map(inst_id) -> None:
     """Persist (inst_id.instance → inst_id.workspace) in agent_workspace_map.json.
     No-op if the entry is already set to this value — avoids rewriting the file on
     every cont relaunch when the workspace hasn't changed."""
@@ -68,7 +68,7 @@ def update_workspace_map(inst_id):
         save_workspace_map(m)
 
 
-def _write_modes_entry(m, sess_id):
+def _write_modes_entry(m: dict, sess_id) -> None:
     """Mutate `m` (a modes-map dict) to reflect sess_id's modes for sess_id.instance:
     set the list when modes are non-empty, pop the entry otherwise. Pure dict
     mutation — callers bracket with their own load/save so a multi-edit pass
@@ -79,7 +79,7 @@ def _write_modes_entry(m, sess_id):
         m.pop(sess_id.instance, None)
 
 
-def set_instance_modes(sess_id):
+def set_instance_modes(sess_id) -> None:
     """Persist the modes list for an instance, taken off the passed SessionIdentity
     (which carries both the instance key and its resolved modes). An empty modes
     tuple removes the entry from the map (we don't store empty entries — keeps the
@@ -97,7 +97,7 @@ def set_instance_modes(sess_id):
 # Per-instance state-dir writers
 # ============================================================
 
-def install_latest_md(inst_id):
+def install_latest_md(inst_id) -> None:
     """Copy the agent's `.md` into the state dir as CLAUDE.md (refreshed each
     launch so a source-side edit propagates), and ensure the shared OAuth files
     exist so docker's bind-mount doesn't auto-create them as root. copy_file
@@ -111,7 +111,7 @@ def install_latest_md(inst_id):
     return inst_id.state_dir
 
 
-def delete_instance(inst_id):
+def delete_instance(inst_id) -> None:
     """Remove this instance's state dir and its workspace + modes mapping entries.
     Path removal goes through `force_remove(name=...)` which logs the removal,
     handles root-owned Docker bind-mount leftovers via sudo, and pauses for
@@ -129,7 +129,7 @@ def delete_instance(inst_id):
         save_modes_map(m)
 
 
-def modify_instance(old_inst_id, new_sess_id):
+def modify_instance(old_inst_id, new_sess_id) -> None:
     """Move an instance's state dir to its new SessionIdentity (renaming if the
     instance id differs) and update both the workspace and modes mappings to
     match. No-op for the rename if old and new ids match; the maps are always
@@ -169,7 +169,7 @@ ORDERED_MODEL_FAMILIES = ["opus", "sonnet", "haiku"]
 _FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
 
 
-def parse_model_id(model):
+def parse_model_id(model: str) -> tuple[str, int, int] | None:
     """Extract (family, major, minor) from a model ID like 'claude-opus-4-7'.
     Returns None when no recognized family is present. The regex's family
     alternation is derived from ORDERED_MODEL_FAMILIES, so a new family means
@@ -180,7 +180,7 @@ def parse_model_id(model):
     return m.group(1), int(m.group(2)), int(m.group(3) or 0)
 
 
-def agent_sort_key(item):
+def agent_sort_key(item) -> tuple:
     """Sort by family (ORDERED_MODEL_FAMILIES order — opus first, haiku last),
     then version desc, then name asc. Agents whose .conf has no recognisable
     model sink past all known families via the sentinel index."""
@@ -190,7 +190,7 @@ def agent_sort_key(item):
     return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
 
 
-def tag_sort_key(tags):
+def tag_sort_key(tags) -> tuple[int, ...]:
     """Sort key for agents grouped by tag set, following InstanceModifiers.tags()
     declaration order. Untagged ([]) → empty tuple, which sorts before any non-
     empty key. Unknown tags sink past the end via a sentinel index so typo'd tags
@@ -198,7 +198,7 @@ def tag_sort_key(tags):
     return tuple(sorted(ordering_index_or_end(t, InstanceModifiers.tag_values()) for t in tags))
 
 
-def mode_sort_key(modes):
+def mode_sort_key(modes) -> tuple[int, ...]:
     """Sort key for instances grouped by mode set, following InstanceModifiers.modes()
     declaration order. Mode-less ([]) → empty tuple, which sorts before any non-empty
     key. Unknown modes sink past the end via a sentinel index."""
@@ -209,7 +209,7 @@ def mode_sort_key(modes):
 # Identity factories — name-string / disk-scan → identity
 # ============================================================
 
-def resolve_pick(name):
+def resolve_pick(name: str) -> AgentIdentity | SessionIdentity | None:
     """Resolve a name string into an identity matching select_agent's return shape.
     Two cases:
         '<agent>__<session>' with a state dir on disk → SessionIdentity (is_brand_new=False)
@@ -240,7 +240,7 @@ def resolve_pick(name):
     return None
 
 
-def creatable_agents():
+def creatable_agents() -> list[dict]:
     """Agent dicts for the picker's Create rows. Sorted first by tag set
     (untagged first, then groups ordered by each tag's position in InstanceModifiers.tags());
     within each tag group, the existing model family/version sort applies. Each
@@ -258,14 +258,19 @@ def creatable_agents():
             "md_path": path,                          # display only — the picker uses this for the agents/ relative path in previews
             "md_text": read_text(path),               # raw .md content; menu_picker uses it for both description and preview
         })
-    out.sort(key=lambda d: (
-        tag_sort_key(d["tags"]),                                       # untagged sinks to top; the rest follow InstanceModifiers.tags() positions
-        agent_sort_key((d["identity"].agent, d["md_path"])),           # within each tag group: family/version/name
-    ))
+    def _sort_key(d: dict) -> tuple:
+        # Narrow the heterogeneous-dict access by binding the identity once;
+        # mypy can't infer AgentIdentity off `d["identity"]` directly.
+        ident: AgentIdentity = d["identity"]
+        return (
+            tag_sort_key(d["tags"]),                            # untagged sinks to top; rest follow InstanceModifiers.tags() positions
+            agent_sort_key((ident.agent, d["md_path"])),        # within each tag group: family/version/name
+        )
+    out.sort(key=_sort_key)
     return out
 
 
-def continuable_instances():
+def continuable_instances() -> list[dict]:
     """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped.
     Sorted first by mode set (mode-less first, then groups ordered by each mode's
     position in InstanceModifiers.modes()); within each mode group, sorted by (agent rank,
@@ -303,9 +308,14 @@ def continuable_instances():
             "is_default_dir":    defaulting_dir_active and ws_resolved == default_workspace_resolved,    # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
             "last_used_display": relative_time(last_mtime) if last_mtime is not None else "(never)",
         })
-    out.sort(key=lambda d: (
-        mode_sort_key(d["identity"].modes),                                   # mode-less sinks to top; the rest follow InstanceModifiers.modes() positions
-        agent_sort_key((d["identity"].agent, d["identity"].md_path)),         # within each mode group: family/version/name
-        d["identity"].session,                                                # then session for tiebreak between instances of the same agent
-    ))
+    def _sort_key(d: dict) -> tuple:
+        # Narrow the heterogeneous-dict access by binding the identity once;
+        # mypy can't infer SessionIdentity off `d["identity"]` directly.
+        sess: SessionIdentity = d["identity"]
+        return (
+            mode_sort_key(sess.modes),                          # mode-less sinks to top; rest follow InstanceModifiers.modes() positions
+            agent_sort_key((sess.agent, sess.md_path)),         # within each mode group: family/version/name
+            sess.session,                                       # then session for tiebreak between instances of the same agent
+        )
+    out.sort(key=_sort_key)
     return out

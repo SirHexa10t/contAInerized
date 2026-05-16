@@ -10,21 +10,22 @@ from launch.agents_crud import (
     creatable_agents, install_latest_md, resolve_pick, set_instance_modes,
     update_workspace_map,
 )
+from launch.compose_env import set_container_env
 from launch.docker_config import (
-    require_docker, run_compose, set_container_env, set_container_mounts,
+    require_docker, run_compose, set_container_mounts,
 )
 from launch.file_access import load_conf
 from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
 from launch.paths import AGENTS_DIR
-from launch.structs import InstanceIdentity
+from launch.structs import AgentIdentity, InstanceIdentity, SessionIdentity
 from launch.user_additions import (
     aggregated_skills_mounts, optional_creds_mounts, plant_user_extras,
 )
 
 
-def parse_cli():
+def parse_cli() -> tuple[AgentIdentity | SessionIdentity | None, list[str], bool]:
     """Parse the launcher's CLI. Returns (picked, claude_args, dry_run):
         picked      — AgentIdentity (new) | SessionIdentity (cont, is_brand_new=False)
                       if a known agent/instance name was given as the positional arg,
@@ -74,7 +75,7 @@ def parse_cli():
     return picked, claude_args, args.dry_run
 
 
-def select_pick():
+def select_pick() -> tuple[AgentIdentity | SessionIdentity, list[str], bool]:
     """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
     back to the interactive picker if no target was given on the command line, exit
     cleanly if the user cancels. Returns (picked, claude_args, dry_run) — `picked`
@@ -91,7 +92,7 @@ def select_pick():
     return picked, claude_args, dry_run
 
 
-def resolve_target(picked):
+def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity:
     """Stage 2 — Filesystem validation. Promote the picker-supplied identity to a
     full InstanceIdentity: for new `picked` is an AgentIdentity, so prompt for
     workspace and session (and stamp is_brand_new=True); for cont it's already a
@@ -110,7 +111,7 @@ def resolve_target(picked):
     return InstanceIdentity(agent=picked.agent, session=session, workspace=workspace, is_brand_new=True)
 
 
-def compute_resume_flag(inst_id):
+def compute_resume_flag(inst_id: InstanceIdentity) -> list[str]:
     """Stage 3 — Resume detection. Returns the claude args needed to resume an
     existing conversation (`["--continue"]`) or `[]` for a fresh session. Cont
     with no transcript prints a notice and starts fresh — `--continue` against
@@ -123,7 +124,7 @@ def compute_resume_flag(inst_id):
     return []
 
 
-def compose_runtime(inst_id):
+def compose_runtime(inst_id: InstanceIdentity) -> tuple[SessionIdentity, list[str]]:
     """Stage 5 — Categorisation. Resolve modes (prompt for new instances in
     priority order, load stored modes for cont), promote to a SessionIdentity,
     compute the build chain, and run handler side effects (env-var staging
@@ -133,7 +134,7 @@ def compose_runtime(inst_id):
     to take. compose_chain takes the resulting SessionIdentity directly
     (it needs tags + modes + state_dir + .chain). Returns (sess_id, chain)."""
     if inst_id.is_brand_new:
-        modes = prompt_modes(inst_id.tags, current_modes=[])
+        modes = prompt_modes(inst_id.tags, current_modes=())
         set_instance_modes(inst_id.with_modes(modes))   # warns inside if both auto+DooD are set
     else:
         modes = inst_id.stored_modes
@@ -145,7 +146,7 @@ def compose_runtime(inst_id):
     return sess_id, chain
 
 
-def setup_state(sess_id):
+def setup_state(sess_id: SessionIdentity) -> tuple[dict, list[str]]:
     """Stage 6 — Setup. Install the agent's .md into its state dir, sync per-
     instance MEMORY.md to the current modifier set (adds/refreshes/removes
     addendum blocks while preserving agent-added pointer entries outside the
@@ -168,7 +169,7 @@ def setup_state(sess_id):
     return conf, cred_names
 
 
-def launch():
+def launch() -> None:
     """Seven-stage orchestrator: input → filesystem validation → resume detection
     → persist → categorise (modes/chain) → setup (state/env/mounts) → run. One
     call per stage so a future operation slots in at the right point with

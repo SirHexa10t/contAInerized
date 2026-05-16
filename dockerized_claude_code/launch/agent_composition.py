@@ -27,9 +27,9 @@ import time
 from .file_access import (
     ensure_dir, iter_file_stats, path_exists, read_text, remove_path, write_text,
 )
+from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
-    ComposeEnvKey, add_docker_mount, any_agent_container_running,
-    detect_docker_gid, stage_compose_env,
+    add_docker_mount, any_agent_container_running, detect_docker_gid,
 )
 from .memory_addendums import _wrap_block, addendum_text
 from .network import start_whitelist_resolution
@@ -53,13 +53,13 @@ CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over
 
 # === Tag dispatch: each handler returns the extras its tag contributes to the docker compose run ===
 
-def prepare_caches():
+def prepare_caches() -> None:
     """Pre-create shared cache dirs so Docker doesn't auto-create them as root."""
     for host in CACHE_MOUNTS:
         ensure_dir(host)
 
 
-def prune_caches():
+def prune_caches() -> None:
     """For caches above CACHE_PRUNE_THRESHOLD_GB, remove files older than CACHE_PRUNE_MIN_AGE_DAYS.
     Skipped when any agent container is running (to avoid yanking caches mid-build)."""
     if any_agent_container_running():
@@ -82,7 +82,7 @@ def prune_caches():
             print(f"  Pruned {host.relative_to(CACHE_ROOT)}: freed {freed / 1024**3:.1f} GB (was {total / 1024**3:.1f} GB)")
 
 
-def _apply_prog():
+def _apply_prog() -> None:
     """[prog] tag handler. Three side effects, no return value:
       • prepare_caches() mkdirs the host cache dirs (so the bind-mount targets
         exist before the container starts; otherwise Docker creates them as
@@ -101,7 +101,7 @@ def _apply_prog():
 
 # === Mode dispatch — like tags, but per-instance (set at create/modify time, stored in agent_modes_map.json) ===
 
-def _apply_dood():
+def _apply_dood() -> None:
     """{DooD} mode: bind-mount the host's /var/run/docker.sock (via DOCKER_DOOD_MOUNTS)
     so the agent can drive the host's Docker daemon (run sub-containers, build images,
     etc.). Looks up the host's docker-group GID via docker_config.detect_docker_gid
@@ -121,7 +121,7 @@ def _apply_dood():
         add_docker_mount(source, target)
 
 
-def _apply_auto(state_dir):
+def _apply_auto(state_dir) -> None:
     """{auto} mode: kick off the two-phase firewall whitelist resolve so it
     overlaps with `docker compose build` (which ensure_image fires right
     after compose_chain returns), then stage the firewall script + entrypoint
@@ -150,7 +150,7 @@ def _apply_auto(state_dir):
 # fresh mode set (set_instance_modes / modify_instance) — agents_crud just
 # writes state; the "is this combination dangerous?" judgement is here.
 
-def warn_if_dangerous_modes(modes):
+def warn_if_dangerous_modes(modes) -> None:
     """Stern red warning + press-any-key gate when `modes` contains a dangerous
     combination — currently just {auto}+{DooD}. {auto} drops Claude Code's
     permission prompts; {DooD} hands the agent the host's Docker daemon.
@@ -168,7 +168,8 @@ def warn_if_dangerous_modes(modes):
     print()
     print("  [press any key to continue] ", end="", flush=True)
     try:
-        import termios, tty
+        import termios
+        import tty
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
@@ -189,7 +190,7 @@ def warn_if_dangerous_modes(modes):
 # Marker format + content live in memory_addendums (one source of truth);
 # this function is a pure orchestration loop.
 
-def sync_memory_templates(sess_id):
+def sync_memory_templates(sess_id) -> None:
     """Reconcile per-instance MEMORY.md with the current modifier set. One
     read + at most one write per launch. Iterates InstanceModifiers in
     declaration order (BASE → tags → modes) so block order in MEMORY.md
@@ -219,7 +220,7 @@ def sync_memory_templates(sess_id):
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===
 
-def compose_chain(sess_id):
+def compose_chain(sess_id) -> list[str]:
     """Run each active modifier's handler and return the docker build chain.
     Accesses `sess_id.chain` once — that's where the validation (typo'd
     tags / stale modes) lives, and it's the canonical modifier-value tuple

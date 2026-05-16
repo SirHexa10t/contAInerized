@@ -11,6 +11,7 @@ DEFAULT_WORKSPACE expression."""
 
 import os
 from pathlib import Path
+from typing import Callable
 
 
 # ============================================================
@@ -336,24 +337,24 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # being built.
 
 # Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/)
-state_md_path           = lambda state_dir:       state_dir / INSTANCE_CLAUDE_MD_FILENAME
-state_memory_path       = lambda state_dir:       state_dir / INSTANCE_MEMORY_FILE_RELPATH
-state_projects_path     = lambda state_dir:       state_dir / INSTANCE_PROJECTS_RELPATH
-state_skill_subdir_path = lambda state_dir, name: state_dir / INSTANCE_SKILLS_RELPATH / name
-state_domain_resolve_status_path = lambda state_dir:     state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
+state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_CLAUDE_MD_FILENAME
+state_memory_path:       Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_MEMORY_FILE_RELPATH
+state_projects_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_PROJECTS_RELPATH
+state_skill_subdir_path: Callable[[Path, str], Path]   = lambda state_dir, name: state_dir / INSTANCE_SKILLS_RELPATH / name
+state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
 
 # Per-instance state directory itself (one level up from the per-state-dir files)
-instance_state_dir_path = lambda instance:        AGENTS_STATE / instance
+instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS_STATE / instance
 
 # Workspace-side skills (workspace is a runtime-provided host path)
-workspace_skills_path   = lambda workspace:       Path(workspace) / WORKSPACE_SKILLS_DIRNAME
-skill_marker_path       = lambda skill_dir:       skill_dir / SKILL_MARKER_FILENAME
+workspace_skills_path:   Callable[[str], Path]         = lambda workspace: Path(workspace) / WORKSPACE_SKILLS_DIRNAME
+skill_marker_path:       Callable[[Path], Path]        = lambda skill_dir: skill_dir / SKILL_MARKER_FILENAME
 
 # Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys)
-optional_creds_service_path = lambda service:     OPTIONAL_CREDS_DIR / service
-optional_creds_token_path   = lambda service:     OPTIONAL_CREDS_DIR / service / OPTIONAL_CREDS_TOKEN_FILENAME
+optional_creds_service_path: Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service
+optional_creds_token_path:   Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service / OPTIONAL_CREDS_TOKEN_FILENAME
 
-agent_conf_path         = lambda name:            AGENTS_DIR / f"{name}{CONF_EXT}"
+agent_conf_path:         Callable[[str], Path]         = lambda name: AGENTS_DIR / f"{name}{CONF_EXT}"
 
 # Docker compose-layer YAML (step ∈ InstanceModifiers value strings, lowercased)
-compose_layer_path      = lambda step:            DOCKER_DIR / f"compose.{step.lower()}.yml"
+compose_layer_path:      Callable[[str], Path]         = lambda step: DOCKER_DIR / f"compose.{step.lower()}.yml"

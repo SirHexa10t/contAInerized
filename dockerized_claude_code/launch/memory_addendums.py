@@ -20,6 +20,8 @@ the [prog] block gets suppressed entirely rather than ending in a trailing
 colon. addendum_text filters '' entries before joining.
 """
 
+from typing import Callable
+
 from .file_access import installed_cred_clis
 from .paths import (
     CLAUDE_CONFIG_IN_CONTAINER, CLAUDE_SUMMARY_IN_CONTAINER,
@@ -33,11 +35,11 @@ from .structs import InstanceModifiers
 # memory instructions for the agent.
 MEMORY_BLOCK_WRAPPER_BANNER = "#" * 21
 
-_wrapper_start_line = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-start {MEMORY_BLOCK_WRAPPER_BANNER}"
-_wrapper_end_line   = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-end {MEMORY_BLOCK_WRAPPER_BANNER}"
+_wrapper_start_line: Callable[[str], str] = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-start {MEMORY_BLOCK_WRAPPER_BANNER}"
+_wrapper_end_line:   Callable[[str], str] = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-end {MEMORY_BLOCK_WRAPPER_BANNER}"
 
 
-def _wrap_block(name, content):
+def _wrap_block(name: str, content: str) -> str:
     """Compose the spliceable block for `name`: banner-wrapped start/end
     marker lines (from the two lambdas above) around `content`. Single
     source of truth for the marker format — every wrapped block in
@@ -75,7 +77,7 @@ MODIFIER_ADDENDUMS = {
 }
 
 
-def addendum_text(modifier):
+def addendum_text(modifier: InstanceModifiers) -> str:
     """Return the joined addendum text for `modifier` — separator '\\n\\n\\n',
     empty values filtered out. '' is the 'no spliceable content this launch'
     signal: either the modifier has no addendums in MODIFIER_ADDENDUMS (the
