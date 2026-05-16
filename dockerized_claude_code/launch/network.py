@@ -78,7 +78,7 @@ from datetime import datetime, timezone
 from .file_access import (
     is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
 )
-from .paths import RESOLVED_DOMAINS_CACHE_FILE, state_pending_yml_path
+from .paths import RESOLVED_DOMAINS_CACHE_FILE, state_domain_resolve_status_path
 from .utils import split_host_port
 
 
@@ -503,7 +503,7 @@ class _WhitelistResolutionStatus:
         from start_whitelist_resolution, gated by that function's idempotency
         check."""
         with self._lock:
-            self._path = state_pending_yml_path(state_dir)
+            self._path = state_domain_resolve_status_path(state_dir)
             self._data = {"status": "resolving", "resolved": {}, "pending": [], "failed": {}}
             self._write()
 

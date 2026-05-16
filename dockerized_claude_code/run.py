@@ -116,24 +116,24 @@ def compute_resume_flag(inst_id):
 
 def compose_runtime(inst_id):
     """Stage 5 — Categorisation. Resolve modes (prompt for new instances in
-    priority order, load stored modes for cont), compute the build chain, and
-    run handler side effects (env-var staging + bind-mount staging via the
-    docker_config accumulators, plus {auto}-mode firewall resolve kickoff).
-    Takes an InstanceIdentity — tags come off it directly (.tags property),
-    is_brand_new tells us which branch to take; modes are the OUTPUT of this
-    stage, layered on top via with_modes() in launch() once we return.
-    state_dir is threaded into compose_chain because the {auto} handler
-    needs it to seed the status files. Returns (modes, chain)."""
+    priority order, load stored modes for cont), promote to a SessionIdentity,
+    compute the build chain, and run handler side effects (env-var staging
+    + bind-mount staging via the docker_config accumulators, plus {auto}-
+    mode firewall resolve kickoff). Takes an InstanceIdentity — tags come
+    off it directly (.tags property), is_brand_new tells us which branch
+    to take. compose_chain takes the resulting SessionIdentity directly
+    (it needs tags + modes + state_dir + .chain). Returns (sess_id, chain)."""
     if inst_id.is_brand_new:
         modes = prompt_modes(inst_id.tags, current_modes=[])
         set_instance_modes(inst_id.with_modes(modes))   # warns inside if both auto+DooD are set
     else:
         modes = inst_id.stored_modes
+    sess_id = inst_id.with_modes(modes)
     try:
-        chain = compose_chain(inst_id.tags, modes, inst_id.state_dir)
+        chain = compose_chain(sess_id)
     except (ValueError, RuntimeError) as e:
         sys.exit(f"  {e}")
-    return modes, chain
+    return sess_id, chain
 
 
 def setup_state(sess_id):
@@ -169,8 +169,7 @@ def launch():
     inst_id = resolve_target(picked)
     resume_flag = compute_resume_flag(inst_id)
     update_workspace_map(inst_id)
-    modes, chain = compose_runtime(inst_id)
-    sess_id = inst_id.with_modes(modes)
+    sess_id, chain = compose_runtime(inst_id)
     conf, cred_names = setup_state(sess_id)
     print_launch_banner(sess_id, cred_names)
     run_compose(chain, sess_id.instance, claude_args, resume_flag, conf)

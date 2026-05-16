@@ -1,10 +1,11 @@
-"""Agent composition layer: computes the docker build chain (base → modifiers in
-InstanceModifiers declaration order) and runs each active modifier's handler
-contributions (volume mounts + compose env staging) in a single pass via
-compose_chain. Also owns the per-instance MEMORY.md reconcile (sync_memory_templates
-+ its modifier_memory_templates feeder, both keyed off the modifier taxonomy)
-and the dangerous-combination warning (warn_if_dangerous_modes) that
-agents_crud's writers call after persisting a new mode set.
+"""Agent composition layer: computes the docker build chain (InstanceModifiers
+in declaration order — BASE always, then user-active tags/modes) and runs each
+active modifier's handler contributions (volume mounts + compose env staging)
+in a single pass via compose_chain. Also owns the per-instance MEMORY.md
+reconcile (sync_memory_templates, which asks memory_addendums.addendum_text
+for each modifier's rendered block) and the dangerous-combination warning
+(warn_if_dangerous_modes) that agents_crud's writers call after persisting a
+new mode set.
 
 The modifier taxonomy itself (InstanceModifiers + tags() / modes() views +
 descriptions) lives in structs.py — both this module and agents_crud consume it
@@ -13,36 +14,31 @@ they're picker-side concerns and don't belong in the composition layer.
 
 Imports path constants from paths, the file_access primitives needed by
 prune_caches / prepare_caches + sync_memory_templates (ensure_dir,
-iter_file_stats, path_exists, remove_path, read_text, write_text,
-installed_cred_clis), env-/mount-staging helpers + docker subprocess wrappers
-from docker_config, the {auto}-mode firewall entry points from network, the
-InstanceModifiers taxonomy from structs, and splice_block from utils;
-agents_crud, menu_picker, and run.py import from here.
+iter_file_stats, path_exists, remove_path, read_text, write_text),
+env-/mount-staging helpers + docker subprocess wrappers from docker_config,
+the {auto}-mode firewall entry points from network, the InstanceModifiers
+taxonomy from structs, the addendum_text getter from memory_addendums, and
+splice_block from utils; agents_crud, menu_picker, and run.py import from here.
 """
 
 import sys
 import time
 
 from .file_access import (
-    ensure_dir, installed_cred_clis, iter_file_stats, path_exists, read_text,
-    remove_path, write_text,
+    ensure_dir, iter_file_stats, path_exists, read_text, remove_path, write_text,
 )
 from .docker_config import (
     ComposeEnvKey, add_docker_mount, any_agent_container_running,
     detect_docker_gid, stage_compose_env,
 )
+from .memory_addendums import _wrap_block, addendum_text
 from .network import start_whitelist_resolution
 from .paths import (
     CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
-    SEEK_SUMMARY_PATH, memory_template_path, state_memory_path,
+    state_memory_path,
 )
 from .structs import InstanceModifiers
 from .utils import splice_block
-
-# Wrapper banner around `<name>-instructions-{start,end}` marker lines in the
-# spliced MEMORY.md blocks — visual cue that the line is a machine-managed
-# comment, not memory instructions for the agent.
-MEMORY_BLOCK_WRAPPER_BANNER = "#" * 21
 
 # === Modifier taxonomy + chain-composition ordering ===
 # The InstanceModifiers enum (in structs.py) is the canonical ordered taxonomy
@@ -185,69 +181,37 @@ def warn_if_dangerous_modes(modes):
     print()
 
 
-# === Per-instance MEMORY.md reconcile (modifier-keyed addendums + seek_summary) ===
-# Each modifier optionally has a `memory/<filename_form>-addendum.md` template
-# that sync_memory_templates splices into per-instance MEMORY.md when the
-# modifier is active, and removes when it's not. seek_summary.md is the only
-# always-active template; it's project-wide rather than modifier-conditional.
-# Template files hold content only — start/end wrapper marker lines are
-# generated at sync time from the filename via _wrap_block, so the marker
-# convention lives in code (one source of truth) rather than spread across
-# template files.
-
-def modifier_memory_templates(sess_id):
-    """Build `(filename_form, active)` pairs for each modifier that has a
-    matching `<filename_form>-addendum.md` template on disk. Iterates ALL
-    `InstanceModifiers` (both tags and modes) so we also emit `active=False`
-    entries for currently-inactive modes — those drive cleanup of orphaned
-    blocks left behind after a previous launch removed the mode. Tags can't
-    be turned off (they're filename-derived and immutable for the instance's
-    lifetime), so for tags `active` is always True; the unified loop keeps
-    the iteration shape consistent. Modifiers without an addendum template
-    file are skipped here so the splicing loop doesn't need to recheck."""
-    active = set(sess_id.tags) | set(sess_id.modes)
-    return [(m.filename_form, m.value in active)
-            for m in InstanceModifiers
-            if path_exists(memory_template_path(m.filename_form))]
-
-
-def _wrap_block(name, content):
-    """Wrap `content` with banner-decorated `<name>-instructions-{start,end}`
-    marker lines. The banner is purely a visual cue that the line is a
-    machine-managed comment, not memory instructions for the agent. Single
-    source of truth for the marker format — every wrapped block in MEMORY.md
-    comes through here, and splice_block's marker detection keys on these
-    exact lines."""
-    banner = MEMORY_BLOCK_WRAPPER_BANNER
-    return (f"{banner} {name}-instructions-start {banner}\n"
-            f"{content.strip()}\n"
-            f"{banner} {name}-instructions-end {banner}")
-
+# === Per-instance MEMORY.md reconcile ===
+# sync_memory_templates iterates InstanceModifiers and asks memory_addendums
+# for each modifier's rendered text (already includes per-launch dynamic
+# content like the [prog] CLI list); each non-empty result is spliced into
+# the instance's MEMORY.md with a wrapper marker keyed off modifier.slug.
+# Marker format + content live in memory_addendums (one source of truth);
+# this function is a pure orchestration loop.
 
 def sync_memory_templates(sess_id):
     """Reconcile per-instance MEMORY.md with the current modifier set. One
-    read + at most one write per launch. Always-active seek_summary first,
-    then each modifier addendum (active → spliced in / refreshed; inactive →
-    spliced out). The [prog] addendum gets the installed cred-CLI names
-    appended inline so the agent learns which credentialed tools are ready
-    to use this launch. Content outside the wrapped blocks is preserved
-    verbatim — that's where agent-added auto-memory pointer entries live.
+    read + at most one write per launch. Iterates InstanceModifiers in
+    declaration order (BASE → tags → modes) so block order in MEMORY.md
+    matches chain order; for each, asks memory_addendums.addendum_text for
+    the modifier's rendered block (already includes per-launch dynamic
+    content like the [prog] CLI list). Empty text means 'nothing to splice
+    this launch' — skipped entirely. Non-empty text gets spliced in when
+    the modifier is active, or removed when not. Content outside the
+    wrapped blocks is preserved verbatim — that's where agent-added auto-
+    memory pointer entries live.
 
     No defensive cleanup of unusual file types at memory_path — if read or
     write fails on a malformed state dir the caller can just delete the
     instance and create a new one."""
     memory_path = state_memory_path(sess_id.state_dir)
     original = read_text(memory_path) if path_exists(memory_path) else ""
-    content = splice_block(original, _wrap_block("seek_summary", read_text(SEEK_SUMMARY_PATH)), keep=True)
+    content = original
 
-    for modifier, active in modifier_memory_templates(sess_id):
-        text = read_text(memory_template_path(modifier))
-        if modifier == InstanceModifiers.TAG_PROG.filename_form:
-            if clis := installed_cred_clis():
-                text = text.rstrip() + " " + clis
-            else:
-                active = False   # no creds → nothing to advertise; drop the block
-        content = splice_block(content, _wrap_block(modifier, text), keep=active)
+    for modifier in InstanceModifiers:
+        text = addendum_text(modifier)
+        if text:
+            content = splice_block(content, _wrap_block(modifier.slug, text), keep=modifier.value in sess_id.chain)
 
     if content != original:
         write_text(memory_path, content)
@@ -255,46 +219,39 @@ def sync_memory_templates(sess_id):
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===
 
-def compose_chain(tags, modes, state_dir):
-    """Run each active modifier's handler and compose the docker build chain.
-    Two independent steps: (1) invoke `_apply_<modifier>()` for each active
-    modifier — side effects: stage compose env vars / bind-mounts, kick off
-    the {auto}-mode background DNS resolve, etc.; (2) build the chain list in
-    InstanceModifiers declaration order. Always starts with 'base'.
+def compose_chain(sess_id):
+    """Run each active modifier's handler and return the docker build chain.
+    Accesses `sess_id.chain` once — that's where the validation (typo'd
+    tags / stale modes) lives, and it's the canonical modifier-value tuple
+    in InstanceModifiers declaration order (BASE first, then user-active
+    tags + modes). Dispatch then runs `_apply_<modifier>()` for each
+    user-toggleable modifier whose value is in the chain — side effects
+    only: stage compose env vars / bind-mounts, kick off the {auto}-mode
+    background DNS resolve, etc. BASE has no handler (no side effects
+    beyond being the starting image).
 
-    `state_dir` is the per-instance host path that gets bind-mounted into
-    the container — passed in for {auto}-mode (status files live inside it);
-    other handlers don't read it. write_text inside the network module auto-
-    creates this dir, so it's safe to use here before setup_state runs.
+    sess_id.state_dir is the per-instance host path bind-mounted into the
+    container — passed to _apply_auto for the {auto}-mode status file
+    location; other handlers don't read it. write_text inside the network
+    module auto-creates this dir, so it's safe to use here before
+    setup_state runs.
 
     Returns the chain list of strings — drives image naming
     (claude-agents:<chain[1:] joined by dot>, or claude-agents:base for the
     base case) and the compose -f stack via chain_image_tag /
     chain_compose_files in docker_config.
 
-    Unknown tags/modes raise ValueError so a typo surfaces loudly. `tags` /
-    `modes` accept any iterable of canonical-string forms; coerced to sets
-    internally for O(1) membership checks and natural deduplication.
+    Adding a new user-toggleable modifier means: a new entry in
+    InstanceModifiers, the matching `_apply_*` function above, and one new
+    conditional below. sess_id.chain picks it up automatically — it
+    iterates InstanceModifiers."""
+    chain = sess_id.chain   # validates against InstanceModifiers taxonomy
 
-    Adding a new modifier means: a new entry in InstanceModifiers, the
-    matching `_apply_*` function above, and one new conditional in step (1)
-    here. Step (2) picks it up automatically — it iterates InstanceModifiers."""
-    tags, modes = set(tags), set(modes)
-    if unknown := tags - set(InstanceModifiers.tag_values()):
-        raise ValueError(f"Unknown tag(s): {sorted(unknown)}. Known tags: {list(InstanceModifiers.tag_values())}")
-    if unknown := modes - set(InstanceModifiers.mode_values()):
-        raise ValueError(f"Unknown mode(s): {sorted(unknown)}. Known modes: {list(InstanceModifiers.mode_values())}")
-
-    # (1) Side-effect dispatch — each active modifier stages its contributions.
-    if InstanceModifiers.TAG_PROG.value in tags:
+    if InstanceModifiers.TAG_PROG.value in chain:
         _apply_prog()
-    if InstanceModifiers.MODE_AUTO.value in modes:
-        _apply_auto(state_dir)
-    if InstanceModifiers.MODE_DOOD.value in modes:
+    if InstanceModifiers.MODE_AUTO.value in chain:
+        _apply_auto(sess_id.state_dir)
+    if InstanceModifiers.MODE_DOOD.value in chain:
         _apply_dood()
 
-    # (2) Chain construction — iterate the source of truth for ordering and
-    # pick whichever modifiers are active. Order in the chain follows
-    # InstanceModifiers declaration order, regardless of input order.
-    active = tags | modes
-    return ["base"] + [m.value for m in InstanceModifiers if m.value in active]
+    return list(chain)

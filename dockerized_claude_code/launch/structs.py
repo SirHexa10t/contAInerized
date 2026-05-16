@@ -61,19 +61,25 @@ from .paths import AGENT_WORKSPACE_MAP_FILE, instance_state_dir_path, state_md_p
 # ============================================================
 
 class InstanceModifiers(Enum):
-    """Every build-chain modifier — filename-derived [tags] and per-instance
-    {modes} unified into a single ordered taxonomy. Member-name prefix encodes
-    kind: `TAG_*` for filename-derived tags, `MODE_*` for per-instance modes.
+    """Every build-chain modifier — the always-on `BASE` plus filename-derived
+    [tags] and per-instance {modes} unified into a single ordered taxonomy.
+    Member-name prefix encodes kind: `TAG_*` for filename-derived tags, `MODE_*`
+    for per-instance modes; the unprefixed `BASE` is implicit (always active,
+    never user-toggled) and naturally falls out of the `tags()` / `modes()`
+    subset views.
     Each member carries:
       • `.value`         — canonical on-disk string (filename + JSON form)
-      • `.filename_form` — lowercased, for docker image tags + `compose.<x>.yml`
-                           + `<x>-addendum.md` (e.g. {DooD} → 'dood')
+      • `.slug`          — lowercased value, used wherever a case-stable
+                           identifier is needed (MEMORY.md wrapper marker
+                           stems, image-tag construction, etc.; e.g.
+                           {DooD} → 'dood')
       • `.description`   — one-sentence picker-legend explanation
     Enum declaration order encodes chain composition order: base → tags → modes.
     Subset views (`tags()` / `modes()` for the members; `tag_values()` /
     `mode_values()` for the canonical strings) are memoized — call them freely
     without buffering locally."""
 
+    BASE      = ("base", "always-on starting image — every agent gets it; no user-facing toggle")
     TAG_PROG  = ("prog", "programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)")
     MODE_AUTO = ("auto", "autonomous; Doesn't need permission to perform actions. Built with a firewall slightly increased security. Danger: hard to control!")
     MODE_DOOD = ("DooD", "Docker outside-of Docker; Can run Docker. Danger: authority to do anything (effectively host-root)!")
@@ -83,7 +89,7 @@ class InstanceModifiers(Enum):
         self.description = description
 
     @property
-    def filename_form(self):
+    def slug(self):
         return self.value.lower()
 
     @property
@@ -91,8 +97,14 @@ class InstanceModifiers(Enum):
         """User-facing label with the kind-distinguishing wrapping: `[prog]` for
         tags (square brackets — the filename-grammar form), `{auto}` / `{DooD}`
         for modes (curly braces). Single source of truth for any picker prompt
-        / dialog / banner that needs to name a specific modifier."""
-        return f"[{self.value}]" if self.name.startswith("TAG_") else f"{{{self.value}}}"
+        / dialog / banner that needs to name a specific modifier. BASE has no
+        user-facing label (never user-toggled), so it's not reachable here in
+        practice — its bare value is returned as a safe fallback."""
+        if self.name.startswith("TAG_"):
+            return f"[{self.value}]"
+        if self.name.startswith("MODE_"):
+            return f"{{{self.value}}}"
+        return self.value
 
     @classmethod
     def format_prefix(cls, values):
@@ -103,10 +115,13 @@ class InstanceModifiers(Enum):
         wrapping convention lives on the enum and callers don't replicate
         it. Unknown values fall back to `[v]` rendering — covers typo'd
         filename tags (the more common origin of strays); compose_chain
-        rejects unknowns separately at launch time."""
+        rejects unknowns separately at launch time. BASE is excluded from
+        the labels dict — it's not a tag or mode and never appears in
+        user-facing value lists, so any 'base' that slipped in would also
+        hit the unknown-tag fallback."""
         if not values:
             return ""
-        labels = {m.value: m.label for m in cls}
+        labels = {m.value: m.label for m in (*cls.tags(), *cls.modes())}
         return "".join(labels.get(v, f"[{v}]") + " " for v in values)
 
     # The four subset-view classmethods below are memoized via @functools.cache
@@ -281,3 +296,24 @@ class SessionIdentity(InstanceIdentity):
     `inst_id.with_modes(...)`, or directly by continuable_instances when the
     picker pre-loads stored modes for the modify flow's pre-fill."""
     modes: tuple                        # per-instance opt-ins like ('auto',) or ('auto', 'DooD'); tuple keeps the dataclass hashable
+
+    @property
+    def chain(self) -> tuple:
+        """Active modifier values for this session in InstanceModifiers
+        declaration order — BASE always first, then the session's tags,
+        then its modes. Drives both the docker image build order (returned
+        as-is from compose_chain) and per-instance MEMORY.md block ordering
+        + active/inactive judgement (consumed by sync_memory_templates via
+        `modifier.value in sess_id.chain`).
+
+        Validates self.tags / self.modes against the InstanceModifiers
+        taxonomy on access — a typo'd filename tag or stale modes-map entry
+        surfaces as a ValueError here rather than as a silent drop from the
+        chain (and rather than as a deeper-down failure when an unknown
+        value reaches docker / compose)."""
+        if unknown := set(self.tags) - set(InstanceModifiers.tag_values()):
+            raise ValueError(f"Unknown tag(s): {sorted(unknown)}. Known tags: {list(InstanceModifiers.tag_values())}")
+        if unknown := set(self.modes) - set(InstanceModifiers.mode_values()):
+            raise ValueError(f"Unknown mode(s): {sorted(unknown)}. Known modes: {list(InstanceModifiers.mode_values())}")
+        return tuple(m.value for m in InstanceModifiers
+                     if m is InstanceModifiers.BASE or m.value in self.tags or m.value in self.modes)

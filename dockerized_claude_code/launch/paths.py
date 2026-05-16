@@ -25,7 +25,6 @@ from pathlib import Path
 
 DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root — one above launch/
 AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .conf definitions
-MEMORY_DIR = DOCKERIZED_CLAUDE_ROOT / "memory"                    # source-of-truth template files synced into per-instance MEMORY.md by agents_crud.sync_memory_templates
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
 PROJECT_CUSTOM_SKILLS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_skills"   # project-bundled skills (paired with workspace .skills/)
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
@@ -38,8 +37,12 @@ DOCKER_DIR = DOCKERIZED_CLAUDE_ROOT / "docker"                    # Dockerfile +
 # ============================================================
 # Host-side persistent state — everything under ~/.claude-agents
 # ============================================================
+# `_HOME` is the host user's home dir, captured once so paths built from it
+# don't repeatedly call Path.home(). Used by AGENTS_STATE and DEFAULTING_DIRS;
+# leaking-underscore name marks it as paths-internal.
 
-AGENTS_STATE = Path.home() / ".claude-agents"
+_HOME = Path.home()
+AGENTS_STATE = _HOME / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"                       # shared OAuth account info
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"             # shared API credentials
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
@@ -80,7 +83,6 @@ FIREWALL_WHITELIST_FILE = USER_EXTRAS_DIR / "firewall_whitelist.txt"
 # bind-mounts something like the user's whole home dir. Same list drives the
 # picker's `(DEFAULT DIR)` tagging.
 
-_HOME = Path.home()
 DEFAULTING_DIRS = [
     str(_HOME),
     str(_HOME / "Desktop"),
@@ -128,6 +130,7 @@ if not Path(DEFAULT_WORKSPACE).is_dir():
 CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
 CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
+CLAUDE_SUMMARY_IN_CONTAINER = Path("/workspace/.claude_summary")   # project summary file the agent reads on demand (lives at the workspace mount root)
 RO_MOUNT_OPTION = "ro"
 
 
@@ -236,14 +239,10 @@ OPTIONAL_CREDS_README_FILENAME = "README.txt"        # auto-created in optional_
 OPTIONAL_CREDS_README_PATH     = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME   # full host path the README is planted at
 OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text token (e.g. jira/token → $JIRA_API_TOKEN)
 
-# Memory templates in MEMORY_DIR — synced into per-instance MEMORY.md at each
-# launch by agent_composition.sync_memory_templates. Each template's content is
-# wrapped with start/end marker lines (banner + name) generated at sync time;
-# the template files themselves hold content only, no inline markers. Marker
-# format (banner string + wrap function) lives in agent_composition — it's a
-# composition concern, not a path concern.
-SEEK_SUMMARY_PATH = MEMORY_DIR / "seek_summary.md"   # always-active template (project-wide)
-ADDENDUM_SUFFIX = "-addendum.md"                     # `<modifier_filename_form>{ADDENDUM_SUFFIX}` — per-modifier addendum (e.g. auto-addendum.md, prog-addendum.md)
+# Memory addendum texts now live as Python constants in memory_addendums.py
+# rather than `<modifier>-addendum.md` files; the splicing logic in
+# agent_composition.sync_memory_templates consumes them directly. No path
+# constants needed here.
 
 # Compose-file naming. The base file is `compose.yml`; per-layer files follow
 # `compose.<step>.yml` (built by the `compose_layer_path` lambda at the bottom
@@ -341,7 +340,7 @@ state_md_path           = lambda state_dir:       state_dir / INSTANCE_CLAUDE_MD
 state_memory_path       = lambda state_dir:       state_dir / INSTANCE_MEMORY_FILE_RELPATH
 state_projects_path     = lambda state_dir:       state_dir / INSTANCE_PROJECTS_RELPATH
 state_skill_subdir_path = lambda state_dir, name: state_dir / INSTANCE_SKILLS_RELPATH / name
-state_pending_yml_path  = lambda state_dir:       state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
+state_domain_resolve_status_path = lambda state_dir:     state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
 
 # Per-instance state directory itself (one level up from the per-state-dir files)
 instance_state_dir_path = lambda instance:        AGENTS_STATE / instance
@@ -354,8 +353,6 @@ skill_marker_path       = lambda skill_dir:       skill_dir / SKILL_MARKER_FILEN
 optional_creds_service_path = lambda service:     OPTIONAL_CREDS_DIR / service
 optional_creds_token_path   = lambda service:     OPTIONAL_CREDS_DIR / service / OPTIONAL_CREDS_TOKEN_FILENAME
 
-# Per-modifier memory addendum template (modifier ∈ InstanceModifiers.filename_form values)
-memory_template_path    = lambda modifier:        MEMORY_DIR / f"{modifier}{ADDENDUM_SUFFIX}"
 agent_conf_path         = lambda name:            AGENTS_DIR / f"{name}{CONF_EXT}"
 
 # Docker compose-layer YAML (step ∈ InstanceModifiers value strings, lowercased)
