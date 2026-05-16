@@ -259,10 +259,15 @@ class InstanceIdentity(AgentIdentity):
 
     def validate_workspace(self) -> None:
         """Exit if the workspace path is set but doesn't resolve to a real
-        directory (stale agent_workspace_map.json entry). Workspace=None passes
-        through silently so the caller can decide to prompt for a new value
-        instead of treating absence as an error."""
-        if self.workspace is not None and not is_dir(self.workspace):
+        directory (stale agent_workspace_map.json entry). Workspace=None /
+        empty string passes through silently so the caller can decide to
+        prompt for a new value instead of treating absence as an error —
+        empty-string is normalized to None here since `Path("").is_dir()`
+        spuriously returns True (it resolves to cwd) and we don't want to
+        bind-mount the launcher's cwd into the container."""
+        if not self.workspace:
+            return
+        if not is_dir(self.workspace):
             sys.exit(
                 f"Workspace for '{self.instance}' is not a valid directory: {self.workspace}\n"
                 f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"

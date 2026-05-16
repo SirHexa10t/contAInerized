@@ -1,6 +1,8 @@
 """Tests for launch.structs — InstanceModifiers taxonomy + identity dataclasses."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from launch.structs import (
     InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
@@ -233,6 +235,112 @@ class TestSessionIdentityChain(unittest.TestCase):
     def test_chain_returns_tuple(self):
         # Tuple (immutable) — signals "don't mutate this".
         self.assertIsInstance(self._sess(["prog"], ["auto"]).chain, tuple)
+
+
+# ============================================================
+# validate_workspace — misconfigured workspace-map entries
+# ============================================================
+
+
+class TestValidateWorkspace(unittest.TestCase):
+    """validate_workspace exits cleanly when a stored workspace path no longer
+    resolves to a real directory (stale workspace-map entry from a deleted /
+    renamed project). None passes through silently — resolve_target uses that
+    to detect the missing-entry case and re-prompt."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _inst(self, workspace):
+        return InstanceIdentity(agent="x", session="s", workspace=workspace, is_brand_new=False)
+
+    def test_valid_directory_passes_silently(self):
+        # Workspace is an existing directory → no exit.
+        valid_dir = self.tmp / "valid"
+        valid_dir.mkdir()
+        self._inst(str(valid_dir)).validate_workspace()   # would raise SystemExit if invalid
+
+    def test_none_workspace_passes_silently(self):
+        # None is the "missing map entry" sentinel — caller (resolve_target)
+        # decides to re-prompt; validate_workspace mustn't treat it as an error.
+        self._inst(None).validate_workspace()
+
+    def test_nonexistent_path_exits(self):
+        nonexistent = self.tmp / "does-not-exist"
+        with self.assertRaises(SystemExit):
+            self._inst(str(nonexistent)).validate_workspace()
+
+    def test_path_to_file_exits(self):
+        # Workspace must be a directory — pointing it at a regular file is wrong.
+        file_path = self.tmp / "a-file"
+        file_path.write_text("not a directory")
+        with self.assertRaises(SystemExit):
+            self._inst(str(file_path)).validate_workspace()
+
+    def test_empty_string_passes_silently(self):
+        # Empty string is treated like None — passes through silently so the
+        # downstream DEFAULT_WORKSPACE fallback (in set_container_mounts) can
+        # take over. NOT a SystemExit, despite `Path("").is_dir()` spuriously
+        # returning True (Python resolves empty path to cwd, which we
+        # definitely don't want to bind-mount).
+        self._inst("").validate_workspace()
+
+
+# ============================================================
+# Modes misconfiguration — additional edge cases beyond test_chain
+# ============================================================
+
+
+class TestModesMisconfiguration(unittest.TestCase):
+    """Modes come from agent_modes_map.json — a JSON file the user can hand-edit.
+    Bad values (typo'd mode names, sundry case mistakes, dup entries) need to
+    surface as a loud failure rather than a silent half-build.
+
+    Uses a SessionIdentity subclass that overrides .tags so we don't need a
+    real agent .md on disk — same pattern as TestSessionIdentityChain above."""
+
+    def _sess(self, modes, tags=()):
+        class _Sess(SessionIdentity):
+            @property
+            def tags(self):
+                return tuple(tags)
+        return _Sess(agent="x", session="s", workspace="/tmp",
+                     is_brand_new=False, modes=tuple(modes))
+
+    def test_unknown_mode_raises_with_listed_value(self):
+        # The ValueError message should name the offending mode so the user can
+        # find it in their modes map.
+        with self.assertRaises(ValueError) as ctx:
+            _ = self._sess(["badmode"]).chain
+        self.assertIn("badmode", str(ctx.exception))
+
+    def test_case_mismatch_is_caught(self):
+        # `auto` is canonical; `Auto` / `AUTO` are unknown. Case sensitivity is
+        # intentional — DooD's mixed-case name relies on case being meaningful.
+        with self.assertRaises(ValueError):
+            _ = self._sess(["Auto"]).chain
+        with self.assertRaises(ValueError):
+            _ = self._sess(["AUTO"]).chain
+
+    def test_mixed_valid_and_unknown_still_raises(self):
+        # One typo shouldn't slip through just because another mode is valid.
+        with self.assertRaises(ValueError) as ctx:
+            _ = self._sess(["auto", "typo"]).chain
+        self.assertIn("typo", str(ctx.exception))
+
+    def test_duplicate_modes_are_idempotent(self):
+        # Duplicates in the input collapse via the set-based chain construction.
+        # Same as if they appeared once.
+        chain = self._sess(["auto", "auto"]).chain
+        self.assertEqual(chain.count("auto"), 1)
+
+    def test_empty_modes_list_yields_base_only_chain(self):
+        # No modes ⇒ no mode-driven blocks; chain is just BASE.
+        self.assertEqual(self._sess([]).chain, ("base",))
 
 
 if __name__ == "__main__":

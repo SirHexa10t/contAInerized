@@ -4,56 +4,56 @@
 
 ### Purpose
 
-Docker-based launcher for pre-made Claude Code agents. Each persona ships its own `CLAUDE.md` and (optionally) `.conf`; all share OAuth credentials, workspace mapping, slash commands, status line, skills, and toolchain caches. Multiple persistent sessions per agent; prior conversations resume automatically. Per-agent build *tags* and per-instance runtime *modes* compose into a layered Docker image and per-launch behavior.
+Docker-based launcher for pre-made Claude Code agents. Each persona ships its own `CLAUDE.md` and (optionally) `.conf`; all share OAuth credentials, workspace mapping, slash commands, status line, skills, and toolchain caches. Multiple persistent sessions per agent; prior conversations resume automatically. Per-agent filename *tags* + per-instance *modes* compose into a layered Docker image and per-launch behavior.
 
 ### Tech Stack
 
-- Python 3.10+ host launcher (walrus operator, dataclasses)
+- Python 3.11 host launcher (walrus operator, frozen dataclasses, modern union types)
 - `prompt_toolkit` (TUI picker), `python-dotenv` (`.conf` parsing), `rich` (markdown rendering for previews + F8 legend); stdlib `readline` for workspace tab-completion
-- Docker + Compose v2; base is `debian:bookworm-slim` + Claude Code; `[prog]` adds Rust/Node/uv toolchains, `{auto}` adds iptables + sudo + firewall script, `{DooD}` mounts host docker socket
-- No tests, no CI, no lockfile
+- Docker + Compose v2; base is `debian:bookworm-slim` + Claude Code + jq/yq/fd/tree/ripgrep; `[prog]` adds Rust/Node/uv + python3-dotenv, `{auto}` adds iptables + sudo + firewall script, `{DooD}` mounts host docker socket
+- `unittest` test suite (346 tests, ~0.08s); `mypy` + `ruff` as the dev-side check stack (no CI gate)
 
 ### Project Structure
 
 ```
-run.py                              entry point: 7-stage launch() orchestrator
+run.py                              entry point: 7-stage launch() orchestrator; --dry-run flag skips run_compose for testable end-to-end
 launch/
-  paths.py                          centralised path constants — import root, zero internal deps; host & container paths, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS + the picker's resolved DEFAULT_WORKSPACE, DOMAINS_PENDING_RESOLVE_FILENAME, RESOLVED_DOMAINS_CACHE_FILE, TEMPLATES_DIR + per-template path constants (OPTIONAL_CREDS_README_TEMPLATE, FIREWALL_WHITELIST_TEMPLATE), and the four per-layer bind-mount dicts (DOCKER_BASE_MOUNTS for always-on, DOCKER_AUTO_MOUNTS for {auto}, DOCKER_DOOD_MOUNTS for {DooD}, CACHE_MOUNTS for [prog]) — every container bind-mount is declared as one of these dicts and the matching `_apply_*` handler iterates it via add_docker_mount. Plus path-builder lambdas at the end (`state_md_path`, `state_memory_path`, `agent_conf_path`, `compose_layer_path`, etc.) — every dynamic "var / constant" join in the codebase routes through one of these
-  utils.py                          domain-neutral helpers — `plural`, `relative_time` (formatting), `ordering_index_or_end` (sorting), `split_host_port`, `splice_block` (parsing). Reserved as the project's home for regex / sorting / parsing / formatting; no disk access (that's file_access). Leaf module — no internal imports
-  file_access.py                    every disk-touching call flows through here. Mutations (`ensure_dir`, `remove_path` — file/symlink/dir-aware single removal, `move_path`, `write_text`, `copy_file`); existence + kind queries (`path_exists`, `is_dir`, `is_file`, `is_symlink` — all accept Path or str); listing + searching (`iter_subdirs`, `rglob_paths`, `tab_complete_paths`); stats (`file_mtime`, `iter_file_stats`, `is_file_recent`); host paths (`resolved_path`, `resolved_cwd`, `home_dir`, `expand_user_path`); plus domain helpers (filename grammar, JSON-map caches, optional-creds discovery, firewall-whitelist self-planting). `find_md_for_agent` / `load_conf` / `present_optional_cred_services` are LRU-cached; the two JSON-map files share a single `_json_map_cache` dict + private load/save helpers. Leaf-shaped — imports paths only
-  structs.py                        identity dataclasses (AgentIdentity → InstanceIdentity → SessionIdentity, frozen=True, inheritance not composition) + InstanceModifiers Enum (TAG_PROG / MODE_AUTO / MODE_DOOD with .value/.filename_form/.label/.description + tags()/modes() classmethods memoized via @functools.cache, plus `format_prefix(values)` classmethod that renders modifier-value strings with each member's wrapping); also owns SESSION_SEP ("__") since it's an agent-instance naming convention, not just a path separator; imports paths + file_access only
-  claude_code_config.py             Claude-Code-side UX configuration — `build_status_line(inst_id)` (cyan agent + grey workspace + green email + blue instance, fed via AGENT_STATUS_LINE env) and `set_terminal_title(name)` (OSC 0 escape so concurrent agent tabs are distinguishable); leaf-shaped, imports paths + file_access only. docker_config calls into here from set_container_env (status line) and run_compose (title)
-  agent_composition.py              compose_chain(tags, modes, state_dir) — dispatches _apply_prog / _apply_auto / _apply_dood handlers (each iterates its matching DOCKER_*_MOUNTS / CACHE_MOUNTS dict from paths via add_docker_mount), then builds ["base", ...active modifiers in InstanceModifiers declaration order]; warn_if_dangerous_modes (modifier-combination guardrails — currently {auto}+{DooD}); mode_memory_templates list for sync_memory_templates; imports paths/file_access/docker_config (incl. ComposeEnvKey + detect_docker_gid + any_agent_container_running)/network/structs
-  network.py                        {auto}-mode firewall: BUILTIN_FIREWALL_DOMAINS (~135 curated dev/cloud/docs entries) + host-side DNS resolution with two-phase cascade (critical Anthropic sync → rest streaming via docker exec iptables -I), cross-launch resolved-domains cache (RESOLVED_DOMAINS_CACHE_FILE, 3h TTL via is_file_recent), agent-visible status file (domains_pending_resolve.yml in state dir); the updater + iptables-insert helpers lazy-import docker_config (wait_for_container_running, docker_exec_root) to break the docker_config↔network cycle. `split_host_port` for parsing whitelist entries comes from utils
-  docker_config.py                  every compose env-var key as a member of `ComposeEnvKey(str, Enum)` — str-subclass so members work transparently as dict keys / in f-strings / in subprocess env; `__str__` override means `f"{key}"` emits the value, not the enum repr. stage_compose_env(KEY, value) + _compose_env accumulator; add_docker_mount(src, tgt) + _docker_mounts accumulator (replaces every compose `volumes:` block); CONTAINER_NAME_PREFIX (one place container naming is defined); CONTAINER_ENV_FORWARDS + CONTAINER_ENV_FIXED → `-e` flags emitted by run_compose (replaces compose.yml's `environment:` block for everything except TERM); docker subprocess helpers (detect_docker_gid, wait_for_container_running, docker_exec_root, any_agent_container_running) — every direct `docker` CLI call flows through here; set_container_env / set_container_mounts orchestrate the per-launch batch (status line via claude_code_config); chain_image_tag / chain_compose_files; ensure_image, run_compose (sets terminal title via claude_code_config, awaits Phase 1, spawns firewall updater before subprocess.call)
-  agents_crud.py                    instance-state CRUD: list_all_instances, update_workspace_map, set_instance_modes (calls agent_composition.warn_if_dangerous_modes after every write), install_latest_md, sync_memory_templates, _force_remove (sudo fallback for Docker bind-mount leftovers), modify_instance, delete_instance, resolve_pick (CLI name → identity), creatable_agents / continuable_instances (picker entries), picker sort keys (agent_sort_key + tag/mode_sort_key)
-  user_additions.py                 thin facade for user-side contributions — aggregated_skills_mounts, optional_creds_mounts, plant_user_extras (idempotent first-launch copy of optional_creds_readme.txt + firewall_whitelist.txt if {auto}); delegates to file_access (disk) + docker_config (mount/env staging)
-  menu_picker.py                    prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend via rich-markdown tables) + ask_for_workspace + prompt_modes (auto then DooD-if-prog) + prompt_session + print_launch_banner
-  audit.py                          read-only state-correctness checker; standalone `python -m launch.audit`
-  templates/                        first-launch file bodies — firewall_whitelist.txt + optional_creds_readme.txt; planted by user_additions.plant_user_extras (with a defensive self-plant in file_access.user_firewall_whitelist_lines for the earlier {auto} read in stage 5) via FIREWALL_WHITELIST_TEMPLATE / OPTIONAL_CREDS_README_TEMPLATE in paths.py
+  paths.py                          centralised path constants — import root, zero in-project deps. `_HOME = Path.home()` at top, then host (`AGENTS_STATE`, `USER_EXTRAS_DIR`, `OPTIONAL_CREDS_MOUNTS` as `{svc: (mount, cli|None)}` tuples, `OPTIONAL_CREDS_TOKEN_ENV_VARS`, `DEFAULTING_DIRS` + resolved `DEFAULT_WORKSPACE`), container (`CLAUDE_HOME_IN_CONTAINER`, `CLAUDE_CONFIG_IN_CONTAINER`, `CLAUDE_SUMMARY_IN_CONTAINER`), the four per-layer bind-mount dicts (`DOCKER_BASE_MOUNTS`, `DOCKER_AUTO_MOUNTS`, `DOCKER_DOOD_MOUNTS`, `CACHE_MOUNTS`), and path-builder lambdas (`state_md_path`, `state_memory_path`, `state_domain_resolve_status_path`, `compose_layer_path`, etc.)
+  utils.py                          domain-neutral helpers — `plural`, `relative_time`, `ordering_index_or_end`, `split_host_port`, `splice_block` (marker-bounded region splice; powers the per-modifier MEMORY.md reconcile). No disk access (that's `file_access`). Leaf module
+  file_access.py                    every disk-touching call routes through here. Mutations + existence/kind queries + listing + stats + host paths. `force_remove(path, *, name=None)` (sudo + `sudo -k` fallback for root-owned bind-mount leftovers — moved here from agents_crud). `installed_cred_clis()` space-joins CLI names of services with creds present (drives the [prog] credentials notice). `find_md_for_agent` / `load_conf` / `present_optional_cred_services` are LRU-cached; `_json_map_cache` serves both workspace + modes maps
+  structs.py                        identity dataclasses (AgentIdentity → InstanceIdentity → SessionIdentity, frozen=True, inheritance) + `InstanceModifiers` enum (`BASE`, `TAG_PROG`, `MODE_AUTO`, `MODE_DOOD` — `BASE` is an actual member now, not a hardcoded chain prefix). Each member: `.value` (canonical str), `.slug` (lowercased value — renamed from `.filename_form` since it's no longer file-specific), `.label` (`[prog]` / `{auto}` wrapping), `.description`. `SessionIdentity.chain` property returns the active-modifier-values tuple in InstanceModifiers order (BASE always first) AND validates self.tags/modes — raises `ValueError` on unknowns
+  compose_env.py                    compose-side env-var staging — split out from docker_config. `ComposeEnvKey(str, Enum)` taxonomy; `_compose_env` accumulator + `stage_compose_env(key, value)` + `subprocess_env()` overlay. `CONTAINER_ENV_FORWARDS` / `CONTAINER_ENV_FIXED` emission lists + `container_env_args()` for `-e KEY=VALUE` flag building. Formatters (`install_creds_flags`, `token_env_dict`, `conf_env_args`). `set_container_env(inst_id)` orchestrator — sister to docker_config's `set_container_mounts`
+  docker_config.py                  docker-subprocess + bind-mount accumulator + image-chain naming. `add_docker_mount` + `_docker_mounts` accumulator; `chain_image_tag` / `chain_compose_files`; docker CLI helpers (`require_docker`, `detect_docker_gid`, `wait_for_container_running`, `docker_exec_root`, `any_agent_container_running` — every direct `docker` call lives here); `set_container_mounts(inst_id)` (workspace=None falls back to DEFAULT_WORKSPACE); `ensure_image` + `run_compose`. `CONTAINER_NAME_PREFIX = "claude-code_"` (single source of truth for per-launch container naming)
+  memory_addendums.py               memory-addendum text + modifier→addendum mapping + wrapper-marker format. Constants `SEEK_SUMMARY`, `FIREWALL_NOTICE`, `CREDENTIALS_NOTICE` (named after content, not the modifier — `CREDENTIALS_NOTICE` collapses to `""` at import time when no creds are installed). `MODIFIER_ADDENDUMS` maps `InstanceModifiers.BASE` → SEEK_SUMMARY, `.TAG_PROG` → CREDENTIALS_NOTICE, `.MODE_AUTO` → FIREWALL_NOTICE. `addendum_text(modifier)` joins active addendums with `\n\n\n`. `_wrap_block(slug, content)` adds the banner-wrapped `<slug>-instructions-{start,end}` markers
+  agent_composition.py              `compose_chain(sess_id)` runs `_apply_prog` / `_apply_auto` / `_apply_dood` dispatch (validation happens via `sess_id.chain` access), returns `list(sess_id.chain)`; `warn_if_dangerous_modes` guards `{auto}+{DooD}`; `sync_memory_templates(sess_id)` iterates `InstanceModifiers`, asks `addendum_text(modifier)` per slot, splices via `_wrap_block(modifier.slug, text)` keyed on `modifier.value in sess_id.chain`; cache prepare/prune helpers (`prepare_caches` always-mkdir, `prune_caches` over-threshold + age + container-running guard)
+  network.py                        {auto}-mode firewall: `BUILTIN_FIREWALL_DOMAINS` (~135 curated entries) + user whitelist, two-phase DNS cascade (critical Anthropic sync → rest streaming via `docker exec iptables -I`), cross-launch resolved-IP cache at `~/.claude-agents/resolved_domains.txt` (6h TTL), agent-visible `domains_pending_resolve.yml` status. `_phase2_thread` / `_phase2_queue` / `_phase1_executor` typed as Optional with explicit narrowing asserts at workers' entry
+  agents_crud.py                    instance-state CRUD: `list_all_instances`, `update_workspace_map`, `set_instance_modes` (calls `warn_if_dangerous_modes` after every write), `install_latest_md`, `modify_instance`, `delete_instance`, `resolve_pick` (CLI name → AgentIdentity | SessionIdentity | None), picker-entry builders (`creatable_agents` / `continuable_instances`) + sort keys. `sync_memory_templates` lives in agent_composition (modifier concern), not here
+  user_additions.py                 thin facade: `aggregated_skills_mounts`, `optional_creds_mounts` (returns sorted service names; unpacks `(mount, cli)` tuples), `plant_user_extras` (always plants optional_creds README; firewall_whitelist.txt only under `{auto}`)
+  menu_picker.py                    prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + `ask_for_workspace` + `prompt_modes` (auto then DooD-if-prog) + `prompt_session` + `print_launch_banner`
+  claude_code_config.py             Claude-Code-side UX — `build_status_line(inst_id)` + `set_terminal_title(name)`. Leaf-shaped
+  audit.py                          read-only state-correctness checker; `python -m launch.audit`
+  templates/                        first-launch user-side files: `firewall_whitelist.txt`, `optional_creds_readme.txt`
+  tests/                            unittest suite — 14 files / 346 tests / ~0.08s. Run via `python3 -m unittest discover -s launch/tests` from `/workspace`. Notable: `test_env_coverage.py` scans compose .yml + Dockerfile files and asserts every `${VAR}` ref is in our `ComposeEnvKey` ∪ `INSTALL_<TOOL>` ∪ token-vars taxonomy (catches typos that would silently substitute to ""); `test_cache.py` covers the toolchain cache lifecycle (prepare/prune/container-running guard); `test_essential_files.py` asserts every non-BASE modifier has a matching Dockerfile + compose layer + `_apply_<slug>` handler
 agents/                             agent definitions — drop `<name>[tag](parent).md` (+ optional `.conf`) here
-custom_commands/                    project-wide slash commands — refactor, unspaghettify, write-readme, write-summary
-custom_skills/                      project-bundled skills (currently: print)
-memory/
-  seek_summary.md                   always-active MEMORY.md template (wrappers + body)
-  auto-addendum.md                  {auto}-mode addendum — points agent to domains_pending_resolve.yml for connection-refused classification
+custom_commands/                    project-wide slash commands — `refactor`, `unspaghettify`, `write-readme`, `write-summary`. Both `refactor` and `unspaghettify` end with a phase/pass that writes to `.claude_dev_guidelines` (project root) — refactor persists style/idioms, unspaghettify persists module roles + dependency-direction rules
+custom_skills/                      project-bundled skills (currently: `print`)
 docker/
-  Dockerfile, compose.yml           base image; compose.yml is thin (only TERM left in `environment:`; bind-mounts + other env-forwards now Python-staged); `network: host` for builds (BuildKit's bridge had DNS issues)
-  Dockerfile.prog, compose.prog.yml [prog] tag: Rust + Node + uv; conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
-  Dockerfile.auto, compose.auto.yml {auto} mode: iptables + sudo + scoped sudoers entry (claude can ONLY run init-firewall.sh), --dangerously-skip-permissions
-  Dockerfile.dood, compose.dood.yml {DooD} mode: host /var/run/docker.sock mount; DOCKER_GID build-arg
-  init-firewall.sh                  iptables outbound whitelist — reads pre-resolved $WHITELIST_ADDRESSES (no DNS in container); init-once marker prevents re-runs; self-tests example.com is blocked + api.anthropic.com is reachable
-  auto-entrypoint.sh                runs sudo init-firewall.sh, sudo -k, unsets $WHITELIST_ADDRESSES, execs claude
+  Dockerfile, compose.yml           base image (jq/yq/fd/tree/ripgrep/python3 + uv + rich-cli + Claude Code); compose.yml carries only TERM in `environment:` (rest is `-e` flags from `container_env_args()`); `network: host` on build
+  Dockerfile.prog, compose.prog.yml [prog] tag: Rust + Node + uv + python3-dotenv (apt); conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
+  Dockerfile.auto, compose.auto.yml {auto}: iptables + sudo + scoped sudoers; `--dangerously-skip-permissions`
+  Dockerfile.dood, compose.dood.yml {DooD}: /var/run/docker.sock; DOCKER_GID build-arg
+  init-firewall.sh                  iptables outbound whitelist from $WHITELIST_ADDRESSES (pre-resolved, no DNS in container); self-tests example.com blocked + api.anthropic.com reachable
+  auto-entrypoint.sh                runs init-firewall.sh, sudo -k, unsets WHITELIST_ADDRESSES, execs claude
 settings/                           in-container bashrc + manifest helpers + status line + Claude settings/keybindings
 tips/                               reference notes
-install_bashrc_alias.sh, install_dependencies.sh    one-time host setup; pip-install step re-runs every invocation so dep additions land without recreating ~/pydev
+install_bashrc_alias.sh, install_dependencies.sh    one-time host setup
 ```
 
 | Agent | Tags / parent | Conf | Role |
 |---|---|---|---|
 | `golem` | — | `golem.conf` | Fast simpleton (haiku) |
 | `poet` | — | `poet.conf` | Dramatic literary commentator (sonnet) |
-| `researcher[prog]` | `[prog]` | `researcher.conf` | Doc-scouring researcher with Sources (opus) |
+| `researcher[prog]` | `[prog]` | `researcher.conf` | Doc-scouring researcher (opus) |
 | `medical-investigator(researcher)` | parent=researcher | `researcher.conf` | Evidence-based clinical inquiry |
 | `feature-identifier(thinker)` | parent=thinker | `thinker.conf` | Feature discovery |
 | `project-starter[prog](thinker)` | `[prog]`, thinker | `thinker.conf` | Bootstraps new projects |
@@ -66,101 +66,140 @@ install_bashrc_alias.sh, install_dependencies.sh    one-time host setup; pip-ins
 
 ### Architecture
 
-Entry: `python3 run.py [target] [...claude-args]` → `launch()` (`run.py:164`).
+Entry: `python3 run.py [target] [--dry-run] [...claude-args]` → `launch()` (`run.py:172`).
 
-1. **Input** (`select_pick`, `run.py:70`) — argparse parses `target`; `resolve_pick` (in agents_crud) returns AgentIdentity (new) | SessionIdentity (cont, with stored workspace + modes + is_brand_new=False) | None. Unknown name falls through to claude_args. Empty `agents/` exits early.
-2. **Filesystem validation** (`resolve_target`, `run.py:86`) — for new: promotes AgentIdentity → InstanceIdentity by prompting for workspace + session (stamping is_brand_new=True); for cont: validates stored workspace, re-prompts if missing.
-3. **Resume detection** (`compute_resume_flag`, `run.py:105`) — returns `["--continue"]` only when conversation JSONL exists.
-4. **Persist** — `update_workspace_map`.
-5. **Categorise** (`compose_runtime`, `run.py:118`) — prompts/loads modes, calls `compose_chain(tags, modes, state_dir)` which dispatches `_apply_*` handlers (side effects: prepare caches for [prog]; stage DOCKER_GID for {DooD}; kick off start_whitelist_resolution() for {auto}) and returns `["base", ...active modifiers in InstanceModifiers declaration order]`.
-6. **Setup** (`setup_state`, `run.py:140`) — `install_latest_md` copies `agents/<x>.md` → `<state>/CLAUDE.md`; `sync_memory_templates` reconciles MEMORY.md from `memory/seek_summary.md` + active mode addendums (preserves agent-added pointer entries outside wrapper blocks); `set_container_env` stages compose vars via `stage_compose_env`; `set_container_mounts` stages base + per-instance bind-mounts via `add_docker_mount`; `aggregated_skills_mounts` / `optional_creds_mounts` add their own; `plant_user_extras(sess_id.modes)` copies the optional_creds README + (only in {auto}) the firewall whitelist preamble.
-7. **Banner + run** — `print_launch_banner` summarises chain/skills/creds/whitelist; `run_compose` builds each chain step (`docker compose build` per step with `PARENT_IMAGE`/`TARGET_IMAGE` env threading), awaits Phase 1 of the {auto}-mode firewall resolve (`wait_for_critical_addresses`) and stages WHITELIST_ADDRESSES, spawns the firewall updater daemon thread (which will `docker exec iptables -I` Phase 2 results into the running container), then execs `docker compose -f compose.yml [-f compose.<step>.yml]* run --rm -it --name claude-code_<instance> ... claude-code`.
+1. **Input** (`select_pick`, `run.py:78`) — argparse parses `target` + `--dry-run`; `resolve_pick` returns AgentIdentity | SessionIdentity | None.
+2. **Docker gate** — `require_docker()` runs here UNLESS `--dry-run` (state-setup doesn't need docker; only the final `run_compose` does).
+3. **Filesystem validation** (`resolve_target`, `run.py:95`) — promotes to InstanceIdentity, prompting for workspace + session on `new`. `validate_workspace` treats empty string / None as "missing" (and `set_container_mounts` falls back to DEFAULT_WORKSPACE downstream).
+4. **Resume detection** (`compute_resume_flag`) — `["--continue"]` only if conversation JSONL exists.
+5. **Persist** — `update_workspace_map`.
+6. **Categorise** (`compose_runtime`, `run.py:127`) — prompts/loads modes, constructs SessionIdentity, calls `compose_chain(sess_id)`. The chain comes from `sess_id.chain` (which validates tags/modes against InstanceModifiers and raises on unknowns); `_apply_prog` / `_apply_auto` / `_apply_dood` dispatch happens here. Returns `(sess_id, chain)`.
+7. **Setup** (`setup_state`) — `install_latest_md` → `sync_memory_templates(sess_id)` reconciles MEMORY.md from `memory_addendums.addendum_text(modifier)` for each `InstanceModifiers` member (block kept when `modifier.value in sess_id.chain`) → `set_container_env` (compose_env) → `set_container_mounts` (docker_config) → skills/creds mounts → `plant_user_extras`.
+8. **Banner + run** — `print_launch_banner` summarises; `run_compose` builds each chain step, awaits {auto} Phase 1, spawns the firewall updater, then execs `docker compose ... run --rm -it --name claude-code_<instance> ... claude-code`. `--dry-run` short-circuits here with a notice.
 
-Bind mounts (host → container) — staged in Python via `add_docker_mount`, flattened to `-v` flags at run_compose time:
-- `$AI_WORKSPACE` → `/workspace`
-- `~/.claude-agents/<agent>__<session>/` → `/home/claude/.claude` (per-instance state; CLAUDE.md + MEMORY.md + domains_pending_resolve.yml inside)
-- `~/.claude-agents/.claude.json` + `.credentials.json` → matching paths (shared OAuth)
+Bind mounts (host → container) — staged via `add_docker_mount`, flattened to `-v` flags in run_compose:
+- `$AI_WORKSPACE` → `/workspace` (falls back to `DEFAULT_WORKSPACE` if `sess_id.workspace` is None/empty)
+- `~/.claude-agents/<agent>__<session>/` → `/home/claude/.claude` (per-instance state)
+- `~/.claude-agents/{.claude.json,.credentials.json}` → matching paths (shared OAuth)
 - `./custom_commands/` → `/home/claude/.claude/commands` (ro)
-- `./custom_skills/<name>/` and `<workspace>/.skills/<name>/` → `/home/claude/.claude/skills/<name>` (ro; workspace overrides project)
+- `./custom_skills/<name>/` and `<workspace>/.skills/<name>/` → `/home/claude/.claude/skills/<name>` (ro)
 - `./settings/{statusline.sh,bashrc.sh,_summary.py,settings.json,keybindings.json}` → matching container paths (ro)
-- `~/.claude-agents/user_extras/optional_creds/<svc>/` → CLI-default path (rw; aws/gcloud/kube/ssh/gh/glab/jira/vercel/railway/npmrc/pypirc)
-- `~/.claude-agents/cache/<rel>` → `/home/claude/<rel>` ([prog] only, rw)
-- `/var/run/docker.sock` → same path ({DooD} only; via `DOCKER_DOOD_MOUNTS`)
-- `docker/init-firewall.sh` + `docker/auto-entrypoint.sh` → `/usr/local/bin/...` ({auto} only; via `DOCKER_AUTO_MOUNTS` — `LOCAL_BIN_IN_CONTAINER` is the container-side dir constant)
-
-`~/.claude-agents/user_extras/firewall_whitelist.txt` is read on the host (not mounted); resolved IPs are passed into the container via `$WHITELIST_ADDRESSES` env var (space-separated `<ip>[:port]` / `<cidr>[:port]` tokens).
+- `~/.claude-agents/user_extras/optional_creds/<svc>/` → CLI-default path (rw)
+- `~/.claude-agents/cache/<rel>` → `/home/claude/<rel>` ([prog] only)
+- `/var/run/docker.sock` → same ({DooD} only); `init-firewall.sh` + `auto-entrypoint.sh` → `/usr/local/bin/...` ({auto} only)
 
 ### Conventions and Patterns
 
-- **Filename grammar**: `<name>(<tag>|<parent>)*.md`. `[tag]` accumulates; `(parent)` is single-valued; order between brackets and parens is free. Parsed by `parse_stem` (`file_access.py`). Tags drive build chain; parent picks the `.conf`.
-- **Identity dataclasses** (in `structs.py`, frozen + inheritance): `AgentIdentity` (just .agent + derived .md_path / .conf_path / .tags) → `InstanceIdentity` (adds session/workspace/is_brand_new + .instance / .state_dir / .stored_modes / .has_continuable_history / .last_used_mtime) → `SessionIdentity` (adds resolved modes). Promote via `inst_id.with_modes(modes)`. A function taking the parent type accepts any subclass.
-- **`InstanceModifiers` enum** (in `structs.py`) is the canonical taxonomy for tags + modes. Member name prefix encodes kind (`TAG_*` / `MODE_*`); each member has `.value` (filename/JSON form), `.filename_form` (lowercased — for Dockerfile/compose/addendum filenames), `.label` (`[prog]` / `{auto}` wrapping), `.description` (legend text). Subset views `tags()` / `modes()` / `tag_values()` / `mode_values()` are memoized.
-- **Adding a new tag/mode**: (1) append a member to `InstanceModifiers` in `structs.py` (declaration order = chain composition order); (2) add `_apply_<x>()` in `agent_composition.py` and one conditional in `compose_chain`; (3) create `docker/Dockerfile.<x>` + `docker/compose.<x>.yml` (filename uses `.filename_form`); optionally (4) drop `memory/<x>-addendum.md` for a mode-conditional MEMORY.md block.
-- **Image naming**: `claude-agents:base`, `claude-agents:prog`, `claude-agents:prog.auto`, etc. — non-base chain steps joined by `.` and lowercased.
-- **Per-agent `.conf` fully replaces `default.conf`** (not merged — re-declare any default you still want).
-- **MEMORY.md is per-instance and writable.** `sync_memory_templates` reconciles wrapper-bracketed blocks at every launch; content outside the wrappers is preserved verbatim (auto-memory step 2).
-- **`_force_remove(path, *, name=None)`** is the canonical removal helper (sudo + `sudo -k` fallback for root-owned Docker leftovers). `delete_instance` and `sync_memory_templates` both go through it.
-- **`utils.py` is the home for regex / sorting / parsing / formatting** — current residents: `plural`, `relative_time`, `ordering_index_or_end`, `split_host_port`, `splice_block`. New helpers that match this profile go here; helpers that touch disk go to file_access; helpers tied to a single domain stay with that domain.
-- **Every filesystem call goes through `file_access.py`** — not just reads/writes but existence (`path_exists`), kind (`is_dir`/`is_file`/`is_symlink`), listing (`iter_subdirs`, `rglob_paths`), stats (`file_mtime`, `iter_file_stats`), and host paths (`resolved_path`, `resolved_cwd`, `home_dir`, `expand_user_path`). Other modules import these wrappers instead of calling `.exists()` / `.is_dir()` / `glob.glob` / `Path.cwd()` / etc. directly. Inside file_access itself, Path methods are used directly (it IS the file-access layer). Side benefit: `find_md_for_agent` / `load_conf` / `present_optional_cred_services` are LRU-cached, and a single `_json_map_cache` dict serves both workspace + modes maps so the picker doesn't re-read the JSON files.
-- **`os.environ` writes are confined to `docker_config.py`** — call `stage_compose_env(key, value)` where key is a `ComposeEnvKey` enum member (`ComposeEnvKey.TARGET_IMAGE`, etc. — autocomplete + grep-able). `_subprocess_env()` overlays the accumulator onto host env at subprocess time. Swapping transport (`.env` file, `-e` flags) is a one-line change.
-- **Every direct `docker` CLI invocation lives in `docker_config.py`** — `subprocess.call(["docker", "compose", ...])` for build/run, plus the small helpers `detect_docker_gid` (host-side `getent group docker` for the DOCKER_GID build-arg), `wait_for_container_running` (`docker inspect` poll), `docker_exec_root` (privileged `docker exec --user root` — single audit point for in-container root operations from the host), and `any_agent_container_running` (`docker ps` filter on CONTAINER_NAME_PREFIX). Other modules (agent_composition, network) call into these rather than spawning their own subprocesses. `network._updater_worker` + `network._insert_iptables_accept` lazy-import the helpers at call time to break the docker_config↔network import cycle.
-- **`CONTAINER_NAME_PREFIX = "claude-code_"`** is the single source of truth for per-launch container naming — `run_compose` builds container names from it; `any_agent_container_running` filters `docker ps` by the same prefix; renaming touches one place.
-- **Claude-Code-side UX lives in `claude_code_config.py`** — `build_status_line(inst_id)` (fed to Claude Code via the AGENT_STATUS_LINE env var) and `set_terminal_title(name)` (OSC 0 escape for the host terminal). Distinct from `menu_picker` (which owns the launcher's *own* picker/prompt UI before the container starts) and from `docker_config` (which orchestrates docker but no longer owns the styling).
-- **Modifier-combination semantics live in `agent_composition.py`** — `warn_if_dangerous_modes(modes)` is the single function that decides "is this mode set dangerous?" (currently: `{auto}+{DooD}`) and shows the press-any-key warning. `agents_crud.set_instance_modes` and `agents_crud.modify_instance` both call it unconditionally after every write; agents_crud doesn't carry its own combo logic.
-- **Bind-mounts are accumulated in Python**, not in any `compose.<x>.yml` — paths.py declares one dict per chain layer (`DOCKER_BASE_MOUNTS` always-on, `DOCKER_AUTO_MOUNTS` for `{auto}`, `DOCKER_DOOD_MOUNTS` for `{DooD}`, `CACHE_MOUNTS` for `[prog]`), and the matching orchestrator (`set_container_mounts` for base, `_apply_*` handlers for the others) iterates its dict via `add_docker_mount`. `run_compose` flattens `_docker_mounts` into `-v` flags inline. No compose YAML carries a `volumes:` block — the only `${...}` substitutions left in any compose layer are build-args (`PARENT_IMAGE`, `TARGET_IMAGE`, `DOCKER_GID`, `INSTALL_<TOOL>`), `DOCKERIZED_CLAUDE_ROOT` (build context), and env-var pass-throughs.
+- **Filename grammar**: `<name>(<tag>|<parent>)*.md`. `[tag]` accumulates; `(parent)` is single-valued. Parsed by `parse_stem` in file_access.
+- **Identity dataclasses** (frozen + inheritance): `AgentIdentity → InstanceIdentity → SessionIdentity`. Promote via `inst_id.with_modes(modes)`. `InstanceIdentity.workspace: str | None` reflects that stale workspace-map entries are real.
+- **`InstanceModifiers` enum** is the canonical taxonomy. `BASE` is an actual member (always-active, first in declaration order); `BASE` naturally falls out of `tags()` / `modes()` since neither matches its name prefix. `.slug` (renamed from `.filename_form`) is the lowercased value used for Dockerfile/compose filenames + wrapper-marker stems.
+- **`SessionIdentity.chain`** is the single source of truth for "what's active": ordered tuple, BASE first, validates self.tags/modes (raises `ValueError` on unknowns). Consumed by `compose_chain` (returns `list(chain)`) and `sync_memory_templates` (`keep=modifier.value in sess_id.chain`).
+- **Adding a new tag/mode**: (1) append a member to `InstanceModifiers` (declaration order = chain order); (2) add `_apply_<slug>()` + one conditional in `compose_chain`; (3) create `docker/Dockerfile.<slug>` + `docker/compose.<slug>.yml`; optionally (4) add an `Addendum` constant in `memory_addendums.py` + entry in `MODIFIER_ADDENDUMS`. `test_essential_files.py` enforces #1-#3 pairings.
+- **Memory addendums live in code, not files** — `memory_addendums.py` holds `SEEK_SUMMARY` / `FIREWALL_NOTICE` / `CREDENTIALS_NOTICE` (named after content, not modifier); paths inside them interpolate from `paths.py` constants; `CREDENTIALS_NOTICE` collapses to `""` at import time if no creds installed (then filtered by `addendum_text`'s join). Wrapper-marker format: `##################### <slug>-instructions-{start,end} #####################` — generated by `_wrap_block` in `memory_addendums.py`. Content outside wrapper blocks is preserved verbatim (auto-memory step 2 lives there).
+- **Per-agent `.conf` fully replaces `default.conf`** (not merged — agent configs must re-declare defaults they still want).
+- **Every filesystem call goes through `file_access.py`** — including existence (`path_exists`), kind (`is_dir`/`is_file`/`is_symlink`), listing, stats, host paths, AND removal-with-sudo-fallback (`force_remove`). Inside file_access itself, Path methods are used directly.
+- **Compose env-var staging lives in `compose_env.py`** — `ComposeEnvKey(str, Enum)` for static keys (`TARGET_IMAGE`, `PARENT_IMAGE`, `SOFTWARE_STACK_REFRESH`, `AGENT_NAME`, `WHITELIST_ADDRESSES`, `DOCKER_GID`, `DOCKERIZED_CLAUDE_ROOT`, `AGENT_STATUS_LINE`, `BASH_ENV`); dynamic INSTALL_<TOOL> + token vars derived from `OPTIONAL_CREDS_MOUNTS` / `OPTIONAL_CREDS_TOKEN_ENV_VARS`. `subprocess_env()` overlays the accumulator at subprocess time. `container_env_args()` flattens `CONTAINER_ENV_FORWARDS` + `CONTAINER_ENV_FIXED` to `-e KEY=VALUE` for run_compose.
+- **Every direct `docker` CLI call lives in `docker_config.py`** — `subprocess.call(["docker", "compose", ...])`, `detect_docker_gid`, `wait_for_container_running`, `docker_exec_root`, `any_agent_container_running`. `network._updater_worker` + `network._insert_iptables_accept` lazy-import to break the cycle.
+- **`OPTIONAL_CREDS_MOUNTS` values are `(mount_path, cli_name | None)` tuples** — `cli_name` is the binary installed in Dockerfile.prog (e.g. `kube` → `kubectl`); fed to `installed_cred_clis()` for the credentials addendum. Services with `cli=None` (ssh/npmrc/pypirc) contribute config but install nothing.
 - **Env-var config layering** (edit at the layer that owns the key):
-  - `Dockerfile` `ENV`: `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `USE_BUILTIN_RIPGREP=0`. Baked into the image; needs rebuild.
-  - `agents/default.conf` / `<parent>.conf` / `<name>.conf`: forwarded as `-e KEY=VALUE` per launch (per-agent fully replaces default).
-  - `compose.yml` `environment`: TERM only (purely shell-inherited from the launcher's terminal — kept declarative).
-  - `docker_config.CONTAINER_ENV_FORWARDS` / `CONTAINER_ENV_FIXED`: container env vars emitted as `-e KEY=VALUE` flags by `run_compose`. FORWARDS reads values from `_compose_env` (currently `AGENT_STATUS_LINE` + token vars from `OPTIONAL_CREDS_TOKEN_ENV_VARS`); FIXED holds constants (currently `BASH_ENV`).
-  - `docker_config.stage_compose_env`: launch-time keys (members of `ComposeEnvKey` — `TARGET_IMAGE`, `PARENT_IMAGE`, `DOCKERIZED_CLAUDE_ROOT`, `SOFTWARE_STACK_REFRESH`, `AGENT_NAME`, `DOCKER_GID`, `WHITELIST_ADDRESSES`, `AGENT_STATUS_LINE`, `BASH_ENV`) plus the dynamic `INSTALL_<TOOL>` build flags and optional-creds token vars (strings, not enum members — populated from the OPTIONAL_CREDS_* tables).
-- **`{auto}` firewall — host-side resolution + streaming updates** (`launch/network.py`): whitelist is `BUILTIN_FIREWALL_DOMAINS` (~135 curated entries: launcher deps + Q&A + language docs + cloud + frameworks + ML + databases + Linux + standards + tooling + reference sites) ∪ user's `firewall_whitelist.txt`. Policy: every form listed explicitly (no apex→www speculation); `www.X` line also allows `X`; CIDR (`10.0.0.0/8`) and raw IPv4 entries skip DNS and go straight to iptables. DNS happens in Python via `getent ahostsv4` with a cascading-timeout retry (3, 5, 8, 13, 21s — recovers from contention-induced false negatives, see `_cascade` docstring). Two phases: **Phase 1** (critical Anthropic) resolves synchronously and seeds the container's initial `$WHITELIST_ADDRESSES`; **Phase 2** (the rest) resolves in a daemon thread that streams `(host, ips)` to an updater thread, which runs `docker exec --user root <container> iptables -I OUTPUT 1 -d <ip> ... -j ACCEPT` to insert rules into the running container BEFORE the catch-all REJECT. Cross-launch DNS cache at `~/.claude-agents/resolved_domains.txt` with a 3h TTL (gated by `is_file_recent` in utils) short-circuits the cascade for hosts seen recently; rewritten at end of Phase 2 (cache hits + fresh DNS results).
-- **`{auto}` firewall — in-container side**: `init-firewall.sh` does no DNS, just `iptables -A OUTPUT -d <ip> -p tcp --dport <port> -j ACCEPT` for each pre-resolved entry; self-tests by curling `example.com` (must fail) and `api.anthropic.com` (must succeed) — fails the launch loudly on either (catches iptables-nft / legacy backend mismatch + DNS-pin drift). Init-once marker at `/var/run/init-firewall.applied` prevents re-runs; sudoers (Dockerfile.auto) restricts claude to ONLY this script with `WHITELIST_ADDRESSES` preserved across the privilege boundary; auto-entrypoint.sh `unset`s `WHITELIST_ADDRESSES` post-run so claude can't read or replay it.
-- **`{auto}`-mode agent status surface**: `<state_dir>/domains_pending_resolve.yml` (mounted into container at `/home/claude/.claude/`) is rewritten atomically as resolution progresses — top-level `status: resolving|complete`, `pending:` list, `failed:` list. `memory/auto-addendum.md` points the agent here for connection-refused classification (pending: brief retry; failed: surface as whitelist offer).
-- **`{auto}` + `{DooD}` together is dangerous** — `set_instance_modes` warns explicitly; agent has unattended root-equivalent host access via the docker socket.
-- **Optional creds patterns**: drop `<service>/` for a config-tree mount (bind-mounted to the CLI's default path); drop `<service>/token` for an env-var token (forwarded via `OPTIONAL_CREDS_TOKEN_ENV_VARS` mapping, currently `jira → $JIRA_API_TOKEN`). Token values get staged in `_compose_env` and then emitted as `-e KEY=VALUE` flags via `CONTAINER_ENV_FORWARDS` — they're on the `docker compose run` argv but the value is never written to the launcher's own `os.environ`, so `ps auxe` on the host doesn't leak them through the parent process.
-- **First-launch template files** live in `launch/templates/` (firewall_whitelist.txt, optional_creds_readme.txt). `user_additions.plant_user_extras(modes)` is the orchestrator — always plants the optional_creds README, gates the firewall whitelist on `{auto}`. Both copies go through `copy_file` with `overwrite_if_dest=False` so user edits are preserved across re-launches.
-- **Picker sort**: creatable rows sorted by (tag set, then existing model-family/version sort); continuable rows by (mode set, then model/family, then session). Tag/mode sets ordered by position in `InstanceModifiers.tags()` / `.modes()` via `ordering_index_or_end` (from utils — untagged/unmoded sink to top). Modifier display in the picker (`[prog] {auto} `) uses `InstanceModifiers.format_prefix(values)` — the enum owns the tag-vs-mode wrapping convention.
-- **F8 in the picker**: opens the composition legend (Tags / Modes tables with descriptions) as an overlay in the preview pane. Rendered via `_render_md` with per-section Rich themes (green for tags, bold red for modes — matches per-row marker colours).
-- **`SOFTWARE_STACK_REFRESH`** = ISO week (`%Y-W%W`) — weekly cache buster for the Dockerfile's curl-piped installers (uv, Claude Code, rustup, etc.); set in `docker_config.py`.
-- **Container UID**: `HOST_UID` build arg matches the host UID so bind-mounted files stay host-writable.
-- **Manifest helpers** (`settings/_summary.py` + bash wrappers `summary_diff` / `summary_files` / `summary_save_manifest`) back `/write-summary`. The save helper anchors on `### File Manifest` and refuses to run without both `<!-- manifest:begin -->` / `<!-- manifest:end -->` markers.
+  - `Dockerfile` `ENV`: `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `USE_BUILTIN_RIPGREP=0`. Baked into image; needs rebuild.
+  - `agents/{default,<parent>,<name>}.conf`: per-launch `-e KEY=VALUE` (agent fully replaces default).
+  - `compose.yml` `environment`: TERM only.
+  - `compose_env.CONTAINER_ENV_FORWARDS` / `CONTAINER_ENV_FIXED`: `-e` flags from `container_env_args()` (forwards reads from `_compose_env`; fixed is constants like `BASH_ENV`).
+  - `compose_env.stage_compose_env(KEY, value)`: launch-time compose env (ComposeEnvKey members + dynamic INSTALL_/token strings).
+- **`{auto}` firewall**: host-side DNS via `getent ahostsv4` with cascading-timeout retry (3/5/8/13/21s); cross-launch IP cache at `~/.claude-agents/resolved_domains.txt` with **6h TTL** (was 3h). Two phases: Phase 1 (critical Anthropic) seeds initial `$WHITELIST_ADDRESSES`; Phase 2 streams the rest via `docker exec iptables -I` into the running container. Container-side `init-firewall.sh` does no DNS — only iptables over pre-resolved IPs. CDN-rotation drift surfaces as `ConnectionRefused`; agents are pointed at `domains_pending_resolve.yml` for classification.
+- **`{auto} + {DooD}` is dangerous** — `warn_if_dangerous_modes` (in `agent_composition`) prints a red press-any-key warning after every mode-set write.
+- **Test discovery**: `python3 -m unittest discover -s launch/tests` from `/workspace`. Tests use `unittest` (no external test runner needed); some tests mock at function level (e.g. `_apply_*` handlers) to exercise dispatch without filesystem/docker side effects. `test_run.py` exercises the full orchestration via mocks + `--dry-run`.
+- **Static-check stack**: `mypy --ignore-missing-imports launch/ run.py` (currently 1 known false positive from prompt_toolkit's decorator overloads); `ruff check launch/ run.py` (38 findings — 24× E402 in `menu_picker.py` for imports below a long banner comment, 14× E731 for the path-builder lambdas and wrapper-line lambdas; both intentional patterns).
+- **`/refactor` and `/unspaghettify`** both end with a phase that persists their findings to `.claude_dev_guidelines` at the project root — refactor writes style/idioms/anti-patterns/type-policy; unspaghettify writes file roles + dependency direction + "new code about X belongs in Y because Z" examples. Each command's pass tells the agent to MERGE (not clobber) the other's sections.
 
 ### Known Issues
 
-- **No tests, no CI, no lockfile.**
+- **No CI gate, no lockfile.** Tests + mypy + ruff exist and are clean (modulo the documented prompt_toolkit-overload false positive and the 38 intentional ruff patterns); nothing enforces them in a pre-merge step.
 - **`docker compose build` runs unconditionally per chain step on every launch** (`docker_config.py:ensure_image`) — adds a few seconds; no image-exists short-circuit.
 - **`install_latest_md` overwrites `<state>/CLAUDE.md` every launch** — in-container edits silently discarded; `audit.py` reports drift but doesn't repair.
-- **Per-instance MEMORY.md only refreshes the wrapper-bracketed blocks** — if a user customises template wrappers, existing instances orphan the old wrappers (see `sync_memory_templates` docstring).
-- **`network: host` on build is a permanent workaround** (`compose.yml:9`) — BuildKit's own bridge had DNS resolution failures (`download.docker.com`, `deb.debian.org`); host net is the simplest robust fix but trades off build isolation.
-- **{auto}-mode DNS-pin drift risk** — host resolves to IPs at launch; iptables allows exactly those IPs. If the container's DNS later returns DIFFERENT IPs for the same hostname (CDN POP rotation, etc.), connections get rejected. In practice host + container share an upstream DNS chain so they line up; `init-firewall.sh`'s positive self-test on `api.anthropic.com` is the early-detection signal. CDN-heavy services (AWS / GitHub / CloudFlare-fronted) are where this would break first.
+- **MEMORY.md reconcile is wrapper-stem-keyed** — if the codebase ever renames a modifier slug (e.g. `auto` → something else), existing instance MEMORY.md files orphan the old wrapper. Documented in `sync_memory_templates`; manual cleanup recommended.
+- **`network: host` on build is a permanent workaround** (`compose.yml:9`) — BuildKit's bridge had DNS issues; trades build isolation for reliability.
+- **{auto}-mode DNS-pin drift risk** — host-resolved IPs are baked into iptables; if container DNS later returns different IPs (CDN POP rotation), connections get rejected. `auto-addendum.md` instructs the agent to suggest pinning IPs in the user whitelist or deleting the resolved_domains cache.
 
 ### Current State
 
-Nothing in flight. The full file-access-exclusivity + utils-consolidation pass has settled: every disk-touching call (existence / kind / listing / stat / removal / host-paths) now routes through wrappers in `file_access.py`; domain-neutral helpers (`plural`, `ordering_index_or_end`, `split_host_port`, `splice_block`) live in `utils.py`; compose env-var keys are members of `ComposeEnvKey(str, Enum)` (no more module-level UPPERCASE constants); `DEFAULT_WORKSPACE` moved into `paths.py`; modifier-value wrapping is owned by `InstanceModifiers.format_prefix`. The earlier YAML→Python migration (per-layer mount dicts, `-e` flag emission for container env vars) and the host-side `{auto}`-mode firewall rework remain settled. `.claude_report` has one deferred item left (whether to class-wrap `network.py`'s thread-state globals — user wanted to think about it separately). `TODO.txt` lists future ideas (domain-tagged agents with extra apt/CLI tooling — image/video/3D/audio toolchains; per-agent backing model configurability; option to mount the project summary directly into MEMORY.md rather than reference `.claude_summary`; inter-agent communication via shared filesystem; new mode ideas like `[larp]` role-play; phone notifications when `{auto}` agent finishes). None mid-implementation.
+The launcher has just gone through a long consolidation arc — all of these recent passes have settled, no in-flight work:
+
+- **Compose env-var extraction** — pulled `ComposeEnvKey` + accumulator + formatters + `set_container_env` out of `docker_config.py` into new `compose_env.py`. `docker_config` is now pure docker-subprocess + mount accumulator + image-chain naming.
+- **Memory addendums moved to code** — `/workspace/memory/*.md` deleted; `memory_addendums.py` holds the texts as Python constants, with paths interpolated from `paths.py` and the CLI list inlined into `CREDENTIALS_NOTICE` at import time.
+- **BASE integrated into InstanceModifiers** — was a hardcoded `"base"` prefix in `compose_chain`'s return; now an actual enum member, always considered active via `SessionIdentity.chain`.
+- **Test suite landed** — 346 tests covering structs/modifier validation, env-var coverage of compose+Dockerfile, cache lifecycle, workspace/mode misconfig, addendum overwrite, the full `--dry-run` orchestration.
+- **Type annotations across all modules** — return types + key parameter types; `from __future__ import annotations` in structs.py for the forward-ref self-references.
+- **`/refactor` and `/unspaghettify` got the lint pass + `.claude_dev_guidelines` phase** added at the tail. `.claude_dev_guidelines` itself isn't written yet (no command has been invoked since the slash-command updates landed).
+
+`TODO.txt` lists future ideas (domain-tagged agents with extra apt/CLI tooling — image/video/3D/audio; per-agent backing model configurability; option to mount the project summary directly into MEMORY.md; inter-agent communication; `[larp]` role-play mode; phone notifications when `{auto}` agents finish). None of these are mid-implementation.
 
 ### File Manifest
 
 <!-- manifest:begin -->
-1778776243 TODO.txt
-1778767737 launch/agents_crud.py
-1778767715 launch/paths.py
-1778767595 .claude_report
-1778767545 launch/docker_config.py
-1778767515 launch/agent_composition.py
-1778767407 launch/audit.py
-1778767401 launch/menu_picker.py
-1778767378 launch/structs.py
-1778767358 launch/file_access.py
-1778765537 launch/utils.py
-1778752624 launch/network.py
-1778749562 launch/user_additions.py
-1778746836 run.py
+1778930720 custom_commands/refactor.md
+1778930700 custom_commands/unspaghettify.md
+1778930028 launch/tests/test_cache.py
+1778930000 launch/tests/test_structs.py
+1778929989 launch/structs.py
+1778929869 launch/tests/test_file_access.py
+1778929847 launch/tests/test_agents_crud.py
+1778928161 .mypy_cache/3.11/cache.3.db
+1778928161 .ruff_cache/0.15.13/11213316649909508988
+1778928113 .ruff_cache/0.15.13/6323902310431791492
+1778928099 .mypy_cache/3.11/cache.0.db
+1778928099 .mypy_cache/3.11/cache.10.db
+1778928099 .mypy_cache/3.11/cache.2.db
+1778928099 .mypy_cache/3.11/cache.5.db
+1778928099 .mypy_cache/3.11/cache.8.db
+1778928099 .mypy_cache/3.11/cache.9.db
+1778928094 launch/menu_picker.py
+1778928075 launch/compose_env.py
+1778928066 .mypy_cache/3.11/cache.1.db
+1778928066 .mypy_cache/3.11/cache.11.db
+1778928066 .mypy_cache/3.11/cache.14.db
+1778928066 .mypy_cache/3.11/cache.15.db
+1778928066 .mypy_cache/3.11/cache.4.db
+1778928066 .mypy_cache/3.11/cache.6.db
+1778928030 launch/network.py
+1778927995 launch/file_access.py
+1778927987 .mypy_cache/3.11/cache.7.db
+1778927903 launch/docker_config.py
+1778927896 launch/agents_crud.py
+1778927836 run.py
+1778927749 launch/tests/test_docker_config.py
+1778927467 launch/tests/test_memory_addendums.py
+1778927457 launch/tests/test_compose_env.py
+1778927440 launch/tests/test_agent_composition.py
+1778927425 .ruff_cache/0.15.13/10624584828245776284
+1778927421 .ruff_cache/0.15.13/9034378910581617933
+1778927410 launch/agent_composition.py
+1778924724 .mypy_cache/.gitignore
+1778924724 .mypy_cache/3.11/cache.12.db
+1778924724 .mypy_cache/3.11/cache.13.db
+1778924724 .mypy_cache/CACHEDIR.TAG
+1778924696 .ruff_cache/.gitignore
+1778924696 .ruff_cache/CACHEDIR.TAG
+1778924013 launch/paths.py
+1778923046 launch/user_additions.py
+1778922976 launch/memory_addendums.py
+1778922941 launch/audit.py
+1778922929 launch/claude_code_config.py
+1778922895 launch/utils.py
+1778918832 launch/tests/test_env_coverage.py
+1778917115 launch/tests/test_run.py
+1778915791 launch/tests/test_audit.py
+1778915774 launch/tests/test_essential_files.py
+1778914846 launch/tests/test_paths.py
+1778914544 launch/tests/test_utils.py
+1778914510 launch/tests/__init__.py
+1778867170 TODO.txt
+1778866795 docker/Dockerfile.prog
+1778857079 docker/Dockerfile
 1778738839 docker/compose.yml
 1778736541 docker/compose.dood.yml
 1778736529 docker/compose.auto.yml
-1778735634 launch/claude_code_config.py
-1778733603 memory/auto-addendum.md
 1778694164 launch/templates/firewall_whitelist.txt
 1778694140 docker/init-firewall.sh
 1778694099 docker/Dockerfile.auto
@@ -168,21 +207,16 @@ Nothing in flight. The full file-access-exclusivity + utils-consolidation pass h
 1778662332 launch/templates/optional_creds_readme.txt
 1778628466 README.md
 1778533901 docker/compose.prog.yml
-1778533894 docker/Dockerfile.prog
 1778501598 install_dependencies.sh
-1778395535 memory/seek_summary.md
-1778387884 custom_commands/unspaghettify.md
-1778387883 custom_commands/refactor.md
 1778370235 docker/Dockerfile.dood
 1778137159 tips/newlines_in_prompt.md
-1778104819 docker/Dockerfile
 1778099042 tips/caching_docker.md
 1778097935 agents/feature-identifier(thinker).md
 1778097934 custom_commands/write-summary.md
 1778085365 settings/keybindings.json
 1778075141 custom_skills/print/SKILL.md
 1778052996 settings/bashrc.sh
-1778036448 .prompts/models_update.txt
+1778036448 .skills/models_update.txt
 1777429255 install_bashrc_alias.sh
 1777427342 agents/bug-investigator[prog](breakthrough).md
 1777424090 agents/mathematician[prog](breakthrough).md

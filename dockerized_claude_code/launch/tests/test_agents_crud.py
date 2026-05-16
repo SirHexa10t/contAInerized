@@ -145,6 +145,23 @@ class TestWriteModesEntry(unittest.TestCase):
         _write_modes_entry(m, _StubSess("a__1", []))
         self.assertEqual(m, {"b__1": ["DooD"]})
 
+    def test_duplicate_modes_persisted_as_given(self):
+        # _write_modes_entry doesn't de-duplicate — that's SessionIdentity.chain's
+        # job at the consumption end. Storing whatever the user/SessionIdentity
+        # provides keeps this layer purely a key-value writer.
+        m = {}
+        _write_modes_entry(m, _StubSess("agent__sess", ["auto", "auto"]))
+        self.assertEqual(m["agent__sess"], ["auto", "auto"])
+
+    def test_persists_unknown_mode_value_as_given(self):
+        # Validation against the InstanceModifiers taxonomy happens at
+        # sess_id.chain access time (in SessionIdentity); _write_modes_entry
+        # treats the modes tuple as opaque data. Lets a future modifier rename
+        # land without a state-file migration step.
+        m = {}
+        _write_modes_entry(m, _StubSess("agent__sess", ["future_mode"]))
+        self.assertEqual(m["agent__sess"], ["future_mode"])
+
 
 if __name__ == "__main__":
     unittest.main()

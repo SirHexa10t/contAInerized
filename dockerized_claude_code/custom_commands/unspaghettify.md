@@ -114,6 +114,41 @@ If you can't write that sentence cleanly, the audit isn't done — find what mak
 
 The completed role list is the audit's most valuable output: a clean spine for the project, a skeleton for documentation, and a baseline against which future drift can be measured.
 
+### 7. Persist the layout — `.claude_dev_guidelines`
+
+Once the structural moves have landed and the role table is stable, write
+the layout knowledge to `.claude_dev_guidelines` at the project root so
+future agents (and humans) joining this codebase know where new code goes
+without re-deriving it from a cold tree-read.
+
+Update an existing file, or create one if absent. Cover at minimum:
+
+- **File / module roles.** The one-sentence-per-file role list from Phase 6,
+  grouped by layer (entry, domain, data, UI, infrastructure, etc.). This
+  is the spine — every other section refers back to it.
+- **Dependency direction.** Which layer is allowed to import from which —
+  e.g. *"leaf modules (`paths`, `utils`) depend on nothing in-project; data
+  layer (`file_access`) depends only on those; identity layer (`structs`)
+  depends on data; orchestration (`run.py`) is the top"*. The arrows that,
+  if reversed, would create cycles or break the layering.
+- **Where new code goes — by example.** For each common addition kind, an
+  explicit "X belongs in Y because Z":
+  - *A new bind-mount source → `paths.py`'s mount-target dicts.*
+  - *A new modifier (tag/mode) → enum in `structs.py` + `_apply_*` handler
+    in `agent_composition.py` + (optional) addendum text in
+    `memory_addendums.py`.*
+  - *A new state-file reader → `file_access.py` (all disk I/O lives there).*
+  Concrete examples ground the rule in cases the codebase has actually seen.
+
+If the file already exists, MERGE — add new sections, refresh ones that no
+longer reflect the code, preserve sections about concerns this pass didn't
+touch. The `/refactor` command writes complementary *style* guidance to the
+same file (different sections); leave that material alone.
+
+End-state: a fresh agent dropped into the repo reads
+`.claude_dev_guidelines` and places its first contribution correctly
+without trial-and-error.
+
 ## Output
 
 Group findings by phase. For each:

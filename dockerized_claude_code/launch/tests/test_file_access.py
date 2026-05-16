@@ -219,6 +219,77 @@ class TestParseLines(unittest.TestCase):
         self.assertEqual(list(file_access.parse_lines(self.path)), ["value"])
 
 
+class TestParseLinesBadInput(unittest.TestCase):
+    """parse_lines is the entry point for the firewall whitelist parser too —
+    a user-edited file with weird content shouldn't crash the launcher; bad
+    entries pass through and fail downstream at DNS-resolution time (where
+    they're recorded in the status file as `failed:`)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmpdir.name) / "whitelist.txt"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_garbage_line_passes_through(self):
+        # Random text that looks nothing like a hostname / IP / CIDR — parser
+        # doesn't validate, just yields. The downstream resolver will fail.
+        self.path.write_text("this is just garbage text\nfoo.com\n")
+        self.assertEqual(
+            list(file_access.parse_lines(self.path)),
+            ["this is just garbage text", "foo.com"],
+        )
+
+    def test_inline_comment_trims_to_useful_part(self):
+        # `foo.com  # added 2025-01-15` → just `foo.com`
+        self.path.write_text("foo.com  # added recently\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), ["foo.com"])
+
+    def test_line_that_is_just_comment_skipped(self):
+        self.path.write_text("# header\nfoo.com\n# trailer\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), ["foo.com"])
+
+    def test_leading_and_trailing_whitespace_stripped(self):
+        self.path.write_text("   foo.com   \n\t bar.com\t\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), ["foo.com", "bar.com"])
+
+    def test_duplicate_entries_returned_as_given(self):
+        # parse_lines doesn't dedupe — that's network.py's job (it dedupes
+        # across BUILTIN + user lists into a single set).
+        self.path.write_text("foo.com\nfoo.com\nbar.com\n")
+        self.assertEqual(
+            list(file_access.parse_lines(self.path)),
+            ["foo.com", "foo.com", "bar.com"],
+        )
+
+    def test_malformed_cidr_passes_through(self):
+        # Parsing layer doesn't know IPv4 CIDR — it just yields strings.
+        # `10.0.0.0/99` is invalid but won't crash the launcher; iptables will
+        # reject it downstream.
+        self.path.write_text("10.0.0.0/99\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), ["10.0.0.0/99"])
+
+    def test_unicode_passes_through(self):
+        # Non-ASCII char in a hostname — exotic but legal in some contexts.
+        # Parser doesn't enforce ASCII; downstream resolver handles or fails.
+        self.path.write_text("héllo.example\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), ["héllo.example"])
+
+    def test_whitespace_only_lines_skipped(self):
+        # Pure-whitespace lines look like comments after strip — yield nothing.
+        self.path.write_text("\n   \n\t\nfoo.com\n   \t\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), ["foo.com"])
+
+    def test_completely_empty_file(self):
+        self.path.write_text("")
+        self.assertEqual(list(file_access.parse_lines(self.path)), [])
+
+    def test_only_comments_file_returns_nothing(self):
+        self.path.write_text("# header\n# more comments\n# yet more\n")
+        self.assertEqual(list(file_access.parse_lines(self.path)), [])
+
+
 class TestIsFileRecent(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()

@@ -234,6 +234,7 @@ tip: ctrl+v to paste image
 
 
 phone notifications when AI is done ( {auto} mode only? )
+    "{notify}" mode?
 
 
 Do NOT summary-scan files excluded within .gitignore (specifically so that you won't read venv folders with all their packages/bloat)
@@ -255,9 +256,22 @@ skill that draws a dependency graph
 /last-msg-to-md - dump text of last message into an md file (stylized)
 
 
+hacker agent - look for vulnerabilities. Attempt their exploitation (proof of their existence/viability)
+    cve-bounty agent
+
+{advi} - advisor mode
+    don't write/update/change any files in the project
+    don't write/update/change any files online
+    project is made ro
+    
 
 
 
+
+
+far-off future:
+    modes:
+        
 
 
 CANCELLED:

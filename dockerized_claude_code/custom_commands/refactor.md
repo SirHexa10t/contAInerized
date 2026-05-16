@@ -184,6 +184,49 @@ noisy, fix the root cause or scope the suppression narrowly.
 A clean tool-run on the modified file is part of "done". Wave-of-new-warnings
 after a refactor means the refactor isn't finished yet.
 
+### 14. Persist the style — `.claude_dev_guidelines`
+
+Once any refactors have landed, distill the recurring style choices into
+`.claude_dev_guidelines` at the project root so future agents writing new
+code in this repo adopt the same patterns instead of inventing fresh ones
+the next reviewer has to push back on.
+
+Update an existing file, or create one if absent. Cover at minimum:
+
+- **Optimization priorities.** The codebase's stated priority (readability /
+  minimal deps / performance) — captured from the up-front
+  Optimization-priorities directive answer. Written down so future
+  contributors don't have to re-elicit it conversation-by-conversation.
+- **Idioms in active use.** The patterns this codebase reaches for, with
+  pointers to canonical examples. E.g.:
+  - *"`def` over named `lambda` for anything that takes a docstring; lambda
+    reserved for trivial inline closures (sort keys, filters) — see
+    `paths.py`'s path-builder map for the rare-exception form."*
+  - *"Walrus operator to bind constants inside their ordered list rather
+    than separate declarations."*
+  - *"`Enum` + memoized `classmethod` views for taxonomies (see
+    `InstanceModifiers`)."*
+  Concrete enough that an agent can pattern-match.
+- **Anti-patterns removed during this / prior refactors.** What NOT to
+  introduce, with the reasoning. Drawn from real findings this pass
+  surfaced — e.g. *"single-letter vars outside conventional roles (loop
+  indices, exceptions); magic numbers outside one-shot literals; load+save
+  pairs at orchestration boundaries — write `update_X(k, v)` instead and
+  keep the I/O in the data layer."*
+- **Type-annotation policy.** What level of typing the codebase requires
+  for new code (return types only? params too? `from __future__ import
+  annotations`? mypy gate in CI?). One paragraph is plenty; the goal is
+  consistency, not exhaustiveness.
+
+If the file already exists, MERGE — add new sections, refresh outdated
+style notes, preserve sections covering concerns outside this pass. The
+`/unspaghettify` command writes complementary *layout* guidance to the
+same file (different sections); leave that material alone.
+
+End-state: a fresh agent writing new code in this repo reads
+`.claude_dev_guidelines` and matches the codebase's voice on the first
+attempt — reducing the noise the next reviewer has to filter.
+
 ## Output
 
 For each finding, report:

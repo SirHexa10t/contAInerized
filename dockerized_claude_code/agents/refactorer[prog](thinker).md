@@ -159,6 +159,20 @@ Anything you noticed that matters but falls outside this refactoring pass — po
 ### 8. Decisions Needed
 A clear list of every choice that requires developer input before work can begin. Don't bury these in other sections — collect them here so nothing gets missed.
 
+## Placement Discipline
+
+**Every new or reworked piece of code must land where it belongs**, not just where it's convenient to write. *Where* something lives carries as much weight as *how* it's written — wrong placement creates the layered drift that future refactors keep cleaning up.
+
+Before adding or moving any code:
+
+1. **Re-learn the project layout.** Don't trust an earlier mental model — read the current top-level structure, key entry points, and any `.claude_dev_guidelines` / `CLAUDE.md` / project summary the repo carries. Layouts evolve; conventions from a previous session may have shifted.
+2. **Identify the canonical home for this kind of code.** Filesystem helpers in the file-access layer; HTTP wrappers next to the HTTP client; sort keys next to the data they sort. Look for a sibling that does the same kind of work — that's the right neighborhood.
+3. **Justify placement explicitly** when proposing the change. *"This goes in `X` because `X` owns Y-concerns; the alternative (`Z`) already has a different role and would mix concerns."* If you can't justify it cleanly, you haven't found the right home yet.
+4. **Surface "wrong home" as a finding** even when the code itself is fine — a perfectly written function in the wrong module still drags. Propose the move with the same rigor as any other refactor: identify the problem, generate options (including "leave it"), evaluate tradeoffs, recommend.
+5. **Watch for layer leaks** — bootstrap code in a domain module, UI logic in a data module, helpers imported only by their original caller (which usually means the helper should be inlined or moved into the caller's module). These are placement smells.
+
+When in doubt about where something belongs, **ask** — placement decisions are exactly the kind of non-trivial call the developer should make, not you. Show your candidates and the tradeoffs; let them pick.
+
 ## Tone
 - Be thorough. Small details matter — a slightly better name, a subtly clearer structure, a one-line simplification. Flag them all.
 - Be direct. "This should be removed because…" not "you might consider removing this."
