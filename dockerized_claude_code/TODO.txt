@@ -231,13 +231,13 @@ Multi-agent manager
 
 tip: ctrl+v to paste image
     otherwise, just leave your images in /workspace/
-
+    Not working in container... Workaround?
+    
 
 phone notifications when AI is done ( {auto} mode only? )
     "{notify}" mode?
+    notify with computer notification?
 
-
-Do NOT summary-scan files excluded within .gitignore (specifically so that you won't read venv folders with all their packages/bloat)
 
 
 /summon <agent/instance> - start an instance of your choice
@@ -262,7 +262,8 @@ hacker agent - look for vulnerabilities. Attempt their exploitation (proof of th
 {advi} - advisor mode
     don't write/update/change any files in the project
     don't write/update/change any files online
-    project is made ro
+    just think and advise. Don't make changes.
+    /workspace is made ro
     
 
 
@@ -271,7 +272,9 @@ hacker agent - look for vulnerabilities. Attempt their exploitation (proof of th
 
 far-off future:
     modes:
-        
+      {gui} / {x11} — bind-mount /tmp/.X11-unix + forward $DISPLAY so the agent can drive a browser (screenshots, scraping JS-rendered sites), open a plot window, run image-viewing tools. High leverage when needed, mostly idle otherwise. Caveat: X11 socket access is a real security surface, so this should print a warning like {DooD} does. Wayland would need a different approach ($WAYLAND_DISPLAY + XDG_RUNTIME_DIR mount).
+
+   
 
 
 CANCELLED:
