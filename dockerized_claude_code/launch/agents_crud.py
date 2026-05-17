@@ -7,8 +7,9 @@ Roughly grouped by section in this file:
   - update_workspace_map / set_instance_modes — single-entry writers
   - warn_dood_with_auto — interactive prompt used by mode writers
   - install_latest_md / delete_instance / modify_instance — per-instance
-    state-dir writers (sync_memory_templates is in agent_composition since it
-    keys off the modifier taxonomy)
+    state-dir writers (install_latest_md composes the active-chain addendum
+    section onto the source `.md` body and writes the result as CLAUDE.md
+    in one go; memory_addendums.composed_addendum supplies the addendum)
   - resolve_pick — name-string → identity factory used by run.py's CLI parsing
   - creatable_agents / continuable_instances — picker entry dict factories the
     menu_picker UI consumes
@@ -31,14 +32,15 @@ import re
 
 from .agent_composition import warn_if_dangerous_modes
 from .file_access import (
-    copy_file, find_md_for_agent, force_remove, is_dir, iter_subdirs,
+    find_md_for_agent, force_remove, is_dir, iter_subdirs,
     load_conf, load_modes_map, load_workspace_map, move_path, parse_stem,
     path_exists, read_text, resolved_cwd, resolved_path,
     save_modes_map, save_workspace_map, write_text,
 )
+from .memory_addendums import composed_addendum
 from .paths import (
-    ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE,
-    DEFAULT_WORKSPACE, DEFAULTING_DIRS, MD_EXT, instance_state_dir_path,
+    AGENTS_DIR, AGENTS_STATE, DEFAULT_WORKSPACE, DEFAULTING_DIRS, MD_EXT,
+    instance_state_dir_path,
 )
 from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
 from .utils import ordering_index_or_end, relative_time
@@ -97,18 +99,17 @@ def set_instance_modes(sess_id) -> None:
 # Per-instance state-dir writers
 # ============================================================
 
-def install_latest_md(inst_id) -> None:
-    """Copy the agent's `.md` into the state dir as CLAUDE.md (refreshed each
-    launch so a source-side edit propagates), and ensure the shared OAuth files
-    exist so docker's bind-mount doesn't auto-create them as root. copy_file
-    and write_text both auto-create the destination's parent directories as
-    needed (via ensure_dir inside the primitives). Returns the state dir."""
-    copy_file(inst_id.md_path, inst_id.state_md, overwrite_if_dest=True)
-    if not path_exists(ACCOUNT_FILE):
-        write_text(ACCOUNT_FILE, "{}")
-    if not path_exists(CREDENTIALS_FILE):
-        write_text(CREDENTIALS_FILE, "{}")
-    return inst_id.state_dir
+def install_latest_md(sess_id) -> None:
+    """Write the agent's source `.md` plus the active-chain addendum section
+    into the state dir as CLAUDE.md, in a single overwrite. Refreshed each
+    launch so a source-side edit AND any modifier toggle both propagate
+    without a separate splice step. write_text auto-creates the destination's
+    parent directory tree. The result is launcher-owned: a stale wrapper or
+    legacy block from a previous launch is replaced wholesale, no marker-
+    based reconciliation needed."""
+    body = read_text(sess_id.md_path)
+    addendum = composed_addendum(sess_id.chain)
+    write_text(sess_id.state_md, f"{body}\n\n{addendum}" if addendum else body)
 
 
 def delete_instance(inst_id) -> None:

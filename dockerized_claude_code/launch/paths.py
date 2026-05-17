@@ -223,11 +223,12 @@ HISTORY_JSONL_FILENAME = "history.jsonl"
 INSTANCE_CLAUDE_MD_FILENAME = "CLAUDE.md"
 
 # Relpath inside an instance's state dir holding Claude Code's per-project
-# state (history.jsonl, session-UUID transcripts, MEMORY.md).
+# state (history.jsonl, session-UUID transcripts, per-project MEMORY.md).
+# The launcher walks the jsonl files (file_access.has_continuable_jsonl); the
+# MEMORY.md inside is fully managed by Claude Code at runtime — the launcher
+# doesn't touch it. Launch-time directives are composed into CLAUDE.md by
+# agents_crud.install_latest_md instead.
 INSTANCE_PROJECTS_RELPATH = Path("projects")
-
-# Relpath inside an instance's state dir holding the per-instance MEMORY.md.
-INSTANCE_MEMORY_FILE_RELPATH = INSTANCE_PROJECTS_RELPATH / "-workspace" / "memory" / "MEMORY.md"
 
 # Relpath inside an instance's state dir under which skill mount-points are
 # pre-created (so Docker doesn't auto-create them as root).
@@ -240,9 +241,9 @@ OPTIONAL_CREDS_README_FILENAME = "README.txt"        # auto-created in optional_
 OPTIONAL_CREDS_README_PATH     = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME   # full host path the README is planted at
 OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text token (e.g. jira/token → $JIRA_API_TOKEN)
 
-# Memory addendum texts now live as Python constants in memory_addendums.py
-# rather than `<modifier>-addendum.md` files; the splicing logic in
-# agent_composition.sync_memory_templates consumes them directly. No path
+# Addendum text + composition lives in memory_addendums.py rather than as
+# `<modifier>-addendum.md` files; agents_crud.install_latest_md asks it for
+# the rendered section and appends it to CLAUDE.md at write time. No path
 # constants needed here.
 
 # Compose-file naming. The base file is `compose.yml`; per-layer files follow
@@ -338,7 +339,6 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 
 # Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/)
 state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_CLAUDE_MD_FILENAME
-state_memory_path:       Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_MEMORY_FILE_RELPATH
 state_projects_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_PROJECTS_RELPATH
 state_skill_subdir_path: Callable[[Path, str], Path]   = lambda state_dir, name: state_dir / INSTANCE_SKILLS_RELPATH / name
 state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / DOMAINS_PENDING_RESOLVE_FILENAME

@@ -72,9 +72,8 @@ class InstanceModifiers(Enum):
     Each member carries:
       • `.value`         — canonical on-disk string (filename + JSON form)
       • `.slug`          — lowercased value, used wherever a case-stable
-                           identifier is needed (MEMORY.md wrapper marker
-                           stems, image-tag construction, etc.; e.g.
-                           {DooD} → 'dood')
+                           identifier is needed (image-tag construction, etc.;
+                           e.g. {DooD} → 'dood')
       • `.description`   — one-sentence picker-legend explanation
     Enum declaration order encodes chain composition order: base → tags → modes.
     Subset views (`tags()` / `modes()` for the members; `tag_values()` /
@@ -313,9 +312,9 @@ class SessionIdentity(InstanceIdentity):
         """Active modifier values for this session in InstanceModifiers
         declaration order — BASE always first, then the session's tags,
         then its modes. Drives both the docker image build order (returned
-        as-is from compose_chain) and per-instance MEMORY.md block ordering
-        + active/inactive judgement (consumed by sync_memory_templates via
-        `modifier.value in sess_id.chain`).
+        as-is from compose_chain) and the launch-time CLAUDE.md addendum
+        order (consumed by memory_addendums.composed_addendum via
+        `modifier.value in chain`).
 
         Validates self.tags / self.modes against the InstanceModifiers
         taxonomy on access — a typo'd filename tag or stale modes-map entry

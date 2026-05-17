@@ -63,12 +63,13 @@ from typing import Any
 from dotenv import dotenv_values  # pip install python-dotenv
 
 from .paths import (
-    AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
-    DEFAULT_CONF, FIREWALL_WHITELIST_FILE, FIREWALL_WHITELIST_TEMPLATE,
-    HISTORY_JSONL_FILENAME, JSONL_EXT, MD_EXT, OPTIONAL_CREDS_MOUNTS,
-    OPTIONAL_CREDS_TOKEN_ENV_VARS, PROJECT_CUSTOM_SKILLS_DIR, agent_conf_path,
-    optional_creds_service_path, optional_creds_token_path, skill_marker_path,
-    state_projects_path, state_skill_subdir_path, workspace_skills_path,
+    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
+    CREDENTIALS_FILE, DEFAULT_CONF, FIREWALL_WHITELIST_FILE,
+    FIREWALL_WHITELIST_TEMPLATE, HISTORY_JSONL_FILENAME, JSONL_EXT, MD_EXT,
+    OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS,
+    PROJECT_CUSTOM_SKILLS_DIR, agent_conf_path, optional_creds_service_path,
+    optional_creds_token_path, skill_marker_path, state_projects_path,
+    state_skill_subdir_path, workspace_skills_path,
 )
 
 # ============================================================
@@ -459,6 +460,27 @@ def save_modes_map(mapping: dict) -> None:     _cached_save_json_map(AGENT_MODES
 
 
 # ============================================================
+# Shared OAuth state files
+# ============================================================
+# Both files live in AGENTS_STATE and are bind-mounted into each container
+# at launch. Claude Code refreshes the token in .credentials.json in place,
+# and .claude.json holds the OAuth account info — so they must exist on the
+# host before docker mounts them, or docker auto-creates them as root-owned
+# directories instead of writable files.
+
+def ensure_shared_oauth_files() -> None:
+    """Idempotently touch ACCOUNT_FILE + CREDENTIALS_FILE as empty JSON
+    objects so docker's bind-mount finds them as writable host files (and
+    doesn't auto-create them as root-owned dirs on first launch). No-op
+    when they already exist — their actual contents are managed by Claude
+    Code at runtime, not by the launcher."""
+    if not path_exists(ACCOUNT_FILE):
+        write_text(ACCOUNT_FILE, "{}")
+    if not path_exists(CREDENTIALS_FILE):
+        write_text(CREDENTIALS_FILE, "{}")
+
+
+# ============================================================
 # Per-instance state-dir queries (helpers for InstanceIdentity properties)
 # ============================================================
 
@@ -539,8 +561,9 @@ def installed_cred_clis() -> str:
     """Space-joined CLI names for present optional-cred services that install
     a CLI in Dockerfile.prog (cli != None in OPTIONAL_CREDS_MOUNTS). Order
     follows the OPTIONAL_CREDS_MOUNTS declaration so the addendum reads in a
-    stable order across launches. Drives the [prog] memory addendum's
-    tool-list suffix in agent_composition.sync_memory_templates."""
+    stable order across launches. Used to render the body of
+    memory_addendums.CREDENTIALS_NOTICE — a no-creds environment collapses
+    the body to '' and composed_addendum drops the sub-section entirely."""
     present = present_optional_cred_services()
     return " ".join(
         cli for name, (_, cli) in OPTIONAL_CREDS_MOUNTS.items()

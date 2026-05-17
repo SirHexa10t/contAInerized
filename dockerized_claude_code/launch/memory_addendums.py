@@ -1,26 +1,25 @@
-"""Memory addendum text + modifier→addendum mapping + wrapper-marker format.
+"""Per-launch CLAUDE.md addendum text + the composer that renders them as a
+single markdown section appended to the agent's source `.md` at install time.
 
-Each addendum is one block of text that gets spliced into per-instance
-MEMORY.md when its associated modifier is active. The blocks live here as
-plain string constants (rather than `/workspace/memory/*.md` files) so
-per-launch dynamic content and path references can be interpolated directly
-from the launcher's path constants + helpers — no separate file to keep in
-sync.
+Each addendum is an `(title, body)` pair. The active set is determined by which
+modifiers are in the session's chain (sess_id.chain); `composed_addendum`
+iterates `InstanceModifiers` in declaration order (BASE → tags → modes) so
+section ordering in the rendered CLAUDE.md matches modifier precedence, and
+emits one `### <title>` sub-section per non-empty addendum body under a single
+`## <ADDENDUM_SECTION_TITLE>` heading.
 
-The wrapper-marker format also lives here: every wrapped block in MEMORY.md
-has `_wrapper_start_line(name)` and `_wrapper_end_line(name)` as its first
-and last lines, where `name` is the activating modifier's `.slug` (one
-block per modifier, not per addendum). `_wrap_block` composes these around
-the joined text; `addendum_text` is the per-modifier getter that
-agent_composition.sync_memory_templates calls.
+Bodies are evaluated at module import: `installed_cred_clis()` is queried then,
+and the Credentials body collapses to `""` when no creds are present so the
+sub-section gets suppressed entirely rather than rendering an empty Credentials
+heading. Empties drop out at compose time; if every body is empty,
+`composed_addendum` returns `""` and the caller appends nothing.
 
-Values are evaluated at module import: `installed_cred_clis()` is queried
-then, and CREDENTIALS_NOTICE collapses to '' when no creds are present so
-the [prog] block gets suppressed entirely rather than ending in a trailing
-colon. addendum_text filters '' entries before joining.
-"""
+Consumed by `agents_crud.install_latest_md`, which composes
+`source .md + "\\n\\n" + composed_addendum(sess_id.chain)` and writes the
+state-dir CLAUDE.md in a single pass — no splice, no wrapper markers, no
+post-write reconciliation."""
 
-from typing import Callable
+from typing import NamedTuple
 
 from .file_access import installed_cred_clis
 from .paths import (
@@ -30,75 +29,82 @@ from .paths import (
 from .structs import InstanceModifiers
 
 
-# Wrapper banner around `<name>-instructions-{start,end}` marker lines in
-# MEMORY.md — visual cue that the line is a machine-managed comment, not
-# memory instructions for the agent.
-MEMORY_BLOCK_WRAPPER_BANNER = "#" * 21
-
-# Separator placed between multiple addendums that share a single modifier's
-# wrapper block (e.g. SEEK_SUMMARY + MAINTAIN_PRIVACY inside `base-instructions-…`).
-# Three newlines render as two blank lines in MEMORY.md — enough visual gap
-# that a reader can tell where one directive ends and the next begins, without
-# fragmenting the block into separately-wrapped sections.
-ADDENDUM_SEPARATOR = "\n\n\n"
-
-_wrapper_start_line: Callable[[str], str] = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-start {MEMORY_BLOCK_WRAPPER_BANNER}"
-_wrapper_end_line:   Callable[[str], str] = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-end {MEMORY_BLOCK_WRAPPER_BANNER}"
+class Addendum(NamedTuple):
+    """One launch-time addendum: a human-readable `title` (rendered as a
+    `### <title>` sub-heading) and a `body` of markdown content (rendered
+    verbatim underneath). An empty `body` means the addendum is inactive
+    this launch — `composed_addendum` filters it out before rendering."""
+    title: str
+    body: str
 
 
-def _wrap_block(name: str, content: str) -> str:
-    """Compose the spliceable block for `name`: banner-wrapped start/end
-    marker lines (from the two lambdas above) around `content`. Single
-    source of truth for the marker format — every wrapped block in
-    MEMORY.md comes through here, and splice_block's marker detection keys
-    on these exact lines."""
-    return f"{_wrapper_start_line(name)}\n{content.strip()}\n{_wrapper_end_line(name)}"
+# Rendered as the single `## <title>` heading wrapping the addendum block in
+# CLAUDE.md. Kept as a bare title (no `##` prefix) so tests assert on the text
+# independent of heading level, and so a future heading-level change is one edit.
+ADDENDUM_SECTION_TITLE = "Launch-time addendums"
 
 
-# === Addendum text constants ===
+SEEK_SUMMARY = Addendum(
+    "Project summary",
+    f"""A comprehensive project summary lives at `{CLAUDE_SUMMARY_IN_CONTAINER}`. `Read` it when the current task would benefit from project context.
+If that file is missing or empty, suggest running `/write-summary` to create / populate it.""",
+)
 
-SEEK_SUMMARY = f"""A comprehensive project summary lives at `{CLAUDE_SUMMARY_IN_CONTAINER}`. `Read` it when the current task would benefit from project context.
-If that file is missing or empty, suggest running `/write-summary` to create / populate it."""
-
-FIREWALL_NOTICE = f"""You are currently running in `{InstanceModifiers.MODE_AUTO.label}` mode, a fact the user is aware of. A firewall is in place — blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
+FIREWALL_NOTICE = Addendum(
+    "Firewall",
+    f"""You are currently running in `{InstanceModifiers.MODE_AUTO.label}` mode, a fact the user is aware of. A firewall is in place — blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
 
 **Before bothering the user about a block, check `{state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)}` first.** Brief retries are appropriate for hosts listed under `pending:` (DNS may resolve within seconds). Hosts under `failed:` won't resolve this session — surface those as whitelist offers; a re-launch may succeed if the cause was transient.
 
 **If a host you'd expect to reach (not in `pending:` or `failed:`) still gives `ConnectionRefused`**, inform the user that you may access it if the appropriate domain-name or IP/CIDR (tell the user how to discover all appropriate CDN addresses) were added to the host-side file: `{FIREWALL_WHITELIST_FILE}`
 
-**Surface every legitimate block as a whitelist offer** (treat this as `feedback`-type guidance per your auto-memory taxonomy — the user has asked for it directly), even when a separate obstacle exists (JS-rendered SPA, login wall, etc.) and even when an alternative source is available. Mention secondary obstacles and alternatives separately — never as a reason to skip the whitelist offer."""
-
-CREDENTIALS_NOTICE = (
-    f"The user has provided credentials for the following CLI tools, which are already installed and ready to use: {installed_cred_clis()}"
-    if installed_cred_clis() else ""
+**Surface every legitimate block as a whitelist offer** (treat this as `feedback`-type guidance per your auto-memory taxonomy — the user has asked for it directly), even when a separate obstacle exists (JS-rendered SPA, login wall, etc.) and even when an alternative source is available. Mention secondary obstacles and alternatives separately — never as a reason to skip the whitelist offer.""",
 )
 
-MAINTAIN_PRIVACY = f"""**Never persist personal or runtime-environment details into project text.** When writing or editing code comments, docstrings, READMEs, summaries, TODOs, or any file that lives in the project tree, exclude:
+CREDENTIALS_NOTICE = Addendum(
+    "Credentials",
+    f"The user has provided credentials for the following CLI tools, which are already installed and ready to use: {installed_cred_clis()}"
+    if installed_cred_clis() else "",
+)
+
+MAINTAIN_PRIVACY = Addendum(
+    "Privacy",
+    f"""**Never persist personal or runtime-environment details into project text.** When writing or editing code comments, docstrings, READMEs, summaries, TODOs, or any file that lives in the project tree, exclude:
 
 - **Personal identifiers** — user emails, names, GitHub handles, system usernames, OAuth account info, API keys / tokens, credential file paths.
 - **Operator-environment state** — which CLIs / tools are installed on the current machine, which agents the operator has configured, what `/home/<user>/` looks like, current shell environment variables, mounted paths specific to this session.
 
 A future reader of any persisted text should see the same content regardless of who ran the command. If a fact wouldn't be true for a different operator's clone of the repo, it doesn't belong.
 
-**Exception (rare):** when the user explicitly asks for such a detail to be written, surface an extra confirmation *before* writing it — name the specific personal / environment detail and ask the user to confirm. Issue this confirmation even when running under a permission-bypass mode like `{InstanceModifiers.MODE_AUTO.label}` — the bypass covers routine actions, not embedding identifying information into persistent files."""
+**Exception (rare):** when the user explicitly asks for such a detail to be written, surface an extra confirmation *before* writing it — name the specific personal / environment detail and ask the user to confirm. Issue this confirmation even when running under a permission-bypass mode like `{InstanceModifiers.MODE_AUTO.label}` — the bypass covers routine actions, not embedding identifying information into persistent files.""",
+)
 
 
 # Maps each modifier to the addendums it activates. Iteration order in
-# sync_memory_templates follows InstanceModifiers declaration order — that's
-# what determines block order in the synced MEMORY.md.
-MODIFIER_ADDENDUMS = {
+# `composed_addendum` follows InstanceModifiers declaration order — that's what
+# determines sub-section order in the rendered CLAUDE.md.
+MODIFIER_ADDENDUMS: dict[InstanceModifiers, list[Addendum]] = {
     InstanceModifiers.BASE:      [SEEK_SUMMARY, MAINTAIN_PRIVACY],
     InstanceModifiers.TAG_PROG:  [CREDENTIALS_NOTICE],
     InstanceModifiers.MODE_AUTO: [FIREWALL_NOTICE],
 }
 
 
-def addendum_text(modifier: InstanceModifiers) -> str:
-    """Return the joined addendum text for `modifier` — joined with
-    ADDENDUM_SEPARATOR, empty values filtered out. '' is the 'no spliceable
-    content this launch' signal: either the modifier has no addendums in
-    MODIFIER_ADDENDUMS (the get() falls back to the empty tuple, which joins
-    to ''), or every addendum is empty (e.g. CREDENTIALS_NOTICE collapsed
-    under no-creds). Callers treat '' as a skip — splice_block isn't invoked,
-    so neither add nor cleanup happens."""
-    return ADDENDUM_SEPARATOR.join(a for a in MODIFIER_ADDENDUMS.get(modifier, ()) if a)
+def composed_addendum(chain: tuple[str, ...]) -> str:
+    """Render the full Launch-time-addendums markdown section for the active
+    chain (tuple of modifier `.value`s — `sess_id.chain`). Iterates
+    `InstanceModifiers` in declaration order; for each modifier in the chain,
+    emits a `### <title>` sub-section per non-empty addendum body. Returns
+    `""` when no modifier in the chain has any non-empty addendum body —
+    `install_latest_md` treats that as "append nothing" and the resulting
+    CLAUDE.md matches the source `.md` byte-for-byte."""
+    sub_sections = [
+        f"### {a.title}\n\n{a.body}"
+        for modifier in InstanceModifiers
+        if modifier.value in chain
+        for a in MODIFIER_ADDENDUMS.get(modifier, ())
+        if a.body
+    ]
+    if not sub_sections:
+        return ""
+    return f"## {ADDENDUM_SECTION_TITLE}\n\n" + "\n\n".join(sub_sections)

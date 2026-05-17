@@ -127,10 +127,6 @@ class TestPathBuilderLambdas(unittest.TestCase):
         d = Path("/tmp/state")
         self.assertEqual(paths.state_md_path(d), d / paths.INSTANCE_CLAUDE_MD_FILENAME)
 
-    def test_state_memory_path(self):
-        d = Path("/tmp/state")
-        self.assertEqual(paths.state_memory_path(d), d / paths.INSTANCE_MEMORY_FILE_RELPATH)
-
     def test_state_projects_path(self):
         d = Path("/tmp/state")
         self.assertEqual(paths.state_projects_path(d), d / paths.INSTANCE_PROJECTS_RELPATH)

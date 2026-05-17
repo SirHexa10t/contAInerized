@@ -1,18 +1,16 @@
-"""Tests for launch.agent_composition — compose_chain return shape,
-sync_memory_templates round-trip, and warn_if_dangerous_modes gate.
+"""Tests for launch.agent_composition — compose_chain return shape and
+warn_if_dangerous_modes gate.
 
 compose_chain has side effects via _apply_* handlers (filesystem caches,
 DNS resolution, docker GID lookup) — tests patch each handler to verify
-dispatch without actually running it. sync_memory_templates is tested
-with a tmp state dir."""
+dispatch without actually running it."""
 
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from launch import agent_composition, memory_addendums
-from launch.agent_composition import compose_chain, sync_memory_templates
+from launch import agent_composition
+from launch.agent_composition import compose_chain
 from launch.structs import InstanceModifiers, SessionIdentity
 
 
@@ -167,158 +165,6 @@ class TestComposeChainValidation(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             compose_chain(sess)
         self.assertIn("bogus", str(ctx.exception))
-
-
-# ============================================================
-# sync_memory_templates — round-trip against a tmp state dir
-# ============================================================
-
-
-class TestSyncMemoryTemplates(unittest.TestCase):
-    """Builds a fake state dir + SessionIdentity, runs sync_memory_templates,
-    and asserts on the resulting MEMORY.md."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        # The memory path is state_dir / projects / -workspace / memory / MEMORY.md;
-        # write_text auto-creates the parent dirs, so we don't pre-create them.
-        self.state_dir = Path(self.tmpdir.name)
-
-    def tearDown(self):
-        self.tmpdir.cleanup()
-
-    def _sess(self, tags, modes):
-        return _FakeSess.make(tags, modes, self.state_dir)
-
-    def _memory_path(self):
-        from launch.paths import state_memory_path
-        return state_memory_path(self.state_dir)
-
-    def test_no_active_modifiers_writes_only_base_block(self):
-        sess = self._sess([], [])
-        sync_memory_templates(sess)
-        content = self._memory_path().read_text()
-        # SEEK_SUMMARY (under BASE) should be present
-        self.assertIn("base-instructions-start", content)
-        self.assertIn("base-instructions-end", content)
-        # No auto block, no prog block
-        self.assertNotIn("auto-instructions-start", content)
-        self.assertNotIn("prog-instructions-start", content)
-
-    def test_auto_mode_adds_firewall_block(self):
-        sess = self._sess([], ["auto"])
-        sync_memory_templates(sess)
-        content = self._memory_path().read_text()
-        self.assertIn("auto-instructions-start", content)
-        self.assertIn("auto-instructions-end", content)
-        # Block content checks
-        self.assertIn("{auto}", content)
-        self.assertIn("ECONNREFUSED", content)
-
-    def test_removing_mode_removes_its_block(self):
-        # First launch with {auto}
-        sess_with = self._sess([], ["auto"])
-        sync_memory_templates(sess_with)
-        # Second launch without {auto} — block should be cleaned up
-        sess_without = self._sess([], [])
-        sync_memory_templates(sess_without)
-        content = self._memory_path().read_text()
-        self.assertNotIn("auto-instructions-start", content)
-        # Base block still there
-        self.assertIn("base-instructions-start", content)
-
-    def test_preserves_content_outside_wrapped_blocks(self):
-        # Simulate an agent-added pointer entry persisting through a sync
-        from launch.paths import state_memory_path
-        memory = state_memory_path(self.state_dir)
-        memory.parent.mkdir(parents=True, exist_ok=True)
-        memory.write_text("- [Some pointer](file.md) — agent-added entry\n")
-        sess = self._sess([], ["auto"])
-        sync_memory_templates(sess)
-        content = memory.read_text()
-        self.assertIn("Some pointer", content)
-        self.assertIn("auto-instructions-start", content)
-
-    def test_no_write_when_content_unchanged(self):
-        sess = self._sess([], [])
-        sync_memory_templates(sess)
-        memory = self._memory_path()
-        first_mtime = memory.stat().st_mtime
-        # Re-sync immediately — same content, should be a no-op
-        import time
-        time.sleep(0.01)
-        sync_memory_templates(sess)
-        self.assertEqual(memory.stat().st_mtime, first_mtime)
-
-    def test_addendum_block_refreshes_when_text_changes(self):
-        # Patch the BASE addendum to a known string, sync, then patch to a
-        # different string and sync again. The second call must REPLACE the
-        # first block (not append a second one alongside it).
-        sess = self._sess([], [])
-        with patch.dict(memory_addendums.MODIFIER_ADDENDUMS,
-                        {InstanceModifiers.BASE: ["first version"]}, clear=True):
-            sync_memory_templates(sess)
-        first = self._memory_path().read_text()
-        self.assertIn("first version", first)
-
-        with patch.dict(memory_addendums.MODIFIER_ADDENDUMS,
-                        {InstanceModifiers.BASE: ["second version"]}, clear=True):
-            sync_memory_templates(sess)
-        second = self._memory_path().read_text()
-        self.assertIn("second version", second)
-        self.assertNotIn("first version", second)
-        # And the block-start marker appears exactly once — no duplicate.
-        self.assertEqual(second.count("base-instructions-start"), 1)
-
-    def test_credentials_block_added_for_prog_with_creds(self):
-        # Patch the credentials addendum so the test doesn't depend on the
-        # launcher's actual cred state at import time.
-        sess = self._sess(["prog"], [])
-        with patch.dict(memory_addendums.MODIFIER_ADDENDUMS,
-                        {InstanceModifiers.TAG_PROG: ["fake creds notice text"]},
-                        clear=False):
-            sync_memory_templates(sess)
-        content = self._memory_path().read_text()
-        self.assertIn("prog-instructions-start", content)
-        self.assertIn("fake creds notice text", content)
-
-    def test_credentials_block_absent_without_prog_tag(self):
-        # Even when MODIFIER_ADDENDUMS has a non-empty CREDENTIALS_NOTICE, a
-        # non-[prog] agent gets no prog block — the modifier isn't in sess.chain
-        # so splice runs with keep=False, removing or never-adding it.
-        sess = self._sess([], ["auto"])
-        with patch.dict(memory_addendums.MODIFIER_ADDENDUMS,
-                        {InstanceModifiers.TAG_PROG: ["fake creds notice text"]},
-                        clear=False):
-            sync_memory_templates(sess)
-        content = self._memory_path().read_text()
-        self.assertNotIn("prog-instructions-start", content)
-        self.assertNotIn("fake creds notice text", content)
-
-    def test_adding_prog_tag_adds_credentials_block(self):
-        # Launch first without [prog]; verify no block. Then launch with [prog]
-        # (same workspace) and verify the block appears.
-        with patch.dict(memory_addendums.MODIFIER_ADDENDUMS,
-                        {InstanceModifiers.TAG_PROG: ["the creds block"]},
-                        clear=False):
-            sync_memory_templates(self._sess([], []))
-            before = self._memory_path().read_text()
-            self.assertNotIn("the creds block", before)
-
-            sync_memory_templates(self._sess(["prog"], []))
-            after = self._memory_path().read_text()
-            self.assertIn("the creds block", after)
-
-    def test_removing_prog_tag_removes_credentials_block(self):
-        # Inverse of above — block disappears when [prog] is dropped.
-        with patch.dict(memory_addendums.MODIFIER_ADDENDUMS,
-                        {InstanceModifiers.TAG_PROG: ["the creds block"]},
-                        clear=False):
-            sync_memory_templates(self._sess(["prog"], []))
-            self.assertIn("the creds block", self._memory_path().read_text())
-
-            sync_memory_templates(self._sess([], []))
-            self.assertNotIn("the creds block", self._memory_path().read_text())
 
 
 # ============================================================

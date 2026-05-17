@@ -1,10 +1,9 @@
 """Tests for launch.audit — the launcher's state-integrity report.
 
-Three pure helpers cover the audit's per-data-source logic:
-  `_check_json_file`        — classifies a JSON state file's status
-  `_stale_memory_wrappers`  — scans MEMORY.md for orphaned banner wrappers
-  `_modes_map_issues`       — validates modes-map entries (ghost/empty/bad)
-All are easily-testable in isolation. `main()` is the I/O orchestrator that
+Two pure helpers cover the audit's per-data-source logic:
+  `_check_json_file`   — classifies a JSON state file's status
+  `_modes_map_issues`  — validates modes-map entries (ghost/empty/bad)
+Both are easily-testable in isolation. `main()` is the I/O orchestrator that
 loads the maps and walks state dirs — left out of unit tests since it
 exercises the same primitives plus a great deal of file system access."""
 
@@ -13,10 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from launch.audit import (
-    _check_json_file, _modes_map_issues, _stale_memory_wrappers,
-)
-from launch.paths import state_memory_path
+from launch.audit import _check_json_file, _modes_map_issues
 
 
 class TestCheckJsonFile(unittest.TestCase):
@@ -65,120 +61,6 @@ class TestCheckJsonFile(unittest.TestCase):
     def test_nested_structure_is_clean(self):
         self.path.write_text(json.dumps({"a": {"b": [1, 2]}}))
         self.assertIsNone(_check_json_file(self.path))
-
-
-class TestStaleMemoryWrappers(unittest.TestCase):
-    """Builds a fake state_dir + MEMORY.md and asserts on the helper's report.
-    Current MODIFIER_ADDENDUMS keys provide the live valid-marker set; the
-    tests use slugs known to be absent from it ('legacy', 'oldmode', etc.)
-    so they remain stale regardless of future modifier additions."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.state_dir = Path(self.tmpdir.name)
-        self.memory_path = state_memory_path(self.state_dir)
-
-    def tearDown(self):
-        self.tmpdir.cleanup()
-
-    def _write_memory(self, content: str) -> None:
-        self.memory_path.parent.mkdir(parents=True, exist_ok=True)
-        self.memory_path.write_text(content)
-
-    def test_no_memory_file_returns_empty(self):
-        # state_dir exists but MEMORY.md doesn't — nothing to scan, no findings.
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ())
-
-    def test_empty_memory_returns_empty(self):
-        self._write_memory("")
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ())
-
-    def test_no_banners_returns_empty(self):
-        self._write_memory("Just some plain MEMORY.md prose\nwith no banner lines.\n")
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ())
-
-    def test_only_valid_wrappers_returns_empty(self):
-        # `base-instructions-{start,end}` is always-on (BASE is in MODIFIER_ADDENDUMS).
-        self._write_memory(
-            "##################### base-instructions-start #####################\n"
-            "hello\n"
-            "##################### base-instructions-end #####################\n"
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ())
-
-    def test_unknown_slug_flagged_and_start_end_collapse(self):
-        # `oldmode` isn't in MODIFIER_ADDENDUMS → start+end of the same slug
-        # collapse to one reported entry via the `-instructions-{start|end}` strip.
-        self._write_memory(
-            "##################### oldmode-instructions-start #####################\n"
-            "stale block\n"
-            "##################### oldmode-instructions-end #####################\n"
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ("oldmode",))
-
-    def test_pre_refactor_banner_grammar_flagged_as_is(self):
-        # Old-format banner whose middle text doesn't follow `-instructions-{start|end}`
-        # surfaces under its raw middle text (no suffix to strip).
-        self._write_memory(
-            "############# auto-addendum #############\n"
-            "old auto block\n"
-            "############# end auto-addendum #############\n"
-        )
-        self.assertEqual(
-            _stale_memory_wrappers(self.state_dir),
-            ("auto-addendum", "end auto-addendum"),
-        )
-
-    def test_mix_of_valid_and_stale(self):
-        self._write_memory(
-            "##################### base-instructions-start #####################\n"
-            "valid\n"
-            "##################### base-instructions-end #####################\n"
-            "\n"
-            "##################### legacy-instructions-start #####################\n"
-            "stale\n"
-            "##################### legacy-instructions-end #####################\n"
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ("legacy",))
-
-    def test_markdown_headers_not_flagged(self):
-        # Markdown headers max at 6 hashes and never have trailing hashes —
-        # the 10-hash floor and `\s+#{10,}$` anchor reject them on both counts.
-        self._write_memory(
-            "# Top\n"
-            "## Sub\n"
-            "###### Six-hash header\n"
-            "###### Closed atx header ######\n"   # max h6, still under the floor
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ())
-
-    def test_distinct_stale_slugs_deduped(self):
-        # Same stale slug appearing in multiple start/end occurrences → one entry.
-        self._write_memory(
-            "##################### foo-instructions-start #####################\n"
-            "##################### foo-instructions-end #####################\n"
-            "##################### foo-instructions-start #####################\n"
-            "##################### foo-instructions-end #####################\n"
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ("foo",))
-
-    def test_multiple_distinct_stale_slugs_sorted(self):
-        self._write_memory(
-            "##################### zebra-instructions-start #####################\n"
-            "##################### zebra-instructions-end #####################\n"
-            "##################### apple-instructions-start #####################\n"
-            "##################### apple-instructions-end #####################\n"
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ("apple", "zebra"))
-
-    def test_varying_banner_widths_all_caught(self):
-        # The regex accepts any `#{10,}` run, not just the current 21-wide banner —
-        # critical for catching pre-refactor wrappers with different widths.
-        self._write_memory(
-            "########## old-instructions-start ##########\n"
-            "############################# old-instructions-end #############################\n"
-        )
-        self.assertEqual(_stale_memory_wrappers(self.state_dir), ("old",))
 
 
 class TestModesMapIssues(unittest.TestCase):

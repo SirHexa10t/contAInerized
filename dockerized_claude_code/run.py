@@ -3,9 +3,7 @@ import argparse
 import dataclasses
 import sys
 
-from launch.agent_composition import (
-    compose_chain, sync_memory_templates,
-)
+from launch.agent_composition import compose_chain
 from launch.agents_crud import (
     creatable_agents, install_latest_md, resolve_pick, set_instance_modes,
     update_workspace_map,
@@ -14,7 +12,7 @@ from launch.compose_env import set_container_env
 from launch.docker_config import (
     require_docker, run_compose, set_container_mounts,
 )
-from launch.file_access import load_conf
+from launch.file_access import ensure_shared_oauth_files, load_conf
 from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
@@ -147,19 +145,18 @@ def compose_runtime(inst_id: InstanceIdentity) -> tuple[SessionIdentity, list[st
 
 
 def setup_state(sess_id: SessionIdentity) -> tuple[dict, list[str]]:
-    """Stage 6 — Setup. Install the agent's .md into its state dir, sync per-
-    instance MEMORY.md to the current modifier set (adds/refreshes/removes
-    addendum blocks while preserving agent-added pointer entries outside the
-    wrapped blocks), populate the env vars compose substitutes at build/run
-    time, stage the per-launch bind-mounts (base set + per-instance
-    workspace/state), load the per-agent conf, and stage the skill +
-    optional-creds bind-mounts (with the auto-readme touch). Takes a
-    SessionIdentity — the modifier-bearing variant is needed here because
-    sync_memory_templates keys off the active modifier set (tags ∪ modes).
-    Returns (conf, cred_names) — mounts have all been staged via
-    docker_config.add_docker_mount and don't need to flow through this return."""
+    """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
+    addendum section into its state dir as CLAUDE.md (a single overwrite —
+    install_latest_md keys off sess_id.chain for the addendums), ensure
+    shared OAuth state files exist so docker doesn't auto-create them as
+    root, populate the env vars compose substitutes at build/run time,
+    stage the per-launch bind-mounts (base set + per-instance workspace/
+    state), load the per-agent conf, and stage the skill + optional-creds
+    bind-mounts (with the auto-readme touch). Returns (conf, cred_names) —
+    mounts have all been staged via docker_config.add_docker_mount and
+    don't need to flow through this return."""
     install_latest_md(sess_id)
-    sync_memory_templates(sess_id)
+    ensure_shared_oauth_files()
     set_container_env(sess_id)
     set_container_mounts(sess_id)
     _, conf = load_conf(sess_id.md_path)

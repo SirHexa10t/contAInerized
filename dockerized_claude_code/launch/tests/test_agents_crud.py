@@ -1,16 +1,23 @@
-"""Tests for launch.agents_crud — sort keys + model parsing.
+"""Tests for launch.agents_crud — sort keys + model parsing + the
+install_latest_md integration round-trip.
 
-Other agents_crud functions (delete_instance, install_latest_md, modify_instance,
-the picker-entry factories) touch disk + the cached JSON maps + sometimes
-print/prompt — covered by file_access tests for the cache layer plus
-manually for the integration path."""
+delete_instance, modify_instance, and the picker-entry factories touch disk +
+the cached JSON maps + sometimes print/prompt — covered by file_access tests
+for the cache layer plus manually for the integration path."""
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from launch.agents_crud import (
-    ORDERED_MODEL_FAMILIES, _write_modes_entry, mode_sort_key, parse_model_id,
-    tag_sort_key,
+    ORDERED_MODEL_FAMILIES, _write_modes_entry, install_latest_md,
+    mode_sort_key, parse_model_id, tag_sort_key,
 )
+from launch.memory_addendums import (
+    ADDENDUM_SECTION_TITLE, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
+)
+from launch.structs import SessionIdentity
 
 
 # ============================================================
@@ -161,6 +168,110 @@ class TestWriteModesEntry(unittest.TestCase):
         m = {}
         _write_modes_entry(m, _StubSess("agent__sess", ["future_mode"]))
         self.assertEqual(m["agent__sess"], ["future_mode"])
+
+
+# ============================================================
+# install_latest_md — source `.md` + composed addendum → state-dir CLAUDE.md
+# ============================================================
+
+
+class _FakeSess(SessionIdentity):
+    """SessionIdentity subclass overriding `md_path`, `state_dir`, and `tags`
+    so install_latest_md can be exercised against temp paths without a real
+    agent .md on disk. Frozen dataclass blocks normal __setattr__, so the
+    overrides come through object.__setattr__ on attributes the subclass
+    properties read from."""
+
+    @property
+    def md_path(self):
+        return self._md_path_override
+
+    @property
+    def state_dir(self):
+        return self._state_dir_override
+
+    @property
+    def tags(self):
+        return self._tags_override
+
+    @classmethod
+    def make(cls, md_path, state_dir, *, tags=(), modes=(), agent="x", session="s"):
+        s = cls(agent=agent, session=session, workspace="/tmp",
+                is_brand_new=False, modes=tuple(modes))
+        object.__setattr__(s, "_md_path_override", md_path)
+        object.__setattr__(s, "_state_dir_override", state_dir)
+        object.__setattr__(s, "_tags_override", tuple(tags))
+        return s
+
+
+class TestInstallLatestMd(unittest.TestCase):
+    """End-to-end check that install_latest_md writes the source body plus the
+    composed-addendum section to the state-dir CLAUDE.md in a single overwrite.
+    Uses real (production) MODIFIER_ADDENDUMS for the BASE-substring assertion
+    so a regression in the addendum-composition path surfaces here, not just
+    in the memory_addendums unit tests."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self.tmpdir.name)
+        self.md_path = root / "agent.md"
+        self.state_dir = root / "state"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _sess(self, body, *, tags=(), modes=()):
+        self.md_path.write_text(body)
+        return _FakeSess.make(self.md_path, self.state_dir, tags=tags, modes=modes)
+
+    def test_source_body_is_at_top_of_resulting_md(self):
+        sess = self._sess("Source line 1\nSource line 2\n")
+        install_latest_md(sess)
+        result = sess.state_md.read_text()
+        self.assertTrue(result.startswith("Source line 1\nSource line 2\n"))
+
+    def test_base_addendum_body_is_present_in_resulting_md(self):
+        # The integration assertion the user asked for: a string that's part of
+        # BASE (SEEK_SUMMARY's body, which sits under BASE) is entirely included
+        # in the file install_latest_md writes.
+        sess = self._sess("agent body\n")
+        install_latest_md(sess)
+        self.assertIn(SEEK_SUMMARY.body, sess.state_md.read_text())
+
+    def test_section_heading_is_present_in_resulting_md(self):
+        sess = self._sess("agent body\n")
+        install_latest_md(sess)
+        self.assertIn(f"## {ADDENDUM_SECTION_TITLE}", sess.state_md.read_text())
+
+    def test_separator_between_source_body_and_addendum(self):
+        # Source body ends with '\n', addendum is prefixed with '\n\n' — so the
+        # transition is `body\n\n\n## Launch-time...` (one blank line gap).
+        sess = self._sess("agent body\n")
+        install_latest_md(sess)
+        self.assertIn(f"agent body\n\n\n## {ADDENDUM_SECTION_TITLE}",
+                      sess.state_md.read_text())
+
+    def test_overwrite_replaces_previous_content(self):
+        # First launch with one source body.
+        sess1 = self._sess("body v1\n")
+        install_latest_md(sess1)
+        # Re-write source `.md`, reinstall — state-dir CLAUDE.md must reflect v2.
+        self.md_path.write_text("body v2\n")
+        install_latest_md(sess1)
+        result = sess1.state_md.read_text()
+        self.assertIn("body v2", result)
+        self.assertNotIn("body v1", result)
+        # Addendum still there post-overwrite.
+        self.assertIn(SEEK_SUMMARY.body, result)
+
+    def test_empty_addendum_yields_source_only(self):
+        # Patch MODIFIER_ADDENDUMS to empty so composed_addendum returns ''.
+        # install_latest_md must skip the separator+addendum append, yielding
+        # the source body byte-for-byte.
+        sess = self._sess("just the body\n")
+        with patch.dict(MODIFIER_ADDENDUMS, {}, clear=True):
+            install_latest_md(sess)
+        self.assertEqual(sess.state_md.read_text(), "just the body\n")
 
 
 if __name__ == "__main__":

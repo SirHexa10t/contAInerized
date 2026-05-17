@@ -2,10 +2,7 @@
 
 Reports:
   - orphan state dirs (instance dir present but no matching agent .md)
-  - drifted CLAUDE.md (state dir's CLAUDE.md differs from agent's current .md)
   - no_history (state dir has no history.jsonl — the last-used signal we rely on)
-  - stale_wrapper (MEMORY.md holds a banner-wrapped block whose marker doesn't
-                   correspond to any current `<slug>-instructions-{start,end}`)
   - ghost workspace-map entries (entry without a corresponding state dir)
   - bad workspaces (mapping points to a non-existent or non-directory path)
   - ws_map issues (workspace-map file missing, empty, or not valid JSON)
@@ -23,43 +20,18 @@ Run from the project root:
 """
 
 import json
-import re
 
 from .agents_crud import list_all_instances
 from .file_access import (
     find_md_for_agent, is_dir, load_modes_map, load_workspace_map,
     path_exists, read_text, rglob_paths,
 )
-from .memory_addendums import MODIFIER_ADDENDUMS
 from .paths import (
     ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
     AGENTS_STATE, CREDENTIALS_FILE, HISTORY_JSONL_FILENAME,
-    instance_state_dir_path, state_md_path, state_memory_path,
+    instance_state_dir_path,
 )
-from .structs import InstanceIdentity, InstanceModifiers, SESSION_SEP
-
-
-# Every wrapper marker `sync_memory_templates` would currently emit, in both
-# its start- and end-line forms. Anything outside this set that still wears
-# banner hashes in MEMORY.md is a leftover the splice loop can no longer find
-# (renamed modifier, modifier dropped from MODIFIER_ADDENDUMS, pre-refactor
-# format, etc.).
-_VALID_MEMORY_MARKERS = frozenset(
-    f"{m.slug}-instructions-{terminator}"
-    for m in MODIFIER_ADDENDUMS
-    for terminator in ("start", "end")
-)
-
-# Banner-wrapped line: 10+ hashes, whitespace, middle text, whitespace, 10+ hashes.
-# 10-hash floor avoids markdown-header false positives (max h6 = 6 hashes, never
-# trailing) while staying loose enough to catch banners of any width — old
-# pre-refactor wrappers may have used a different banner length than the current
-# 21. Trailing `\s*` tolerates `\r` in CRLF line endings.
-_BANNER_LINE_RE = re.compile(r"^#{10,}\s+(.+?)\s+#{10,}\s*$", re.MULTILINE)
-
-# Strips a trailing `-instructions-{start|end}` from a captured marker so
-# start/end of the same stale wrapper collapse to one reported entry.
-_MARKER_SUFFIX_RE = re.compile(r"-instructions-(start|end)$")
+from .structs import InstanceModifiers, SESSION_SEP
 
 
 def _check_json_file(path) -> str | None:
@@ -105,25 +77,6 @@ def _modes_map_issues(modes: dict, actual: set) -> list[tuple[str, str, str]]:
     return out
 
 
-def _stale_memory_wrappers(state_dir) -> tuple[str, ...]:
-    """Distinct stems for banner-wrapped marker lines in this instance's
-    MEMORY.md whose middle text doesn't match any current `<slug>-instructions-
-    {start,end}`. Catches both pre-refactor banners (different middle-text
-    grammar entirely) and banners whose slug refers to a removed / renamed
-    modifier — both orphan in MEMORY.md because sync_memory_templates only
-    cleans up wrappers matching the *current* marker format. Start + end of
-    the same stale slug collapse to one entry."""
-    memory = state_memory_path(state_dir)
-    if not path_exists(memory):
-        return ()
-    stale = {
-        _MARKER_SUFFIX_RE.sub("", m) or m
-        for m in _BANNER_LINE_RE.findall(read_text(memory))
-        if m not in _VALID_MEMORY_MARKERS
-    }
-    return tuple(sorted(stale))
-
-
 def main() -> None:
     issues = []
 
@@ -160,20 +113,15 @@ def main() -> None:
     actual = set(instances)
 
     # Per-instance checks — `dir_name` is the `<agent>__<session>` string, not an InstanceIdentity.
+    # CLAUDE.md drift isn't checked: install_latest_md fully rewrites it every launch
+    # (source `.md` + composed-addendum), so any pre-launch divergence is transient.
     for dir_name in instances:
         agent, _, session = dir_name.partition(SESSION_SEP)
-        md_path = find_md_for_agent(agent)
-        if md_path is None:
+        if find_md_for_agent(agent) is None:
             issues.append(("orphan", dir_name, f"agent '{agent}' has no .md file"))
             continue
-        state_dir = InstanceIdentity.state_dir_for(agent, session)
-        sm = state_md_path(state_dir)
-        if path_exists(sm) and read_text(sm) != read_text(md_path):
-            issues.append(("drifted", dir_name, f"CLAUDE.md differs from {md_path.name}"))
         if not list(rglob_paths(instance_state_dir_path(dir_name), HISTORY_JSONL_FILENAME)):
             issues.append(("no_history", dir_name, f"no {HISTORY_JSONL_FILENAME} found (instance never started?)"))
-        for stem in _stale_memory_wrappers(state_dir):
-            issues.append(("stale_wrapper", dir_name, f"MEMORY.md has unknown banner wrapper '{stem}'"))
 
     # Workspace-map entries — same shape: `dir_name` is the map key, a `<agent>__<session>` string.
     for dir_name, ws in mapping.items():

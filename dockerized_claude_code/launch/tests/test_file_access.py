@@ -315,5 +315,72 @@ class TestIsFileRecent(unittest.TestCase):
         self.assertFalse(file_access.is_file_recent(self.path, 60))
 
 
+# ============================================================
+# ensure_shared_oauth_files — idempotent touch of shared OAuth state files
+# ============================================================
+
+
+class TestEnsureSharedOauthFiles(unittest.TestCase):
+    """Each test patches launch.file_access.ACCOUNT_FILE / CREDENTIALS_FILE to
+    a temp path so the real launcher state under AGENTS_STATE isn't touched."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.account_path = Path(self.tmpdir.name) / "account.json"
+        self.creds_path = Path(self.tmpdir.name) / "creds.json"
+        self.patches = [
+            patch.object(file_access, "ACCOUNT_FILE", self.account_path),
+            patch.object(file_access, "CREDENTIALS_FILE", self.creds_path),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmpdir.cleanup()
+
+    def test_creates_both_files_when_absent(self):
+        self.assertFalse(self.account_path.exists())
+        self.assertFalse(self.creds_path.exists())
+        file_access.ensure_shared_oauth_files()
+        self.assertTrue(self.account_path.is_file())
+        self.assertTrue(self.creds_path.is_file())
+
+    def test_initial_contents_are_empty_json_object(self):
+        file_access.ensure_shared_oauth_files()
+        self.assertEqual(self.account_path.read_text(), "{}")
+        self.assertEqual(self.creds_path.read_text(), "{}")
+
+    def test_existing_account_file_left_alone(self):
+        # Pre-existing OAuth state must NOT be clobbered — Claude Code's
+        # actual tokens live in these files.
+        self.account_path.write_text('{"real": "data"}')
+        file_access.ensure_shared_oauth_files()
+        self.assertEqual(self.account_path.read_text(), '{"real": "data"}')
+
+    def test_existing_creds_file_left_alone(self):
+        self.creds_path.write_text('{"token": "abc"}')
+        file_access.ensure_shared_oauth_files()
+        self.assertEqual(self.creds_path.read_text(), '{"token": "abc"}')
+
+    def test_creates_only_missing_file_when_other_exists(self):
+        # Mixed state: one file exists, the other doesn't. Existing one stays
+        # untouched; missing one gets created.
+        self.account_path.write_text('{"existing": true}')
+        file_access.ensure_shared_oauth_files()
+        self.assertEqual(self.account_path.read_text(), '{"existing": true}')
+        self.assertEqual(self.creds_path.read_text(), "{}")
+
+    def test_idempotent_across_repeated_calls(self):
+        file_access.ensure_shared_oauth_files()
+        first_mtime = self.account_path.stat().st_mtime
+        # Repeated call — must not rewrite the file (mtime stable).
+        import time
+        time.sleep(0.01)
+        file_access.ensure_shared_oauth_files()
+        self.assertEqual(self.account_path.stat().st_mtime, first_mtime)
+
+
 if __name__ == "__main__":
     unittest.main()

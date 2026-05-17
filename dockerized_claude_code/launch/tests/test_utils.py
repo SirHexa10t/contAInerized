@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from launch.utils import (
-    ordering_index_or_end, plural, relative_time, splice_block, split_host_port,
+    ordering_index_or_end, plural, relative_time, split_host_port,
 )
 
 
@@ -116,96 +116,6 @@ class TestSplitHostPort(unittest.TestCase):
 
     def test_leading_colon(self):
         self.assertEqual(split_host_port(":80"), ("", "80"))
-
-
-class TestSpliceBlock(unittest.TestCase):
-    """splice_block uses the first and last lines of `block_text` as wrapper
-    markers — these tests use the project's banner format for realism."""
-
-    BANNER = "#" * 21
-
-    def _block(self, name, body):
-        return (f"{self.BANNER} {name}-instructions-start {self.BANNER}\n"
-                f"{body}\n"
-                f"{self.BANNER} {name}-instructions-end {self.BANNER}")
-
-    # --- keep=True: add or refresh ---
-
-    def test_append_to_empty(self):
-        block = self._block("foo", "body")
-        result = splice_block("", block, keep=True)
-        self.assertEqual(result, block)
-
-    def test_append_with_separator(self):
-        block = self._block("foo", "body")
-        result = splice_block("existing content", block, keep=True)
-        self.assertEqual(result, "existing content\n\n" + block)
-
-    def test_replace_existing_block(self):
-        first = splice_block("", self._block("foo", "body1"), keep=True)
-        second = splice_block(first, self._block("foo", "body2"), keep=True)
-        self.assertIn("body2", second)
-        self.assertNotIn("body1", second)
-
-    def test_preserves_content_outside_block(self):
-        original = "header text\n\n" + self._block("foo", "body") + "\n\nfooter text"
-        result = splice_block(original, self._block("foo", "new body"), keep=True)
-        self.assertIn("header text", result)
-        self.assertIn("footer text", result)
-        self.assertIn("new body", result)
-        self.assertNotIn("body\n", result.split("new body")[1])
-
-    # --- keep=False: remove if present ---
-
-    def test_remove_existing(self):
-        original = splice_block("", self._block("foo", "body"), keep=True)
-        result = splice_block(original, self._block("foo", "body"), keep=False)
-        self.assertEqual(result, "")
-
-    def test_remove_when_absent_is_noop(self):
-        result = splice_block("untouched", self._block("foo", "body"), keep=False)
-        self.assertEqual(result, "untouched")
-
-    def test_remove_block_preserves_surrounding(self):
-        block = self._block("foo", "body")
-        original = "before\n\n" + block + "\n\nafter"
-        result = splice_block(original, block, keep=False)
-        self.assertIn("before", result)
-        self.assertIn("after", result)
-        self.assertNotIn("body", result)
-
-    # --- edge cases ---
-
-    def test_single_line_block_is_noop(self):
-        # block must have ≥2 lines (start + end markers)
-        self.assertEqual(splice_block("content", "single", keep=True), "content")
-        self.assertEqual(splice_block("content", "single", keep=False), "content")
-
-    def test_block_text_strips_whitespace(self):
-        # leading/trailing whitespace on block_text is stripped before use
-        block = self._block("foo", "body")
-        padded = "\n\n\n" + block + "\n\n\n"
-        result = splice_block("", padded, keep=True)
-        self.assertEqual(result, block)
-
-    def test_multiple_blocks_coexist(self):
-        a = self._block("a", "abody")
-        b = self._block("b", "bbody")
-        content = splice_block("", a, keep=True)
-        content = splice_block(content, b, keep=True)
-        self.assertIn("abody", content)
-        self.assertIn("bbody", content)
-        # Order preserved: a before b
-        self.assertLess(content.index("abody"), content.index("bbody"))
-
-    def test_remove_one_of_multiple_blocks(self):
-        a = self._block("a", "abody")
-        b = self._block("b", "bbody")
-        content = splice_block("", a, keep=True)
-        content = splice_block(content, b, keep=True)
-        content = splice_block(content, a, keep=False)
-        self.assertNotIn("abody", content)
-        self.assertIn("bbody", content)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
 """Agent composition layer: computes the docker build chain (InstanceModifiers
 in declaration order — BASE always, then user-active tags/modes) and runs each
 active modifier's handler contributions (volume mounts + compose env staging)
-in a single pass via compose_chain. Also owns the per-instance MEMORY.md
-reconcile (sync_memory_templates, which asks memory_addendums.addendum_text
-for each modifier's rendered block) and the dangerous-combination warning
+in a single pass via compose_chain. Also owns the dangerous-combination warning
 (warn_if_dangerous_modes) that agents_crud's writers call after persisting a
 new mode set.
 
@@ -13,32 +11,28 @@ from there. Sort keys for the picker (agent/mode/tag sort) live in agents_crud �
 they're picker-side concerns and don't belong in the composition layer.
 
 Imports path constants from paths, the file_access primitives needed by
-prune_caches / prepare_caches + sync_memory_templates (ensure_dir,
-iter_file_stats, path_exists, remove_path, read_text, write_text),
-env-/mount-staging helpers + docker subprocess wrappers from docker_config,
-the {auto}-mode firewall entry points from network, the InstanceModifiers
-taxonomy from structs, the addendum_text getter from memory_addendums, and
-splice_block from utils; agents_crud, menu_picker, and run.py import from here.
+prune_caches / prepare_caches (ensure_dir, iter_file_stats, path_exists,
+remove_path), env-/mount-staging helpers + docker subprocess wrappers from
+docker_config, the {auto}-mode firewall entry points from network, and the
+InstanceModifiers taxonomy from structs; agents_crud, menu_picker, and run.py
+import from here.
 """
 
 import sys
 import time
 
 from .file_access import (
-    ensure_dir, iter_file_stats, path_exists, read_text, remove_path, write_text,
+    ensure_dir, iter_file_stats, path_exists, remove_path,
 )
 from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
     add_docker_mount, any_agent_container_running, detect_docker_gid,
 )
-from .memory_addendums import _wrap_block, addendum_text
 from .network import start_whitelist_resolution
 from .paths import (
     CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
-    state_memory_path,
 )
 from .structs import InstanceModifiers
-from .utils import splice_block
 
 # === Modifier taxonomy + chain-composition ordering ===
 # The InstanceModifiers enum (in structs.py) is the canonical ordered taxonomy
@@ -180,42 +174,6 @@ def warn_if_dangerous_modes(modes) -> None:
     except (ImportError, OSError):   # non-Linux/macOS or no tty → fallback requires Enter
         input()
     print()
-
-
-# === Per-instance MEMORY.md reconcile ===
-# sync_memory_templates iterates InstanceModifiers and asks memory_addendums
-# for each modifier's rendered text (already includes per-launch dynamic
-# content like the [prog] CLI list); each non-empty result is spliced into
-# the instance's MEMORY.md with a wrapper marker keyed off modifier.slug.
-# Marker format + content live in memory_addendums (one source of truth);
-# this function is a pure orchestration loop.
-
-def sync_memory_templates(sess_id) -> None:
-    """Reconcile per-instance MEMORY.md with the current modifier set. One
-    read + at most one write per launch. Iterates InstanceModifiers in
-    declaration order (BASE → tags → modes) so block order in MEMORY.md
-    matches chain order; for each, asks memory_addendums.addendum_text for
-    the modifier's rendered block (already includes per-launch dynamic
-    content like the [prog] CLI list). Empty text means 'nothing to splice
-    this launch' — skipped entirely. Non-empty text gets spliced in when
-    the modifier is active, or removed when not. Content outside the
-    wrapped blocks is preserved verbatim — that's where agent-added auto-
-    memory pointer entries live.
-
-    No defensive cleanup of unusual file types at memory_path — if read or
-    write fails on a malformed state dir the caller can just delete the
-    instance and create a new one."""
-    memory_path = state_memory_path(sess_id.state_dir)
-    original = read_text(memory_path) if path_exists(memory_path) else ""
-    content = original
-
-    for modifier in InstanceModifiers:
-        text = addendum_text(modifier)
-        if text:
-            content = splice_block(content, _wrap_block(modifier.slug, text), keep=modifier.value in sess_id.chain)
-
-    if content != original:
-        write_text(memory_path, content)
 
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===

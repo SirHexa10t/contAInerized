@@ -1,146 +1,122 @@
-"""Tests for launch.memory_addendums — wrapper format, addendum text content,
-and the per-modifier getter.
+"""Tests for launch.memory_addendums — Addendum shape, the addendum bodies,
+and the composed_addendum renderer.
 
-Note: `Addendum.CREDENTIALS_NOTICE` is evaluated at module import (via
+`CREDENTIALS_NOTICE.body` is evaluated at module import (via
 `installed_cred_clis()`), so its concrete value depends on the launcher
-environment. Tests here assert structure and patterns, not the exact CLI
-list."""
+environment. Tests here assert structure and patterns, not the exact CLI list."""
 
 import unittest
 from unittest.mock import patch
 
 from launch.memory_addendums import (
-    ADDENDUM_SEPARATOR, CREDENTIALS_NOTICE, FIREWALL_NOTICE, MAINTAIN_PRIVACY,
-    MEMORY_BLOCK_WRAPPER_BANNER, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
-    _wrap_block, _wrapper_end_line, _wrapper_start_line, addendum_text,
+    ADDENDUM_SECTION_TITLE, Addendum, CREDENTIALS_NOTICE, FIREWALL_NOTICE,
+    MAINTAIN_PRIVACY, MODIFIER_ADDENDUMS, SEEK_SUMMARY, composed_addendum,
 )
 from launch.structs import InstanceModifiers
 
 
-class TestWrapperBanner(unittest.TestCase):
-    def test_banner_is_21_hashes(self):
-        self.assertEqual(MEMORY_BLOCK_WRAPPER_BANNER, "#" * 21)
-
-
-class TestWrapperLines(unittest.TestCase):
-    def test_start_line_format(self):
-        self.assertEqual(
-            _wrapper_start_line("auto"),
-            "##################### auto-instructions-start #####################",
-        )
-
-    def test_end_line_format(self):
-        self.assertEqual(
-            _wrapper_end_line("auto"),
-            "##################### auto-instructions-end #####################",
-        )
-
-    def test_start_and_end_share_name_stem(self):
-        self.assertIn("foo-instructions-start", _wrapper_start_line("foo"))
-        self.assertIn("foo-instructions-end", _wrapper_end_line("foo"))
-
-    def test_banner_on_both_sides(self):
-        line = _wrapper_start_line("x")
-        self.assertTrue(line.startswith(MEMORY_BLOCK_WRAPPER_BANNER))
-        self.assertTrue(line.endswith(MEMORY_BLOCK_WRAPPER_BANNER))
-
-
-class TestWrapBlock(unittest.TestCase):
-    def test_wraps_content_with_start_end_lines(self):
-        wrapped = _wrap_block("auto", "hello")
-        self.assertEqual(
-            wrapped,
-            f"{_wrapper_start_line('auto')}\nhello\n{_wrapper_end_line('auto')}",
-        )
-
-    def test_strips_content_whitespace(self):
-        wrapped = _wrap_block("auto", "\n\n  hello world  \n\n")
-        # content.strip() removes leading/trailing whitespace
-        self.assertIn("\nhello world\n", wrapped)
-
-    def test_multiline_content_preserved(self):
-        content = "line one\nline two\nline three"
-        wrapped = _wrap_block("foo", content)
-        self.assertIn(content, wrapped)
-
-
 # ============================================================
-# Addendum text constants — structural assertions
+# Addendum NamedTuple — shape + accessors
 # ============================================================
 
 
-class TestSeekSummary(unittest.TestCase):
+class TestAddendumShape(unittest.TestCase):
+    def test_each_constant_is_an_addendum(self):
+        for addendum in (SEEK_SUMMARY, FIREWALL_NOTICE, CREDENTIALS_NOTICE, MAINTAIN_PRIVACY):
+            with self.subTest(addendum=addendum):
+                self.assertIsInstance(addendum, Addendum)
+
+    def test_title_and_body_attributes(self):
+        # NamedTuple style — `.title` / `.body` access, plus tuple indexing.
+        self.assertEqual(SEEK_SUMMARY.title, SEEK_SUMMARY[0])
+        self.assertEqual(SEEK_SUMMARY.body, SEEK_SUMMARY[1])
+
+    def test_titles_are_human_readable(self):
+        # Sub-headings render verbatim as `### <title>`; assert each title is
+        # set to its user-facing form.
+        self.assertEqual(SEEK_SUMMARY.title, "Project summary")
+        self.assertEqual(FIREWALL_NOTICE.title, "Firewall")
+        self.assertEqual(CREDENTIALS_NOTICE.title, "Credentials")
+        self.assertEqual(MAINTAIN_PRIVACY.title, "Privacy")
+
+
+# ============================================================
+# Addendum body contents — structural assertions
+# ============================================================
+
+
+class TestSeekSummaryBody(unittest.TestCase):
     def test_references_summary_path(self):
-        self.assertIn("/workspace/.claude_summary", SEEK_SUMMARY)
+        self.assertIn("/workspace/.claude_summary", SEEK_SUMMARY.body)
 
     def test_mentions_write_summary_command(self):
-        self.assertIn("/write-summary", SEEK_SUMMARY)
+        self.assertIn("/write-summary", SEEK_SUMMARY.body)
 
 
-class TestFirewallNotice(unittest.TestCase):
+class TestFirewallNoticeBody(unittest.TestCase):
     def test_contains_auto_label_not_escape(self):
         # Should contain literal `{auto}` (rendered from InstanceModifiers.MODE_AUTO.label),
         # NOT `{{auto}}` (the f-string escape form).
-        self.assertIn("{auto}", FIREWALL_NOTICE)
-        self.assertNotIn("{{auto}}", FIREWALL_NOTICE)
+        self.assertIn("{auto}", FIREWALL_NOTICE.body)
+        self.assertNotIn("{{auto}}", FIREWALL_NOTICE.body)
 
     def test_references_status_file_in_container(self):
         # Path comes from state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)
-        self.assertIn("/home/claude/.claude/domains_pending_resolve.yml", FIREWALL_NOTICE)
+        self.assertIn("/home/claude/.claude/domains_pending_resolve.yml", FIREWALL_NOTICE.body)
 
     def test_references_whitelist_file(self):
         # The host-side whitelist path is interpolated from FIREWALL_WHITELIST_FILE
-        self.assertIn("firewall_whitelist.txt", FIREWALL_NOTICE)
+        self.assertIn("firewall_whitelist.txt", FIREWALL_NOTICE.body)
 
     def test_mentions_econnrefused(self):
-        self.assertIn("ECONNREFUSED", FIREWALL_NOTICE)
+        self.assertIn("ECONNREFUSED", FIREWALL_NOTICE.body)
 
     def test_mentions_pending_and_failed_sections(self):
-        self.assertIn("pending:", FIREWALL_NOTICE)
-        self.assertIn("failed:", FIREWALL_NOTICE)
+        self.assertIn("pending:", FIREWALL_NOTICE.body)
+        self.assertIn("failed:", FIREWALL_NOTICE.body)
 
 
-class TestCredentialsNotice(unittest.TestCase):
-    """CREDENTIALS_NOTICE is dynamic: text+CLI-list when creds present, '' otherwise.
+class TestCredentialsNoticeBody(unittest.TestCase):
+    """CREDENTIALS_NOTICE.body is dynamic: text+CLI-list when creds present, '' otherwise.
     The value is locked at import time, so we test the two shapes it can have."""
 
     def test_either_empty_or_describes_clis(self):
-        if CREDENTIALS_NOTICE:
-            self.assertIn("credentials", CREDENTIALS_NOTICE.lower())
-            self.assertIn("installed", CREDENTIALS_NOTICE)
+        if CREDENTIALS_NOTICE.body:
+            self.assertIn("credentials", CREDENTIALS_NOTICE.body.lower())
+            self.assertIn("installed", CREDENTIALS_NOTICE.body)
         else:
-            self.assertEqual(CREDENTIALS_NOTICE, "")
+            self.assertEqual(CREDENTIALS_NOTICE.body, "")
 
 
-class TestMaintainPrivacy(unittest.TestCase):
+class TestMaintainPrivacyBody(unittest.TestCase):
     """MAINTAIN_PRIVACY warns the agent off persisting personal / runtime-environment
     details (emails, usernames, installed CLI inventories, etc.) into project text.
-    Structural asserts — the text must carry the load-bearing phrases that a
-    future agent reading its MEMORY.md needs to pattern-match against its own
+    Structural asserts — the body must carry the load-bearing phrases that a
+    future agent reading its CLAUDE.md needs to pattern-match against its own
     proposed writes."""
 
     def test_mentions_persistence(self):
         # The directive is about WRITING TO PERSISTED FILES, not about chat output.
-        self.assertIn("persist", MAINTAIN_PRIVACY.lower())
+        self.assertIn("persist", MAINTAIN_PRIVACY.body.lower())
 
     def test_lists_personal_identifier_categories(self):
         # The categories the user explicitly named in the incident that motivated this.
         for term in ("email", "name", "username", "credential"):
             with self.subTest(term=term):
-                self.assertIn(term, MAINTAIN_PRIVACY.lower())
+                self.assertIn(term, MAINTAIN_PRIVACY.body.lower())
 
     def test_lists_environment_categories(self):
         # "What's installed in this dev shell" — the smoking-gun heading from the incident.
-        self.assertIn("CLI", MAINTAIN_PRIVACY)
+        self.assertIn("CLI", MAINTAIN_PRIVACY.body)
 
     def test_specifies_exception_requires_confirmation(self):
         # When the user explicitly asks, a confirmation prompt is still required.
-        self.assertIn("confirm", MAINTAIN_PRIVACY.lower())
+        self.assertIn("confirm", MAINTAIN_PRIVACY.body.lower())
 
     def test_confirmation_required_even_under_bypass_mode(self):
         # `{auto}` mode bypasses routine permission prompts — but NOT this one.
-        self.assertIn("{auto}", MAINTAIN_PRIVACY)
-        self.assertIn("bypass", MAINTAIN_PRIVACY.lower())
+        self.assertIn("{auto}", MAINTAIN_PRIVACY.body)
+        self.assertIn("bypass", MAINTAIN_PRIVACY.body.lower())
 
 
 # ============================================================
@@ -154,12 +130,19 @@ class TestModifierAddendumsDict(unittest.TestCase):
             with self.subTest(modifier=k):
                 self.assertIsInstance(k, InstanceModifiers)
 
+    def test_values_are_lists_of_addendums(self):
+        for k, v in MODIFIER_ADDENDUMS.items():
+            with self.subTest(modifier=k):
+                self.assertIsInstance(v, list)
+                for item in v:
+                    self.assertIsInstance(item, Addendum)
+
     def test_base_maps_to_seek_summary(self):
         self.assertIn(SEEK_SUMMARY, MODIFIER_ADDENDUMS[InstanceModifiers.BASE])
 
     def test_base_maps_to_maintain_privacy(self):
         # Privacy guidance is project-wide, not mode-conditional — sits under BASE
-        # so every agent's MEMORY.md carries it.
+        # so every agent's CLAUDE.md carries it.
         self.assertIn(MAINTAIN_PRIVACY, MODIFIER_ADDENDUMS[InstanceModifiers.BASE])
 
     def test_tag_prog_maps_to_credentials_notice(self):
@@ -169,61 +152,119 @@ class TestModifierAddendumsDict(unittest.TestCase):
         self.assertIn(FIREWALL_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.MODE_AUTO])
 
     def test_mode_dood_has_no_addendum(self):
-        # MODE_DOOD doesn't currently advertise anything in MEMORY.md.
+        # MODE_DOOD doesn't currently advertise anything in CLAUDE.md.
         self.assertNotIn(InstanceModifiers.MODE_DOOD, MODIFIER_ADDENDUMS)
 
 
 # ============================================================
-# addendum_text getter
+# composed_addendum — the chain-to-markdown renderer
 # ============================================================
 
 
-class TestAddendumText(unittest.TestCase):
-    def test_returns_empty_for_unmapped_modifier(self):
-        # MODE_DOOD has no entry in MODIFIER_ADDENDUMS → MODIFIER_ADDENDUMS.get(...)
-        # falls back to (); join of () is "".
-        self.assertEqual(addendum_text(InstanceModifiers.MODE_DOOD), "")
+class TestComposedAddendum(unittest.TestCase):
+    """`composed_addendum(chain)` is the only consumer of MODIFIER_ADDENDUMS.
+    Tests both the live (un-patched) production data and a patched dict where
+    we control titles/bodies so structural assertions don't depend on the
+    body text of real addendums."""
 
-    def test_returns_seek_summary_and_privacy_for_base(self):
-        # BASE → [SEEK_SUMMARY, MAINTAIN_PRIVACY]; addendum_text joins them with
-        # ADDENDUM_SEPARATOR. The exact joined shape is asserted so a future
-        # accidental reorder / drop is caught here.
-        self.assertEqual(
-            addendum_text(InstanceModifiers.BASE),
-            f"{SEEK_SUMMARY}{ADDENDUM_SEPARATOR}{MAINTAIN_PRIVACY}",
-        )
+    # --- Production-data assertions ---
 
-    def test_returns_firewall_notice_for_auto(self):
-        self.assertEqual(addendum_text(InstanceModifiers.MODE_AUTO), FIREWALL_NOTICE)
+    def test_empty_chain_returns_empty_string(self):
+        self.assertEqual(composed_addendum(()), "")
 
-    def test_credentials_addendum_matches_credentials_notice(self):
-        # Whether the notice is "" or "...CLIs...", addendum_text returns the same value.
-        self.assertEqual(addendum_text(InstanceModifiers.TAG_PROG), CREDENTIALS_NOTICE)
+    def test_chain_without_any_known_modifier_returns_empty(self):
+        # 'unknown' isn't in MODIFIER_ADDENDUMS → no sub-sections → ''
+        self.assertEqual(composed_addendum(("unknown",)), "")
 
-    def test_join_separator_is_triple_newline(self):
-        # Patch the dict to add a second entry for BASE and confirm the join shape.
+    def test_base_chain_contains_section_title(self):
+        result = composed_addendum(("base",))
+        self.assertIn(f"## {ADDENDUM_SECTION_TITLE}", result)
+
+    def test_base_chain_contains_seek_summary_body(self):
+        # The integration assertion the user asked for: a known-BASE substring
+        # is wholly present in the rendered addendum text.
+        result = composed_addendum(("base",))
+        self.assertIn(SEEK_SUMMARY.body, result)
+
+    def test_base_chain_contains_maintain_privacy_body(self):
+        # MAINTAIN_PRIVACY also sits under BASE — both should render.
+        result = composed_addendum(("base",))
+        self.assertIn(MAINTAIN_PRIVACY.body, result)
+
+    def test_base_chain_renders_each_title_as_h3(self):
+        result = composed_addendum(("base",))
+        self.assertIn(f"### {SEEK_SUMMARY.title}", result)
+        self.assertIn(f"### {MAINTAIN_PRIVACY.title}", result)
+
+    def test_auto_chain_includes_firewall_body(self):
+        result = composed_addendum(("base", "auto"))
+        self.assertIn(FIREWALL_NOTICE.body, result)
+        self.assertIn(f"### {FIREWALL_NOTICE.title}", result)
+
+    def test_section_title_appears_once_even_with_multiple_modifiers(self):
+        result = composed_addendum(("base", "auto"))
+        self.assertEqual(result.count(f"## {ADDENDUM_SECTION_TITLE}"), 1)
+
+    def test_modifier_order_follows_enum_declaration(self):
+        # InstanceModifiers declaration order: BASE → TAG_PROG → MODE_AUTO → MODE_DOOD.
+        # Even when chain is passed with 'auto' before 'base', the output must
+        # follow enum order (composed_addendum iterates InstanceModifiers, not chain).
+        result = composed_addendum(("auto", "base"))
+        i_seek = result.find(SEEK_SUMMARY.title)
+        i_fire = result.find(FIREWALL_NOTICE.title)
+        self.assertGreater(i_seek, -1)
+        self.assertGreater(i_fire, -1)
+        self.assertLess(i_seek, i_fire)
+
+    # --- Patched-data assertions (control title/body for structure-only tests) ---
+
+    def test_empty_body_addendum_is_filtered(self):
+        # An addendum with body='' must NOT render — its sub-heading would be
+        # an empty section, which is exactly what we don't want when
+        # CREDENTIALS_NOTICE collapses to empty under no-creds.
         custom = {
-            InstanceModifiers.BASE: ["alpha-content", "beta-content"],
+            InstanceModifiers.BASE: [
+                Addendum("Real", "real body"),
+                Addendum("Phantom", ""),
+            ],
         }
         with patch.dict(MODIFIER_ADDENDUMS, custom, clear=True):
-            result = addendum_text(InstanceModifiers.BASE)
-            self.assertEqual(result, "alpha-content\n\n\nbeta-content")
+            result = composed_addendum(("base",))
+            self.assertIn("### Real", result)
+            self.assertIn("real body", result)
+            self.assertNotIn("### Phantom", result)
 
-    def test_empty_entries_filtered_before_join(self):
-        # Mixed empty + non-empty addendums — empties get dropped, no orphan separators.
+    def test_all_empty_bodies_return_empty_string(self):
+        custom = {InstanceModifiers.BASE: [Addendum("A", ""), Addendum("B", "")]}
+        with patch.dict(MODIFIER_ADDENDUMS, custom, clear=True):
+            self.assertEqual(composed_addendum(("base",)), "")
+
+    def test_join_separator_between_sub_sections(self):
+        # Two non-empty addendums under BASE — sub-sections joined with '\n\n'
+        # (one blank line between them).
         custom = {
-            InstanceModifiers.BASE: ["", "alpha", "", "beta", ""],
+            InstanceModifiers.BASE: [
+                Addendum("First", "alpha"),
+                Addendum("Second", "beta"),
+            ],
         }
         with patch.dict(MODIFIER_ADDENDUMS, custom, clear=True):
-            result = addendum_text(InstanceModifiers.BASE)
-            self.assertEqual(result, "alpha\n\n\nbeta")
+            result = composed_addendum(("base",))
+            self.assertEqual(
+                result,
+                f"## {ADDENDUM_SECTION_TITLE}\n\n"
+                "### First\n\nalpha\n\n"
+                "### Second\n\nbeta",
+            )
 
-    def test_all_empty_returns_empty(self):
-        custom = {
-            InstanceModifiers.BASE: ["", ""],
-        }
+    def test_modifier_with_no_entry_is_skipped(self):
+        # A chain value with no MODIFIER_ADDENDUMS entry contributes nothing.
+        custom = {InstanceModifiers.BASE: [Addendum("Base", "base body")]}
         with patch.dict(MODIFIER_ADDENDUMS, custom, clear=True):
-            self.assertEqual(addendum_text(InstanceModifiers.BASE), "")
+            # 'prog' has no entry in our patched dict → only base contributes.
+            result = composed_addendum(("base", "prog"))
+            self.assertIn("base body", result)
+            self.assertEqual(result.count("###"), 1)
 
 
 if __name__ == "__main__":
