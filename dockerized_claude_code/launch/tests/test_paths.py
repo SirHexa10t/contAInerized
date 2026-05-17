@@ -131,13 +131,6 @@ class TestPathBuilderLambdas(unittest.TestCase):
         d = Path("/tmp/state")
         self.assertEqual(paths.state_projects_path(d), d / paths.INSTANCE_PROJECTS_RELPATH)
 
-    def test_state_skill_subdir_path(self):
-        d = Path("/tmp/state")
-        self.assertEqual(
-            paths.state_skill_subdir_path(d, "my_skill"),
-            d / paths.INSTANCE_SKILLS_RELPATH / "my_skill",
-        )
-
     def test_state_domain_resolve_status_path(self):
         d = Path("/tmp/state")
         self.assertEqual(
@@ -157,12 +150,6 @@ class TestPathBuilderLambdas(unittest.TestCase):
         self.assertEqual(
             paths.instance_state_dir_path("poet__draft"),
             paths.AGENTS_STATE / "poet__draft",
-        )
-
-    def test_workspace_skills_path(self):
-        self.assertEqual(
-            paths.workspace_skills_path("/my/workspace"),
-            Path("/my/workspace") / paths.WORKSPACE_SKILLS_DIRNAME,
         )
 
     def test_optional_creds_service_path(self):

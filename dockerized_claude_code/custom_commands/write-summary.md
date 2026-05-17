@@ -1,4 +1,6 @@
-Analyze this project and produce a structured summary that would let a fresh AI session understand the codebase quickly and work effectively without re-exploring from scratch.
+---
+description: Produce or refresh a structured project summary at /workspace/.claude_summary so a fresh AI session can understand the codebase without re-exploring. Uses summary_files to detect what changed since the last run.
+---
 
 ## Instructions
 

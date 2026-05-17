@@ -1,9 +1,13 @@
-"""User-side contributions to agent containers — skills (custom_skills/ +
-<workspace>/.skills/), optional credentials (~/.claude-agents/user_extras/
-optional_creds/<service>/), and the first-launch plant of the user-facing
-template files. This module is a thin facade: each public function orchestrates
-calls into file_access (for disk I/O) and docker_config (for docker-side
-staging). No file access or arg shape lives here.
+"""User-side contributions to agent containers — optional credentials
+(~/.claude-agents/user_extras/optional_creds/<service>/) and the first-launch
+plant of the user-facing template files. Skills aren't handled here: bundled
+skills (`custom_skills/`) ride along in DOCKER_BASE_MOUNTS as a single dir
+mount, and workspace-side skills live at
+`<workspace>/.claude/skills/<name>/SKILL.md` for Claude Code's native
+discovery (no bind-mount needed for either). This module is a thin facade:
+each public function orchestrates calls into file_access (for disk I/O) and
+docker_config (for docker-side staging). No file access or arg shape lives
+here.
 
 The split exists because the two concerns are independent layers:
   - file_access decides what's present on disk and reads file contents.
@@ -15,14 +19,11 @@ The split exists because the two concerns are independent layers:
 """
 
 from .docker_config import add_docker_mount
-from .file_access import (
-    copy_file, discover_workspace_skills, prepare_skill_mount_dirs,
-    present_optional_cred_services,
-)
+from .file_access import copy_file, present_optional_cred_services
 from .paths import (
     FIREWALL_WHITELIST_FILE, FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
-    OPTIONAL_CREDS_README_PATH, OPTIONAL_CREDS_README_TEMPLATE, RO_MOUNT_OPTION,
-    SKILLS_IN_CONTAINER, optional_creds_service_path,
+    OPTIONAL_CREDS_README_PATH, OPTIONAL_CREDS_README_TEMPLATE,
+    optional_creds_service_path,
 )
 from .structs import InstanceModifiers
 
@@ -46,27 +47,6 @@ def plant_user_extras(modes) -> None:
     copy_file(OPTIONAL_CREDS_README_TEMPLATE, OPTIONAL_CREDS_README_PATH)
     if InstanceModifiers.MODE_AUTO.value in modes:
         copy_file(FIREWALL_WHITELIST_TEMPLATE, FIREWALL_WHITELIST_FILE)
-
-
-# ============================================================
-# Skills — project-bundled (custom_skills/) + per-workspace (.skills/)
-# ============================================================
-
-def aggregated_skills_mounts(workspace, state_path) -> None:
-    """Surface skills from `custom_skills/` (this project's bundled skills) and
-    `<workspace>/.skills/` (the user's per-workspace skills) as the agent's skills
-    directory. Each `<name>/SKILL.md` becomes a `/<name>` slash command. When both
-    sources have a skill with the same name, the workspace's wins (last-write).
-    Both sources are optional; if neither exists, no mounts are staged.
-
-    Mount points are pre-created on the host (under `<state>/skills/<name>/`) as
-    the launcher user, so Docker doesn't auto-create them as root — which would
-    otherwise leave undeletable directories blocking `delete_instance`'s rmtree.
-    Pure side-effect — the count surfaces to the launch banner via staged_mounts()."""
-    skills = discover_workspace_skills(workspace)
-    prepare_skill_mount_dirs(state_path, skills)
-    for name, src in sorted(skills.items()):
-        add_docker_mount(src, f"{SKILLS_IN_CONTAINER}/{name}:{RO_MOUNT_OPTION}")
 
 
 # ============================================================

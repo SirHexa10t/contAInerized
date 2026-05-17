@@ -27,7 +27,7 @@ from typing import Callable
 DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root — one above launch/
 AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .conf definitions
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
-PROJECT_CUSTOM_SKILLS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_skills"   # project-bundled skills (paired with workspace .skills/)
+PROJECT_CUSTOM_SKILLS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_skills"   # project-bundled skills mounted into ~/.claude/skills/<name>/ per launch
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
 TEMPLATES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "templates"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
 OPTIONAL_CREDS_README_TEMPLATE = TEMPLATES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME on first launch
@@ -190,6 +190,7 @@ DOCKER_BASE_MOUNTS = {
     CREDENTIALS_FILE:                           f"{CLAUDE_CONFIG_IN_CONTAINER}/.credentials.json",                  # shared API credentials — Claude Code refreshes the token in place
     # Project-bundled sources — inlined since DOCKER_BASE_MOUNTS is their only consumer
     DOCKERIZED_CLAUDE_ROOT / "custom_commands": f"{CLAUDE_CONFIG_IN_CONTAINER}/commands:{RO_MOUNT_OPTION}",         # shared slash commands
+    DOCKERIZED_CLAUDE_ROOT / "custom_skills":   f"{SKILLS_IN_CONTAINER}:{RO_MOUNT_OPTION}",                        # shared skill directory — each subdir is a skill
     SETTINGS_DIR / "statusline.sh":             f"{CLAUDE_CONFIG_IN_CONTAINER}/statusline.sh:{RO_MOUNT_OPTION}",    # shared status-line script
     SETTINGS_DIR / "bashrc.sh":                 f"{CLAUDE_HOME_IN_CONTAINER}/.bashrc:{RO_MOUNT_OPTION}",            # sourced by every non-interactive bash via BASH_ENV
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
@@ -230,13 +231,7 @@ INSTANCE_CLAUDE_MD_FILENAME = "CLAUDE.md"
 # agents_crud.install_latest_md instead.
 INSTANCE_PROJECTS_RELPATH = Path("projects")
 
-# Relpath inside an instance's state dir under which skill mount-points are
-# pre-created (so Docker doesn't auto-create them as root).
-INSTANCE_SKILLS_RELPATH = Path("skills")
-
 # Filenames inside user-contributed dirs.
-SKILL_MARKER_FILENAME = "SKILL.md"                   # required inside a skill dir for it to be recognised
-WORKSPACE_SKILLS_DIRNAME = ".skills"                 # per-workspace skills folder name
 OPTIONAL_CREDS_README_FILENAME = "README.txt"        # auto-created in optional_creds/ on first launch
 OPTIONAL_CREDS_README_PATH     = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME   # full host path the README is planted at
 OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text token (e.g. jira/token → $JIRA_API_TOKEN)
@@ -340,15 +335,10 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/)
 state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_CLAUDE_MD_FILENAME
 state_projects_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_PROJECTS_RELPATH
-state_skill_subdir_path: Callable[[Path, str], Path]   = lambda state_dir, name: state_dir / INSTANCE_SKILLS_RELPATH / name
 state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
 
 # Per-instance state directory itself (one level up from the per-state-dir files)
 instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS_STATE / instance
-
-# Workspace-side skills (workspace is a runtime-provided host path)
-workspace_skills_path:   Callable[[str], Path]         = lambda workspace: Path(workspace) / WORKSPACE_SKILLS_DIRNAME
-skill_marker_path:       Callable[[Path], Path]        = lambda skill_dir: skill_dir / SKILL_MARKER_FILENAME
 
 # Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys)
 optional_creds_service_path: Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service

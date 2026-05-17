@@ -1,6 +1,9 @@
-Audit a project's structural organization — how files are split, what they import from where, and which third-party packages they pull in. The outcome: every file/module has an obvious, single-sentence role.
+---
+description: Audit a project's structural organization — how files are split, what imports what, and which third-party packages are pulled in. For single-file content audits, use /refactor instead.
+argument-hint: <directory-path>
+---
 
-For per-file content audits (naming, idioms, control flow, dead code, magic literals), use `/refactor`. This command is one level up — it's about *which files exist and what each is for*.
+The outcome: every file/module has an obvious, single-sentence role. This command is one level up than `/refactor` — it's about *which files exist and what each is for*, not about naming / idioms / control flow / dead code / magic literals inside one file (that's `/refactor`'s job).
 
 ## Subject
 

@@ -54,10 +54,12 @@ isolated Docker container with persistent per-instance state.
   every agent. Current entries add `Shift+Enter` as newline-without-submit
   alongside the defaults (`Enter` submits, `Ctrl+J` newline, `Alt+Enter`
   newline in most terminals). Edits propagate live, no restart required.
-- **Per-workspace skills** — drop a `.skills/` folder in your workspace with
-  one or more `<name>/SKILL.md` files; each becomes a `/<name>` slash command
-  scoped to that workspace, with all the skills features (auto-invocation,
-  resource bundles, hot reload). Absent folder = no project skills loaded.
+- **Per-workspace skills / commands / CLAUDE.md** — Claude Code auto-discovers
+  anything you check into `<workspace>/.claude/` natively (`.claude/skills/<name>/SKILL.md`
+  for skills, `.claude/commands/<name>.md` for slash commands, `CLAUDE.md` at the
+  repo root for project instructions). No launcher mount step needed — see
+  [tips/project_claude_files.md](tips/project_claude_files.md) for the layout,
+  priority order, and quirks.
 - **Per-workspace prompts** — `@<path>` works on any file to inline its
   contents into a message; the `.prompts/` folder is a discovery convention,
   so the in-container `man` command surfaces those files as ready-to-paste
@@ -201,7 +203,6 @@ then drops you into Claude Code:
   Configuration:    agents/researcher.conf
   Tags:             [prog]
   Modes:            {auto}
-  Project skills:   2 loaded (custom_skills/ + .skills/ if present)
   User whitelist:   3 domains (from ~/.claude-agents/user_extras/firewall_whitelist.txt)
   Building base → claude-agents:base...
   Building prog → claude-agents:prog...
@@ -315,7 +316,6 @@ Each is independent; nothing here is required for a basic launch.
 
 | Mount | Source | Container path | Trigger |
 |---|---|---|---|
-| Workspace skills | `<workspace>/.skills/<name>/` | `/home/claude/.claude/skills/<name>` | dir present in workspace; each becomes a `/<name>` slash command |
 | Workspace prompts | `<workspace>/.prompts/` | (left in-place at `/workspace/.prompts/`; surfaced by the in-container `man`) | dir present in workspace |
 | Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | agent filename includes `[prog]` |
 | Firewall whitelist | `~/.claude-agents/user_extras/firewall_whitelist.txt` | `/usr/local/etc/firewall_whitelist.txt` (ro) | instance has `{auto}` mode enabled |
@@ -389,7 +389,7 @@ launch/
   agent_composition.py               # tag/mode definitions (ORDERED_TAGS/MODES/MODEL_FAMILIES + TAG/MODE_DESCRIPTIONS + handlers), BUILTIN_FIREWALL_DOMAINS + resolved_whitelist_domains, build-chain composition (compute_chain, apply_composition), sort keys (agent/tag/mode), cache pruning
   docker_config.py                   # docker-side: compose env-key constants (TARGET_IMAGE, AGENT_STATE, …) + accumulator (_compose_env, stage_compose_env), image-chain naming, _build_status_line, set_container_env, ensure_image, run_compose. Never writes to os.environ; the accumulator gets passed to docker compose subprocesses via env=.
   agents_crud.py                     # agent-state mutations + picker-entry factories: install_latest_md, sync_memory_templates, _force_remove (sudo + sudo -k fallback), delete_instance, modify_instance, resolve_pick, creatable_agents, continuable_instances. JSON map I/O lives in file_access; this module just calls into it.
-  user_additions.py                  # custom_skills + workspace .skills mounts, optional_creds_* (mounts, install env flags, token env vars), firewall whitelist count, README + whitelist file templates created on first launch
+  user_additions.py                  # optional_creds_* (mounts, install env flags, token env vars), firewall whitelist count, README + whitelist file templates created on first launch. Bundled skills (custom_skills/) ride along in DOCKER_BASE_MOUNTS as a single dir mount; no per-skill code here.
   menu_picker.py                     # picker UI + composition-legend overlay + ask_for_workspace + prompt_modes + prompt_session + print_launch_banner
   audit.py                           # state-checker (run as `python -m launch.audit`)
 agents/                              # agent definitions (.md + optional .conf)

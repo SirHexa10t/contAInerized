@@ -28,7 +28,7 @@ launch/
   agent_composition.py              `compose_chain(sess_id)` runs `_apply_prog` / `_apply_auto` / `_apply_dood` dispatch (validation happens via `sess_id.chain` access), returns `list(sess_id.chain)`; `warn_if_dangerous_modes` guards `{auto}+{DooD}`; `sync_memory_templates(sess_id)` iterates `InstanceModifiers`, asks `addendum_text(modifier)` per slot, splices via `_wrap_block(modifier.slug, text)` keyed on `modifier.value in sess_id.chain`; cache prepare/prune helpers (`prepare_caches` always-mkdir, `prune_caches` over-threshold + age + container-running guard)
   network.py                        {auto}-mode firewall: `BUILTIN_FIREWALL_DOMAINS` (~135 curated entries) + user whitelist, two-phase DNS cascade (critical Anthropic sync → rest streaming via `docker exec iptables -I`), cross-launch resolved-IP cache at `~/.claude-agents/resolved_domains.txt` (6h TTL), agent-visible `domains_pending_resolve.yml` status. `_phase2_thread` / `_phase2_queue` / `_phase1_executor` typed as Optional with explicit narrowing asserts at workers' entry
   agents_crud.py                    instance-state CRUD: `list_all_instances`, `update_workspace_map`, `set_instance_modes` (calls `warn_if_dangerous_modes` after every write), `install_latest_md`, `modify_instance`, `delete_instance`, `resolve_pick` (CLI name → AgentIdentity | SessionIdentity | None), picker-entry builders (`creatable_agents` / `continuable_instances`) + sort keys. `sync_memory_templates` lives in agent_composition (modifier concern), not here
-  user_additions.py                 thin facade: `aggregated_skills_mounts`, `optional_creds_mounts` (returns sorted service names; unpacks `(mount, cli)` tuples), `plant_user_extras` (always plants optional_creds README; firewall_whitelist.txt only under `{auto}`)
+  user_additions.py                 thin facade: `optional_creds_mounts` (returns sorted service names; unpacks `(mount, cli)` tuples), `plant_user_extras` (always plants optional_creds README; firewall_whitelist.txt only under `{auto}`). Bundled skills ride along in `DOCKER_BASE_MOUNTS` now; per-workspace skills go through Claude Code's native `<workspace>/.claude/skills/` discovery — neither needs code here.
   menu_picker.py                    prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + `ask_for_workspace` + `prompt_modes` (auto then DooD-if-prog) + `prompt_session` + `print_launch_banner`
   claude_code_config.py             Claude-Code-side UX — `build_status_line(inst_id)` + `set_terminal_title(name)`. Leaf-shaped
   audit.py                          read-only state-correctness checker; `python -m launch.audit`
@@ -74,7 +74,7 @@ Entry: `python3 run.py [target] [--dry-run] [...claude-args]` → `launch()` (`r
 4. **Resume detection** (`compute_resume_flag`) — `["--continue"]` only if conversation JSONL exists.
 5. **Persist** — `update_workspace_map`.
 6. **Categorise** (`compose_runtime`, `run.py:127`) — prompts/loads modes, constructs SessionIdentity, calls `compose_chain(sess_id)`. The chain comes from `sess_id.chain` (which validates tags/modes against InstanceModifiers and raises on unknowns); `_apply_prog` / `_apply_auto` / `_apply_dood` dispatch happens here. Returns `(sess_id, chain)`.
-7. **Setup** (`setup_state`) — `install_latest_md` → `sync_memory_templates(sess_id)` reconciles MEMORY.md from `memory_addendums.addendum_text(modifier)` for each `InstanceModifiers` member (block kept when `modifier.value in sess_id.chain`) → `set_container_env` (compose_env) → `set_container_mounts` (docker_config) → skills/creds mounts → `plant_user_extras`.
+7. **Setup** (`setup_state`) — `install_latest_md(sess_id)` writes source `.md` + `composed_addendum(sess_id.chain)` to state-dir CLAUDE.md in one go → `ensure_shared_oauth_files` → `set_container_env` (compose_env) → `set_container_mounts` (docker_config; bundled-skills and bundled-commands ride along in DOCKER_BASE_MOUNTS) → `plant_user_extras` → `optional_creds_mounts`.
 8. **Banner + run** — `print_launch_banner` summarises; `run_compose` builds each chain step, awaits {auto} Phase 1, spawns the firewall updater, then execs `docker compose ... run --rm -it --name claude-code_<instance> ... claude-code`. `--dry-run` short-circuits here with a notice.
 
 Bind mounts (host → container) — staged via `add_docker_mount`, flattened to `-v` flags in run_compose:
@@ -82,7 +82,7 @@ Bind mounts (host → container) — staged via `add_docker_mount`, flattened to
 - `~/.claude-agents/<agent>__<session>/` → `/home/claude/.claude` (per-instance state)
 - `~/.claude-agents/{.claude.json,.credentials.json}` → matching paths (shared OAuth)
 - `./custom_commands/` → `/home/claude/.claude/commands` (ro)
-- `./custom_skills/<name>/` and `<workspace>/.skills/<name>/` → `/home/claude/.claude/skills/<name>` (ro)
+- `./custom_skills/` → `/home/claude/.claude/skills` (ro, single dir mount) — each `<name>/SKILL.md` subdir becomes a `/<name>` skill. Workspace-side skills live at `<workspace>/.claude/skills/<name>/` and are picked up by Claude Code natively (no launcher mount).
 - `./settings/{statusline.sh,bashrc.sh,_summary.py,settings.json,keybindings.json}` → matching container paths (ro)
 - `~/.claude-agents/user_extras/optional_creds/<svc>/` → CLI-default path (rw)
 - `~/.claude-agents/cache/<rel>` → `/home/claude/<rel>` ([prog] only)

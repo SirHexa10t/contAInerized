@@ -145,15 +145,11 @@ from rich.theme import Theme
 from .agents_crud import (
     continuable_instances, creatable_agents, delete_instance, modify_instance,
 )
-from .docker_config import staged_mounts
 from .file_access import (
     expand_user_path, home_dir, is_dir, path_exists, tab_complete_paths,
     user_firewall_whitelist_lines,
 )
-from .paths import (
-    DEFAULT_WORKSPACE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE,
-    SKILLS_IN_CONTAINER,
-)
+from .paths import DEFAULT_WORKSPACE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
 from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers
 from .utils import plural
 
@@ -847,17 +843,13 @@ def print_launch_banner(sess_id, cred_names) -> None:
     (no empty 'Tags: ' if there are none). The user-whitelist line counts
     user_firewall_whitelist_lines() inline — only when {auto} is in modes, so
     non-{auto} launches don't touch the file at all. Takes the launch's
-    SessionIdentity and pulls md_path / conf_path / tags / modes off it directly;
-    the skill count comes from the docker_config mount accumulator (skills are
-    the mounts whose target sits under SKILLS_IN_CONTAINER)."""
+    SessionIdentity and pulls md_path / conf_path / tags / modes off it directly."""
     print(f"  Agent definition: {sess_id.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
     print(f"  Configuration:    {sess_id.conf_path.relative_to(DOCKERIZED_CLAUDE_ROOT) if sess_id.conf_path else '(none — using defaults)'}")
     if sess_id.tags:
         print(f"  Tags:             {' '.join(f'[{t}]' for t in sess_id.tags)}")
     if sess_id.modes:
         print(f"  Modes:            {' '.join('{' + m + '}' for m in sess_id.modes)}")
-    if skill_count := sum(1 for tgt in staged_mounts().values() if tgt.startswith(f"{SKILLS_IN_CONTAINER}/")):
-        print(f"  Project skills:   {skill_count} loaded (custom_skills/ + .skills/ if present)")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
     if InstanceModifiers.MODE_AUTO.value in sess_id.modes:

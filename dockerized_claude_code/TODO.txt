@@ -134,9 +134,6 @@ skills (or similar)
     prettify (print json in human-readable format, with newlines and indents)
 
 
-check if user's skills should be mounted one by one, by scanning the contents of .skills/ (because I don't know if it'd work directly when user provides it as a symlink)
-
-
 
 
 share image with claude code

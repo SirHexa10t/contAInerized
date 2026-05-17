@@ -19,7 +19,7 @@ from launch.menu_picker import (
 from launch.paths import AGENTS_DIR
 from launch.structs import AgentIdentity, InstanceIdentity, SessionIdentity
 from launch.user_additions import (
-    aggregated_skills_mounts, optional_creds_mounts, plant_user_extras,
+    optional_creds_mounts, plant_user_extras,
 )
 
 
@@ -151,16 +151,18 @@ def setup_state(sess_id: SessionIdentity) -> tuple[dict, list[str]]:
     shared OAuth state files exist so docker doesn't auto-create them as
     root, populate the env vars compose substitutes at build/run time,
     stage the per-launch bind-mounts (base set + per-instance workspace/
-    state), load the per-agent conf, and stage the skill + optional-creds
-    bind-mounts (with the auto-readme touch). Returns (conf, cred_names) —
-    mounts have all been staged via docker_config.add_docker_mount and
-    don't need to flow through this return."""
+    state — the bundled-skills mount rides along in DOCKER_BASE_MOUNTS),
+    load the per-agent conf, and stage the optional-creds bind-mounts
+    (with the auto-readme touch). Per-workspace skills aren't mounted —
+    Claude Code auto-discovers those from the workspace's `.claude/skills/`
+    directory natively. Returns (conf, cred_names) — mounts have all been
+    staged via docker_config.add_docker_mount and don't need to flow
+    through this return."""
     install_latest_md(sess_id)
     ensure_shared_oauth_files()
     set_container_env(sess_id)
     set_container_mounts(sess_id)
     _, conf = load_conf(sess_id.md_path)
-    aggregated_skills_mounts(sess_id.workspace, sess_id.state_dir)
     plant_user_extras(sess_id.modes)
     cred_names = optional_creds_mounts()
     return conf, cred_names

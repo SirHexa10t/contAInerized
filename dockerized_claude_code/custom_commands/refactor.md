@@ -1,4 +1,9 @@
-Audit a single code file for smells, dead weight, and missed within-file improvements. Apply the passes below in order; report findings with concrete fixes; apply only after the user confirms.
+---
+description: Audit a single code file for smells, dead weight, and within-file simplification opportunities. For multi-file or project-structure work, use /unspaghettify instead.
+argument-hint: <file-path>
+---
+
+Apply the passes below in order; report findings with concrete fixes; apply only after the user confirms.
 
 ## Subject
 

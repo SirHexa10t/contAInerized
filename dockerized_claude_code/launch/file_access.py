@@ -12,8 +12,6 @@ Grouped by section in this file:
     load/save_modes_map) — agent_workspace_map.json + agent_modes_map.json
   - Per-instance state-dir queries (has_continuable_jsonl, last_history_mtime)
     — feed InstanceIdentity properties
-  - Workspace skills discovery (discover_workspace_skills,
-    prepare_skill_mount_dirs)
   - Optional credentials (present_optional_cred_services [cached],
     optional_cred_tokens)
   - User firewall whitelist (user_firewall_whitelist_lines [cached, self-plants
@@ -66,10 +64,8 @@ from .paths import (
     ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
     CREDENTIALS_FILE, DEFAULT_CONF, FIREWALL_WHITELIST_FILE,
     FIREWALL_WHITELIST_TEMPLATE, HISTORY_JSONL_FILENAME, JSONL_EXT, MD_EXT,
-    OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS,
-    PROJECT_CUSTOM_SKILLS_DIR, agent_conf_path, optional_creds_service_path,
-    optional_creds_token_path, skill_marker_path, state_projects_path,
-    state_skill_subdir_path, workspace_skills_path,
+    OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, agent_conf_path,
+    optional_creds_service_path, optional_creds_token_path, state_projects_path,
 )
 
 # ============================================================
@@ -511,33 +507,6 @@ def last_history_mtime(state_dir: Path) -> float | None:
     a thin wrapper around this (same reason as above)."""
     files = list(state_dir.rglob(HISTORY_JSONL_FILENAME))
     return max((f.stat().st_mtime for f in files), default=None)
-
-
-# ============================================================
-# User-contributed skills (custom_skills/ + <workspace>/.skills/)
-# ============================================================
-
-def discover_workspace_skills(workspace) -> dict[str, Path]:
-    """Walk PROJECT_CUSTOM_SKILLS_DIR (project-bundled) and
-    `<workspace>/<WORKSPACE_SKILLS_DIRNAME>` (per-workspace) for subdirectories
-    containing a SKILL.md. Returns `{name: source_path}`; when the same name
-    appears in both sources, the workspace's wins (last-write)."""
-    skills = {}
-    for source_dir in (PROJECT_CUSTOM_SKILLS_DIR, workspace_skills_path(workspace)):
-        if not source_dir.is_dir():
-            continue
-        for skill in source_dir.iterdir():
-            if skill.is_dir() and skill_marker_path(skill).is_file():
-                skills[skill.name] = skill   # workspace overrides project-bundled
-    return skills
-
-
-def prepare_skill_mount_dirs(state_path: Path, names) -> None:
-    """Pre-create `<state_path>/skills/<name>` on the host for each entry in
-    `names` so Docker doesn't auto-create them as root (which would otherwise
-    leave undeletable dirs blocking `delete_instance`'s rmtree)."""
-    for name in names:
-        ensure_dir(state_skill_subdir_path(state_path, name))
 
 
 # ============================================================

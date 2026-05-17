@@ -1,4 +1,6 @@
-Write or update a `README.md` for this project that takes a fresh reader from a clean machine to a running program.
+---
+description: Write or update README.md so it takes a fresh reader from a clean machine to a running program. Reads existing setup files (Dockerfile, manifest, .env.example, etc.) before rewriting.
+---
 
 ## Instructions
 
