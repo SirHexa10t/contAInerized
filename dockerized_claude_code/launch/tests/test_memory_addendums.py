@@ -10,9 +10,9 @@ import unittest
 from unittest.mock import patch
 
 from launch.memory_addendums import (
-    CREDENTIALS_NOTICE, FIREWALL_NOTICE, MEMORY_BLOCK_WRAPPER_BANNER,
-    MODIFIER_ADDENDUMS, SEEK_SUMMARY, _wrap_block, _wrapper_end_line,
-    _wrapper_start_line, addendum_text,
+    ADDENDUM_SEPARATOR, CREDENTIALS_NOTICE, FIREWALL_NOTICE, MAINTAIN_PRIVACY,
+    MEMORY_BLOCK_WRAPPER_BANNER, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
+    _wrap_block, _wrapper_end_line, _wrapper_start_line, addendum_text,
 )
 from launch.structs import InstanceModifiers
 
@@ -112,6 +112,37 @@ class TestCredentialsNotice(unittest.TestCase):
             self.assertEqual(CREDENTIALS_NOTICE, "")
 
 
+class TestMaintainPrivacy(unittest.TestCase):
+    """MAINTAIN_PRIVACY warns the agent off persisting personal / runtime-environment
+    details (emails, usernames, installed CLI inventories, etc.) into project text.
+    Structural asserts — the text must carry the load-bearing phrases that a
+    future agent reading its MEMORY.md needs to pattern-match against its own
+    proposed writes."""
+
+    def test_mentions_persistence(self):
+        # The directive is about WRITING TO PERSISTED FILES, not about chat output.
+        self.assertIn("persist", MAINTAIN_PRIVACY.lower())
+
+    def test_lists_personal_identifier_categories(self):
+        # The categories the user explicitly named in the incident that motivated this.
+        for term in ("email", "name", "username", "credential"):
+            with self.subTest(term=term):
+                self.assertIn(term, MAINTAIN_PRIVACY.lower())
+
+    def test_lists_environment_categories(self):
+        # "What's installed in this dev shell" — the smoking-gun heading from the incident.
+        self.assertIn("CLI", MAINTAIN_PRIVACY)
+
+    def test_specifies_exception_requires_confirmation(self):
+        # When the user explicitly asks, a confirmation prompt is still required.
+        self.assertIn("confirm", MAINTAIN_PRIVACY.lower())
+
+    def test_confirmation_required_even_under_bypass_mode(self):
+        # `{auto}` mode bypasses routine permission prompts — but NOT this one.
+        self.assertIn("{auto}", MAINTAIN_PRIVACY)
+        self.assertIn("bypass", MAINTAIN_PRIVACY.lower())
+
+
 # ============================================================
 # MODIFIER_ADDENDUMS dict structure
 # ============================================================
@@ -125,6 +156,11 @@ class TestModifierAddendumsDict(unittest.TestCase):
 
     def test_base_maps_to_seek_summary(self):
         self.assertIn(SEEK_SUMMARY, MODIFIER_ADDENDUMS[InstanceModifiers.BASE])
+
+    def test_base_maps_to_maintain_privacy(self):
+        # Privacy guidance is project-wide, not mode-conditional — sits under BASE
+        # so every agent's MEMORY.md carries it.
+        self.assertIn(MAINTAIN_PRIVACY, MODIFIER_ADDENDUMS[InstanceModifiers.BASE])
 
     def test_tag_prog_maps_to_credentials_notice(self):
         self.assertIn(CREDENTIALS_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.TAG_PROG])
@@ -148,9 +184,14 @@ class TestAddendumText(unittest.TestCase):
         # falls back to (); join of () is "".
         self.assertEqual(addendum_text(InstanceModifiers.MODE_DOOD), "")
 
-    def test_returns_seek_summary_for_base(self):
-        # BASE → [SEEK_SUMMARY]; addendum_text joins (single entry, no separator added).
-        self.assertEqual(addendum_text(InstanceModifiers.BASE), SEEK_SUMMARY)
+    def test_returns_seek_summary_and_privacy_for_base(self):
+        # BASE → [SEEK_SUMMARY, MAINTAIN_PRIVACY]; addendum_text joins them with
+        # ADDENDUM_SEPARATOR. The exact joined shape is asserted so a future
+        # accidental reorder / drop is caught here.
+        self.assertEqual(
+            addendum_text(InstanceModifiers.BASE),
+            f"{SEEK_SUMMARY}{ADDENDUM_SEPARATOR}{MAINTAIN_PRIVACY}",
+        )
 
     def test_returns_firewall_notice_for_auto(self):
         self.assertEqual(addendum_text(InstanceModifiers.MODE_AUTO), FIREWALL_NOTICE)

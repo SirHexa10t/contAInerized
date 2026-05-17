@@ -35,6 +35,13 @@ from .structs import InstanceModifiers
 # memory instructions for the agent.
 MEMORY_BLOCK_WRAPPER_BANNER = "#" * 21
 
+# Separator placed between multiple addendums that share a single modifier's
+# wrapper block (e.g. SEEK_SUMMARY + MAINTAIN_PRIVACY inside `base-instructions-…`).
+# Three newlines render as two blank lines in MEMORY.md — enough visual gap
+# that a reader can tell where one directive ends and the next begins, without
+# fragmenting the block into separately-wrapped sections.
+ADDENDUM_SEPARATOR = "\n\n\n"
+
 _wrapper_start_line: Callable[[str], str] = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-start {MEMORY_BLOCK_WRAPPER_BANNER}"
 _wrapper_end_line:   Callable[[str], str] = lambda name: f"{MEMORY_BLOCK_WRAPPER_BANNER} {name}-instructions-end {MEMORY_BLOCK_WRAPPER_BANNER}"
 
@@ -66,23 +73,32 @@ CREDENTIALS_NOTICE = (
     if installed_cred_clis() else ""
 )
 
+MAINTAIN_PRIVACY = f"""**Never persist personal or runtime-environment details into project text.** When writing or editing code comments, docstrings, READMEs, summaries, TODOs, or any file that lives in the project tree, exclude:
+
+- **Personal identifiers** — user emails, names, GitHub handles, system usernames, OAuth account info, API keys / tokens, credential file paths.
+- **Operator-environment state** — which CLIs / tools are installed on the current machine, which agents the operator has configured, what `/home/<user>/` looks like, current shell environment variables, mounted paths specific to this session.
+
+A future reader of any persisted text should see the same content regardless of who ran the command. If a fact wouldn't be true for a different operator's clone of the repo, it doesn't belong.
+
+**Exception (rare):** when the user explicitly asks for such a detail to be written, surface an extra confirmation *before* writing it — name the specific personal / environment detail and ask the user to confirm. Issue this confirmation even when running under a permission-bypass mode like `{InstanceModifiers.MODE_AUTO.label}` — the bypass covers routine actions, not embedding identifying information into persistent files."""
+
 
 # Maps each modifier to the addendums it activates. Iteration order in
 # sync_memory_templates follows InstanceModifiers declaration order — that's
 # what determines block order in the synced MEMORY.md.
 MODIFIER_ADDENDUMS = {
-    InstanceModifiers.BASE:      [SEEK_SUMMARY],
+    InstanceModifiers.BASE:      [SEEK_SUMMARY, MAINTAIN_PRIVACY],
     InstanceModifiers.TAG_PROG:  [CREDENTIALS_NOTICE],
     InstanceModifiers.MODE_AUTO: [FIREWALL_NOTICE],
 }
 
 
 def addendum_text(modifier: InstanceModifiers) -> str:
-    """Return the joined addendum text for `modifier` — separator '\\n\\n\\n',
-    empty values filtered out. '' is the 'no spliceable content this launch'
-    signal: either the modifier has no addendums in MODIFIER_ADDENDUMS (the
-    get() falls back to the empty tuple, which joins to ''), or every
-    addendum is empty (e.g. CREDENTIALS_NOTICE collapsed under no-creds).
-    Callers treat '' as a skip — splice_block isn't invoked, so neither
-    add nor cleanup happens."""
-    return "\n\n\n".join(a for a in MODIFIER_ADDENDUMS.get(modifier, ()) if a)
+    """Return the joined addendum text for `modifier` — joined with
+    ADDENDUM_SEPARATOR, empty values filtered out. '' is the 'no spliceable
+    content this launch' signal: either the modifier has no addendums in
+    MODIFIER_ADDENDUMS (the get() falls back to the empty tuple, which joins
+    to ''), or every addendum is empty (e.g. CREDENTIALS_NOTICE collapsed
+    under no-creds). Callers treat '' as a skip — splice_block isn't invoked,
+    so neither add nor cleanup happens."""
+    return ADDENDUM_SEPARATOR.join(a for a in MODIFIER_ADDENDUMS.get(modifier, ()) if a)
