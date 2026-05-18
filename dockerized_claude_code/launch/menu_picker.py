@@ -135,6 +135,7 @@ from prompt_toolkit import Application                                     # pip
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -284,7 +285,7 @@ class PickerEntry:
     sets them False to disable Del / F2 on the row (Create / Back / opener).
     `display` defaults to a fresh empty list per instance to keep the
     dataclass safe — never shared across rows."""
-    display: list = field(default_factory=list)
+    display: list[tuple[str, str]] = field(default_factory=list)
     preview: str = ""
     value: Any = None
     deletable: bool = True
@@ -343,7 +344,7 @@ def continuable_instances() -> list[ContEntry]:
     return out
 
 
-def _render_md(text: str, *, theme: dict | None = None) -> str:
+def _render_md(text: str, *, theme: dict[str, str] | None = None) -> str:
     """Render markdown text to an ANSI-encoded string for the picker's preview pane.
     Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower. Optional
     `theme` (dict of Rich style names → style strings) overrides Markdown's defaults
@@ -440,7 +441,7 @@ def _plain(display) -> str:
     return "".join(text for _, text in _normalize(display))
 
 
-def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None):
+def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
     """Render a full-screen picker; block until the user picks or cancels.
 
     legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
@@ -457,7 +458,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         "legend_open": False,
     }
 
-    def refilter():
+    def refilter() -> None:
         q = state["filter"].lower()
         state["shown"] = [i for i in range(len(entries))
                           if q in _plain(entries[i].display).lower()]
@@ -466,7 +467,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         elif not state["shown"]:
             state["cursor"] = 0
 
-    def list_fragments():
+    def list_fragments() -> list[tuple[str, str]]:
         if not state["shown"]:
             return [(PickerClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
         out = []
@@ -481,7 +482,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             out.pop()
         return out
 
-    def preview_text():
+    def preview_text() -> ANSI | str:
         if state["legend_open"] and legend_text is not None:
             return ANSI(legend_text)
         if not state["shown"]:
@@ -490,10 +491,10 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         # as styled text. Plain previews (Cont rows, etc.) pass through unchanged.
         return ANSI(entries[state["cursor"]].preview)
 
-    def title_fragments():
+    def title_fragments() -> list[tuple[str, str]]:
         return [(PickerClass.TITLE.css, title)]
 
-    def status_fragments():
+    def status_fragments() -> list[tuple[str, str]]:
         if state["legend_open"]:
             hint = HINT_LEGEND_OPEN
         else:
@@ -510,14 +511,14 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             out.append(("", state["filter"]))
         return out
 
-    def cursor_pos():
+    def cursor_pos() -> Point:
         if not state["shown"]:
             return Point(0, 0)
         return Point(0, state["shown"].index(state["cursor"]))
 
     kb = KeyBindings()
 
-    def move(delta):
+    def move(delta: int) -> None:
         if not state["shown"]:
             return
         n = len(state["shown"])
@@ -525,35 +526,35 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         state["cursor"] = state["shown"][(i + delta) % n]
 
     @kb.add("up")
-    def _(event): move(-1)
+    def _(event: KeyPressEvent) -> None: move(-1)
 
     @kb.add("down")
-    def _(event): move(1)
+    def _(event: KeyPressEvent) -> None: move(1)
 
     @kb.add("pageup")
-    def _(event): move(-PAGE_JUMP)
+    def _(event: KeyPressEvent) -> None: move(-PAGE_JUMP)
 
     @kb.add("pagedown")
-    def _(event): move(PAGE_JUMP)
+    def _(event: KeyPressEvent) -> None: move(PAGE_JUMP)
 
     @kb.add("home")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         if state["shown"]:
             state["cursor"] = state["shown"][0]
 
     @kb.add("end")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         if state["shown"]:
             state["cursor"] = state["shown"][-1]
 
     @kb.add("enter")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         if state["shown"]:
             state["result"] = (PickerAction.SELECT, entries[state["cursor"]].value)
             event.app.exit()
 
     @kb.add("escape")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         if state["legend_open"]:
             state["legend_open"] = False
             return
@@ -561,23 +562,23 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         event.app.exit()
 
     @kb.add("c-c")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         state["result"] = (None, None)
         event.app.exit()
 
     @kb.add("f8")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         if legend_text is not None:
             state["legend_open"] = not state["legend_open"]
 
     @kb.add("backspace")
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         if state["filter"]:
             state["filter"] = state["filter"][:-1]
             refilter()
 
     @kb.add(Keys.Any)
-    def _(event):
+    def _(event: KeyPressEvent) -> None:
         ch = event.data
         if ch and len(ch) == 1 and ch.isprintable():
             state["filter"] += ch
@@ -585,7 +586,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     if allow_delete:
         @kb.add("delete")
-        def _(event):
+        def _(event: KeyPressEvent) -> None:
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
@@ -596,7 +597,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     if allow_modify:
         @kb.add("f2")
-        def _(event):
+        def _(event: KeyPressEvent) -> None:
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
@@ -605,7 +606,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             state["result"] = (PickerAction.MODIFY, entry.value)
             event.app.exit()
 
-    def accent_style():
+    def accent_style() -> str:
         """Colour the preview's left-edge accent bar based on the selected row's kind:
         green for Create rows (AgentIdentity), yellow for Cont rows (InstanceIdentity
         and its SessionIdentity subclass), dim default for menu/back rows."""
@@ -776,7 +777,7 @@ def prompt_dood(current_modifiers) -> bool:
     )
 
 
-def prompt_modes(tags, current_modes: tuple = ()) -> list[str]:
+def prompt_modes(tags: tuple[str, ...], current_modes: tuple[str, ...] = ()) -> list[str]:
     """Prompt for each mode in InstanceModifiers.modes() priority order, applying
     per-mode applicability gates (DooD only fires for [prog] agents). `current_modes`
     is the existing list (pre-fills the Y/N defaults — empty for new instances).
@@ -791,7 +792,7 @@ def prompt_modes(tags, current_modes: tuple = ()) -> list[str]:
     return new_modes
 
 
-def select_agent():   # returns AgentIdentity | SessionIdentity | None — too dynamic for a tight annotation
+def select_agent() -> AgentIdentity | SessionIdentity | None:
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
     Caller must ensure at least one agent .md exists before invoking."""
     while True:

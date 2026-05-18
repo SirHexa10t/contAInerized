@@ -4,14 +4,17 @@ bind-mount targets, defaults for workspace selection (including the host-shell
 $AI_WORKSPACE override read at startup), and the bind-mount source paths the
 docker compose YAMLs consume via ${...} substitutions.
 
-Imports nothing from sibling launch/ modules — kept as the import root so it
-can be pulled in anywhere without circular-import risk. Pure data + a couple
-of host-environment reads (`$AI_WORKSPACE`, `os.getcwd()`) folded into the
-DEFAULT_WORKSPACE expression."""
+Imports only from `utils` (for `parse_agent_name`, used to build
+AGENT_MD_BY_NAME at module import) — utils is itself a true leaf, so the
+no-cycle guarantee still holds. Pure data + a couple of host-environment
+reads (`$AI_WORKSPACE`, `os.getcwd()`) folded into the DEFAULT_WORKSPACE
+expression."""
 
 import os
 from pathlib import Path
 from typing import Callable, Iterator
+
+from .utils import parse_agent_name
 
 
 # ============================================================
@@ -200,14 +203,14 @@ DOCKER_BASE_MOUNTS = {
 # call sites. Centralised here so the file-path contract is in one place
 # rather than scattered as magic strings.
 
-# Snapshot of every agent .md currently in AGENTS_DIR — captured at module
-# import as an immutable tuple. agents/ is hand-populated and stable across
-# a single `run.py` invocation, so re-globbing per consumer would be wasted
-# work; agents_crud derives the name → md_path index `AGENT_MD_BY_NAME` from
-# this tuple, and the picker's `creatable_agents` iterates it directly.
+# Snapshot of every agent .md currently in AGENTS_DIR, indexed by the agent's
+# clean name (filename grammar: `<name>[tag](parent).md`). Captured at module
+# import — agents/ is hand-populated and stable across a single `run.py`
+# invocation. Iterate `.values()` for the path list, `.keys()` (or membership
+# checks) for the name set; AgentIdentity.md_path looks an entry up by name.
 # agents/ pairs each `<agent>.md` with a matching `<agent or parent>.conf`
 # (see `agent_conf_path` at the bottom of this file).
-AGENT_MD_FILES = tuple(AGENTS_DIR.glob("*.md"))
+AGENT_MD_BY_NAME: dict[str, Path] = {parse_agent_name(p.stem): p for p in AGENTS_DIR.glob("*.md")}
 
 # Full host path the optional_creds README is planted at on first launch.
 OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"

@@ -38,15 +38,9 @@ from .file_access import (
     save_workspace_map, write_text,
 )
 from .memory_addendums import composed_addendum
-from .paths import AGENT_MD_FILES, AGENTS_STATE, instance_state_dir_path
+from .paths import AGENT_MD_BY_NAME, AGENTS_STATE, instance_state_dir_path
 from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
-from .utils import ordering_index_or_end, parse_agent_name
-
-
-# Name → md-path index over AGENT_MD_FILES (the launcher's view of agents/ at
-# import time). The picker's resolve_pick + audit's per-instance check + every
-# AgentIdentity.md_path property access goes through this dict.
-AGENT_MD_BY_NAME: dict[str, Path] = {parse_agent_name(p.stem): p for p in AGENT_MD_FILES}
+from .utils import ordering_index_or_end
 
 
 def list_all_instances() -> list[str]:
@@ -71,7 +65,7 @@ def update_workspace_map(inst_id) -> None:
         save_workspace_map(m)
 
 
-def _write_modes_entry(m: dict, sess_id) -> None:
+def _write_modes_entry(m: dict[str, list[str]], sess_id: SessionIdentity) -> None:
     """Mutate `m` (a modes-map dict) to reflect sess_id's modes for sess_id.instance:
     set the list when modes are non-empty, pop the entry otherwise. Pure dict
     mutation — callers bracket with their own load/save so a multi-edit pass
@@ -182,7 +176,7 @@ def parse_model_id(model: str) -> tuple[str, int, int] | None:
     return m.group(1), int(m.group(2)), int(m.group(3) or 0)
 
 
-def agent_sort_key(item) -> tuple:
+def agent_sort_key(item: tuple[str, Path]) -> tuple[int, tuple[int, int], str]:
     """Sort by family (ORDERED_MODEL_FAMILIES order — opus first, haiku last),
     then version desc, then name asc. Agents whose .conf has no recognisable
     model sink past all known families via the sentinel index."""
@@ -192,7 +186,7 @@ def agent_sort_key(item) -> tuple:
     return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
 
 
-def tag_sort_key(tags) -> tuple[int, ...]:
+def tag_sort_key(tags: tuple[str, ...] | list[str]) -> tuple[int, ...]:
     """Sort key for agents grouped by tag set, following InstanceModifiers.tags()
     declaration order. Untagged ([]) → empty tuple, which sorts before any non-
     empty key. Unknown tags sink past the end via a sentinel index so typo'd tags
@@ -200,7 +194,7 @@ def tag_sort_key(tags) -> tuple[int, ...]:
     return tuple(sorted(ordering_index_or_end(t, InstanceModifiers.tag_values()) for t in tags))
 
 
-def mode_sort_key(modes) -> tuple[int, ...]:
+def mode_sort_key(modes: tuple[str, ...] | list[str]) -> tuple[int, ...]:
     """Sort key for instances grouped by mode set, following InstanceModifiers.modes()
     declaration order. Mode-less ([]) → empty tuple, which sorts before any non-empty
     key. Unknown modes sink past the end via a sentinel index."""
@@ -249,7 +243,7 @@ def creatable_agents() -> list[AgentIdentity]:
     `AgentIdentity.tags` / `.md_path` are properties (the md_path lookup
     hits AGENT_MD_BY_NAME, parse_stem is cheap), so the sort doesn't need
     a side cache."""
-    out = [AgentIdentity(agent=parse_agent_name(p.stem)) for p in AGENT_MD_FILES]
+    out = [AgentIdentity(agent=name) for name in AGENT_MD_BY_NAME]
     out.sort(key=lambda a: (
         tag_sort_key(a.tags),                       # untagged sinks to top; rest follow InstanceModifiers.tags() positions
         agent_sort_key((a.agent, a.md_path)),       # within each tag group: family/version/name

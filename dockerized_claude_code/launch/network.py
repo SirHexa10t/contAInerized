@@ -621,7 +621,7 @@ def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames) -> list[
     critical_addresses = []
     critical_failed = []
 
-    def on_ok(host, ips):
+    def on_ok(host: str, ips: list[str]) -> None:
         _status.mark_resolved(host, ips)
         # Match resolved host back to its entries (multiple entries may share a host
         # if e.g. the user wrote `api.anthropic.com:443` and we also have it via apex/www).
@@ -630,7 +630,7 @@ def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames) -> list[
                 for ip in ips:
                     critical_addresses.append(f"{ip}:{port}" if port else ip)
 
-    def on_fail(host):
+    def on_fail(host: str) -> None:
         _status.mark_failed(host, _FAILED_RESOLVE_REASON)
         critical_failed.append(host)
 
@@ -669,7 +669,7 @@ def _phase2_worker(rest_hostnames) -> None:
     assert _phase2_queue is not None
     q = _phase2_queue
 
-    def on_ok(host, ips):
+    def on_ok(host: str, ips: list[str]) -> None:
         _status.mark_resolved(host, ips)
         # Find every (entry, host, port) tuple that uses this host — multiple
         # entries can share a host with different ports.
@@ -677,7 +677,7 @@ def _phase2_worker(rest_hostnames) -> None:
             if h == host:
                 q.put((entry, host, port, ips))
 
-    def on_fail(host):
+    def on_fail(host: str) -> None:
         _status.mark_failed(host, _FAILED_RESOLVE_REASON)
 
     _cascade([h for _, h, _ in rest_hostnames], on_ok, on_fail)

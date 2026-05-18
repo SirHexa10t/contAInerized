@@ -30,6 +30,7 @@ agent_composition / docker_config / run.py all import from here.
 import os
 from datetime import date
 from enum import Enum
+from typing import Any
 
 from .claude_code_config import build_status_line
 from .file_access import optional_cred_tokens, present_optional_cred_services
@@ -70,7 +71,7 @@ class ComposeEnvKey(str, Enum):
     AGENT_STATUS_LINE      = "AGENT_STATUS_LINE"       # pre-styled ANSI status line at the bottom of Claude Code
     BASH_ENV               = "BASH_ENV"                # path to the bashrc that non-interactive bash sources at startup
 
-    def __str__(self):                                 # `f"{key}"` → "TARGET_IMAGE", not "ComposeEnvKey.TARGET_IMAGE"
+    def __str__(self) -> str:                          # `f"{key}"` → "TARGET_IMAGE", not "ComposeEnvKey.TARGET_IMAGE"
         return self.value
 
 
@@ -105,7 +106,7 @@ CONTAINER_ENV_FIXED    = {ComposeEnvKey.BASH_ENV: f"{CLAUDE_HOME_IN_CONTAINER}/.
 # Compose env accumulator
 # ============================================================
 
-_compose_env: dict[str, object] = {}    # populated by set_container_env + per-mode handlers + ensure_image + run_compose; read at subprocess invocation time. Keys are ComposeEnvKey members (which subclass str) plus dynamic INSTALL_<TOOL> / token-var str keys.
+_compose_env: dict[str, Any] = {}       # populated by set_container_env + per-mode handlers + ensure_image + run_compose; read at subprocess invocation time. Keys are ComposeEnvKey members (which subclass str) plus dynamic INSTALL_<TOOL> / token-var str keys. Values are heterogeneous (image-tag strs, DOCKER_GID int, etc.) — `Any` since the dict is a serialization bag, not a typed schema.
 
 
 def stage_compose_env(key: ComposeEnvKey, value) -> None:

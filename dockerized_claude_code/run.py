@@ -16,7 +16,7 @@ from launch.file_access import ensure_shared_oauth_files, load_conf
 from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
-from launch.paths import AGENT_MD_FILES, AGENTS_DIR
+from launch.paths import AGENT_MD_BY_NAME, AGENTS_DIR
 from launch.structs import AgentIdentity, InstanceIdentity, SessionIdentity
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
@@ -81,7 +81,7 @@ def select_pick() -> tuple[AgentIdentity | SessionIdentity, list[str], bool]:
     distinction is encoded in the returned type (and downstream in
     inst_id.is_brand_new), so no parallel kind string is threaded alongside.
     `dry_run` comes straight off the CLI flag — see parse_cli."""
-    if not AGENT_MD_FILES:
+    if not AGENT_MD_BY_NAME:
         sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
     picked, claude_args, dry_run = parse_cli()
     picked = picked or select_agent()
@@ -144,7 +144,7 @@ def compose_runtime(inst_id: InstanceIdentity) -> tuple[SessionIdentity, list[st
     return sess_id, chain
 
 
-def setup_state(sess_id: SessionIdentity) -> tuple[dict, list[str]]:
+def setup_state(sess_id: SessionIdentity) -> tuple[dict[str, str], list[str]]:
     """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
     addendum section into its state dir as CLAUDE.md (a single overwrite —
     install_latest_md keys off sess_id.chain for the addendums), ensure

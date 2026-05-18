@@ -309,7 +309,7 @@ class SessionIdentity(InstanceIdentity):
     which is why they live here rather than on the parent. Constructed via
     `inst_id.with_modes(...)`, or directly by continuable_instances when the
     picker pre-loads stored modes for the modify flow's pre-fill."""
-    modes: tuple                        # per-instance opt-ins like ('auto',) or ('auto', 'DooD'); tuple keeps the dataclass hashable
+    modes: tuple[str, ...]              # per-instance opt-ins like ('auto',) or ('auto', 'DooD'); tuple keeps the dataclass hashable
 
     @property
     def chain(self) -> tuple[str, ...]:

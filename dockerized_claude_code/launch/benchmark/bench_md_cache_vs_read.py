@@ -2,8 +2,8 @@
 """Benchmark: file reads (OS-page-cache-hot) vs in-process dict lookups for
 the project's agent .md files.
 
-Loads every entry of `AGENT_MD_FILES` into a dict (one disk read per file),
-then runs N iterations of:
+Loads every entry of `AGENT_MD_BY_NAME.values()` into a dict (one disk read
+per file), then runs N iterations of:
   (a) re-reading every file from disk via Path.read_text()
   (b) looking up every file's content from the dict
 
@@ -17,39 +17,40 @@ Run from the project root:
 
 import time
 
-from ..paths import AGENT_MD_FILES
+from ..paths import AGENT_MD_BY_NAME
 
 
-N = 10_000   # outer iterations; inner is len(AGENT_MD_FILES). Total ops ≈ 100k for a typical agent count.
+N = 10_000   # outer iterations; inner is len(AGENT_MD_BY_NAME). Total ops ≈ 100k for a typical agent count.
 
 
 def main() -> None:
-    if not AGENT_MD_FILES:
+    if not AGENT_MD_BY_NAME:
         print("No .md files in agents/ — nothing to benchmark.")
         return
+    paths = tuple(AGENT_MD_BY_NAME.values())
 
     # Stage 1 — populate the dict (also warms the OS page cache for stage 2).
-    cache = {p: p.read_text() for p in AGENT_MD_FILES}
+    cache = {p: p.read_text() for p in paths}
     total_bytes = sum(len(v) for v in cache.values())
     print(f"Loaded {len(cache)} .md files into dict ({total_bytes:,} chars total).")
-    print(f"Running {N:,} outer iterations × {len(AGENT_MD_FILES)} files = {N * len(AGENT_MD_FILES):,} ops per condition.")
+    print(f"Running {N:,} outer iterations × {len(paths)} files = {N * len(paths):,} ops per condition.")
     print()
 
     # Stage 2a — file reads (page-cache-hot from stage 1).
     t0 = time.perf_counter()
     for _ in range(N):
-        for p in AGENT_MD_FILES:
+        for p in paths:
             _ = p.read_text()
     file_total = time.perf_counter() - t0
 
     # Stage 2b — dict lookups.
     t0 = time.perf_counter()
     for _ in range(N):
-        for p in AGENT_MD_FILES:
+        for p in paths:
             _ = cache[p]
     dict_total = time.perf_counter() - t0
 
-    ops = N * len(AGENT_MD_FILES)
+    ops = N * len(paths)
     print(f"File reads (page-cache-hot):  total {file_total*1000:7.2f} ms   per op {file_total*1e6/ops:7.3f} µs")
     print(f"Dict lookups:                 total {dict_total*1000:7.2f} ms   per op {dict_total*1e6/ops:7.3f} µs")
     print()

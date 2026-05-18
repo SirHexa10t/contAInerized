@@ -310,7 +310,7 @@ def read_json_field(path, *keys: str) -> Any:
         return None
 
 
-def load_json_map(path: Path) -> dict:
+def load_json_map(path: Path) -> dict[str, Any]:
     """Parse a JSON-mapping file into a dict. Missing or empty files yield
     {}. Used for state-file readers where the top-level shape is a single
     JSON object (e.g. agent_workspace_map.json, agent_modes_map.json) —
@@ -373,10 +373,10 @@ def load_conf(md_path: Path) -> tuple[Path | None, dict]:
 # between load and save are visible to any other load that happens in
 # between — which is fine in single-threaded Python.
 
-_json_map_cache: dict[Path, dict] = {}   # {Path: dict} — single per-process cache shared by every JSON-map file
+_json_map_cache: dict[Path, dict[str, Any]] = {}   # single per-process cache shared by every JSON-map file
 
 
-def _cached_load_json_map(path: Path) -> dict:
+def _cached_load_json_map(path: Path) -> dict[str, Any]:
     """Load a JSON map from `path`, caching the result by path. Subsequent
     calls return the cached dict by reference (so callers' in-place mutations
     before save_*_map are visible to other loaders too — see section comment
@@ -386,7 +386,7 @@ def _cached_load_json_map(path: Path) -> dict:
     return _json_map_cache[path]
 
 
-def _cached_save_json_map(path: Path, mapping: dict) -> None:
+def _cached_save_json_map(path: Path, mapping: dict[str, Any]) -> None:
     """Write `mapping` to `path` as pretty-printed JSON and refresh the cache
     entry for that path. AGENTS_STATE is auto-created by write_text via the
     internal ensure_dir call."""
@@ -394,10 +394,14 @@ def _cached_save_json_map(path: Path, mapping: dict) -> None:
     _json_map_cache[path] = mapping
 
 
-def load_workspace_map() -> dict: return _cached_load_json_map(AGENT_WORKSPACE_MAP_FILE)
-def load_modes_map() -> dict:     return _cached_load_json_map(AGENT_MODES_MAP_FILE)
-def save_workspace_map(mapping: dict) -> None: _cached_save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
-def save_modes_map(mapping: dict) -> None:     _cached_save_json_map(AGENT_MODES_MAP_FILE, mapping)
+# Concrete shapes: workspace map is `{instance_id: workspace_path_or_None}`,
+# modes map is `{instance_id: [mode, ...]}`. The narrower types help mypy at
+# every call site; the `dict[str, Any]`-returning shared backend tolerates
+# either via Any-compatibility.
+def load_workspace_map() -> dict[str, str | None]: return _cached_load_json_map(AGENT_WORKSPACE_MAP_FILE)
+def load_modes_map() -> dict[str, list[str]]:     return _cached_load_json_map(AGENT_MODES_MAP_FILE)
+def save_workspace_map(mapping: dict[str, str | None]) -> None: _cached_save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
+def save_modes_map(mapping: dict[str, list[str]]) -> None:      _cached_save_json_map(AGENT_MODES_MAP_FILE, mapping)
 
 
 # ============================================================

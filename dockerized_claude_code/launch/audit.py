@@ -20,6 +20,7 @@ Run from the project root:
 """
 
 import json
+from typing import Any
 
 from .agents_crud import AGENT_MD_BY_NAME, list_all_instances
 from .file_access import (
@@ -49,7 +50,7 @@ def _check_json_file(path) -> str | None:
     return None
 
 
-def _modes_map_issues(modes: dict, actual: set) -> list[tuple[str, str, str]]:
+def _modes_map_issues(modes: dict[str, Any], actual: set[str]) -> list[tuple[str, str, str]]:
     """Per-entry findings for the modes map, returned as (kind, dir_name, msg)
     tuples. Symmetric to the workspace-map loop in main() — extracted as a
     helper so each finding kind has direct unit-test coverage. Covers:

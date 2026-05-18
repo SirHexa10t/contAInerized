@@ -222,7 +222,7 @@ def ensure_image(chain: list[str]) -> None:
         prev_tag = target
 
 
-def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_flag: list[str], conf: dict) -> None:
+def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_flag: list[str], conf: dict[str, str]) -> None:
     """Build each image in the chain, set TARGET_IMAGE so compose's `image:`
     substitutes to the chain output, set the terminal title, then exec
     `docker compose run`. By the time we get here every bind-mount has been
