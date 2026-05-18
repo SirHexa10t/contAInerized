@@ -21,15 +21,13 @@ Run from the project root:
 
 import json
 
-from .agents_crud import list_all_instances
+from .agents_crud import AGENT_MD_BY_NAME, list_all_instances
 from .file_access import (
-    find_md_for_agent, is_dir, load_modes_map, load_workspace_map,
-    path_exists, read_text, rglob_paths,
+    is_dir, load_modes_map, load_workspace_map, path_exists, read_text,
 )
 from .paths import (
     ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
-    AGENTS_STATE, CREDENTIALS_FILE, HISTORY_JSONL_FILENAME,
-    instance_state_dir_path,
+    AGENTS_STATE, CREDENTIALS_FILE, instance_state_dir_path, state_history_path,
 )
 from .structs import InstanceModifiers, SESSION_SEP
 
@@ -117,11 +115,11 @@ def main() -> None:
     # (source `.md` + composed-addendum), so any pre-launch divergence is transient.
     for dir_name in instances:
         agent, _, session = dir_name.partition(SESSION_SEP)
-        if find_md_for_agent(agent) is None:
+        if agent not in AGENT_MD_BY_NAME:
             issues.append(("orphan", dir_name, f"agent '{agent}' has no .md file"))
             continue
-        if not list(rglob_paths(instance_state_dir_path(dir_name), HISTORY_JSONL_FILENAME)):
-            issues.append(("no_history", dir_name, f"no {HISTORY_JSONL_FILENAME} found (instance never started?)"))
+        if not state_history_path(instance_state_dir_path(dir_name)).is_file():
+            issues.append(("no_history", dir_name, "no history.jsonl found (instance never started?)"))
 
     # Workspace-map entries — same shape: `dir_name` is the map key, a `<agent>__<session>` string.
     for dir_name, ws in mapping.items():

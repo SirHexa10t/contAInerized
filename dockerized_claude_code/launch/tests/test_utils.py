@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from launch.utils import (
-    ordering_index_or_end, plural, relative_time, split_host_port,
+    ordering_index_or_end, parse_agent_name, parse_stem, plural,
+    relative_time, split_host_port,
 )
 
 
@@ -116,6 +117,47 @@ class TestSplitHostPort(unittest.TestCase):
 
     def test_leading_colon(self):
         self.assertEqual(split_host_port(":80"), ("", "80"))
+
+
+class TestParseStem(unittest.TestCase):
+    def test_name_only(self):
+        self.assertEqual(parse_stem("poet"), ("poet", [], None))
+
+    def test_name_with_tag(self):
+        self.assertEqual(parse_stem("poet[prog]"), ("poet", ["prog"], None))
+
+    def test_name_with_parent(self):
+        self.assertEqual(parse_stem("poet(thinker)"), ("poet", [], "thinker"))
+
+    def test_name_with_tag_then_parent(self):
+        self.assertEqual(parse_stem("poet[prog](thinker)"), ("poet", ["prog"], "thinker"))
+
+    def test_name_with_parent_then_tag(self):
+        # Order is free — same result either way
+        self.assertEqual(parse_stem("poet(thinker)[prog]"), ("poet", ["prog"], "thinker"))
+
+    def test_multiple_tags_accumulate_in_order(self):
+        self.assertEqual(parse_stem("poet[a][b][c]"), ("poet", ["a", "b", "c"], None))
+
+    def test_repeated_parent_last_wins(self):
+        self.assertEqual(parse_stem("poet(a)(b)"), ("poet", [], "b"))
+
+    def test_empty_stem(self):
+        # No name regex match → fallback returns the stem as-is
+        self.assertEqual(parse_stem(""), ("", [], None))
+
+    def test_complex_combo(self):
+        self.assertEqual(parse_stem("name[a](parent)[b]"), ("name", ["a", "b"], "parent"))
+
+
+class TestParseAgentName(unittest.TestCase):
+    def test_extracts_name_dropping_suffixes(self):
+        # Asserts the name half of parse_stem's tuple — the wrapper that
+        # AGENT_MD_BY_NAME's comprehension uses to index the dict.
+        self.assertEqual(parse_agent_name("poet"), "poet")
+        self.assertEqual(parse_agent_name("poet[prog]"), "poet")
+        self.assertEqual(parse_agent_name("poet(thinker)"), "poet")
+        self.assertEqual(parse_agent_name("poet[prog](thinker)"), "poet")
 
 
 if __name__ == "__main__":

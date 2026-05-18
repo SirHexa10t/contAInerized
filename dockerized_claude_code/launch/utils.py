@@ -7,6 +7,7 @@ Leaf module: imports nothing from sibling launch/ modules — kept pull-able
 from anywhere without circular-import risk.
 """
 
+import re
 from datetime import datetime
 
 
@@ -50,5 +51,41 @@ def split_host_port(entry: str) -> tuple[str, str]:
     a bare host (`foo.com`) all dispatch correctly."""
     host, sep, port = entry.rpartition(":")
     return (host, port) if sep else (entry, "")
+
+
+def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
+    """Parse an agent-filename stem into (name, tags, parent).
+
+    Grammar: <name>(<bracketed-tag>|<parenthesized-parent>)*
+      - `[tag]` accumulates into tags (list, in the order they appear).
+      - `(parent)` is single-valued; if repeated, last wins.
+      - Order between brackets and parens is free: 'name[prog](thinker)' and
+        'name(thinker)[prog]' both parse the same way.
+
+    Examples:
+        'name'                → ('name', [], None)
+        'name(thinker)'       → ('name', [], 'thinker')
+        'name[prog]'          → ('name', ['prog'], None)
+        'name[prog](thinker)' → ('name', ['prog'], 'thinker')
+        'name[a][b]'          → ('name', ['a', 'b'], None)
+    """
+    m = re.match(r"^([^()\[\]]+)", stem)
+    if not m:
+        return (stem, [], None)
+    name = m.group(1)
+    tags = []
+    parent = None
+    for paren, bracket in re.findall(r"\(([^()]+)\)|\[([^\[\]]+)\]", stem[len(name):]):
+        if paren:
+            parent = paren
+        else:
+            tags.append(bracket)
+    return (name, tags, parent)
+
+
+def parse_agent_name(stem: str) -> str:
+    """Just the `name` half of `parse_stem` — drops [tag] / (parent) suffixes
+    from a filename stem. Used to index AGENT_MD_BY_NAME in agents_crud."""
+    return parse_stem(stem)[0]
 
 

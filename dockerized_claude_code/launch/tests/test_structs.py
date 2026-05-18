@@ -133,7 +133,7 @@ class TestSessionSep(unittest.TestCase):
 
 class TestInstanceIdentityHelpers(unittest.TestCase):
     """Tests focused on properties/methods that don't require filesystem
-    access (find_md_for_agent, etc.)."""
+    access or AGENT_MD_BY_NAME lookups."""
 
     def test_instance_name_static(self):
         self.assertEqual(InstanceIdentity.instance_name("poet", "draft"), "poet__draft")

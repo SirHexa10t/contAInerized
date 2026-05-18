@@ -22,10 +22,12 @@ isolated Docker container with persistent per-instance state.
 - **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is in
   `DEFAULTING_DIRS` — `$HOME`, `~/Desktop`, `~/Downloads`, `~/Pictures`,
   `~/Videos`, `~/.ssh`, `/tmp`, `/var/tmp`, `/` — in which case it falls back
-  to `/ai_workspace`). Rows whose workspace matches `$PWD` are tagged
-  `(CURRENT DIR)` in yellow; when `$PWD` is one of `DEFAULTING_DIRS`, rows
-  whose workspace is the fallback target get `(DEFAULT DIR)` in the same
-  yellow.
+  to `/ai_workspace`). Picker rows show a workspace hint when applicable:
+  `(CURRENT DIR)` (yellow) for rows whose workspace matches `$PWD`,
+  `(DEFAULT DIR)` (yellow) when `$PWD` is one of `DEFAULTING_DIRS` and the
+  row's workspace is the fallback target, or `(INVALID DIR)` (red) when the
+  stored workspace path no longer exists or isn't a directory — hit F2 to
+  repoint it.
 - **Per-agent build tags & per-instance modes** — append `[prog]` to a
   filename (e.g. `refactorer[prog](thinker).md`) to opt into the heavier
   Dockerfile stage with Rust + Node + uv. Modes are picked per instance at
@@ -76,8 +78,9 @@ isolated Docker container with persistent per-instance state.
   inside the container picks it up automatically. See *Optional Host
   Mounts* below for the full table.
 - **State auditor** — `python3 -m launch.audit` reports orphaned state dirs,
-  drifted CLAUDE.md files, ghost workspace-map entries, and missing/empty
-  OAuth files.
+  ghost workspace-map / modes-map entries, missing or empty OAuth files,
+  malformed modes-map values, and instances without a `history.jsonl`
+  trace.
 
 ## Tech Stack & Setup
 
@@ -214,8 +217,8 @@ init-firewall.sh: testing enforcement...
 [Claude Code starts; status line shows: ● Researcher - Myproject ( /path/to/workspace )]
 ```
 
-Lines for tags, modes, skills, optional creds, and whitelist are conditional —
-they only appear when the relevant feature is in play.
+Lines for tags, modes, optional creds, and whitelist are conditional — they
+only appear when the relevant feature is in play.
 
 ### Picker controls
 
@@ -238,10 +241,12 @@ Inspect persistent state for issues:
 python3 -m launch.audit
 ```
 
-Reports orphans, drifted CLAUDE.md files, ghost mapping entries, missing or
-empty OAuth files, and instances with no `history.jsonl` (the file the picker
-uses for the "Last used" hint). Prints `All clear. N instance(s)…` when nothing
-is wrong.
+Reports orphans (state dirs without an agent .md), ghost workspace-map /
+modes-map entries (entry without a state dir), bad workspaces (mapping
+points nowhere), missing/empty OAuth files, modes-map shape problems
+(non-list value, empty list, unknown mode strings), and instances with no
+`history.jsonl` (the file the picker uses for the "Last used" hint).
+Prints `All clear. N instance(s)…` when nothing is wrong.
 
 ## Adding an Agent
 
@@ -302,8 +307,8 @@ is wrong.
     firewall_whitelist.txt           # user-managed extra domains for {auto} mode (auto-created with a template preamble; comments + one domain per line)
     optional_creds/                  # opt-in passthrough creds; see "Optional Host Mounts" below
   <agent>__<session>/                # one per instance
-    CLAUDE.md                        # copy of the agent's .md
-    projects/-workspace/memory/MEMORY.md   # per-instance, regenerated each launch from memory/seek_summary.md + active mode addendums (preserves agent-added pointer entries outside the wrapped blocks)
+    CLAUDE.md                        # rewritten each launch: source agent .md + active-modifier addendums (project summary pointer, privacy rules, credentials notice, {auto} firewall guidance — composed by memory_addendums.composed_addendum)
+    projects/-workspace/memory/MEMORY.md   # Claude Code's auto-memory file, agent-owned (the launcher doesn't touch it)
     projects/-workspace/...          # claude's per-project state, incl. history.jsonl
 ```
 
@@ -379,31 +384,35 @@ installed, and the mounted creds make it ready to use.
 ## Project Layout
 
 ```
-run.py                               # entry point + 7-stage launch() orchestrator
+run.py                               # entry point + 7-stage launch() orchestrator (parse → resolve → resume? → persist → categorise → setup → run)
 launch/
-  __init__.py
-  paths.py                           # centralised path constants + read_workspace_pref — host + container paths, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, CACHE_MOUNTS, DEFAULTING_DIRS (import root: zero internal deps)
-  utils.py                           # domain-neutral helpers (parse_lines, read_json_field, load_json_map, relative_time); leaf module
-  file_access.py                     # the launcher's file-access layer: agent filename grammar (parse_stem) + .md/.conf lookup (find_md_for_agent, conf_path_for, load_conf), plus the cached load/save of agent_workspace_map.json + agent_modes_map.json. lru_cache on the hot reads; manual caches with invalidation on save for the JSON maps.
-  structs.py                         # identity dataclasses — AgentIdentity / InstanceIdentity / SessionIdentity (inheritance chain with derived properties: instance, state_dir, md_path, conf_path, tags, stored_modes, has_continuable_history, last_used_mtime); SESSION_SEP constant
-  agent_composition.py               # tag/mode definitions (ORDERED_TAGS/MODES/MODEL_FAMILIES + TAG/MODE_DESCRIPTIONS + handlers), BUILTIN_FIREWALL_DOMAINS + resolved_whitelist_domains, build-chain composition (compute_chain, apply_composition), sort keys (agent/tag/mode), cache pruning
-  docker_config.py                   # docker-side: compose env-key constants (TARGET_IMAGE, AGENT_STATE, …) + accumulator (_compose_env, stage_compose_env), image-chain naming, _build_status_line, set_container_env, ensure_image, run_compose. Never writes to os.environ; the accumulator gets passed to docker compose subprocesses via env=.
-  agents_crud.py                     # agent-state mutations + picker-entry factories: install_latest_md, sync_memory_templates, _force_remove (sudo + sudo -k fallback), delete_instance, modify_instance, resolve_pick, creatable_agents, continuable_instances. JSON map I/O lives in file_access; this module just calls into it.
-  user_additions.py                  # optional_creds_* (mounts, install env flags, token env vars), firewall whitelist count, README + whitelist file templates created on first launch. Bundled skills (custom_skills/) ride along in DOCKER_BASE_MOUNTS as a single dir mount; no per-skill code here.
-  menu_picker.py                     # picker UI + composition-legend overlay + ask_for_workspace + prompt_modes + prompt_session + print_launch_banner
-  audit.py                           # state-checker (run as `python -m launch.audit`)
-agents/                              # agent definitions (.md + optional .conf)
-custom_commands/                     # shared slash commands (`/refactor`, `/unspaghettify`, `/write-readme`, `/write-summary`)
-custom_skills/                       # shared skills bundled with the project
-settings/                            # status line + bashrc + Claude Code settings + keybindings + manifest helpers
-memory/
-  seek_summary.md                    # always-active MEMORY.md template (points the agent at .claude_summary)
-  auto-addendum.md                   # {auto}-mode addendum (firewall guidance)
+  paths.py                           # centralised path constants — host (AGENTS_STATE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), per-layer bind-mount dicts (DOCKER_BASE_MOUNTS, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
+  utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port. No disk access (that's file_access). Leaf module.
+  file_access.py                     # every disk-touching call routes through here. Agent filename grammar (parse_stem) + .md/.conf lookup (find_md_for_agent, conf_path_for, load_conf), cached load/save of agent_workspace_map.json + agent_modes_map.json, ensure_shared_oauth_files (touches the two OAuth files as `{}` if absent), force_remove with sudo + `sudo -k` fallback, installed_cred_clis (space-joins CLIs with creds present).
+  structs.py                         # identity dataclasses — AgentIdentity → InstanceIdentity → SessionIdentity (frozen=True, inheritance) + InstanceModifiers enum (BASE / TAG_PROG / MODE_AUTO / MODE_DOOD). SessionIdentity.chain returns the active-modifier-values tuple (BASE first, declaration order) and validates self.tags/self.modes against the taxonomy.
+  compose_env.py                     # compose-side env-var staging — ComposeEnvKey enum, _compose_env accumulator + stage_compose_env, subprocess_env overlay, container_env_args (→ `-e KEY=VALUE` flags), conf_env_args, install_creds_flags, token_env_dict. set_container_env orchestrator (sister to docker_config's set_container_mounts).
+  docker_config.py                   # docker subprocesses + bind-mount accumulator + image-chain naming. add_docker_mount, set_container_mounts, ensure_image, run_compose; docker CLI wrappers (require_docker, detect_docker_gid, wait_for_container_running, docker_exec_root, any_agent_container_running). Every direct `docker` call lives here.
+  memory_addendums.py                # launch-time directives for CLAUDE.md. Addendum(NamedTuple) instances — SEEK_SUMMARY, MAINTAIN_PRIVACY, CREDENTIALS_NOTICE, FIREWALL_NOTICE — mapped per modifier via MODIFIER_ADDENDUMS. composed_addendum(chain) renders the active sub-sections under a single `## Launch-time addendums` heading.
+  agent_composition.py               # compose_chain(sess_id) dispatch → _apply_prog / _apply_auto / _apply_dood handlers; warn_if_dangerous_modes ({auto}+{DooD} red press-any-key warning); cache prepare/prune helpers ([prog] only).
+  network.py                         # {auto}-mode firewall coordination — BUILTIN_FIREWALL_DOMAINS (~135 entries), two-phase DNS resolution (sync Phase 1 → streaming Phase 2 via docker exec iptables -I), cross-launch resolved-IP cache (~/.claude-agents/resolved_domains.txt, 6h TTL), agent-visible status file (domains_pending_resolve.yml).
+  agents_crud.py                     # instance-state CRUD — list_all_instances, update_workspace_map, set_instance_modes, install_latest_md (writes source `.md` + composed_addendum to state-dir CLAUDE.md in one go), modify_instance, delete_instance, resolve_pick, picker-entry builders (creatable_agents, continuable_instances), sort keys.
+  user_additions.py                  # optional_creds_* (mounts, install env flags, token env vars) + plant_user_extras (auto-creates user_extras/optional_creds_readme.txt always; firewall_whitelist.txt only under {auto}). Bundled skills + commands ride along in DOCKER_BASE_MOUNTS; no per-skill code lives here.
+  menu_picker.py                     # prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + ask_for_workspace + prompt_modes + prompt_session + print_launch_banner.
+  claude_code_config.py              # Claude-Code-side UX — build_status_line(inst_id) + set_terminal_title(name). Leaf-shaped.
+  audit.py                           # state-correctness checker (run as `python -m launch.audit`). Per-entry helpers (_check_json_file, _modes_map_issues) are unit-testable in isolation; main() handles orchestration.
+  templates/                         # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/ on first {auto} / first launch respectively.
+  tests/                             # unittest suite — 14 files, 353 tests, ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
+agents/                              # agent definitions — drop `<name>[tag](parent).md` (+ optional `.conf`) here
+custom_commands/                     # launcher-bundled slash commands (mounted into every container) — `/refactor`, `/unspaghettify`, `/write-readme`, `/write-summary`
+custom_skills/                       # launcher-bundled skills (mounted into every container) — currently `print/SKILL.md`
+.claude/commands/                    # workspace-local slash commands for THIS project — `/update-models`. Auto-discovered by Claude Code natively when launched here; no mount.
+settings/                            # status line + bashrc + Claude Code settings + keybindings + manifest helpers (mounted into every container)
+tips/                                # reference notes (`project_claude_files.md`, `running_audit.md`, `chat_syntax.md`, …). Read by humans, not the launcher.
 docker/
   Dockerfile, compose.yml            # base image + base compose (compose.yml uses `network: host` for builds to dodge BuildKit DNS issues)
   Dockerfile.prog, compose.prog.yml  # [prog] tag layer (Rust + Node + uv); conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
   Dockerfile.auto, compose.auto.yml  # {auto} mode layer (iptables + sudo + entrypoint wrapper)
   Dockerfile.dood, compose.dood.yml  # {DooD} mode layer (docker.sock bind-mount)
-  init-firewall.sh                   # iptables outbound whitelist; parallel DNS resolution (xargs -P $((nproc*8)) with 8s per-query timeout); CIDR / literal-IP entries skip DNS
-  auto-entrypoint.sh                 # runs init-firewall.sh, then claude with --dangerously-skip-permissions
+  init-firewall.sh                   # iptables outbound whitelist; container-side does no DNS — it sees pre-resolved IPs only
+  auto-entrypoint.sh                 # runs init-firewall.sh, sudo -k, unsets WHITELIST_ADDRESSES, execs claude
 ```

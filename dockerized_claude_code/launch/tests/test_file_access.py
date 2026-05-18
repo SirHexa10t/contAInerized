@@ -1,5 +1,6 @@
-"""Tests for launch.file_access — parse_stem grammar, the JSON-map caching
-layer, and the small helpers in this module.
+"""Tests for launch.file_access — the JSON-map caching layer, the OAuth
+file ensure step, and the small helpers in this module. `parse_stem` lives
+in launch.utils now, so its grammar tests are over in test_utils.
 
 Filesystem-touching tests use tmpdir + targeted patches so they don't depend
 on the host's actual launcher state."""
@@ -11,57 +12,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from launch import file_access
-
-
-# ============================================================
-# parse_stem grammar
-# ============================================================
-
-
-class TestParseStem(unittest.TestCase):
-    def test_name_only(self):
-        self.assertEqual(file_access.parse_stem("poet"), ("poet", [], None))
-
-    def test_name_with_tag(self):
-        self.assertEqual(file_access.parse_stem("poet[prog]"), ("poet", ["prog"], None))
-
-    def test_name_with_parent(self):
-        self.assertEqual(file_access.parse_stem("poet(thinker)"), ("poet", [], "thinker"))
-
-    def test_name_with_tag_then_parent(self):
-        self.assertEqual(
-            file_access.parse_stem("poet[prog](thinker)"),
-            ("poet", ["prog"], "thinker"),
-        )
-
-    def test_name_with_parent_then_tag(self):
-        # Order is free — same result either way
-        self.assertEqual(
-            file_access.parse_stem("poet(thinker)[prog]"),
-            ("poet", ["prog"], "thinker"),
-        )
-
-    def test_multiple_tags_accumulate_in_order(self):
-        self.assertEqual(
-            file_access.parse_stem("poet[a][b][c]"),
-            ("poet", ["a", "b", "c"], None),
-        )
-
-    def test_repeated_parent_last_wins(self):
-        self.assertEqual(
-            file_access.parse_stem("poet(a)(b)"),
-            ("poet", [], "b"),
-        )
-
-    def test_empty_stem(self):
-        # No name regex match → fallback returns the stem as-is
-        self.assertEqual(file_access.parse_stem(""), ("", [], None))
-
-    def test_complex_combo(self):
-        self.assertEqual(
-            file_access.parse_stem("name[a](parent)[b]"),
-            ("name", ["a", "b"], "parent"),
-        )
 
 
 # ============================================================

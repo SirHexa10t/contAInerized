@@ -11,7 +11,7 @@ DEFAULT_WORKSPACE expression."""
 
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 
 # ============================================================
@@ -27,10 +27,9 @@ from typing import Callable
 DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root — one above launch/
 AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .conf definitions
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
-PROJECT_CUSTOM_SKILLS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_skills"   # project-bundled skills mounted into ~/.claude/skills/<name>/ per launch
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
 TEMPLATES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "templates"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
-OPTIONAL_CREDS_README_TEMPLATE = TEMPLATES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME on first launch
+OPTIONAL_CREDS_README_TEMPLATE = TEMPLATES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
 FIREWALL_WHITELIST_TEMPLATE    = TEMPLATES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
 DOCKER_DIR = DOCKERIZED_CLAUDE_ROOT / "docker"                    # Dockerfile + compose.yml + per-layer Dockerfile.<x> / compose.<x>.yml
 
@@ -50,19 +49,13 @@ AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
 AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # {instance_id: [mode, ...]}; only entries for instances with modes
 CACHE_ROOT = AGENTS_STATE / "cache"
 
-# {auto}-mode firewall whitelist — two files, separate purposes:
-#   • DOMAINS_PENDING_RESOLVE_FILENAME — lives inside the per-instance state
-#     dir (bind-mounted into the container at /home/claude/.claude/).
-#     auto-addendum.md points the agent here to classify "I hit a connection
-#     refused" → pending / failed / not-listed. Holds status + pending list +
-#     failed list.
-#   • RESOLVED_DOMAINS_CACHE_FILE — global cross-launch DNS cache at the
-#     AGENTS_STATE root. Hosts already in this file (when it's fresh — the
-#     TTL gate lives with the cache logic in network.py) short-circuit DNS
-#     resolution: the launcher reuses the cached IPs directly. Rewritten at
-#     end of every {auto} launch with the full resolved set, so successive
-#     launches keep accumulating coverage while they stay within the TTL.
-DOMAINS_PENDING_RESOLVE_FILENAME = "domains_pending_resolve.yml"
+# {auto}-mode firewall: cross-launch DNS cache. Hosts already in this file
+# (when it's fresh — the TTL gate lives with the cache logic in network.py)
+# short-circuit DNS resolution: the launcher reuses the cached IPs directly.
+# Rewritten at end of every {auto} launch with the full resolved set, so
+# successive launches keep accumulating coverage while they stay within the
+# TTL. The per-instance "still resolving / failed" status file is built by
+# state_domain_resolve_status_path further down.
 RESOLVED_DOMAINS_CACHE_FILE = AGENTS_STATE / "resolved_domains.txt"
 
 # Everything under user_extras/ is for the user to populate with
@@ -207,45 +200,26 @@ DOCKER_BASE_MOUNTS = {
 # call sites. Centralised here so the file-path contract is in one place
 # rather than scattered as magic strings.
 
-# Agent-file extensions — pair with parse_stem-derived names: `<agent>{MD_EXT}`
-# and `<agent or parent>{CONF_EXT}` in agents/.
-MD_EXT = ".md"
-CONF_EXT = ".conf"
+# Snapshot of every agent .md currently in AGENTS_DIR — captured at module
+# import as an immutable tuple. agents/ is hand-populated and stable across
+# a single `run.py` invocation, so re-globbing per consumer would be wasted
+# work; agents_crud derives the name → md_path index `AGENT_MD_BY_NAME` from
+# this tuple, and the picker's `creatable_agents` iterates it directly.
+# agents/ pairs each `<agent>.md` with a matching `<agent or parent>.conf`
+# (see `agent_conf_path` at the bottom of this file).
+AGENT_MD_FILES = tuple(AGENTS_DIR.glob("*.md"))
 
-# JSONL extension — Claude Code's per-turn input log + session-UUID transcripts.
-JSONL_EXT = ".jsonl"
-
-# Session JSONL written by Claude Code on each turn; distinct from the
-# session-UUID JSONLs that hold the actual conversation. has_continuable_history
-# filters this name out; last_used_mtime + audit use its presence as the signal.
-HISTORY_JSONL_FILENAME = "history.jsonl"
-
-# Per-instance copy of the agent's source .md, installed each launch.
-INSTANCE_CLAUDE_MD_FILENAME = "CLAUDE.md"
-
-# Relpath inside an instance's state dir holding Claude Code's per-project
-# state (history.jsonl, session-UUID transcripts, per-project MEMORY.md).
-# The launcher walks the jsonl files (file_access.has_continuable_jsonl); the
-# MEMORY.md inside is fully managed by Claude Code at runtime — the launcher
-# doesn't touch it. Launch-time directives are composed into CLAUDE.md by
-# agents_crud.install_latest_md instead.
-INSTANCE_PROJECTS_RELPATH = Path("projects")
-
-# Filenames inside user-contributed dirs.
-OPTIONAL_CREDS_README_FILENAME = "README.txt"        # auto-created in optional_creds/ on first launch
-OPTIONAL_CREDS_README_PATH     = OPTIONAL_CREDS_DIR / OPTIONAL_CREDS_README_FILENAME   # full host path the README is planted at
-OPTIONAL_CREDS_TOKEN_FILENAME = "token"              # per-service plain-text token (e.g. jira/token → $JIRA_API_TOKEN)
+# Full host path the optional_creds README is planted at on first launch.
+OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"
 
 # Addendum text + composition lives in memory_addendums.py rather than as
 # `<modifier>-addendum.md` files; agents_crud.install_latest_md asks it for
 # the rendered section and appends it to CLAUDE.md at write time. No path
 # constants needed here.
 
-# Compose-file naming. The base file is `compose.yml`; per-layer files follow
-# `compose.<step>.yml` (built by the `compose_layer_path` lambda at the bottom
-# of this file).
-COMPOSE_FILE_NAME = "compose.yml"
-COMPOSE_FILE_PATH = DOCKER_DIR / COMPOSE_FILE_NAME   # full repo-relative path to the base compose.yml
+# Base compose file (per-layer files follow `compose.<step>.yml`, built by
+# the `compose_layer_path` lambda at the bottom of this file).
+COMPOSE_FILE_PATH = DOCKER_DIR / "compose.yml"
 
 
 # ============================================================
@@ -332,19 +306,37 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # describes WHAT, the type system handles HOW). Group comments call out what's
 # being built.
 
-# Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/)
-state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_CLAUDE_MD_FILENAME
-state_projects_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / INSTANCE_PROJECTS_RELPATH
-state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / DOMAINS_PENDING_RESOLVE_FILENAME
+# Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/).
+# `state_domain_resolve_status_path` is the per-instance status file the
+# FIREWALL_NOTICE addendum points the agent at to classify a `ConnectionRefused`
+# (still resolving / failed / not listed) — accepts any base dir, including
+# CLAUDE_CONFIG_IN_CONTAINER for the in-container view.
+state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / "CLAUDE.md"
+state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / "domains_pending_resolve.yml"
+# Per-launch input log Claude Code writes directly under the state dir (sibling
+# of `projects/`, not nested with the session transcripts). `last_history_mtime`
+# uses its mtime as the "last launched" signal; audit's `no_history` check
+# treats absence as "instance never started".
+state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / "history.jsonl"
+
+# JSONLs Claude Code writes for the /workspace project — sits at the only
+# subdir Claude Code ever creates under projects/ inside this launcher
+# (workspace bind-mount target is always `/workspace` → URL-encoded to
+# `-workspace`). Returns the glob iterator directly; caller filters
+# history.jsonl out and checks per-file size. `Path.glob` on a missing dir
+# yields an empty iterator, so no existence-check needed at the call site.
+state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / "projects" / "-workspace").glob("*.jsonl")
 
 # Per-instance state directory itself (one level up from the per-state-dir files)
 instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS_STATE / instance
 
-# Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys)
+# Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys).
+# `optional_creds_token_path` points at `<service>/token` — a plain-text
+# secret the launcher forwards as the matching env var (see OPTIONAL_CREDS_TOKEN_ENV_VARS).
 optional_creds_service_path: Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service
-optional_creds_token_path:   Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service / OPTIONAL_CREDS_TOKEN_FILENAME
+optional_creds_token_path:   Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service / "token"
 
-agent_conf_path:         Callable[[str], Path]         = lambda name: AGENTS_DIR / f"{name}{CONF_EXT}"
+agent_conf_path:         Callable[[str], Path]         = lambda name: AGENTS_DIR / f"{name}.conf"
 
 # Docker compose-layer YAML (step ∈ InstanceModifiers value strings, lowercased)
 compose_layer_path:      Callable[[str], Path]         = lambda step: DOCKER_DIR / f"compose.{step.lower()}.yml"

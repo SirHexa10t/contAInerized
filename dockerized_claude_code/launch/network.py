@@ -490,12 +490,10 @@ class _WhitelistResolutionStatus:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._path: Path | None = None
-        self._data: dict = {
-            "status":   "uninit",  # → "resolving" while host work is in flight, "complete" at end
-            "resolved": {},        # host → [ip, ...]
-            "pending":  [],        # hosts still waiting on DNS
-            "failed":   {},        # host → reason string
-        }
+        self.status: str = "uninit"                  # → "resolving" while host work is in flight, "complete" at end
+        self.resolved: dict[str, list[str]] = {}     # host → [ip, ...]
+        self.pending: list[str] = []                 # hosts still waiting on DNS
+        self.failed: dict[str, str] = {}             # host → reason string
 
     def init(self, state_dir) -> None:
         """Reset to a clean 'resolving' state and record where to write — wipes
@@ -505,37 +503,40 @@ class _WhitelistResolutionStatus:
         check."""
         with self._lock:
             self._path = state_domain_resolve_status_path(state_dir)
-            self._data = {"status": "resolving", "resolved": {}, "pending": [], "failed": {}}
+            self.status = "resolving"
+            self.resolved = {}
+            self.pending = []
+            self.failed = {}
             self._write()
 
     def set_pending(self, hosts) -> None:
         """Replace the pending-host list (called once at start_whitelist_resolution
         after the full whitelist is assembled)."""
         with self._lock:
-            self._data["pending"] = sorted(hosts)
+            self.pending = sorted(hosts)
             self._write()
 
     def mark_resolved(self, host: str, ips: list[str]) -> None:
         """Move `host` from pending → resolved; file the IPs."""
         with self._lock:
-            self._data["resolved"][host] = list(ips)
-            if host in self._data["pending"]:
-                self._data["pending"].remove(host)
+            self.resolved[host] = list(ips)
+            if host in self.pending:
+                self.pending.remove(host)
             self._write()
 
     def mark_failed(self, host: str, reason: str) -> None:
         """Move `host` from pending → failed with `reason`."""
         with self._lock:
-            self._data["failed"][host] = reason
-            if host in self._data["pending"]:
-                self._data["pending"].remove(host)
+            self.failed[host] = reason
+            if host in self.pending:
+                self.pending.remove(host)
             self._write()
 
     def complete(self) -> None:
         """Flip top-level status to 'complete' — every entry has been
         resolved or terminally failed; no more updates coming."""
         with self._lock:
-            self._data["status"] = "complete"
+            self.status = "complete"
             self._write()
 
     def resolved_snapshot(self) -> dict[str, list[str]]:
@@ -543,7 +544,7 @@ class _WhitelistResolutionStatus:
         persist the full resolution map (used by _phase2_worker to feed
         _save_resolution_cache)."""
         with self._lock:
-            return dict(self._data["resolved"])
+            return dict(self.resolved)
 
     def _write(self) -> None:
         """Atomic rewrite of the pending-status file. Caller holds the lock.
@@ -564,22 +565,22 @@ class _WhitelistResolutionStatus:
             "# progresses. The agent uses this file to classify a connection",
             "# refused: still pending vs. terminally failed vs. neither.",
             "",
-            f"status: {self._data['status']}    # 'resolving' = host still working;  'complete' = every entry resolved or terminally failed",
+            f"status: {self.status}    # 'resolving' = host still working;  'complete' = every entry resolved or terminally failed",
             f"last_updated: {now}",
             "",
             "# Pending — host is still resolving these. Rule may arrive within seconds;",
             "# if you can't reach a pending host, retry shortly before surfacing to the user.",
             "pending:",
         ]
-        for host in sorted(self._data["pending"]):
+        for host in sorted(self.pending):
             lines.append(f"  - {host}")
         lines.append("")
         lines.append("# Failed — DNS resolution failed terminally for these (likely IPv6-only,")
         lines.append("# dead host, typo, or transient error). Won't be reachable this session;")
         lines.append("# surface to the user if you need one — a re-launch may succeed.")
         lines.append("failed:")
-        for host in sorted(self._data["failed"]):
-            lines.append(f"  {host}: {self._data['failed'][host]}")
+        for host in sorted(self.failed):
+            lines.append(f"  {host}: {self.failed[host]}")
         return "\n".join(lines) + "\n"
 
 

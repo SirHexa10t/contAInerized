@@ -6,8 +6,9 @@ state-dir lifecycle in agents_crud, where the file ops are inseparable
 from the domain logic).
 
 Grouped by section in this file:
-  - Filename grammar + agent file lookup (parse_stem, find_md_for_agent,
-    conf_path_for, load_conf) — name → .md / .conf
+  - Agent file lookup (conf_path_for, load_conf) — md_path → .conf.
+    Filename-stem parsing (parse_stem / parse_agent_name) lives in `utils`;
+    the name → md path index (AGENT_MD_BY_NAME) lives in `agents_crud`.
   - JSON state maps load/save with cache (load/save_workspace_map,
     load/save_modes_map) — agent_workspace_map.json + agent_modes_map.json
   - Per-instance state-dir queries (has_continuable_jsonl, last_history_mtime)
@@ -21,12 +22,10 @@ Grouped by section in this file:
     they happen at the right point in run.py's launch flow.
 
 Caching strategy:
-  - `find_md_for_agent` and `load_conf` are LRU-cached for the launcher
-    process lifetime. The picker's continuable_instances builder + the
-    creatable/continuable sort comparators would otherwise hit them many
-    times with the same arguments (one AGENTS_DIR glob or one dotenv read
-    per call). With caching, each unique (agent_name) glob and each unique
-    (md_path) conf read fires exactly once per process.
+  - `load_conf` is LRU-cached for the launcher process lifetime — the
+    creatable/continuable sort comparators would otherwise re-dotenv-parse
+    per pairwise comparison. With caching, each unique (md_path) conf read
+    fires exactly once per process.
   - `load_workspace_map` / `load_modes_map` cache the JSON map dicts and
     refresh the cache on every `save_*_map`. The picker's modify/delete
     flows otherwise re-read each map ~5× per launch.
@@ -36,8 +35,6 @@ Caching strategy:
     spread) don't redo the stat sweep.
   - Same-process lifetime is the cache window across all of the above —
     each `python3 run.py` invocation is a fresh process.
-  - Particularly helps when AGENTS_DIR sits on a remote / networked
-    filesystem where the glob round-trip is non-trivial.
 
 No build/composition logic (that's agent_composition), no identity dataclasses
 (that's structs), no arg formatting for docker compose (that's docker_config).
@@ -49,7 +46,6 @@ structs, user_additions, and run.py all import from here.
 import glob
 import json
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -61,12 +57,13 @@ from typing import Any
 from dotenv import dotenv_values  # pip install python-dotenv
 
 from .paths import (
-    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
+    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
     CREDENTIALS_FILE, DEFAULT_CONF, FIREWALL_WHITELIST_FILE,
-    FIREWALL_WHITELIST_TEMPLATE, HISTORY_JSONL_FILENAME, JSONL_EXT, MD_EXT,
-    OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, agent_conf_path,
-    optional_creds_service_path, optional_creds_token_path, state_projects_path,
+    FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
+    OPTIONAL_CREDS_TOKEN_ENV_VARS, agent_conf_path, optional_creds_service_path,
+    optional_creds_token_path, state_history_path, state_workspace_jsonls,
 )
+from .utils import parse_stem
 
 # ============================================================
 # Filesystem primitives — every disk-touching syscall flows through this file
@@ -209,12 +206,6 @@ def iter_subdirs(parent: Path) -> Iterator[Path]:
             yield entry
 
 
-def rglob_paths(parent: Path, pattern: str) -> Iterator[Path]:
-    """Recursive glob — yield every path under `parent` matching `pattern`.
-    Thin wrapper around `parent.rglob(pattern)`."""
-    return parent.rglob(pattern)
-
-
 def tab_complete_paths(text_prefix: str) -> list[str]:
     """Host filesystem glob for readline tab-completion. Returns list of
     string matches (~-expanded), each with `os.sep` appended if it's a
@@ -330,52 +321,6 @@ def load_json_map(path: Path) -> dict:
     return json.loads(content) if content else {}
 
 
-def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
-    """Parse a filename stem into (name, tags, parent).
-
-    Grammar: <name>(<bracketed-tag>|<parenthesized-parent>)*
-      - `[tag]` accumulates into tags (list, in the order they appear).
-      - `(parent)` is single-valued; if repeated, last wins.
-      - Order between brackets and parens is free: 'name[prog](thinker)' and
-        'name(thinker)[prog]' both parse the same way.
-
-    Examples:
-        'name'                → ('name', [], None)
-        'name(thinker)'       → ('name', [], 'thinker')
-        'name[prog]'          → ('name', ['prog'], None)
-        'name[prog](thinker)' → ('name', ['prog'], 'thinker')
-        'name[a][b]'          → ('name', ['a', 'b'], None)
-    """
-    m = re.match(r"^([^()\[\]]+)", stem)
-    if not m:
-        return (stem, [], None)
-    name = m.group(1)
-    tags = []
-    parent = None
-    for paren, bracket in re.findall(r"\(([^()]+)\)|\[([^\[\]]+)\]", stem[len(name):]):
-        if paren:
-            parent = paren
-        else:
-            tags.append(bracket)
-    return (name, tags, parent)
-
-
-@lru_cache(maxsize=None)
-def find_md_for_agent(agent_name: str) -> Path | None:
-    """Locate an agent's .md by its clean name; handles any [tag]/(parent) suffix combination
-    in the filename. Glob can't express the new grammar (`[` is a glob metacharacter), so we
-    enumerate `.md` files and match on the parsed stem — cheap with the project's agent count.
-
-    Cached for the launcher process's lifetime — the picker's continuable_instances
-    builder calls this once per state dir (so without the cache, every cont row
-    would re-glob AGENTS_DIR), and the sort callbacks fire it through identity
-    properties many more times during pairwise comparisons."""
-    for path in AGENTS_DIR.glob(f"*{MD_EXT}"):
-        if parse_stem(path.stem)[0] == agent_name:
-            return path
-    return None
-
-
 def conf_path_for(md_path: Path) -> Path | None:
     """Locate an agent's .conf path. A '(parent)' suffix in the filename aliases
     to '<parent>.conf'; otherwise '<name>.conf'; falls back to DEFAULT_CONF, or
@@ -482,31 +427,23 @@ def ensure_shared_oauth_files() -> None:
 
 def has_continuable_jsonl(state_dir: Path) -> bool:
     """True iff `state_dir` has at least one non-empty session JSONL — i.e.,
-    something `claude --continue` can load. Excludes `history.jsonl` (the per-
-    turn input log that exists even when no real conversation happened). The
-    InstanceIdentity.has_continuable_history property is a thin wrapper around
-    this; pulling the disk-walk out of the dataclass keeps structs.py a pure
-    data layer."""
-    projects_dir = state_projects_path(state_dir)
-    if not projects_dir.is_dir():
-        return False
-    for jsonl in projects_dir.rglob(f"*{JSONL_EXT}"):
-        if jsonl.name == HISTORY_JSONL_FILENAME:
-            continue
-        try:
-            if jsonl.stat().st_size > 0:
-                return True
-        except OSError:
-            continue
-    return False
+    something `claude --continue` can load. `state_workspace_jsonls` points
+    at `projects/-workspace/`, where only session-UUID JSONLs live —
+    `history.jsonl` is a sibling of `projects/` at the state-dir root, so
+    it never shows up in the iteration. InstanceIdentity.has_continuable_history
+    is a thin wrapper — pulling the disk-walk out of the dataclass keeps
+    structs.py a pure data layer."""
+    return any(jsonl.stat().st_size > 0 for jsonl in state_workspace_jsonls(state_dir))
 
 
 def last_history_mtime(state_dir: Path) -> float | None:
-    """Mtime of the most-recently-written history.jsonl under `state_dir`, or
-    None if no history file exists yet. InstanceIdentity.last_used_mtime is
-    a thin wrapper around this (same reason as above)."""
-    files = list(state_dir.rglob(HISTORY_JSONL_FILENAME))
-    return max((f.stat().st_mtime for f in files), default=None)
+    """Mtime of `<state_dir>/history.jsonl` (the per-launch input log), or
+    None if it doesn't exist yet. `state_history_path` encodes the layout
+    fact that this file has a single deterministic location — no walk
+    needed. InstanceIdentity.last_used_mtime is a thin wrapper around this
+    (same reason as above)."""
+    history = state_history_path(state_dir)
+    return history.stat().st_mtime if history.is_file() else None
 
 
 # ============================================================

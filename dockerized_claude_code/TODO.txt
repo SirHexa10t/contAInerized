@@ -193,9 +193,6 @@ new tags:
         well defined through a writing bot; Character_Builder (an independent agent) - will ask you for all of the details and background info (or tweaks; you may choose a certain historical interpretation of a known character over some other, or at a specific period of the character's life. If it's an invented character; fill in the whole personal history)
 
 
-(INVALID DIR) red label for workdirs that don't exist (not dir or symlink, or maybe other thing that I'm not thinking about)
-
-
 this repo's premise looks interesting, look into it later:
     addyosmani/agent-skills
 
@@ -244,6 +241,11 @@ phone notifications when AI is done ( {auto} mode only? )
     attempt to execute all commands and skills
     check access to sites
     see if all intended mounts are active
+
+/test-project
+    run tests
+    run `ruff check .`
+    run mypy on all files
 
 skill that draws a dependency graph
 

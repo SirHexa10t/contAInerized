@@ -11,8 +11,8 @@ Roughly grouped by section in this file:
     section onto the source `.md` body and writes the result as CLAUDE.md
     in one go; memory_addendums.composed_addendum supplies the addendum)
   - resolve_pick — name-string → identity factory used by run.py's CLI parsing
-  - creatable_agents / continuable_instances — picker entry dict factories the
-    menu_picker UI consumes
+  - creatable_agents — picker Create-row factory (returns list[AgentIdentity]).
+    The Cont-row factory lives in menu_picker (its row type is picker-only).
 
 The JSON map load/save primitives (load_workspace_map, save_modes_map, etc.)
 live in file_access with module-level caches that refresh on save — this
@@ -29,23 +29,24 @@ run.py, or menu_picker — all of those import from here.
 """
 
 import re
+from pathlib import Path
 
 from .agent_composition import warn_if_dangerous_modes
 from .file_access import (
-    find_md_for_agent, force_remove, is_dir, iter_subdirs,
-    load_conf, load_modes_map, load_workspace_map, move_path, parse_stem,
-    path_exists, read_text, resolved_cwd, resolved_path,
-    save_modes_map, save_workspace_map, write_text,
+    force_remove, is_dir, iter_subdirs, load_conf, load_modes_map,
+    load_workspace_map, move_path, path_exists, read_text, save_modes_map,
+    save_workspace_map, write_text,
 )
 from .memory_addendums import composed_addendum
-from .paths import (
-    AGENTS_DIR, AGENTS_STATE, DEFAULT_WORKSPACE, DEFAULTING_DIRS, MD_EXT,
-    instance_state_dir_path,
-)
+from .paths import AGENT_MD_FILES, AGENTS_STATE, instance_state_dir_path
 from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
-from .utils import ordering_index_or_end, relative_time
+from .utils import ordering_index_or_end, parse_agent_name
 
-NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
+
+# Name → md-path index over AGENT_MD_FILES (the launcher's view of agents/ at
+# import time). The picker's resolve_pick + audit's per-instance check + every
+# AgentIdentity.md_path property access goes through this dict.
+AGENT_MD_BY_NAME: dict[str, Path] = {parse_agent_name(p.stem): p for p in AGENT_MD_FILES}
 
 
 def list_all_instances() -> list[str]:
@@ -160,7 +161,7 @@ def modify_instance(old_inst_id, new_sess_id) -> None:
 # ============================================================
 # Picker-entry sort keys
 # ============================================================
-# Used by creatable_agents (tag + family/version sort) and continuable_instances
+# Used by creatable_agents (tag + family/version sort, here) and menu_picker's continuable_instances
 # (mode + family/version/session sort). Kept here rather than in agent_composition
 # because they're picker output concerns — composition handlers don't sort
 # anything. Tag/mode position comes from InstanceModifiers (in structs);
@@ -228,7 +229,7 @@ def resolve_pick(name: str) -> AgentIdentity | SessionIdentity | None:
     picker would have returned, so launch's downstream flow is uniform."""
     if SESSION_SEP in name and is_dir(instance_state_dir_path(name)):
         agent, _, session = name.partition(SESSION_SEP)
-        if find_md_for_agent(agent) is not None:
+        if agent in AGENT_MD_BY_NAME:
             return SessionIdentity(
                 agent=agent,
                 session=session,
@@ -236,87 +237,23 @@ def resolve_pick(name: str) -> AgentIdentity | SessionIdentity | None:
                 is_brand_new=False,
                 modes=tuple(load_modes_map().get(name, [])),
             )
-    if find_md_for_agent(name) is not None:
+    if name in AGENT_MD_BY_NAME:
         return AgentIdentity(agent=name)
     return None
 
 
-def creatable_agents() -> list[dict]:
-    """Agent dicts for the picker's Create rows. Sorted first by tag set
+def creatable_agents() -> list[AgentIdentity]:
+    """AgentIdentities for the picker's Create rows, sorted first by tag set
     (untagged first, then groups ordered by each tag's position in InstanceModifiers.tags());
-    within each tag group, the existing model family/version sort applies. Each
-    entry carries an AgentIdentity (`identity`) the picker hands back as the
-    selection value, plus picker-private caches (`tags`, `md_path`, `md_text`)
-    so sort comparisons and previews don't re-glob AGENTS_DIR per row."""
-    out = []
-    for path in AGENTS_DIR.glob(f"*{MD_EXT}"):
-        name, tags, _ = parse_stem(path.stem)
-        if name == "default":
-            continue
-        out.append({
-            "identity": AgentIdentity(agent=name),    # the value the picker hands back on selection
-            "tags": tags,                             # filename-grammar tags (e.g. ["prog"]); rendered prefixed in green by menu_picker
-            "md_path": path,                          # display only — the picker uses this for the agents/ relative path in previews
-            "md_text": read_text(path),               # raw .md content; menu_picker uses it for both description and preview
-        })
-    def _sort_key(d: dict) -> tuple:
-        # Narrow the heterogeneous-dict access by binding the identity once;
-        # mypy can't infer AgentIdentity off `d["identity"]` directly.
-        ident: AgentIdentity = d["identity"]
-        return (
-            tag_sort_key(d["tags"]),                            # untagged sinks to top; rest follow InstanceModifiers.tags() positions
-            agent_sort_key((ident.agent, d["md_path"])),        # within each tag group: family/version/name
-        )
-    out.sort(key=_sort_key)
+    within each tag group, the existing model family/version sort applies.
+    `AgentIdentity.tags` / `.md_path` are properties (the md_path lookup
+    hits AGENT_MD_BY_NAME, parse_stem is cheap), so the sort doesn't need
+    a side cache."""
+    out = [AgentIdentity(agent=parse_agent_name(p.stem)) for p in AGENT_MD_FILES]
+    out.sort(key=lambda a: (
+        tag_sort_key(a.tags),                       # untagged sinks to top; rest follow InstanceModifiers.tags() positions
+        agent_sort_key((a.agent, a.md_path)),       # within each tag group: family/version/name
+    ))
     return out
 
 
-def continuable_instances() -> list[dict]:
-    """Instance dicts for the picker's Cont/DELETE rows. Orphans (missing .md) skipped.
-    Sorted first by mode set (mode-less first, then groups ordered by each mode's
-    position in InstanceModifiers.modes()); within each mode group, sorted by (agent rank,
-    session) as before. Marks instances whose workspace resolves to the current
-    working directory (for the picker's CURRENT DIR hint). Each entry carries a
-    SessionIdentity (`identity`) — stored workspace + modes are baked in so the
-    modify flow's pre-fill can read them straight off the identity. Remaining
-    fields are display-only (workspace_display, modes_display, last_used_display,
-    is_current_dir, is_default_dir) — the picker reads them and they never leave
-    menu_picker."""
-    # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
-    # when one symlinks to the other. Subdirs deliberately don't count — being in a
-    # project under $HOME doesn't make /ai_workspace your "default" workspace.
-    cwd = resolved_cwd()
-    defaulting_dir_active = cwd in {resolved_path(d) for d in DEFAULTING_DIRS}
-    default_workspace_resolved = resolved_path(DEFAULT_WORKSPACE)
-    workspace_map = load_workspace_map()
-    modes_map = load_modes_map()
-
-    out = []
-    for dir_name in list_all_instances():
-        agent, _, session = dir_name.partition(SESSION_SEP)
-        if find_md_for_agent(agent) is None:
-            continue
-        modes = tuple(modes_map.get(dir_name, []))
-        ws = workspace_map.get(dir_name)
-        ws_resolved = resolved_path(ws) if ws and is_dir(ws) else None
-        sess_id = SessionIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
-        last_mtime = sess_id.last_used_mtime
-        out.append({
-            "identity": sess_id,
-            "modes_display":     ", ".join(modes) or "(none)",
-            "workspace_display": ws if ws_resolved else NO_WORKSPACE_DISPLAY,    # "?" sentinel when the map entry is missing or stale
-            "is_current_dir":    ws_resolved == cwd,
-            "is_default_dir":    defaulting_dir_active and ws_resolved == default_workspace_resolved,    # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)` by menu_picker
-            "last_used_display": relative_time(last_mtime) if last_mtime is not None else "(never)",
-        })
-    def _sort_key(d: dict) -> tuple:
-        # Narrow the heterogeneous-dict access by binding the identity once;
-        # mypy can't infer SessionIdentity off `d["identity"]` directly.
-        sess: SessionIdentity = d["identity"]
-        return (
-            mode_sort_key(sess.modes),                          # mode-less sinks to top; rest follow InstanceModifiers.modes() positions
-            agent_sort_key((sess.agent, sess.md_path)),         # within each mode group: family/version/name
-            sess.session,                                       # then session for tiebreak between instances of the same agent
-        )
-    out.sort(key=_sort_key)
-    return out

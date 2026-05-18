@@ -126,8 +126,10 @@ STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" mod
 import dataclasses
 import io
 import readline
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import Application                                     # pip install prompt_toolkit
 from prompt_toolkit.data_structures import Point
@@ -143,15 +145,21 @@ from rich.markdown import Markdown
 from rich.theme import Theme
 
 from .agents_crud import (
-    continuable_instances, creatable_agents, delete_instance, modify_instance,
+    AGENT_MD_BY_NAME, agent_sort_key, creatable_agents, delete_instance,
+    list_all_instances, mode_sort_key, modify_instance,
 )
 from .file_access import (
-    expand_user_path, home_dir, is_dir, path_exists, tab_complete_paths,
+    expand_user_path, home_dir, is_dir, load_modes_map, load_workspace_map,
+    path_exists, read_text, resolved_cwd, resolved_path, tab_complete_paths,
     user_firewall_whitelist_lines,
 )
-from .paths import DEFAULT_WORKSPACE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
-from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers
-from .utils import plural
+from .paths import (
+    DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE,
+)
+from .structs import (
+    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
+)
+from .utils import plural, relative_time
 
 
 class PickerAction(Enum):
@@ -222,14 +230,17 @@ class PickerRowMarker(Enum):
 
 
 class PickerCwdHint(Enum):
-    """The cwd-relation tag shown on a Cont row when the instance's workspace
-    happens to coincide with where the launcher was invoked from. Same
-    bundling rationale as PickerRowMarker — the label text and its style are
-    a fixed pair, not two parallel constants. Both currently share a yellow
+    """The cwd-relation tag shown on a Cont row's workspace. CURRENT/DEFAULT
+    mark a healthy relation to where the launcher was invoked from; INVALID
+    flags a stored workspace path that no longer exists / isn't a directory
+    so the user can spot it before continuing (or hit F2 to repoint it).
+    Same bundling rationale as PickerRowMarker — label text and style are a
+    fixed pair, not two parallel constants. CURRENT/DEFAULT share a yellow
     style; kept as separate enum members so the colours can diverge later
     without re-threading call sites."""
     CURRENT = ("(CURRENT DIR) ", "bold fg:ansiyellow")
     DEFAULT = ("(DEFAULT DIR) ", "bold fg:ansiyellow")
+    INVALID = ("(INVALID DIR) ", "bold fg:ansired")
 
     def __init__(self, label: str, style: str) -> None:
         self.label = label
@@ -242,11 +253,94 @@ class PickerCwdHint(Enum):
         return (self.style, self.label)
 
 
+NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
+
+
+@dataclass(frozen=True)
+class ContEntry:
+    """One Cont/DELETE row's data — what `continuable_instances` produces and
+    `pick_with_preview` consumes. `identity` is what the picker hands back
+    on selection; the *_display strings are pre-rendered for the agent-name
+    column / hint area; the is_*_dir booleans drive the
+    CURRENT/DEFAULT/INVALID workspace tags (only one can be True per row —
+    invalid implies ws_resolved is None, which makes the other two False)."""
+    identity: SessionIdentity
+    modes_display: str
+    workspace_display: str
+    is_current_dir: bool
+    is_default_dir: bool
+    is_invalid_dir: bool
+    last_used_display: str
+
+
+@dataclass(frozen=True)
+class PickerEntry:
+    """One row in `pick_with_preview`. `display` is the prompt_toolkit
+    FormattedText fragment list (list of (style, text) tuples), `preview` is
+    the right-pane markdown rendered to ANSI, `value` is what the picker
+    hands back on selection (AgentIdentity for Create rows, SessionIdentity
+    for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
+    for Back rows). `deletable` / `modifiable` default True; the producer
+    sets them False to disable Del / F2 on the row (Create / Back / opener).
+    `display` defaults to a fresh empty list per instance to keep the
+    dataclass safe — never shared across rows."""
+    display: list = field(default_factory=list)
+    preview: str = ""
+    value: Any = None
+    deletable: bool = True
+    modifiable: bool = True
+
+
 # Sentinel entry value signalling "open the delete submenu" — used in the
 # main picker where most rows hold an identity dataclass; this is the one
 # non-identity row, so a distinct singleton lets the dispatcher match by
 # `is` rather than tagging identities with extra metadata.
 _OPEN_DELMENU = object()
+
+
+def continuable_instances() -> list[ContEntry]:
+    """ContEntry list for the picker's Cont/DELETE rows. Orphans (missing .md)
+    skipped. Sorted first by mode set (mode-less first, then groups ordered by
+    each mode's position in InstanceModifiers.modes()); within each mode group,
+    sorted by (agent rank, session) as before. Marks instances whose workspace
+    resolves to the current working directory (for the picker's CURRENT DIR
+    hint). The contained SessionIdentity is what the picker hands back on
+    selection — stored workspace + modes are baked in so the modify flow's
+    pre-fill can read them straight off the identity."""
+    # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
+    # when one symlinks to the other. Subdirs deliberately don't count — being in a
+    # project under $HOME doesn't make /ai_workspace your "default" workspace.
+    cwd = resolved_cwd()
+    defaulting_dir_active = cwd in {resolved_path(d) for d in DEFAULTING_DIRS}
+    default_workspace_resolved = resolved_path(DEFAULT_WORKSPACE)
+    workspace_map = load_workspace_map()
+    modes_map = load_modes_map()
+
+    out = []
+    for dir_name in list_all_instances():
+        agent, _, session = dir_name.partition(SESSION_SEP)
+        if agent not in AGENT_MD_BY_NAME:
+            continue
+        modes = tuple(modes_map.get(dir_name, []))
+        ws = workspace_map.get(dir_name)
+        ws_resolved = resolved_path(ws) if ws and is_dir(ws) else None
+        sess_id = SessionIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
+        last_mtime = sess_id.last_used_mtime
+        out.append(ContEntry(
+            identity=sess_id,
+            modes_display=", ".join(modes) or "(none)",
+            workspace_display=ws if ws else NO_WORKSPACE_DISPLAY,                                    # show stored value even when invalid; `?` sentinel only when no map entry at all
+            is_current_dir=ws_resolved == cwd,
+            is_default_dir=defaulting_dir_active and ws_resolved == default_workspace_resolved,      # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)`
+            is_invalid_dir=bool(ws) and ws_resolved is None,                                         # ws set but path doesn't exist / isn't a directory — tagged `(INVALID DIR)`
+            last_used_display=relative_time(last_mtime) if last_mtime is not None else "(never)",
+        ))
+    out.sort(key=lambda e: (
+        mode_sort_key(e.identity.modes),                                # mode-less sinks to top; rest follow InstanceModifiers.modes() positions
+        agent_sort_key((e.identity.agent, e.identity.md_path)),         # within each mode group: family/version/name
+        e.identity.session,                                             # then session for tiebreak between instances of the same agent
+    ))
+    return out
 
 
 def _render_md(text: str, *, theme: dict | None = None) -> str:
@@ -305,32 +399,31 @@ def _agent_description(md_text: str) -> str:
     return md_text.splitlines()[0].lstrip("# ").strip()
 
 
-def _create_preview(agent: dict) -> str:
-    """Build the Create-row preview markdown from a creatable_agents entry and
-    render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
-    agent_id = agent["identity"]
+def _create_preview(agent: AgentIdentity) -> str:
+    """Build the Create-row preview markdown from a creatable_agents AgentIdentity
+    and render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
     return _render_md(
-        f"*Create a new instance of `{agent_id.agent}` — `agents/{agent['md_path'].name}`*\n\n"
+        f"*Create a new instance of `{agent.agent}` — `agents/{agent.md_path.name}`*\n\n"
         f"---\n\n"
-        f"{agent['md_text']}"
+        f"{read_text(agent.md_path)}"
     )
 
 
-def _cont_preview(inst: dict) -> str:
-    """Build the Cont-row preview markdown from a continuable_instances entry and
-    render to ANSI. Italic lead-in, horizontal rule, then a YAML-fenced metadata
-    block (rich syntax-colors keys/values)."""
-    sess_id = inst["identity"]
+def _cont_preview(inst: ContEntry) -> str:
+    """Build the Cont-row preview markdown from a continuable_instances ContEntry
+    and render to ANSI. Italic lead-in, horizontal rule, then a YAML-fenced
+    metadata block (rich syntax-colors keys/values)."""
+    sess_id = inst.identity
     return _render_md(
         f"*Continue session `{sess_id.instance}`.*\n\n"
         f"---\n\n"
         f"```yaml\n"
         f"Agent:     {sess_id.agent}\n"
         f"Session:   {sess_id.session}\n"
-        f"Workspace: {inst['workspace_display']}\n"
-        f"Modes:     {inst['modes_display']}\n"
+        f"Workspace: {inst.workspace_display}\n"
+        f"Modes:     {inst.modes_display}\n"
         f"State:     {sess_id.state_dir}\n"
-        f"Last used: {inst['last_used_display']}\n"
+        f"Last used: {inst.last_used_display}\n"
         f"```\n"
     )
 
@@ -347,7 +440,7 @@ def _plain(display) -> str:
     return "".join(text for _, text in _normalize(display))
 
 
-def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None):
+def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None):
     """Render a full-screen picker; block until the user picks or cancels.
 
     legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
@@ -367,7 +460,7 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
     def refilter():
         q = state["filter"].lower()
         state["shown"] = [i for i in range(len(entries))
-                          if q in _plain(entries[i]["display"]).lower()]
+                          if q in _plain(entries[i].display).lower()]
         if state["shown"] and state["cursor"] not in state["shown"]:
             state["cursor"] = state["shown"][0]
         elif not state["shown"]:
@@ -378,7 +471,7 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
             return [(PickerClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
         out = []
         for i in state["shown"]:
-            segments = _normalize(entries[i]["display"])
+            segments = _normalize(entries[i].display)
             if i == state["cursor"]:
                 segments = [(f"{PickerClass.CURSOR.css} {style}".strip(), text)
                             for style, text in segments]
@@ -395,7 +488,7 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
             return ""
         # Wrap in ANSI(...) so rich-rendered escape codes in Create-row previews show
         # as styled text. Plain previews (Cont rows, etc.) pass through unchanged.
-        return ANSI(entries[state["cursor"]]["preview"])
+        return ANSI(entries[state["cursor"]].preview)
 
     def title_fragments():
         return [(PickerClass.TITLE.css, title)]
@@ -456,7 +549,7 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
     @kb.add("enter")
     def _(event):
         if state["shown"]:
-            state["result"] = (PickerAction.SELECT, entries[state["cursor"]]["value"])
+            state["result"] = (PickerAction.SELECT, entries[state["cursor"]].value)
             event.app.exit()
 
     @kb.add("escape")
@@ -496,9 +589,9 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
-            if not entry.get("deletable", True):
+            if not entry.deletable:
                 return  # silently ignored — caller marked this row non-deletable
-            state["result"] = (PickerAction.DELETE, entry["value"])
+            state["result"] = (PickerAction.DELETE, entry.value)
             event.app.exit()
 
     if allow_modify:
@@ -507,9 +600,9 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
-            if not entry.get("modifiable", True):
+            if not entry.modifiable:
                 return  # silently ignored — caller marked this row non-modifiable
-            state["result"] = (PickerAction.MODIFY, entry["value"])
+            state["result"] = (PickerAction.MODIFY, entry.value)
             event.app.exit()
 
     def accent_style():
@@ -518,7 +611,7 @@ def pick_with_preview(title: str, entries: list, *, allow_delete: bool = False, 
         and its SessionIdentity subclass), dim default for menu/back rows."""
         if not state["shown"]:
             return PickerClass.DIVIDER.css
-        value = entries[state["cursor"]].get("value")
+        value = entries[state["cursor"]].value
         if isinstance(value, InstanceIdentity):     # cont row — SessionIdentity is a subclass; checked before AgentIdentity since InstanceIdentity isa AgentIdentity
             return PickerRowMarker.CONT.style       # fg:ansiyellow
         if isinstance(value, AgentIdentity):        # new row — plain AgentIdentity only
@@ -707,41 +800,40 @@ def select_agent():   # returns AgentIdentity | SessionIdentity | None — too d
 
         instances_by_agent = {}
         for inst in instances:
-            instances_by_agent.setdefault(inst["identity"].agent, []).append(inst)
+            instances_by_agent.setdefault(inst.identity.agent, []).append(inst)
 
-        agent_name_width = max(len(a["identity"].agent) for a in agents)
-        instance_name_width = max((len(i["identity"].instance) for i in instances), default=0)
+        agent_name_width = max(len(a.agent) for a in agents)
+        instance_name_width = max((len(i.identity.instance) for i in instances), default=0)
 
         # Shared tag/mode column: tags only appear on Create rows, modes only on Cont rows,
         # so they never collide and can occupy the same horizontal slot. Width is sized to
         # the widest of either so the agent-name / instance-ID column still lines up.
         # Effect: a `{DooD}` mark on a Cont row sits at the same column as `[prog]` would
         # on a Create row (just nested by the Cont marker's longer prefix).
-        tag_strs = [InstanceModifiers.format_prefix(a.get("tags", [])) for a in agents]
-        mode_strs_by_inst = {i["identity"].instance: InstanceModifiers.format_prefix(i["identity"].modes) for i in instances}
+        tag_strs = [InstanceModifiers.format_prefix(a.tags) for a in agents]
+        mode_strs_by_inst = {i.identity.instance: InstanceModifiers.format_prefix(i.identity.modes) for i in instances}
         shared_col_width = max(
             [len(s) for s in tag_strs] + [len(s) for s in mode_strs_by_inst.values()],
             default=0,
         )
 
-        entries = []
+        entries: list[PickerEntry] = []
         for agent, tag_str in zip(agents, tag_strs):
-            agent_id = agent["identity"]
-            entries.append({
-                "display": [
+            entries.append(PickerEntry(
+                display=[
                     PickerRowMarker.NEW.fragment("  "),
                     (STYLE_TAG, tag_str),
                     ("", " " * (shared_col_width - len(tag_str))),
-                    (STYLE_AGENT_NAME, f"{agent_id.agent:<{agent_name_width}}"),
-                    ("", f" — {_agent_description(agent['md_text'])}"),
+                    (STYLE_AGENT_NAME, f"{agent.agent:<{agent_name_width}}"),
+                    ("", f" — {_agent_description(read_text(agent.md_path))}"),
                 ],
-                "preview": _create_preview(agent),
-                "value": agent_id,
-                "deletable": False,
-                "modifiable": False,
-            })
-            for inst in instances_by_agent.get(agent_id.agent, []):
-                sess_id = inst["identity"]
+                preview=_create_preview(agent),
+                value=agent,
+                deletable=False,
+                modifiable=False,
+            ))
+            for inst in instances_by_agent.get(agent.agent, []):
+                sess_id = inst.identity
                 mode_str = mode_strs_by_inst[sess_id.instance]
                 cont_display = [
                     PickerRowMarker.CONT.fragment("      "),
@@ -750,27 +842,29 @@ def select_agent():   # returns AgentIdentity | SessionIdentity | None — too d
                     (STYLE_AGENT_NAME, f"{sess_id.instance:<{instance_name_width}}"),
                     ("", "    "),
                 ]
-                if inst.get("is_current_dir"):
+                if inst.is_current_dir:
                     cont_display.append(PickerCwdHint.CURRENT.fragment)
-                elif inst.get("is_default_dir"):
+                elif inst.is_default_dir:
                     cont_display.append(PickerCwdHint.DEFAULT.fragment)
-                cont_display.append((STYLE_WORKSPACE_HINT, inst["workspace_display"]))
-                entries.append({
-                    "display": cont_display,
-                    "preview": _cont_preview(inst),
-                    "value": sess_id,
-                })
+                elif inst.is_invalid_dir:
+                    cont_display.append(PickerCwdHint.INVALID.fragment)
+                cont_display.append((STYLE_WORKSPACE_HINT, inst.workspace_display))
+                entries.append(PickerEntry(
+                    display=cont_display,
+                    preview=_cont_preview(inst),
+                    value=sess_id,
+                ))
 
-        entries.append({
-            "display": [
+        entries.append(PickerEntry(
+            display=[
                 PickerRowMarker.DELMNU.fragment("  "),
                 ("", DELMENU_LABEL),
             ],
-            "preview": DELMENU_PREVIEW,
-            "value": _OPEN_DELMENU,
-            "deletable": False,
-            "modifiable": False,
-        })
+            preview=DELMENU_PREVIEW,
+            value=_OPEN_DELMENU,
+            deletable=False,
+            modifiable=False,
+        ))
 
         action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True, legend_text=LEGEND_TEXT)
         if action is None:
@@ -811,23 +905,23 @@ def _delete_submenu() -> None:
         instances = continuable_instances()
         if not instances:
             return
-        entries = []
+        entries: list[PickerEntry] = []
         for inst in instances:
-            sess_id = inst["identity"]
-            entries.append({
-                "display": [
+            sess_id = inst.identity
+            entries.append(PickerEntry(
+                display=[
                     PickerRowMarker.DLET.fragment("  "),
                     (STYLE_DEL_NAME, sess_id.instance),
                 ],
-                "preview": _cont_preview(inst),
-                "value": sess_id,
-            })
-        entries.append({
-            "display": [PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],
-            "preview": BACK_PREVIEW,
-            "value": None,
-            "deletable": False,
-        })
+                preview=_cont_preview(inst),
+                value=sess_id,
+            ))
+        entries.append(PickerEntry(
+            display=[PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],
+            preview=BACK_PREVIEW,
+            value=None,
+            deletable=False,
+        ))
 
         action, value = pick_with_preview(TITLE_DELETE_MENU, entries, allow_delete=True, legend_text=LEGEND_TEXT)
         if action is None or value is None:

@@ -37,10 +37,11 @@ accepts any subclass. Construction:
     compose_runtime has resolved them.
 
 Pure data-types module — leaf-ish within launch/, depending only on paths,
-file_access (for the AgentIdentity property bodies that need parse_stem /
-find_md_for_agent / conf_path_for), and utils. Does NOT depend on
-agent_composition or agents_crud — those import from here; nothing here
-imports from them.
+file_access (for `conf_path_for` etc.), and utils (for `parse_stem`).
+AgentIdentity.md_path lazy-imports AGENT_MD_BY_NAME from agents_crud at
+property-access time — agents_crud already imports AgentIdentity from here,
+so the lazy import is what breaks the would-be cycle while keeping
+structs.py module-level imports unidirectional.
 """
 
 from __future__ import annotations
@@ -52,10 +53,11 @@ from functools import cache
 from pathlib import Path
 
 from .file_access import (
-    conf_path_for, find_md_for_agent, has_continuable_jsonl, is_dir,
-    last_history_mtime, load_modes_map, parse_stem,
+    conf_path_for, has_continuable_jsonl, is_dir, last_history_mtime,
+    load_modes_map,
 )
 from .paths import AGENT_WORKSPACE_MAP_FILE, instance_state_dir_path, state_md_path
+from .utils import parse_stem
 
 
 # ============================================================
@@ -174,15 +176,17 @@ class AgentIdentity:
 
     @property
     def md_path(self) -> Path:
-        """Source agent .md file under agents/, located by agent name via
-        find_md_for_agent. The agent's filename .stem still carries [tags] /
-        (parent) — the conf_path / tags properties parse those out. Re-globbed
-        on each access (cheap: AGENTS_DIR is typically tiny). Identity is
-        constructed after the agent's existence has been verified upstream, so
-        this won't return None in practice — the assert narrows the
-        find_md_for_agent's Optional and would also surface a callsite that
-        skipped the upstream verification."""
-        md = find_md_for_agent(self.agent)
+        """Source agent .md file under agents/, looked up by agent name via
+        AGENT_MD_BY_NAME (lazy import — agents_crud imports AgentIdentity
+        from here, so the deferred import breaks the cycle while keeping the
+        property cheap: dict access is O(1)). The agent's filename .stem
+        still carries [tags] / (parent) — the conf_path / tags properties
+        parse those out. Identity is constructed after the agent's existence
+        has been verified upstream, so the lookup won't return None in
+        practice — the assert narrows the Optional and would also surface a
+        callsite that skipped the upstream verification."""
+        from .agents_crud import AGENT_MD_BY_NAME
+        md = AGENT_MD_BY_NAME.get(self.agent)
         assert md is not None, f"AgentIdentity({self.agent!r}) has no .md file — verify upstream"
         return md
 

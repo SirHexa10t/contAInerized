@@ -123,20 +123,29 @@ class TestOptionalCredsTokenEnvVars(unittest.TestCase):
 
 
 class TestPathBuilderLambdas(unittest.TestCase):
-    def test_state_md_path(self):
-        d = Path("/tmp/state")
-        self.assertEqual(paths.state_md_path(d), d / paths.INSTANCE_CLAUDE_MD_FILENAME)
+    def test_state_workspace_jsonls_missing_dir_yields_empty(self):
+        # Documented behaviour: glob on a missing dir returns an empty iterator,
+        # which is what lets has_continuable_jsonl skip the is_dir() guard.
+        self.assertEqual(list(paths.state_workspace_jsonls(Path("/tmp/definitely-missing"))), [])
 
-    def test_state_projects_path(self):
-        d = Path("/tmp/state")
-        self.assertEqual(paths.state_projects_path(d), d / paths.INSTANCE_PROJECTS_RELPATH)
+    def test_state_workspace_jsonls_yields_jsonls_under_workspace_subdir(self):
+        # Concrete-path assertion: the lambda must look under projects/-workspace/
+        # specifically (not just projects/, and not the state dir root where
+        # history.jsonl actually lives), and must filter by `.jsonl` extension.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            target = state / "projects" / "-workspace"
+            target.mkdir(parents=True)
+            (target / "abc-uuid.jsonl").touch()
+            (target / "def-uuid.jsonl").touch()
+            (target / "ignore.txt").touch()
+            (state / "history.jsonl").touch()                              # actual location — must NOT be picked up
+            (state / "projects" / "other-project").mkdir()
+            (state / "projects" / "other-project" / "sneaky.jsonl").touch() # different project — must NOT be picked up
 
-    def test_state_domain_resolve_status_path(self):
-        d = Path("/tmp/state")
-        self.assertEqual(
-            paths.state_domain_resolve_status_path(d),
-            d / paths.DOMAINS_PENDING_RESOLVE_FILENAME,
-        )
+            found = {p.name for p in paths.state_workspace_jsonls(state)}
+            self.assertEqual(found, {"abc-uuid.jsonl", "def-uuid.jsonl"})
 
     def test_state_domain_resolve_status_for_container_path(self):
         # Same lambda works for the in-container claude-config dir; this is
@@ -158,12 +167,6 @@ class TestPathBuilderLambdas(unittest.TestCase):
             paths.OPTIONAL_CREDS_DIR / "aws",
         )
 
-    def test_optional_creds_token_path(self):
-        self.assertEqual(
-            paths.optional_creds_token_path("jira"),
-            paths.OPTIONAL_CREDS_DIR / "jira" / paths.OPTIONAL_CREDS_TOKEN_FILENAME,
-        )
-
     def test_compose_layer_path_lowercases(self):
         # DooD mode → compose.dood.yml (lowercased)
         self.assertEqual(
@@ -180,7 +183,7 @@ class TestPathBuilderLambdas(unittest.TestCase):
     def test_agent_conf_path(self):
         self.assertEqual(
             paths.agent_conf_path("poet"),
-            paths.AGENTS_DIR / f"poet{paths.CONF_EXT}",
+            paths.AGENTS_DIR / "poet.conf",
         )
 
 
