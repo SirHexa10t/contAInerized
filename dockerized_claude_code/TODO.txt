@@ -273,7 +273,27 @@ far-off future:
     modes:
       {gui} / {x11} — bind-mount /tmp/.X11-unix + forward $DISPLAY so the agent can drive a browser (screenshots, scraping JS-rendered sites), open a plot window, run image-viewing tools. High leverage when needed, mostly idle otherwise. Caveat: X11 socket access is a real security surface, so this should print a warning like {DooD} does. Wayland would need a different approach ($WAYLAND_DISPLAY + XDG_RUNTIME_DIR mount).
 
-   
+
+
+
+
+Add hooks:
+    Block Bash commands (sudo and rm commands in auto mode)
+
+
+Whitelist:
+    cdn.playwright.dev
+
+
+Add overwrite for credentials within project: if credentials folder exists in project, use it INSTEAD of in ~/.claude-agents
+    Change credential folders from <service_name> to .<service_name>  ?
+
+
+In the bottom banner, concat the tags and modes chain (in {} and [])
+
+
+
+
 
 
 CANCELLED:

@@ -32,7 +32,7 @@ from .structs import InstanceModifiers
 # First-launch template files (~/.claude-agents/user_extras/...)
 # ============================================================
 
-def plant_user_extras(modes) -> None:
+def plant_user_extras(modes: tuple[str, ...]) -> None:
     """Idempotently drop the user-facing helper files into ~/.claude-agents/
     user_extras/ so users discovering the directories know what to put in
     them:

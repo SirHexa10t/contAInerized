@@ -92,7 +92,7 @@ def remove_path(path: Path) -> None:
     is_symlink checks. For paths that may be root-owned (Docker bind-mount
     leftovers), use `force_remove` instead — it wraps this one with a
     sudo-escalation policy."""
-    if not path.exists() and not path.is_symlink():
+    if not path.exists() and not path.is_symlink():   # broken symlinks: `.exists()` returns False, so we also check `.is_symlink()` to catch them
         return
     if path.is_symlink() or not path.is_dir():
         path.unlink(missing_ok=True)
@@ -175,22 +175,22 @@ def copy_file(src: Path, dest: Path, overwrite_if_dest: bool = False) -> None:
 # All accept Path or str (internally `Path(path)`-coerced) so callers don't
 # have to think about which they're holding.
 
-def path_exists(path) -> bool:
+def path_exists(path: Path | str) -> bool:
     """True iff something exists at `path` (file, dir, or symlink-to-anything)."""
     return Path(path).exists()
 
 
-def is_dir(path) -> bool:
+def is_dir(path: Path | str) -> bool:
     """True iff `path` exists and is a directory."""
     return Path(path).is_dir()
 
 
-def is_file(path) -> bool:
+def is_file(path: Path | str) -> bool:
     """True iff `path` exists and is a regular file (not a directory or symlink-to-dir)."""
     return Path(path).is_file()
 
 
-def is_symlink(path) -> bool:
+def is_symlink(path: Path | str) -> bool:
     """True iff `path` is a symlink (regardless of what — or nothing — it points to)."""
     return Path(path).is_symlink()
 
@@ -216,7 +216,7 @@ def tab_complete_paths(text_prefix: str) -> list[str]:
 
 # --- Stats ---
 
-def file_mtime(path) -> float | None:
+def file_mtime(path: Path | str) -> float | None:
     """Mtime of `path` as epoch seconds, or None if it doesn't exist or
     can't be stat'd. Single point of stat-call truth so callers don't deal
     with `path.stat().st_mtime` and the OSError surface directly."""
@@ -237,7 +237,7 @@ def iter_file_stats(parent: Path) -> Iterator[tuple[Path, int, float]]:
             yield f, s.st_size, s.st_mtime
 
 
-def is_file_recent(path, max_age_seconds: float) -> bool:
+def is_file_recent(path: Path | str, max_age_seconds: float) -> bool:
     """True iff `path` exists and its mtime is within the last `max_age_seconds`.
     Missing / unreadable / stale all → False, so callers can use this as a
     single truthy 'use this cache?' gate. Backs the {auto}-mode resolved-domains
@@ -248,7 +248,7 @@ def is_file_recent(path, max_age_seconds: float) -> bool:
 
 # --- Host paths ---
 
-def resolved_path(p) -> Path:
+def resolved_path(p: Path | str) -> Path:
     """Path(p) with symlinks resolved and ~ expanded."""
     return Path(p).resolve()
 
@@ -296,7 +296,7 @@ def parse_lines(path: Path) -> Iterator[str]:
             yield line
 
 
-def read_json_field(path, *keys: str) -> Any:
+def read_json_field(path: Path | str, *keys: str) -> Any:
     """Walk `keys` into the JSON document at `path` and return the value, or
     None on any failure: file missing, unreadable, malformed JSON, missing
     key, or a non-dict mid-walk. Callers wanting an optional field handle

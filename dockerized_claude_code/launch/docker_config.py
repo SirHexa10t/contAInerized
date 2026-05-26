@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from .claude_code_config import set_terminal_title
 from .compose_env import (
@@ -34,6 +35,7 @@ from .paths import (
     CLAUDE_CONFIG_IN_CONTAINER, COMPOSE_FILE_PATH, DEFAULT_WORKSPACE,
     DOCKER_BASE_MOUNTS, compose_layer_path,
 )
+from .structs import InstanceIdentity
 
 
 # ============================================================
@@ -52,7 +54,7 @@ from .paths import (
 _docker_mounts: dict[str, str] = {}   # {source_path_str: "target_path[:ro]"} — source uniquely identifies a mount across our callers
 
 
-def add_docker_mount(source, target) -> None:
+def add_docker_mount(source: Path | str, target: Path | str) -> None:
     """Stage a bind-mount for the upcoming `docker compose run` invocation. Any
     docker access-mode suffix (`:ro`, also `:z`/`:Z`, `:cached`/`:delegated`,
     propagation modes) is the caller's responsibility — bake it into target
@@ -184,7 +186,7 @@ def any_agent_container_running() -> bool:
 # Orchestration
 # ============================================================
 
-def set_container_mounts(inst_id) -> None:
+def set_container_mounts(inst_id: InstanceIdentity) -> None:
     """Stage per-launch bind-mounts via add_docker_mount. Sister to set_container_env
     (bind-mounts vs env vars); both run sequentially in setup_state. Two layers:
     the per-instance pair (workspace → /workspace, state dir → /home/claude/.claude)

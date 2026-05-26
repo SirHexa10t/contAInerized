@@ -5,7 +5,7 @@ import sys
 
 from launch.agent_composition import compose_chain
 from launch.agents_crud import (
-    creatable_agents, install_latest_md, resolve_pick, set_instance_modes,
+    install_latest_md, resolve_pick, set_instance_modes,
     update_workspace_map,
 )
 from launch.compose_env import set_container_env

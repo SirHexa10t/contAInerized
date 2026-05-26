@@ -1,5 +1,5 @@
 ---
-description: Run the project's full check stack — unit tests, ruff lint, ruff format-check, mypy type-check, and a launcher dry-run smoke. Read-only; reports findings, doesn't fix.
+description: Run the project's full check stack — unit tests, ruff lint, mypy type-check, and a launcher dry-run smoke. Read-only; reports findings, doesn't fix.
 ---
 
 ## Instructions
@@ -28,17 +28,20 @@ for tool in ruff mypy; do
     fi
 done
 
-# Python runtime deps (prompt_toolkit, python-dotenv, rich) — needed for test_run + the dry-run step
+# Python runtime deps (prompt_toolkit, python-dotenv, rich) — needed for test_run + the dry-run step.
+# `pip3 --user --break-system-packages` is the cheap path: doesn't need root, and the
+# --break-system-packages flag bypasses PEP 668's externally-managed marker on Debian/Ubuntu
+# (no-op everywhere else). `uv pip install` without a venv refuses outright, so we don't try it.
+# install_dependencies.sh is the canonical path (creates ~/pydev venv); fall through to that
+# hint if pip3 isn't available either.
 if python3 -c "import prompt_toolkit, dotenv, rich" 2>/dev/null; then
     echo "✓ Python runtime deps (prompt_toolkit, python-dotenv, rich)"
 else
     echo "✗ Python runtime deps MISSING — installing..."
-    if command -v uv >/dev/null 2>&1; then
-        uv pip install prompt_toolkit python-dotenv rich 2>&1 | tail -3 | sed 's/^/    /'
-    elif command -v pip3 >/dev/null 2>&1; then
-        pip3 install --user prompt_toolkit python-dotenv rich 2>&1 | tail -3 | sed 's/^/    /'
+    if command -v pip3 >/dev/null 2>&1; then
+        pip3 install --user --break-system-packages prompt_toolkit python-dotenv rich 2>&1 | tail -3 | sed 's/^/    /'
     else
-        echo "    neither uv nor pip3 in PATH — run 'install_dependencies.sh' from the project root, or install uv/pip first."
+        echo "    pip3 not in PATH — run 'install_dependencies.sh' from the project root to set up the ~/pydev venv."
     fi
     python3 -c "import prompt_toolkit, dotenv, rich" 2>/dev/null && echo "  ✓ runtime deps now available" || echo "  ✗ runtime deps still missing"
 fi
@@ -66,17 +69,7 @@ ruff check .
 
 Reports any rule violations across all Python files. Exit 0 = clean.
 
-### 3. Ruff (format drift)
-
-From the project root:
-
-```bash
-ruff format --check .
-```
-
-Reports any files whose formatting drifts from the project style; does NOT modify anything (no `--write`). Exit 0 = clean.
-
-### 4. Mypy (type-check)
+### 3. Mypy (type-check)
 
 From the project root:
 
@@ -86,7 +79,7 @@ mypy launch/ run.py
 
 Reports any type errors. Exit 0 = clean.
 
-### 5. Launcher dry-run
+### 4. Launcher dry-run
 
 Exercise the launcher's full orchestration up to (but not including) `docker compose run` — catches import-time errors and orchestration bugs that the unit tests stub past.
 
@@ -103,22 +96,18 @@ Exit 0 = orchestration completed through every stage; failures surface as the us
 
 ## Report shape
 
-After everything runs, lead with the Preflight result + five step-result bullets, then list findings underneath each. Frame any per-step failure that's clearly an environmental gap (missing tool, missing Python dep) as such — not as a code regression. Example with a clean environment:
+After everything runs, lead with the Preflight result + four step-result bullets, then list findings underneath each. Frame any per-step failure that's clearly an environmental gap (missing tool, missing Python dep) as such — not as a code regression. Example with a clean environment:
 
 ```
 Preflight: ✓ ruff, ✓ mypy, ✓ runtime deps
 - Tests:   340 passed, 0 failed
 - Ruff:    2 findings
-- Format:  1 file would be reformatted
 - Mypy:    clean
 - Dry-run: clean
 
 Ruff findings:
   launch/foo.py:42:1  E501  line too long (95 > 88 characters)
   launch/bar.py:17:5  F841  local variable 'unused' is assigned but never used
-
-Format findings:
-  launch/foo.py  (would be reformatted)
 
 Mypy findings:
   (none)
@@ -133,7 +122,6 @@ Example where preflight auto-installed everything that was missing (the run then
 Preflight: ✓ ruff (installed inline), ✓ mypy (installed inline), ✓ runtime deps (installed inline)
 - Tests:   340 passed, 0 failed
 - Ruff:    clean
-- Format:  clean
 - Mypy:    clean
 - Dry-run: clean
 ```
@@ -144,7 +132,6 @@ Example where the auto-install couldn't proceed (e.g., `uv` itself was missing) 
 Preflight: ✗ ruff still missing (uv not in PATH), ✗ mypy still missing (uv not in PATH), ✗ runtime deps still missing
 - Tests:   340 passed, 1 module failed to import (env issue — see Preflight)
 - Ruff:    blocked (tool missing)
-- Format:  blocked (tool missing)
 - Mypy:    blocked (tool missing)
 - Dry-run: blocked (runtime deps missing — `python3 run.py` can't import menu_picker)
 

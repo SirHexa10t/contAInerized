@@ -61,10 +61,11 @@ FIREWALL_NOTICE = Addendum(
 **Surface every legitimate block as a whitelist offer** (treat this as `feedback`-type guidance per your auto-memory taxonomy — the user has asked for it directly), even when a separate obstacle exists (JS-rendered SPA, login wall, etc.) and even when an alternative source is available. Mention secondary obstacles and alternatives separately — never as a reason to skip the whitelist offer.""",
 )
 
+_installed_clis = installed_cred_clis()
 CREDENTIALS_NOTICE = Addendum(
     "Credentials",
-    f"The user has provided credentials for the following CLI tools, which are already installed and ready to use: {installed_cred_clis()}"
-    if installed_cred_clis() else "",
+    f"The user has provided credentials for the following CLI tools, which are already installed and ready to use: {_installed_clis}"
+    if _installed_clis else "",
 )
 
 MAINTAIN_PRIVACY = Addendum(

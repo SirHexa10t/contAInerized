@@ -20,17 +20,30 @@ Run from the project root:
 """
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
-from .agents_crud import AGENT_MD_BY_NAME, list_all_instances
+from .agents_crud import list_all_instances
 from .file_access import (
     is_dir, load_modes_map, load_workspace_map, path_exists, read_text,
 )
 from .paths import (
-    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
+    ACCOUNT_FILE, AGENT_MD_BY_NAME, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
     AGENTS_STATE, CREDENTIALS_FILE, instance_state_dir_path, state_history_path,
 )
 from .structs import InstanceModifiers, SESSION_SEP
+
+
+def _load_or_issue(kind: str, path: Path, loader: Callable[[], dict[str, Any]]) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+    """Load `path` via `loader`; return (mapping, issues). On missing file or
+    JSONDecodeError, return ({}, [single issue tagged with `kind`]). `kind`
+    is the issue category ('ws_map' / 'modes_map') reported on failure."""
+    if not path_exists(path):
+        return {}, [(kind, path.name, "file is missing")]
+    try:
+        return loader(), []
+    except json.JSONDecodeError as e:
+        return {}, [(kind, path.name, f"invalid JSON: {e}")]
 
 
 def _check_json_file(path) -> str | None:
@@ -77,30 +90,14 @@ def _modes_map_issues(modes: dict[str, Any], actual: set[str]) -> list[tuple[str
 
 
 def main() -> None:
-    issues = []
+    issues: list[tuple[str, str, str]] = []
 
-    # Workspace map file (file may legitimately not exist on a fresh install — still report it).
-    if not path_exists(AGENT_WORKSPACE_MAP_FILE):
-        issues.append(("ws_map", AGENT_WORKSPACE_MAP_FILE.name, "file is missing"))
-        mapping = {}
-    else:
-        try:
-            mapping = load_workspace_map()
-        except json.JSONDecodeError as e:
-            issues.append(("ws_map", AGENT_WORKSPACE_MAP_FILE.name, f"invalid JSON: {e}"))
-            mapping = {}
-
-    # Modes map file (parallel to workspace map; entries are optional per-instance,
-    # but a missing or corrupt file is still surfaced).
-    if not path_exists(AGENT_MODES_MAP_FILE):
-        issues.append(("modes_map", AGENT_MODES_MAP_FILE.name, "file is missing"))
-        modes = {}
-    else:
-        try:
-            modes = load_modes_map()
-        except json.JSONDecodeError as e:
-            issues.append(("modes_map", AGENT_MODES_MAP_FILE.name, f"invalid JSON: {e}"))
-            modes = {}
+    # Map files may legitimately be missing on a fresh install — _load_or_issue
+    # reports + degrades to {} so the per-entry checks below still run cleanly.
+    mapping, ws_issues = _load_or_issue("ws_map", AGENT_WORKSPACE_MAP_FILE, load_workspace_map)
+    issues.extend(ws_issues)
+    modes, modes_issues = _load_or_issue("modes_map", AGENT_MODES_MAP_FILE, load_modes_map)
+    issues.extend(modes_issues)
 
     # Shared OAuth files — these must be populated after login.
     for path in (ACCOUNT_FILE, CREDENTIALS_FILE):

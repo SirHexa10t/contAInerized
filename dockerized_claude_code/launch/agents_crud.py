@@ -39,7 +39,7 @@ from .file_access import (
 )
 from .memory_addendums import composed_addendum
 from .paths import AGENT_MD_BY_NAME, AGENTS_STATE, instance_state_dir_path
-from .structs import AgentIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
+from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
 from .utils import ordering_index_or_end
 
 
@@ -55,7 +55,7 @@ def list_all_instances() -> list[str]:
 # Single-entry writers
 # ============================================================
 
-def update_workspace_map(inst_id) -> None:
+def update_workspace_map(inst_id: InstanceIdentity) -> None:
     """Persist (inst_id.instance → inst_id.workspace) in agent_workspace_map.json.
     No-op if the entry is already set to this value — avoids rewriting the file on
     every cont relaunch when the workspace hasn't changed."""
@@ -76,7 +76,7 @@ def _write_modes_entry(m: dict[str, list[str]], sess_id: SessionIdentity) -> Non
         m.pop(sess_id.instance, None)
 
 
-def set_instance_modes(sess_id) -> None:
+def set_instance_modes(sess_id: SessionIdentity) -> None:
     """Persist the modes list for an instance, taken off the passed SessionIdentity
     (which carries both the instance key and its resolved modes). An empty modes
     tuple removes the entry from the map (we don't store empty entries — keeps the
@@ -94,7 +94,7 @@ def set_instance_modes(sess_id) -> None:
 # Per-instance state-dir writers
 # ============================================================
 
-def install_latest_md(sess_id) -> None:
+def install_latest_md(sess_id: SessionIdentity) -> None:
     """Write the agent's source `.md` plus the active-chain addendum section
     into the state dir as CLAUDE.md, in a single overwrite. Refreshed each
     launch so a source-side edit AND any modifier toggle both propagate
@@ -107,7 +107,7 @@ def install_latest_md(sess_id) -> None:
     write_text(sess_id.state_md, f"{body}\n\n{addendum}" if addendum else body)
 
 
-def delete_instance(inst_id) -> None:
+def delete_instance(inst_id: InstanceIdentity) -> None:
     """Remove this instance's state dir and its workspace + modes mapping entries.
     Path removal goes through `force_remove(name=...)` which logs the removal,
     handles root-owned Docker bind-mount leftovers via sudo, and pauses for
@@ -115,17 +115,17 @@ def delete_instance(inst_id) -> None:
     map entries are still cleaned up."""
     if not force_remove(inst_id.state_dir, name=inst_id.instance):
         return   # force_remove printed errors and waited for keypress
-    m = load_workspace_map()
-    if inst_id.instance in m:
-        del m[inst_id.instance]
-        save_workspace_map(m)
-    m = load_modes_map()
-    if inst_id.instance in m:
-        del m[inst_id.instance]
-        save_modes_map(m)
+    workspace_map = load_workspace_map()
+    if inst_id.instance in workspace_map:
+        del workspace_map[inst_id.instance]
+        save_workspace_map(workspace_map)
+    modes_map = load_modes_map()
+    if inst_id.instance in modes_map:
+        del modes_map[inst_id.instance]
+        save_modes_map(modes_map)
 
 
-def modify_instance(old_inst_id, new_sess_id) -> None:
+def modify_instance(old_inst_id: SessionIdentity, new_sess_id: SessionIdentity) -> None:
     """Move an instance's state dir to its new SessionIdentity (renaming if the
     instance id differs) and update both the workspace and modes mappings to
     match. No-op for the rename if old and new ids match; the maps are always
@@ -136,19 +136,19 @@ def modify_instance(old_inst_id, new_sess_id) -> None:
             raise ValueError(f"Instance '{new_sess_id.instance}' already exists.")
         move_path(old_inst_id.state_dir, new_sess_id.state_dir)
     # workspace map
-    m = load_workspace_map()
+    workspace_map = load_workspace_map()
     if renaming:
-        m.pop(old_inst_id.instance, None)
-    m[new_sess_id.instance] = new_sess_id.workspace
-    save_workspace_map(m)
+        workspace_map.pop(old_inst_id.instance, None)
+    workspace_map[new_sess_id.instance] = new_sess_id.workspace
+    save_workspace_map(workspace_map)
     # modes map — single load/save (mirrors set_instance_modes' shape via the
     # shared helpers so a rename costs one file write instead of two), plus the
     # same {auto}+{DooD} warning at the end so both persistence paths surface it.
-    m = load_modes_map()
+    modes_map = load_modes_map()
     if renaming:
-        m.pop(old_inst_id.instance, None)
-    _write_modes_entry(m, new_sess_id)
-    save_modes_map(m)
+        modes_map.pop(old_inst_id.instance, None)
+    _write_modes_entry(modes_map, new_sess_id)
+    save_modes_map(modes_map)
     warn_if_dangerous_modes(new_sess_id.modes)
 
 

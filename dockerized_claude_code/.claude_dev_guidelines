@@ -1,0 +1,192 @@
+# Dev guidelines
+
+How to navigate and extend this codebase. A fresh contributor should read this
+file before adding code, so that new contributions land where the rest of the
+project would expect them. This file is jointly maintained by `/refactor`
+(style + idioms + anti-patterns) and `/unspaghettify` (file roles + dependency
+direction + placement); each command MERGES into its own sections without
+clobbering the other's.
+
+## Module roles (one sentence each)
+
+Grouped by layer, top of the dependency graph last.
+
+### Leaves — depend on nothing in-project
+
+- `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split).
+- `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined.
+
+### Disk + identity — depend only on leaves
+
+- `launch/file_access.py` — sole chokepoint for every disk-touching call (reads, writes, removes, queries, lists, stats).
+- `launch/structs.py` — identity dataclasses (`AgentIdentity` → `InstanceIdentity` → `SessionIdentity`) + `InstanceModifiers` enum taxonomy.
+
+### Small services — depend on disk + identity
+
+- `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
+- `launch/memory_addendums.py` — launch-time addendums composed into per-instance `CLAUDE.md` (per modifier in the active chain).
+- `launch/network.py` — `{auto}`-mode firewall: host-side DNS cascade + cross-launch IP cache + streaming iptables updater.
+
+### Orchestration — depend on services
+
+- `launch/compose_env.py` — compose env-var staging (`ComposeEnvKey` taxonomy, `_compose_env` accumulator, `-e` flag emission).
+- `launch/docker_config.py` — docker subprocess wrappers + bind-mount accumulator + image-chain naming + `run_compose`.
+- `launch/agent_composition.py` — chain composition via `_apply_<modifier>` dispatch + `{auto}+{DooD}` warning + cache lifecycle.
+- `launch/agents_crud.py` — instance state CRUD (create/modify/delete) + workspace + modes-map writers + picker-entry builders + sort keys.
+- `launch/user_additions.py` — user-side contributions to the container (optional-creds mounts + first-launch template plants).
+- `launch/audit.py` — read-only state-correctness checker, runnable as `python -m launch.audit`.
+
+### UI
+
+- `launch/menu_picker.py` — prompt_toolkit picker + line prompts (workspace, session, modes) + pre-launch banner.
+
+### Entry
+
+- `run.py` — `launch()` 7-stage orchestrator (input → fs-validate → resume → persist → categorise → setup → run).
+
+### Other directories
+
+- `launch/templates/` — source-side files `file_access.copy_file` plants to `user_extras/` on first launch.
+- `launch/tests/` — unittest suite (`python3 -m unittest discover -s launch/tests` from project root).
+- `agents/` — agent definitions (`<name>[tag](parent).md` + optional matching `.conf`).
+- `docker/` — `Dockerfile.<step>` + `compose.<step>.yml` per modifier; `init-firewall.sh` + `auto-entrypoint.sh` for `{auto}`.
+- `settings/` — in-container bashrc + status line + manifest helpers + Claude settings/keybindings (bind-mounted via `DOCKER_BASE_MOUNTS`).
+- `custom_commands/` — launcher-bundled slash commands (bind-mounted into every container).
+- `custom_skills/` — launcher-bundled skills (bind-mounted as a single dir; each `<name>/SKILL.md` becomes a `/<name>` skill).
+
+## Dependency direction
+
+The arrows must stay one-way. A reversal creates a cycle (or hides one behind
+lazy imports, which is the bandage of last resort).
+
+```
+utils ──► paths ──► file_access ──► structs ──┐
+                                              ├─► small services (claude_code_config, memory_addendums, network)
+                                              │
+                            small services ──► orchestration (compose_env, docker_config, agent_composition,
+                                                              agents_crud, user_additions, audit)
+                                                       │
+                                                       ▼
+                                                       UI (menu_picker)
+                                                       │
+                                                       ▼
+                                                       entry (run.py)
+```
+
+**One acknowledged cycle:** `docker_config ↔ network`. `docker_config` imports
+`network` at module level (for `is_critical_pending` / `start_firewall_updater` /
+`wait_for_critical_addresses`); `network._updater_worker` and
+`network._insert_iptables_accept` lazy-import `docker_config.wait_for_container_running`
+and `docker_config.docker_exec_root` from inside the function body. Both
+docstrings call this out. Don't add new lazy imports without good reason —
+prefer to push the shared logic to a leaf-er module first.
+
+## Where new code goes — by example
+
+For each common addition, place it where the rest of the project would expect.
+"X belongs in Y because Z" — the *because* matters more than the rule.
+
+### A new host or container path
+
+→ `paths.py`. Because every path constant in the project lives here — search
+finds it once, edit-via-relocation is one line. Static composite paths go
+inline with their constituents; dynamic paths get a `<name>_path` lambda at
+the bottom.
+
+### A new bind-mount
+
+→ one of the `DOCKER_*_MOUNTS` dicts in `paths.py`. Because the per-launch
+mount-staging code (`docker_config.set_container_mounts` and the `_apply_<modifier>`
+handlers in `agent_composition`) just iterates these dicts — new entry is a
+data-side change, not a code change. Pick the dict by scope: `DOCKER_BASE_MOUNTS`
+(every launch), `DOCKER_AUTO_MOUNTS` (`{auto}` only), `DOCKER_DOOD_MOUNTS` (`{DooD}`
+only), `CACHE_MOUNTS` (`[prog]` cache shares).
+
+### A new modifier (tag or mode)
+
+Five touch points, in this order:
+1. Append an `InstanceModifiers` enum member in `structs.py` (declaration order
+   = chain order). Prefix `TAG_` for filename-grammar tags, `MODE_` for
+   per-instance modes.
+2. Add `docker/Dockerfile.<slug>` + `docker/compose.<slug>.yml`.
+3. Add `_apply_<slug>()` handler + one conditional in `compose_chain` in
+   `agent_composition.py`.
+4. (Optional) `Addendum(...)` instance in `memory_addendums.py` + entry under
+   the modifier in `MODIFIER_ADDENDUMS` if you want a launch-time CLAUDE.md
+   directive.
+5. (Optional) prompt + the mode in `menu_picker.prompt_modes` if it's a per-
+   instance mode (user opt-in).
+
+`launch/tests/test_essential_files.py` enforces 1–3 by asserting every non-BASE
+member has matching Dockerfile + compose + `_apply_<slug>` handler.
+
+### A new disk-touching helper
+
+→ `file_access.py`. Because that's the project's chokepoint — no other module
+calls `open()`, `Path.exists()`, `shutil.*`, `subprocess` for git/sudo, etc.
+The chokepoint rule is what makes the rest of the codebase mock-able and
+keeps OS-quirk handling (root-owned bind-mount leftovers, etc.) in one place.
+
+### A new env var staged to compose / container
+
+→ `compose_env.py`. If it's a known static key, add it to the `ComposeEnvKey`
+enum and stage via `stage_compose_env(key, value)`. If it's forwarded from
+the host shell, add to `CONTAINER_ENV_FORWARDS`. If it's a constant fixed at
+launch, add to `CONTAINER_ENV_FIXED`. Dynamic INSTALL_<TOOL> / token vars
+derive from `OPTIONAL_CREDS_MOUNTS` and `OPTIONAL_CREDS_TOKEN_ENV_VARS` in
+`paths.py` — adding a new optional-cred service flows through both.
+
+### A new launch-time CLAUDE.md directive
+
+→ `memory_addendums.py`. Add an `Addendum(title=..., body=...)` instance,
+then list it under the relevant modifier in `MODIFIER_ADDENDUMS`. `composed_addendum(chain)`
+picks it up via `chain` membership and renders it as a `### <title>` section
+under the single `## Launch-time addendums` block. Bodies can `format(...)`
+in path constants from `paths.py`.
+
+### A new picker row kind
+
+→ `menu_picker.py`. Define a dataclass for the row's data (see `ContEntry` /
+`PickerEntry`). Add a `PickerRowMarker` enum member if you want a new glyph
+prefix. Build entries via the existing `pick_with_preview` primitive — it's
+generic over `PickerEntry.value`.
+
+### A new state-correctness check
+
+→ `audit.py`. Add a check function (the existing `_modes_map_issues`,
+`_check_json_file` are unit-testable in isolation) and call it from `main()`.
+Tests go in `launch/tests/test_audit.py`.
+
+### A new identity property derived from existing fields
+
+→ a `@property` on the appropriate identity class in `structs.py`. Don't
+add a free function elsewhere — the dataclass owns its derivations. Same
+for any "compute X from sess_id" — it's `sess_id.x`, not `compute_x(sess_id)`.
+
+### A new helper that's pure (no disk, no third-party)
+
+→ `utils.py`. Domain-neutral helpers only. If it needs disk, it goes in
+`file_access.py`. If it needs an identity dataclass, it's a property /
+method on that class.
+
+## Anti-patterns
+
+Things to NOT do, with the reason:
+
+- **Don't import `Path` or call `open()` outside `file_access.py`.** The
+  chokepoint rule is what keeps disk-quirk handling (sudo fallbacks, atomic
+  writes, JSON-map caching) in one place. New disk reader → new function in
+  `file_access.py`.
+- **Don't add a constant `FOO_PATH` outside `paths.py`.** Search returns one
+  hit for any path; that's the point.
+- **Don't add a free function that takes a `SessionIdentity` and computes
+  one of its fields.** That's a `@property` on the dataclass — same call site
+  shape, lives next to the rest of the identity surface.
+- **Don't introduce a new cycle (even a lazy one).** The existing `network
+  ↔ docker_config` cycle is a documented exception; new ones get pushed to
+  a leaf-er module first.
+- **Don't add a `# noqa` without naming the rule.** `# noqa: E402` not bare
+  `# noqa`. Same for `# type: ignore[misc]` over bare `# type: ignore`.
+- **Don't re-export by importing-and-not-using.** If module A needs `X` and
+  `X` lives in module C, import directly: `from .C import X`. Routing it
+  through B (`from .B import X`) is a re-export hop with no value.

@@ -38,6 +38,7 @@ from .paths import (
     CLAUDE_HOME_IN_CONTAINER, DOCKERIZED_CLAUDE_ROOT, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS,
 )
+from .structs import InstanceIdentity
 
 
 # ============================================================
@@ -105,8 +106,13 @@ CONTAINER_ENV_FIXED    = {ComposeEnvKey.BASH_ENV: f"{CLAUDE_HOME_IN_CONTAINER}/.
 # ============================================================
 # Compose env accumulator
 # ============================================================
+# Populated by set_container_env + per-mode handlers + ensure_image + run_compose;
+# read at subprocess invocation time. Keys are ComposeEnvKey members (which
+# subclass str) plus dynamic INSTALL_<TOOL> / token-var str keys. Values are
+# heterogeneous (image-tag strs, DOCKER_GID int, etc.) — `Any` since the dict
+# is a serialization bag, not a typed schema.
 
-_compose_env: dict[str, Any] = {}       # populated by set_container_env + per-mode handlers + ensure_image + run_compose; read at subprocess invocation time. Keys are ComposeEnvKey members (which subclass str) plus dynamic INSTALL_<TOOL> / token-var str keys. Values are heterogeneous (image-tag strs, DOCKER_GID int, etc.) — `Any` since the dict is a serialization bag, not a typed schema.
+_compose_env: dict[str, Any] = {}
 
 
 def stage_compose_env(key: ComposeEnvKey, value) -> None:
@@ -181,7 +187,7 @@ def container_env_args() -> list[str]:
 # Per-launch orchestration
 # ============================================================
 
-def set_container_env(inst_id) -> None:
+def set_container_env(inst_id: InstanceIdentity) -> None:
     """Stage per-launch compose env vars in one bulk dict-update — called by
     run.py before docker compose build/run. Sister to docker_config's
     set_container_mounts (env vars vs bind-mounts); both run sequentially

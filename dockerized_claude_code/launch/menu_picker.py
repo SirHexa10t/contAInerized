@@ -64,6 +64,47 @@ Generic-picker entry shape (pick_with_preview):
     }
 """
 
+import dataclasses
+import io
+import readline
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+from prompt_toolkit import Application                                     # pip install prompt_toolkit
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import D
+from prompt_toolkit.styles import Style
+from rich.console import Console                                           # pip install rich
+from rich.markdown import Markdown
+from rich.theme import Theme
+
+from .agents_crud import (
+    agent_sort_key, creatable_agents, delete_instance,
+    list_all_instances, mode_sort_key, modify_instance,
+)
+from .file_access import (
+    expand_user_path, home_dir, is_dir, load_modes_map, load_workspace_map,
+    path_exists, read_text, resolved_cwd, resolved_path, tab_complete_paths,
+    user_firewall_whitelist_lines,
+)
+from .paths import (
+    AGENT_MD_BY_NAME, DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
+    FIREWALL_WHITELIST_FILE,
+)
+from .structs import (
+    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
+)
+from .utils import plural, relative_time
+
+
 # ============================================================
 # UI strings
 # ============================================================
@@ -91,8 +132,7 @@ DIVIDER_WIDTH  = 1
 PAGE_JUMP      = 10  # rows skipped per PageUp/PageDown
 
 # Style class names + their corresponding style strings live as the
-# PickerClass enum below — defined after the imports because dataclass /
-# enum decorators need their stdlib modules in scope first.
+# PickerClass enum below.
 
 # ============================================================
 # Agent-picker UI strings
@@ -101,8 +141,8 @@ PAGE_JUMP      = 10  # rows skipped per PageUp/PageDown
 TITLE_AGENT_PICKER = "Select an agent:"
 TITLE_DELETE_MENU  = "‼️  DELETE AGENT INSTANCES  ‼️"
 
-# Row marker glyphs + their styles live on the PickerRowMarker enum (after the
-# imports). Cwd-relation labels ("(CURRENT DIR) " / "(DEFAULT DIR) ") live on
+# Row marker glyphs + their styles live on the PickerRowMarker enum below.
+# Cwd-relation labels ("(CURRENT DIR) " / "(DEFAULT DIR) ") live on
 # PickerCwdHint there too.
 
 DELMENU_LABEL  = "(Move onto deletions menu)"
@@ -120,47 +160,6 @@ STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
 STYLE_TAG            = "fg:ansibrightgreen"
 STYLE_MODE_WARNING   = "bold fg:ansibrightred"   # DooD and other "elevated" modes — visual warning that the instance has reduced isolation
-
-# ============================================================
-
-import dataclasses
-import io
-import readline
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
-from typing import Any
-
-from prompt_toolkit import Application                                     # pip install prompt_toolkit
-from prompt_toolkit.data_structures import Point
-from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.key_binding.key_processor import KeyPressEvent
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.dimension import D
-from prompt_toolkit.styles import Style
-from rich.console import Console                                           # pip install rich
-from rich.markdown import Markdown
-from rich.theme import Theme
-
-from .agents_crud import (
-    AGENT_MD_BY_NAME, agent_sort_key, creatable_agents, delete_instance,
-    list_all_instances, mode_sort_key, modify_instance,
-)
-from .file_access import (
-    expand_user_path, home_dir, is_dir, load_modes_map, load_workspace_map,
-    path_exists, read_text, resolved_cwd, resolved_path, tab_complete_paths,
-    user_firewall_whitelist_lines,
-)
-from .paths import (
-    DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE,
-)
-from .structs import (
-    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
-)
-from .utils import plural, relative_time
 
 
 class PickerAction(Enum):
@@ -272,6 +271,25 @@ class ContEntry:
     is_default_dir: bool
     is_invalid_dir: bool
     last_used_display: str
+
+    @property
+    def preview(self) -> str:
+        """Cont-row preview markdown rendered to ANSI. Italic lead-in,
+        horizontal rule, then a YAML-fenced metadata block (rich syntax-colors
+        keys/values)."""
+        sess_id = self.identity
+        return _render_md(
+            f"*Continue session `{sess_id.instance}`.*\n\n"
+            f"---\n\n"
+            f"```yaml\n"
+            f"Agent:     {sess_id.agent}\n"
+            f"Session:   {sess_id.session}\n"
+            f"Workspace: {self.workspace_display}\n"
+            f"Modes:     {self.modes_display}\n"
+            f"State:     {sess_id.state_dir}\n"
+            f"Last used: {self.last_used_display}\n"
+            f"```\n"
+        )
 
 
 @dataclass(frozen=True)
@@ -410,25 +428,6 @@ def _create_preview(agent: AgentIdentity) -> str:
     )
 
 
-def _cont_preview(inst: ContEntry) -> str:
-    """Build the Cont-row preview markdown from a continuable_instances ContEntry
-    and render to ANSI. Italic lead-in, horizontal rule, then a YAML-fenced
-    metadata block (rich syntax-colors keys/values)."""
-    sess_id = inst.identity
-    return _render_md(
-        f"*Continue session `{sess_id.instance}`.*\n\n"
-        f"---\n\n"
-        f"```yaml\n"
-        f"Agent:     {sess_id.agent}\n"
-        f"Session:   {sess_id.session}\n"
-        f"Workspace: {inst.workspace_display}\n"
-        f"Modes:     {inst.modes_display}\n"
-        f"State:     {sess_id.state_dir}\n"
-        f"Last used: {inst.last_used_display}\n"
-        f"```\n"
-    )
-
-
 def _normalize(display) -> list[tuple[str, str]]:
     """Coerce any accepted display form into a list of (style, text) tuples."""
     if isinstance(display, str):
@@ -450,7 +449,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
     if not entries:
         raise ValueError("entries must be non-empty")
 
-    state = {
+    state: dict[str, Any] = {
         "cursor": 0,
         "filter": "",
         "shown": list(range(len(entries))),
@@ -586,7 +585,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     if allow_delete:
         @kb.add("delete")
-        def _(event: KeyPressEvent) -> None:
+        def _on_delete_key(event: KeyPressEvent) -> None:
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
@@ -597,7 +596,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     if allow_modify:
         @kb.add("f2")
-        def _(event: KeyPressEvent) -> None:
+        def _on_modify_key(event: KeyPressEvent) -> None:
             if not state["shown"]:
                 return
             entry = entries[state["cursor"]]
@@ -706,7 +705,7 @@ def prompt_session(agent: str, workspace: str) -> str:
         return suffix
 
 
-def prompt_yn(header: str, body, prompt_label: str, default: bool = False) -> bool:
+def prompt_yn(header: str, body: list[str], prompt_label: str, default: bool = False) -> bool:
     """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
     list of explanation/caveat lines (empty strings render as blank lines for
     visual separation), and `prompt_label` is what shows in the actual y/N input
@@ -799,7 +798,7 @@ def select_agent() -> AgentIdentity | SessionIdentity | None:
         agents = creatable_agents()
         instances = continuable_instances()
 
-        instances_by_agent = {}
+        instances_by_agent: dict[str, list[ContEntry]] = {}
         for inst in instances:
             instances_by_agent.setdefault(inst.identity.agent, []).append(inst)
 
@@ -852,7 +851,7 @@ def select_agent() -> AgentIdentity | SessionIdentity | None:
                 cont_display.append((STYLE_WORKSPACE_HINT, inst.workspace_display))
                 entries.append(PickerEntry(
                     display=cont_display,
-                    preview=_cont_preview(inst),
+                    preview=inst.preview,
                     value=sess_id,
                 ))
 
@@ -914,7 +913,7 @@ def _delete_submenu() -> None:
                     PickerRowMarker.DLET.fragment("  "),
                     (STYLE_DEL_NAME, sess_id.instance),
                 ],
-                preview=_cont_preview(inst),
+                preview=inst.preview,
                 value=sess_id,
             ))
         entries.append(PickerEntry(

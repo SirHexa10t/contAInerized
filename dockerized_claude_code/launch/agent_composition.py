@@ -21,12 +21,12 @@ import from here.
 import sys
 import time
 
-from .file_access import (
-    ensure_dir, iter_file_stats, path_exists, remove_path,
-)
 from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
     add_docker_mount, any_agent_container_running, detect_docker_gid,
+)
+from .file_access import (
+    ensure_dir, iter_file_stats, path_exists, remove_path,
 )
 from .network import start_whitelist_resolution
 from .paths import (
@@ -43,6 +43,7 @@ from .structs import InstanceModifiers
 # === [prog]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
 CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
 CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
+SECONDS_PER_DAY = 86400        # used by prune_caches to convert MIN_AGE_DAYS into an epoch-seconds cutoff
 
 
 # === Tag dispatch: each handler returns the extras its tag contributes to the docker compose run ===
@@ -58,8 +59,8 @@ def prune_caches() -> None:
     Skipped when any agent container is running (to avoid yanking caches mid-build)."""
     if any_agent_container_running():
         return
-    time_cutoff = time.time() - CACHE_PRUNE_MIN_AGE_DAYS * 86400  # days → seconds (match epoch-second time.time())
-    size_cutoff = CACHE_PRUNE_THRESHOLD_GB * 1024**3              # GB   → bytes   (match st_size units)
+    time_cutoff = time.time() - CACHE_PRUNE_MIN_AGE_DAYS * SECONDS_PER_DAY  # days → seconds (match epoch-second time.time())
+    size_cutoff = CACHE_PRUNE_THRESHOLD_GB * 1024**3                        # GB   → bytes   (match st_size units)
     for host in CACHE_MOUNTS:
         if not path_exists(host):
             continue

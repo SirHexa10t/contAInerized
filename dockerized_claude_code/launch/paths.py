@@ -145,11 +145,12 @@ RO_MOUNT_OPTION = "ro"
 # stays the single declaration site while the names remain importable for any
 # future external use (currently none).
 
-LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # container target dir for the {auto} scripts
-
+# `/usr/local/bin` is the container target dir for the {auto} scripts — inlined
+# into both mount values rather than hoisted to a constant since it's only used
+# here.
 DOCKER_AUTO_MOUNTS = {
-    (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"{LOCAL_BIN_IN_CONTAINER}/init-firewall.sh:{RO_MOUNT_OPTION}",
-    (AUTO_ENTRYPOINT_SH := DOCKER_DIR / "auto-entrypoint.sh"): f"{LOCAL_BIN_IN_CONTAINER}/auto-entrypoint.sh:{RO_MOUNT_OPTION}",
+    (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"/usr/local/bin/init-firewall.sh:{RO_MOUNT_OPTION}",
+    (AUTO_ENTRYPOINT_SH := DOCKER_DIR / "auto-entrypoint.sh"): f"/usr/local/bin/auto-entrypoint.sh:{RO_MOUNT_OPTION}",
 }
 
 

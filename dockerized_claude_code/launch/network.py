@@ -72,6 +72,7 @@ import re
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -293,6 +294,12 @@ BUILTIN_FIREWALL_DOMAINS = [
 
 _IP_OR_CIDR_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$")
 
+# A whitelist entry's parsed shape — (raw entry string, hostname, port). Carried
+# through both phases of the resolution cascade so a resolved host can be matched
+# back to every (entry, port) pair that shares its hostname. `port` is "" when
+# the entry didn't specify one (and `_DEFAULT_OPEN_PORTS` is opened instead).
+HostnameEntry = tuple[str, str, str]
+
 # Reason string written to the status file's `failed:` section when a host
 # exhausts every cascade stage. One constant so phase 1 + phase 2 emit
 # identical text — the agent / user can grep for it.
@@ -385,7 +392,7 @@ def _save_resolution_cache(resolved: dict[str, list[str]]) -> None:
     write_text(RESOLVED_DOMAINS_CACHE_FILE, "\n".join(lines) + "\n")
 
 
-def _cascade(hosts, on_resolved, on_terminal_failure) -> None:
+def _cascade(hosts: Iterable[str], on_resolved: Callable[[str, list[str]], None], on_terminal_failure: Callable[[str], None]) -> None:
     """Run cascading-timeout resolution over `hosts`. For each host, invoke
     `on_resolved(host, ips)` exactly once on success or `on_terminal_failure(host)`
     if every cascade stage exhausted its budget. Subsequent passes operate
@@ -611,30 +618,40 @@ _phase2_thread: threading.Thread | None = None
 _updater_thread: threading.Thread | None = None
 
 
-def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames) -> list[str]:
+def _index_by_host(entries: list[HostnameEntry]) -> dict[str, list[tuple[str, str]]]:
+    """Build `{host: [(entry, port), ...]}` from a list of (entry, host, port)
+    triples — multiple entries can share a host (the user wrote both
+    `api.anthropic.com:443` and the bare apex, or apex+www stripping produced
+    duplicates). The dict turns the per-resolve scan in each `on_ok` from O(N)
+    into O(1)."""
+    out: dict[str, list[tuple[str, str]]] = {}
+    for entry, host, port in entries:
+        out.setdefault(host, []).append((entry, port))
+    return out
+
+
+def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: list[str], rest_hostnames: list[HostnameEntry]) -> list[str]:
     """Phase 1 body: cascade through critical hosts (Anthropic), then kick off
     Phase 2 in its own thread before returning. Result is the list of address
     strings to stage as WHITELIST_ADDRESSES for the initial firewall — that's
     critical IPs plus literal IP/CIDR entries (which need no resolution).
     Raises if any critical host fails terminally — those are non-optional and
     the launcher should abort loudly rather than start a half-broken agent."""
-    critical_addresses = []
-    critical_failed = []
+    critical_addresses: list[str] = []
+    critical_failed: list[str] = []
+    by_host = _index_by_host(critical_hostnames)
 
     def on_ok(host: str, ips: list[str]) -> None:
         _status.mark_resolved(host, ips)
-        # Match resolved host back to its entries (multiple entries may share a host
-        # if e.g. the user wrote `api.anthropic.com:443` and we also have it via apex/www).
-        for entry, h, port in critical_hostnames:
-            if h == host:
-                for ip in ips:
-                    critical_addresses.append(f"{ip}:{port}" if port else ip)
+        for _entry, port in by_host.get(host, []):
+            for ip in ips:
+                critical_addresses.append(f"{ip}:{port}" if port else ip)
 
     def on_fail(host: str) -> None:
         _status.mark_failed(host, _FAILED_RESOLVE_REASON)
         critical_failed.append(host)
 
-    _cascade([h for _, h, _ in critical_hostnames], on_ok, on_fail)
+    _cascade(by_host, on_ok, on_fail)
 
     if critical_failed:
         raise RuntimeError(
@@ -653,14 +670,15 @@ def _phase1_worker(critical_hostnames, literal_entries, rest_hostnames) -> list[
     return critical_addresses + list(literal_entries)
 
 
-def _phase2_worker(rest_hostnames) -> None:
+def _phase2_worker(rest_hostnames: list[HostnameEntry]) -> None:
     """Phase 2 body: cascade through non-critical hosts. For each successful
-    resolution, push (host, ips) onto `_phase2_queue` for the updater to
-    docker-exec into the container; for each terminal failure, just log via
-    status file (no iptables work to do). Pushes `_phase2_done` sentinel last,
-    flips the status file to 'complete', and rewrites the cross-launch
-    resolution cache with everything resolved this launch (cache hits + fresh
-    DNS) so the next launch's is_file_recent check sees a freshened mtime."""
+    resolution, push (entry, host, port, ips) onto `_phase2_queue` for the
+    updater to docker-exec into the container; for each terminal failure, just
+    log via status file (no iptables work to do). Pushes `_phase2_done`
+    sentinel last, flips the status file to 'complete', and rewrites the
+    cross-launch resolution cache with everything resolved this launch (cache
+    hits + fresh DNS) so the next launch's is_file_recent check sees a
+    freshened mtime."""
     # Spawned only from _phase1_worker (which itself runs inside
     # start_whitelist_resolution's executor — created after _phase2_queue
     # was initialized). The assertion narrows the Optional for the type
@@ -668,26 +686,24 @@ def _phase2_worker(rest_hostnames) -> None:
     # ever bypasses start_whitelist_resolution.
     assert _phase2_queue is not None
     q = _phase2_queue
+    by_host = _index_by_host(rest_hostnames)
 
     def on_ok(host: str, ips: list[str]) -> None:
         _status.mark_resolved(host, ips)
-        # Find every (entry, host, port) tuple that uses this host — multiple
-        # entries can share a host with different ports.
-        for entry, h, port in rest_hostnames:
-            if h == host:
-                q.put((entry, host, port, ips))
+        for entry, port in by_host.get(host, []):
+            q.put((entry, host, port, ips))
 
     def on_fail(host: str) -> None:
         _status.mark_failed(host, _FAILED_RESOLVE_REASON)
 
-    _cascade([h for _, h, _ in rest_hostnames], on_ok, on_fail)
+    _cascade(by_host, on_ok, on_fail)
 
     _status.complete()
     _save_resolution_cache(_status.resolved_snapshot())
     q.put(_phase2_done)
 
 
-def start_whitelist_resolution(state_dir) -> None:
+def start_whitelist_resolution(state_dir: Path) -> None:
     """Reset the agent-visible status surface to a clean 'resolving' state,
     then fire Phase 1 (critical Anthropic — synchronous from the caller's
     perspective via wait_for_critical_addresses); once Phase 1 finishes
@@ -711,16 +727,12 @@ def start_whitelist_resolution(state_dir) -> None:
     _status.init(state_dir)
     _load_resolution_cache()
 
-    # Expand the whitelist (BUILTIN + user file, apex/www, *.X stripping).
-    deduped = set()
-    for d in set(BUILTIN_FIREWALL_DOMAINS) | set(user_firewall_whitelist_lines()):
-        d = d.removeprefix("*.")
-        deduped.add(d)
-        if d.startswith("www."):
-            deduped.add(d.removeprefix("www."))
+    # Expand the whitelist (BUILTIN + user file, *.X stripping, apex-from-www).
+    deduped = {d.removeprefix("*.") for d in set(BUILTIN_FIREWALL_DOMAINS) | set(user_firewall_whitelist_lines())}
+    deduped |= {d.removeprefix("www.") for d in deduped if d.startswith("www.")}
 
-    literals = []
-    hostnames = []   # list of (entry, host, port)
+    literals: list[str] = []
+    hostnames: list[HostnameEntry] = []
     for entry in sorted(deduped):
         host, port = split_host_port(entry)
         if _IP_OR_CIDR_RE.match(host):

@@ -1,0 +1,27 @@
+[tool.ruff]
+# Generous line length — the project intentionally allows long lines for
+# multi-name imports, descriptive picker fragments, etc. /test-project no
+# longer runs `ruff format --check` (the project's columnar alignment
+# conflicts with ruff format's always-on normalization), but this setting
+# still kicks in for anyone invoking `ruff format` manually so they get
+# less-destructive behaviour than the stock 88-col default.
+line-length = 200
+
+[tool.ruff.format]
+# Don't treat trailing commas as "must stay multi-line" — lets `ruff format`
+# (when run manually) collapse multi-name imports onto one line. Same
+# rationale as line-length above.
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+# E731 (no-lambda-assignments): paths.py uses lambdas as a documented idiom
+# for the per-call path builders — compact, aligned, single source of truth
+# for every dynamic path. See the "Path builders" docstring in paths.py.
+ignore = ["E731"]
+
+[tool.mypy]
+# Third-party deps without bundled type stubs — ignore at the import boundary
+# so mypy only flags issues in our own code.
+[[tool.mypy.overrides]]
+module = ["prompt_toolkit.*", "rich.*", "dotenv"]
+ignore_missing_imports = true

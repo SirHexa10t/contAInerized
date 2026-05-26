@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from launch import agent_composition
 from launch.agent_composition import compose_chain
-from launch.structs import InstanceModifiers, SessionIdentity
+from launch.structs import SessionIdentity
 
 
 class _FakeSess(SessionIdentity):

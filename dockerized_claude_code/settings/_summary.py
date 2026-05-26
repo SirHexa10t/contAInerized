@@ -128,7 +128,7 @@ def _walk_with_fallback_exclusions():
     debugging later)."""
     print(
         "  (no git repo at /workspace — using built-in dir-name blocklist; "
-        f"adopting any .gitignore would require `git init`.)",
+        "adopting any .gitignore would require `git init`.)",
         file=sys.stderr,
     )
     paths = []
@@ -224,9 +224,12 @@ def _classify():
     curr = list_files()
     for path in sorted(set(prev) | set(curr)):
         p, c = prev.get(path), curr.get(path)
-        if   p is None: yield "NEW", path
-        elif c is None: yield "DELETED", path
-        elif p != c:    yield "CHANGED", path
+        if p is None:
+            yield "NEW", path
+        elif c is None:
+            yield "DELETED", path
+        elif p != c:
+            yield "CHANGED", path
 
 
 def cmd_diff():

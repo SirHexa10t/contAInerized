@@ -19,7 +19,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import run
+import run  # noqa: E402  — must come after the sys.path.insert above
 
 
 class TestParseCliDryRunFlag(unittest.TestCase):
