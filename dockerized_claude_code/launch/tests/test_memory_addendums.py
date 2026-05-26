@@ -55,7 +55,7 @@ class TestSeekSummaryBody(unittest.TestCase):
 
 class TestFirewallNoticeBody(unittest.TestCase):
     def test_contains_auto_label_not_escape(self):
-        # Should contain literal `{auto}` (rendered from InstanceModifiers.MODE_AUTO.label),
+        # Should contain literal `{auto}` (rendered from InstanceModifiers.MODE_WARN_AUTO.label),
         # NOT `{{auto}}` (the f-string escape form).
         self.assertIn("{auto}", FIREWALL_NOTICE.body)
         self.assertNotIn("{{auto}}", FIREWALL_NOTICE.body)
@@ -149,11 +149,11 @@ class TestModifierAddendumsDict(unittest.TestCase):
         self.assertIn(CREDENTIALS_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.TAG_PROG])
 
     def test_mode_auto_maps_to_firewall_notice(self):
-        self.assertIn(FIREWALL_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.MODE_AUTO])
+        self.assertIn(FIREWALL_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.MODE_WARN_AUTO])
 
     def test_mode_dood_has_no_addendum(self):
-        # MODE_DOOD doesn't currently advertise anything in CLAUDE.md.
-        self.assertNotIn(InstanceModifiers.MODE_DOOD, MODIFIER_ADDENDUMS)
+        # MODE_WARN_DOOD doesn't currently advertise anything in CLAUDE.md.
+        self.assertNotIn(InstanceModifiers.MODE_WARN_DOOD, MODIFIER_ADDENDUMS)
 
 
 # ============================================================
@@ -206,7 +206,7 @@ class TestComposedAddendum(unittest.TestCase):
         self.assertEqual(result.count(f"## {ADDENDUM_SECTION_TITLE}"), 1)
 
     def test_modifier_order_follows_enum_declaration(self):
-        # InstanceModifiers declaration order: BASE → TAG_PROG → MODE_AUTO → MODE_DOOD.
+        # InstanceModifiers declaration order: BASE → TAG_PROG → MODE_WARN_AUTO → MODE_WARN_DOOD.
         # Even when chain is passed with 'auto' before 'base', the output must
         # follow enum order (composed_addendum iterates InstanceModifiers, not chain).
         result = composed_addendum(("auto", "base"))

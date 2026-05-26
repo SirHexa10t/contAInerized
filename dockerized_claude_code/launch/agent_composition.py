@@ -20,6 +20,7 @@ import from here.
 
 import sys
 import time
+from collections.abc import Iterable
 
 from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
@@ -107,13 +108,23 @@ def _apply_dood() -> None:
     gid = detect_docker_gid()
     if gid is None:
         raise RuntimeError(
-            f"{InstanceModifiers.MODE_DOOD.value} mode requires a `docker` group on the host. On Linux: "
+            f"{InstanceModifiers.MODE_WARN_DOOD.value} mode requires a `docker` group on the host. On Linux: "
             f"`sudo usermod -aG docker $USER` (then log out + back in). "
-            f"If you don't actually need {InstanceModifiers.MODE_DOOD.value}, modify the instance and decline the prompt."
+            f"If you don't actually need {InstanceModifiers.MODE_WARN_DOOD.value}, modify the instance and decline the prompt."
         )
     stage_compose_env(ComposeEnvKey.DOCKER_GID, gid)
     for source, target in DOCKER_DOOD_MOUNTS.items():
         add_docker_mount(source, target)
+
+
+def _apply_web() -> None:
+    """{web} mode: no per-launch side effects. Playwright's default
+    browser-install location (`~/.cache/ms-playwright/`) sits under the
+    `~/.cache` mount that [prog]'s `_apply_prog` already stages, so the
+    host cache is shared across every [prog][web] instance with no extra
+    plumbing. This handler exists for the test_essential_files contract
+    (every non-BASE modifier has an `_apply_<slug>` callable)."""
+    pass
 
 
 def _apply_auto(state_dir) -> None:
@@ -145,7 +156,7 @@ def _apply_auto(state_dir) -> None:
 # fresh mode set (set_instance_modes / modify_instance) — agents_crud just
 # writes state; the "is this combination dangerous?" judgement is here.
 
-def warn_if_dangerous_modes(modes) -> None:
+def warn_if_dangerous_modes(modes: Iterable[InstanceModifiers]) -> None:
     """Stern red warning + press-any-key gate when `modes` contains a dangerous
     combination — currently just {auto}+{DooD}. {auto} drops Claude Code's
     permission prompts; {DooD} hands the agent the host's Docker daemon.
@@ -153,11 +164,11 @@ def warn_if_dangerous_modes(modes) -> None:
     Blocks until the user presses any key so the warning isn't silently
     scrolled past. No-op when the dangerous combo isn't present, so callers
     can fire this unconditionally after any mode-set write."""
-    if not (InstanceModifiers.MODE_AUTO.value in modes
-            and InstanceModifiers.MODE_DOOD.value in modes):
+    active = set(modes)
+    if not ({InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD} <= active):
         return
     print()
-    print(f"\033[1;31m  ⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_AUTO.label} AND {InstanceModifiers.MODE_DOOD.label} - PROCEED WITH CAUTION,")
+    print(f"\033[1;31m  ⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_WARN_AUTO.label} AND {InstanceModifiers.MODE_WARN_DOOD.label} - PROCEED WITH CAUTION,")
     print("    AS THE AI AGENT HAS THE POWER TO DO ANYTHING ON YOUR COMPUTER,")
     print("    AND DOESN'T REQUIRE PERMISSION!\033[0m")
     print()
@@ -209,9 +220,11 @@ def compose_chain(sess_id) -> list[str]:
 
     if InstanceModifiers.TAG_PROG.value in chain:
         _apply_prog()
-    if InstanceModifiers.MODE_AUTO.value in chain:
+    if InstanceModifiers.MODE_WARN_AUTO.value in chain:
         _apply_auto(sess_id.state_dir)
-    if InstanceModifiers.MODE_DOOD.value in chain:
+    if InstanceModifiers.MODE_WARN_DOOD.value in chain:
         _apply_dood()
+    if InstanceModifiers.MODE_WEB.value in chain:
+        _apply_web()
 
     return list(chain)

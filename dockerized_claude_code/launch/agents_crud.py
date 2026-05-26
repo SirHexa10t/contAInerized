@@ -29,6 +29,7 @@ run.py, or menu_picker — all of those import from here.
 """
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 from .agent_composition import warn_if_dangerous_modes
@@ -69,9 +70,11 @@ def _write_modes_entry(m: dict[str, list[str]], sess_id: SessionIdentity) -> Non
     """Mutate `m` (a modes-map dict) to reflect sess_id's modes for sess_id.instance:
     set the list when modes are non-empty, pop the entry otherwise. Pure dict
     mutation — callers bracket with their own load/save so a multi-edit pass
-    can batch into a single disk write (see modify_instance)."""
+    can batch into a single disk write (see modify_instance). Modes are
+    serialized as their `.value` strings (JSON-friendly); sess_id.modes is a
+    tuple of typed enum members on the in-memory side."""
     if sess_id.modes:
-        m[sess_id.instance] = list(sess_id.modes)
+        m[sess_id.instance] = [mode.value for mode in sess_id.modes]
     else:
         m.pop(sess_id.instance, None)
 
@@ -186,19 +189,20 @@ def agent_sort_key(item: tuple[str, Path]) -> tuple[int, tuple[int, int], str]:
     return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
 
 
-def tag_sort_key(tags: tuple[str, ...] | list[str]) -> tuple[int, ...]:
+def tag_sort_key(tags: Iterable[InstanceModifiers]) -> tuple[int, ...]:
     """Sort key for agents grouped by tag set, following InstanceModifiers.tags()
-    declaration order. Untagged ([]) → empty tuple, which sorts before any non-
-    empty key. Unknown tags sink past the end via a sentinel index so typo'd tags
-    don't mix into the untagged group."""
-    return tuple(sorted(ordering_index_or_end(t, InstanceModifiers.tag_values()) for t in tags))
+    declaration order. Untagged () → empty tuple, which sorts before any non-
+    empty key. Tags are typed members here; we sort by each member's `.value`
+    position in tag_values() (preserves the InstanceModifiers declaration order)."""
+    return tuple(sorted(ordering_index_or_end(t.value, InstanceModifiers.tag_values()) for t in tags))
 
 
-def mode_sort_key(modes: tuple[str, ...] | list[str]) -> tuple[int, ...]:
+def mode_sort_key(modes: Iterable[InstanceModifiers]) -> tuple[int, ...]:
     """Sort key for instances grouped by mode set, following InstanceModifiers.modes()
-    declaration order. Mode-less ([]) → empty tuple, which sorts before any non-empty
-    key. Unknown modes sink past the end via a sentinel index."""
-    return tuple(sorted(ordering_index_or_end(m, InstanceModifiers.mode_values()) for m in modes))
+    declaration order. Mode-less () → empty tuple, which sorts before any non-empty
+    key. Modes are typed members here; we sort by each member's `.value` position
+    in mode_values() (preserves the InstanceModifiers declaration order)."""
+    return tuple(sorted(ordering_index_or_end(m.value, InstanceModifiers.mode_values()) for m in modes))
 
 
 # ============================================================
@@ -224,12 +228,15 @@ def resolve_pick(name: str) -> AgentIdentity | SessionIdentity | None:
     if SESSION_SEP in name and is_dir(instance_state_dir_path(name)):
         agent, _, session = name.partition(SESSION_SEP)
         if agent in AGENT_MD_BY_NAME:
+            # JSON-load boundary for modes: convert each string → enum member
+            # via InstanceModifiers(s), which raises ValueError on unknowns
+            # (fail-fast for defective modes-map entries).
             return SessionIdentity(
                 agent=agent,
                 session=session,
                 workspace=load_workspace_map().get(name),
                 is_brand_new=False,
-                modes=tuple(load_modes_map().get(name, [])),
+                modes=tuple(InstanceModifiers.from_value(s) for s in load_modes_map().get(name, [])),
             )
     if name in AGENT_MD_BY_NAME:
         return AgentIdentity(agent=name)

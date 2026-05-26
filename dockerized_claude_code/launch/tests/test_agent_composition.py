@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from launch import agent_composition
 from launch.agent_composition import compose_chain
-from launch.structs import SessionIdentity
+from launch.structs import InstanceModifiers, SessionIdentity
 
 
 class _FakeSess(SessionIdentity):
@@ -67,15 +67,15 @@ class TestComposeChainReturn(unittest.TestCase):
         self.assertEqual(compose_chain(sess), ["base"])
 
     def test_prog_chain(self):
-        sess = _FakeSess.make(["prog"], [], Path("/tmp/state"))
+        sess = _FakeSess.make([InstanceModifiers.TAG_PROG], [], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base", "prog"])
 
     def test_full_chain_order(self):
-        sess = _FakeSess.make(["prog"], ["auto", "DooD"], Path("/tmp/state"))
+        sess = _FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base", "prog", "auto", "DooD"])
 
     def test_chain_order_independent_of_input(self):
-        sess = _FakeSess.make(["prog"], ["DooD", "auto"], Path("/tmp/state"))
+        sess = _FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base", "prog", "auto", "DooD"])
 
 
@@ -102,22 +102,22 @@ class TestComposeChainDispatch(unittest.TestCase):
         self.mock_dood.assert_not_called()
 
     def test_prog_handler_fires_for_prog_tag(self):
-        compose_chain(_FakeSess.make(["prog"], [], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [], Path("/tmp/state")))
         self.mock_prog.assert_called_once()
         self.mock_auto.assert_not_called()
         self.mock_dood.assert_not_called()
 
     def test_auto_handler_receives_state_dir(self):
         state = Path("/tmp/some-state")
-        compose_chain(_FakeSess.make([], ["auto"], state))
+        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_AUTO], state))
         self.mock_auto.assert_called_once_with(state)
 
     def test_dood_handler_fires_for_dood_mode(self):
-        compose_chain(_FakeSess.make([], ["DooD"], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
         self.mock_dood.assert_called_once()
 
     def test_all_three_fire_when_all_active(self):
-        compose_chain(_FakeSess.make(["prog"], ["auto", "DooD"], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
         self.mock_prog.assert_called_once()
         self.mock_auto.assert_called_once()
         self.mock_dood.assert_called_once()
@@ -126,21 +126,21 @@ class TestComposeChainDispatch(unittest.TestCase):
         # No [prog] tag → no programming-toolchain caches are mounted, no
         # programming-image layer is selected. Critical guarantee: a non-[prog]
         # agent never inherits the [prog] tag's side effects.
-        compose_chain(_FakeSess.make([], ["auto"], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
         self.mock_prog.assert_not_called()
 
     def test_prog_handler_not_fired_for_dood_only(self):
-        compose_chain(_FakeSess.make([], ["DooD"], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
         self.mock_prog.assert_not_called()
 
     def test_auto_handler_not_fired_when_auto_inactive(self):
         # Symmetric: a [prog] agent without {auto} doesn't trigger the firewall
         # resolve.
-        compose_chain(_FakeSess.make(["prog"], [], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [], Path("/tmp/state")))
         self.mock_auto.assert_not_called()
 
     def test_dood_handler_not_fired_when_dood_inactive(self):
-        compose_chain(_FakeSess.make(["prog"], ["auto"], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
         self.mock_dood.assert_not_called()
 
 
@@ -154,17 +154,22 @@ class TestComposeChainValidation(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_unknown_tag_raises_before_any_handler(self):
-        sess = _FakeSess.make(["typo"], [], Path("/tmp/state"))
-        with self.assertRaises(ValueError) as ctx:
-            compose_chain(sess)
-        self.assertIn("typo", str(ctx.exception))
+    def test_unknown_tag_unrepresentable(self):
+        # Tags are typed enum members — AgentIdentity.tags converts each
+        # filename string via from_value at the property boundary, which
+        # raises ValueError on unknowns. By the time compose_chain accesses
+        # sess_id.tags, every tag is a valid member; the chain itself no
+        # longer needs a runtime tag-validation block.
+        with self.assertRaises(ValueError):
+            InstanceModifiers.from_value("typo")
 
-    def test_unknown_mode_raises(self):
-        sess = _FakeSess.make([], ["bogus"], Path("/tmp/state"))
-        with self.assertRaises(ValueError) as ctx:
-            compose_chain(sess)
-        self.assertIn("bogus", str(ctx.exception))
+    def test_unknown_mode_unrepresentable(self):
+        # Modes are typed enum members — the JSON-load boundary
+        # (InstanceModifiers(s)) raises ValueError before a SessionIdentity
+        # with an unknown mode can be constructed. The chain-level mode
+        # validation block is therefore gone; only tag validation remains.
+        with self.assertRaises(ValueError):
+            InstanceModifiers("bogus")
 
 
 # ============================================================
@@ -180,11 +185,11 @@ class TestWarnIfDangerousModes(unittest.TestCase):
 
     def test_no_warning_for_auto_alone(self):
         from launch.agent_composition import warn_if_dangerous_modes
-        warn_if_dangerous_modes(["auto"])
+        warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO])
 
     def test_no_warning_for_dood_alone(self):
         from launch.agent_composition import warn_if_dangerous_modes
-        warn_if_dangerous_modes(["DooD"])
+        warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_DOOD])
 
     def test_warning_fires_for_auto_plus_dood(self):
         # The function prints and waits for keypress. We patch stdin and the
@@ -194,7 +199,7 @@ class TestWarnIfDangerousModes(unittest.TestCase):
              patch("builtins.print"):
             mock_stdin.fileno.side_effect = OSError("no tty")   # forces input() fallback
             from launch.agent_composition import warn_if_dangerous_modes
-            warn_if_dangerous_modes(["auto", "DooD"])
+            warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD])
             # If we reach here without blocking, the keypress gate was triggered
             # and the input() fallback returned.
 

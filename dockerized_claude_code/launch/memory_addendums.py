@@ -52,7 +52,7 @@ If that file is missing or empty, suggest running `/write-summary` to create / p
 
 FIREWALL_NOTICE = Addendum(
     "Firewall",
-    f"""You are currently running in `{InstanceModifiers.MODE_AUTO.label}` mode, a fact the user is aware of. A firewall is in place — blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
+    f"""You are currently running in `{InstanceModifiers.MODE_WARN_AUTO.label}` mode, a fact the user is aware of. A firewall is in place — blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
 
 **Before bothering the user about a block, check `{state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)}` first.** Brief retries are appropriate for hosts listed under `pending:` (DNS may resolve within seconds). Hosts under `failed:` won't resolve this session — surface those as whitelist offers; a re-launch may succeed if the cause was transient.
 
@@ -68,6 +68,11 @@ CREDENTIALS_NOTICE = Addendum(
     if _installed_clis else "",
 )
 
+WEB_NOTICE = Addendum(
+    "Headless browser",
+    f"""You're in `{InstanceModifiers.MODE_WEB.label}` mode — the `playwright` CLI is available for headless browser automation. Run `playwright install chromium` (or `firefox` / `webkit`) before first use; subsequent `[prog][web]` instances share the same browser cache so the install is idempotent and fast when warm. For Python: `uv pip install playwright` in your project venv.""",
+)
+
 MAINTAIN_PRIVACY = Addendum(
     "Privacy",
     f"""**Never persist personal or runtime-environment details into project text.** When writing or editing code comments, docstrings, READMEs, summaries, TODOs, or any file that lives in the project tree, exclude:
@@ -77,7 +82,7 @@ MAINTAIN_PRIVACY = Addendum(
 
 A future reader of any persisted text should see the same content regardless of who ran the command. If a fact wouldn't be true for a different operator's clone of the repo, it doesn't belong.
 
-**Exception (rare):** when the user explicitly asks for such a detail to be written, surface an extra confirmation *before* writing it — name the specific personal / environment detail and ask the user to confirm. Issue this confirmation even when running under a permission-bypass mode like `{InstanceModifiers.MODE_AUTO.label}` — the bypass covers routine actions, not embedding identifying information into persistent files.""",
+**Exception (rare):** when the user explicitly asks for such a detail to be written, surface an extra confirmation *before* writing it — name the specific personal / environment detail and ask the user to confirm. Issue this confirmation even when running under a permission-bypass mode like `{InstanceModifiers.MODE_WARN_AUTO.label}` — the bypass covers routine actions, not embedding identifying information into persistent files.""",
 )
 
 
@@ -87,7 +92,8 @@ A future reader of any persisted text should see the same content regardless of 
 MODIFIER_ADDENDUMS: dict[InstanceModifiers, list[Addendum]] = {
     InstanceModifiers.BASE:      [SEEK_SUMMARY, MAINTAIN_PRIVACY],
     InstanceModifiers.TAG_PROG:  [CREDENTIALS_NOTICE],
-    InstanceModifiers.MODE_AUTO: [FIREWALL_NOTICE],
+    InstanceModifiers.MODE_WARN_AUTO: [FIREWALL_NOTICE],
+    InstanceModifiers.MODE_WEB:  [WEB_NOTICE],
 }
 
 

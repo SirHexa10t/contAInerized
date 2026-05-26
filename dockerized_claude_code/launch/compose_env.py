@@ -15,27 +15,31 @@ env-dicts:
   - `conf_env_args` — flattens an agent .conf dict into `-e KEY=VALUE`
     flags for the final `docker compose run`.
 
-The container-side emission lists (`CONTAINER_ENV_FORWARDS` /
-`CONTAINER_ENV_FIXED`) live here too — declarative wiring of which
-compose entries flow into the container as `-e` flags. `container_env_args`
-flattens them into the actual `-e ...` arg list run_compose appends.
+Container-side `-e KEY=VALUE` emission is declared on the enum itself: each
+`ComposeEnvKey` member carries a `container_emit: bool` flag. The
+`container_emits()` classmethod returns the flagged subset, which
+`CONTAINER_ENV_FORWARDS` splices alongside the dynamic per-cred token
+keys. `container_env_args` flattens the resulting set into the `-e ...`
+arg list run_compose appends.
 
 `set_container_env` is the per-launch orchestrator that bulk-stages
 everything `docker compose build/run` needs in one update — agent name,
-status line, build-context root, cred-flag fan-out, and token forwards.
+status line, build-context root, cred-flag fan-out, token forwards, and
+the in-container BASH_ENV literal.
 
 agent_composition / docker_config / run.py all import from here.
 """
 
 import os
 from datetime import date
-from enum import Enum
+from enum import Enum, auto
+from functools import cache
 from typing import Any
 
 from .claude_code_config import build_status_line
 from .file_access import optional_cred_tokens, present_optional_cred_services
 from .paths import (
-    CLAUDE_HOME_IN_CONTAINER, DOCKERIZED_CLAUDE_ROOT, OPTIONAL_CREDS_MOUNTS,
+    BASHRC_IN_CONTAINER, DOCKERIZED_CLAUDE_ROOT, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS,
 )
 from .structs import InstanceIdentity
@@ -52,32 +56,75 @@ from .structs import InstanceIdentity
 # the value (`"TARGET_IMAGE"`), not the enum repr (`"ComposeEnvKey.TARGET_IMAGE"`)
 # — that's important for the `-e KEY=VALUE` flag emission in container_env_args.
 #
+# Each member carries a `container_emit: bool` flag declaring whether the
+# launcher emits it as a `-e KEY=VALUE` flag at `docker compose run` time
+# (True) or only uses it for compose-YAML `${...}` substitution at build time
+# (False). `container_emits()` returns the flagged subset, which drives
+# `CONTAINER_ENV_FORWARDS` below.
+#
 # Dynamic env-var names (per-service tokens from OPTIONAL_CREDS_TOKEN_ENV_VARS,
 # build-arg INSTALL_<TOOL> flags) are not enumerated here — they're derived
 # at run time from paths-side configuration.
 
 class ComposeEnvKey(str, Enum):
+    # `auto()` resolves to the member's name via `_generate_next_value_` below,
+    # so each entry just declares its `container_emit` flag — no duplicated
+    # name string. The tuple `(auto(), <flag>)` keeps each member's value
+    # unique so Python's enum metaclass doesn't alias same-flag members.
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        # Called by the enum metaclass for each `auto()` in member declarations.
+        # Returning the name makes the resolved tuple element equal to the
+        # member's own name, so __new__ below can pass it to str.__new__ and
+        # the resulting member's `.value` (and `str(member)`) is the name.
+        # Must be declared BEFORE the members for the metaclass to pick it up.
+        return name
+
     # Image build chain — driven into compose-YAML ${...} substitution
-    TARGET_IMAGE           = "TARGET_IMAGE"            # compose.yml `image:` — current step's tag (set per chain step + once more in run_compose)
-    PARENT_IMAGE           = "PARENT_IMAGE"            # compose.<step>.yml `FROM ${PARENT_IMAGE}` — prior step's tag; not set on base
-    SOFTWARE_STACK_REFRESH = "SOFTWARE_STACK_REFRESH"  # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup)
+    TARGET_IMAGE             = (auto(), False)   # compose.yml `image:` — current step's tag (set per chain step + once more in run_compose)
+    PARENT_IMAGE             = (auto(), False)   # compose.<step>.yml `FROM ${PARENT_IMAGE}` — prior step's tag; not set on base
+    SOFTWARE_STACK_REFRESH   = (auto(), False)   # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup, playwright)
     # Per-instance identity
-    AGENT_NAME             = "AGENT_NAME"              # agent's clean name — substituted into compose.yml's `container_name:`
-    # Mode-driven keys
-    WHITELIST_ADDRESSES    = "WHITELIST_ADDRESSES"     # {auto}-mode firewall list of pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens (space-joined) — read by init-firewall.sh inside the container
-    DOCKER_GID             = "DOCKER_GID"              # host docker group GID — Dockerfile.dood build-arg for /var/run/docker.sock access
+    AGENT_NAME               = (auto(), False)   # agent's clean name — substituted into compose.yml's `container_name:`
+    # Mode-driven build-args (compose-YAML ${...} substitution into the per-mode Dockerfile)
+    WHITELIST_ADDRESSES      = (auto(), False)   # {auto}-mode firewall list of pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens — read by init-firewall.sh inside the container via compose.auto.yml's environment: block
+    DOCKER_GID               = (auto(), False)   # {DooD}-mode host docker group GID — Dockerfile.dood build-arg for /var/run/docker.sock access
     # Build/launch wiring (compose-YAML ${...} substitution)
-    DOCKERIZED_CLAUDE_ROOT = "DOCKERIZED_CLAUDE_ROOT"  # repo root — `context: ${DOCKERIZED_CLAUDE_ROOT}` in every build block
-    # Container-side env vars (emitted as `-e KEY=VALUE` flags)
-    AGENT_STATUS_LINE      = "AGENT_STATUS_LINE"       # pre-styled ANSI status line at the bottom of Claude Code
-    BASH_ENV               = "BASH_ENV"                # path to the bashrc that non-interactive bash sources at startup
+    DOCKERIZED_CLAUDE_ROOT   = (auto(), False)   # repo root — `context: ${DOCKERIZED_CLAUDE_ROOT}` in every build block
+    # Container-side env vars (emitted as `-e KEY=VALUE` flags by container_env_args)
+    AGENT_STATUS_LINE        = (auto(), True)    # pre-styled ANSI status line at the bottom of Claude Code
+    BASH_ENV                 = (auto(), True)    # path to the bashrc that non-interactive bash sources at startup
+
+    # Custom __new__ + __init__ so the str-mixin and the extra `container_emit`
+    # attribute can coexist:
+    #   __new__ — bridges str.__new__ (which only accepts one arg) by passing
+    #             just the value; also pins _value_ so .value resolves correctly.
+    #   __init__ — sets the per-member `container_emit` (visible to mypy as a
+    #              regular instance attribute, unlike attrs set inside __new__).
+
+    def __new__(cls, value: str, container_emit: bool) -> "ComposeEnvKey":
+        obj = str.__new__(cls, value)
+        obj._value_ = value
+        return obj
+
+    def __init__(self, value: str, container_emit: bool) -> None:
+        self.container_emit = container_emit
 
     def __str__(self) -> str:                          # `f"{key}"` → "TARGET_IMAGE", not "ComposeEnvKey.TARGET_IMAGE"
-        return self.value
+        return self.name
+
+    @classmethod
+    @cache
+    def container_emits(cls) -> tuple["ComposeEnvKey", ...]:
+        """Members flagged `container_emit=True` — the subset that
+        container_env_args emits as `-e KEY=VALUE` flags. Cached: enum
+        membership is fixed at import time."""
+        return tuple(m for m in cls if m.container_emit)
 
 
 # ============================================================
-# Container env-var emission lists
+# Container env-var emission list
 # ============================================================
 # Container env vars are emitted as `-e KEY=VALUE` flags on the `docker
 # compose run` command, rather than declared in compose.yml's
@@ -85,22 +132,24 @@ class ComposeEnvKey(str, Enum):
 # declarative wiring lives in Python, compose YAMLs reserved for the build
 # graph + build-context root substitution.
 #
-# CONTAINER_ENV_FORWARDS holds keys whose values are already in `_compose_env`
-# (staged by stage_compose_env elsewhere — AGENT_STATUS_LINE from
-# set_container_env, and the optional-creds token vars from token_env_dict).
-# Keys absent from `_compose_env` at run_compose time are silently skipped —
-# that's how the JIRA_API_TOKEN passthrough stays conditional on
-# optional_creds/jira/token being present.
+# CONTAINER_ENV_FORWARDS holds the keys container_env_args considers for
+# emission. Two slices:
+#   1. ComposeEnvKey.container_emits() — every enum member flagged as a
+#      container `-e` emit. Values come from `_compose_env` at run time
+#      (staged by set_container_env for unconditional ones, or by a
+#      per-mode handler for conditional ones — see _apply_web).
+#   2. OPTIONAL_CREDS_TOKEN_ENV_VARS values — the per-service token env-var
+#      names (JIRA_API_TOKEN etc.). Values come from `_compose_env` via
+#      token_env_dict, which only stages tokens whose files exist on host.
 #
-# CONTAINER_ENV_FIXED holds key→value pairs with constant in-container values
-# (BASH_ENV). Emitted unconditionally.
+# Keys whose values aren't staged at run_compose time are silently skipped —
+# that's how JIRA_API_TOKEN stays gated on optional_creds/jira/token, etc.
 #
 # TERM is intentionally *not* here — it's purely shell-inherited (whatever
 # the user's terminal sets), so compose.yml's `environment: [- TERM]`
 # pass-through is the natural fit.
 
-CONTAINER_ENV_FORWARDS = (ComposeEnvKey.AGENT_STATUS_LINE, *OPTIONAL_CREDS_TOKEN_ENV_VARS.values())
-CONTAINER_ENV_FIXED    = {ComposeEnvKey.BASH_ENV: f"{CLAUDE_HOME_IN_CONTAINER}/.bashrc"}
+CONTAINER_ENV_FORWARDS = (*ComposeEnvKey.container_emits(), *OPTIONAL_CREDS_TOKEN_ENV_VARS.values())
 
 
 # ============================================================
@@ -168,18 +217,13 @@ def conf_env_args(conf: dict[str, str]) -> list[str]:
 
 def container_env_args() -> list[str]:
     """The `-e KEY=VALUE` arg list for the final `docker compose run`
-    command — forwards each ComposeEnvKey from CONTAINER_ENV_FORWARDS that
-    actually has a value staged, plus the always-on CONTAINER_ENV_FIXED
-    entries. Mirrors the bind-mount flattening in docker_config.run_compose,
-    just for env vars."""
+    command — emits one pair per CONTAINER_ENV_FORWARDS key that actually
+    has a value staged in `_compose_env`. Mirrors the bind-mount flattening
+    in docker_config.run_compose, just for env vars."""
     return [
         arg
         for k in CONTAINER_ENV_FORWARDS if k in _compose_env
         for arg in ("-e", f"{k}={_compose_env[k]}")
-    ] + [
-        arg
-        for k, v in CONTAINER_ENV_FIXED.items()
-        for arg in ("-e", f"{k}={v}")
     ]
 
 
@@ -198,6 +242,7 @@ def set_container_env(inst_id: InstanceIdentity) -> None:
         ComposeEnvKey.SOFTWARE_STACK_REFRESH: date.today().strftime("%Y-W%W"),
         ComposeEnvKey.AGENT_NAME:             inst_id.agent,
         ComposeEnvKey.AGENT_STATUS_LINE:      build_status_line(inst_id),
+        ComposeEnvKey.BASH_ENV:               BASHRC_IN_CONTAINER,
         ComposeEnvKey.DOCKERIZED_CLAUDE_ROOT: DOCKERIZED_CLAUDE_ROOT,
         # Dynamic-key updates from optional_creds/
         **install_creds_flags(present_optional_cred_services()),   # INSTALL_<TOOL>=0|1 build flags

@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cache
 from pathlib import Path
+from typing import Literal, overload
 
 from .file_access import (
     conf_path_for, has_continuable_jsonl, is_dir, last_history_mtime,
@@ -81,12 +82,36 @@ class InstanceModifiers(Enum):
 
     BASE      = ("base", "always-on starting image — every agent gets it; no user-facing toggle")
     TAG_PROG  = ("prog", "programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)")
-    MODE_AUTO = ("auto", "autonomous; Doesn't need permission to perform actions. Built with a firewall slightly increased security. Danger: hard to control!")
-    MODE_DOOD = ("DooD", "Docker outside-of Docker; Can run Docker. Danger: authority to do anything (effectively host-root)!")
+    MODE_WARN_AUTO = ("auto", "autonomous; Doesn't need permission to perform actions. Comes with a firewall for a slight security-increase. Danger: hard to control!")
+    MODE_WARN_DOOD = ("DooD", "Docker outside-of Docker; Can run Docker. Danger: authority to do anything (effectively host-root)!")
+    MODE_WEB  = ("web", "headless browser automation (playwright + chromium baked in); for web-scraping / browser-testing / dynamic-page extraction. Built on [prog]; no display server needed.")
+
+    def __new__(cls, value: str, description: str) -> "InstanceModifiers":
+        # Set _value_ here (rather than in __init__) so the enum metaclass
+        # registers each member by its string value in `_value2member_map_`
+        # before init runs. That makes `InstanceModifiers("auto")` a valid
+        # value-lookup — used by the JSON-load boundary via from_value()
+        # below (raises ValueError on unknowns, fail-fast).
+        obj = object.__new__(cls)
+        obj._value_ = value
+        return obj
 
     def __init__(self, value: str, description: str) -> None:
-        self._value_ = value
         self.description = description
+
+    @classmethod
+    def from_value(cls, value: str) -> "InstanceModifiers":
+        """Look up a member by its `.value` string; raises ValueError on
+        unknowns. Used at JSON-load boundaries (stored_modes /
+        continuable_instances / resolve_pick) to convert modes-map strings
+        into typed members — defective entries fail fast here rather than
+        propagating downstream as silent string mismatches.
+
+        The `# type: ignore` exists because mypy reads InstanceModifiers'
+        __init__ literally and thinks calling InstanceModifiers(value) is a
+        constructor call missing `description` — but Python's enum machinery
+        treats EnumClass(value) as a value-lookup, not construction."""
+        return cls(value)  # type: ignore[call-arg]
 
     @property
     def slug(self) -> str:
@@ -106,23 +131,44 @@ class InstanceModifiers(Enum):
             return f"{{{self.value}}}"
         return self.value
 
+    @overload
+    def colored_label(self, ansi: Literal[False] = False) -> tuple[str, str]: ...
+    @overload
+    def colored_label(self, ansi: Literal[True]) -> str: ...
+    def colored_label(self, ansi: bool = False) -> tuple[str, str] | str:
+        """The member's `.label` paired with the warning-aware color: red
+        for members whose Python name contains `_WARN_` (the dangerous modes
+        flagged at the taxonomy level — MODE_WARN_AUTO drops permission
+        prompts, MODE_WARN_DOOD grants host-docker access), green otherwise.
+        Single source of truth for every site that colors a modifier label.
+
+        `ansi=False` (default — for the prompt_toolkit picker): returns a
+        `(style, text)` FormattedText fragment ready to drop into a
+        display list. The style is a prompt_toolkit style string.
+
+        `ansi=True` (for the rich-rendered F8 legend): returns a string
+        with embedded ANSI escapes around the label and a reset at the
+        end. The two opening codes are 8 bytes each by design — rich's
+        markdown-table column-width detection counts bytes (including
+        escapes), so unequal-length codes would shift the description
+        column for whichever colour has the shorter prefix."""
+        red   = "\033[01;91m" if ansi else "bold fg:ansibrightred"
+        green = "\033[22;92m" if ansi else "fg:ansibrightgreen"
+        color = red if "_WARN_" in self.name else green
+        if ansi:
+            return f"{color}{self.label}\033[0m"
+        return (color, self.label)
+
     @classmethod
-    def format_prefix(cls, values) -> str:
-        """Render an iterable of modifier value strings (any mix of tag and
-        mode values) as space-separated bracketed labels with a trailing
-        space: '[prog] {auto} ' / '' for empty input. Wrapping comes from
-        each member's `.label` (tags → `[..]`, modes → `{..}`), so the
-        wrapping convention lives on the enum and callers don't replicate
-        it. Unknown values fall back to `[v]` rendering — covers typo'd
-        filename tags (the more common origin of strays); compose_chain
-        rejects unknowns separately at launch time. BASE is excluded from
-        the labels dict — it's not a tag or mode and never appears in
-        user-facing value lists, so any 'base' that slipped in would also
-        hit the unknown-tag fallback."""
-        if not values:
-            return ""
-        labels = {m.value: m.label for m in (*cls.tags(), *cls.modes())}
-        return "".join(labels.get(v, f"[{v}]") + " " for v in values)
+    def format_prefix(cls, modifiers: Iterable["InstanceModifiers"]) -> str:
+        """Render an iterable of typed modifier members as space-separated
+        bracketed labels with a trailing space: '[prog] {auto} ' / '' for
+        empty input. Wrapping comes from each member's `.label` (tags →
+        `[..]`, modes → `{..}`), so the wrapping convention lives on the
+        enum and callers don't replicate it. Both AgentIdentity.tags and
+        SessionIdentity.modes are typed `tuple[InstanceModifiers, ...]`,
+        so every caller in the codebase passes members."""
+        return "".join(m.label + " " for m in modifiers)
 
     # The four subset-view classmethods below are memoized via @functools.cache
     # (key = cls; single-class system → 100% hit rate after the first call). The
@@ -192,11 +238,17 @@ class AgentIdentity:
         return conf_path_for(self.md_path)
 
     @property
-    def tags(self) -> tuple[str, ...]:
-        """Filename-grammar tags from the .md's stem (e.g. ('prog',) for
-        `name[prog].md`). Tuple so the dataclass stays hashable should we ever
-        want it as a dict key."""
-        return tuple(parse_stem(self.md_path.stem)[1])
+    def tags(self) -> tuple["InstanceModifiers", ...]:
+        """Filename-grammar tags from the .md's stem, converted to typed
+        modifier members (e.g. (InstanceModifiers.TAG_PROG,) for
+        `name[prog].md`). Tuple so the dataclass stays hashable should we
+        ever want it as a dict key.
+
+        Strings come out of `parse_stem`; we map each via `from_value` at
+        this boundary so the rest of the launcher works with typed members.
+        Unknown filename tags raise ValueError here (fail-fast on a typo'd
+        filename, same contract modes get at the JSON-load boundary)."""
+        return tuple(InstanceModifiers.from_value(t) for t in parse_stem(self.md_path.stem)[1])
 
 
 @dataclass(frozen=True)
@@ -230,13 +282,20 @@ class InstanceIdentity(AgentIdentity):
         return state_md_path(self.state_dir)
 
     @property
-    def stored_modes(self) -> list[str]:
+    def stored_modes(self) -> list[InstanceModifiers]:
         """Modes persisted in agent_modes_map.json for this instance (empty
-        list if no entry). Used by compose_runtime on cont launches to pick up
-        whatever the modify flow last persisted. Reads through file_access's
+        list if no entry). Used by compose_runtime on cont launches to pick
+        up whatever the modify flow last persisted. Reads through file_access's
         cached load_modes_map() so repeated property accesses don't re-read
-        the JSON file."""
-        return load_modes_map().get(self.instance, [])
+        the JSON file.
+
+        Strings load from JSON; we convert at this boundary via
+        InstanceModifiers(s) so the rest of the launcher works with typed
+        members. An unknown string raises ValueError (`InstanceModifiers(s)`
+        does the work) — that's the fail-fast contract for defective
+        modes-map entries; use `python -m launch.audit` to find them
+        without crashing."""
+        return [InstanceModifiers.from_value(s) for s in load_modes_map().get(self.instance, [])]
 
     @property
     def has_continuable_history(self) -> bool:
@@ -270,11 +329,14 @@ class InstanceIdentity(AgentIdentity):
                 f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
             )
 
-    def with_modes(self, modes: Iterable[str]) -> SessionIdentity:
+    def with_modes(self, modes: Iterable[InstanceModifiers]) -> SessionIdentity:
         """Promote this InstanceIdentity into a full SessionIdentity by
         attaching the resolved modes — called once compose_runtime has prompted
         (for brand-new) or loaded (for cont) the per-instance mode list.
-        Carries is_brand_new through unchanged."""
+        Carries is_brand_new through unchanged. Modes are typed enum members;
+        callers loading from JSON convert via InstanceModifiers(s) at the
+        boundary (raises ValueError on unknowns — fail-fast for defective
+        modes-map entries)."""
         return SessionIdentity(
             agent=self.agent, session=self.session, workspace=self.workspace,
             is_brand_new=self.is_brand_new, modes=tuple(modes),
@@ -302,8 +364,10 @@ class SessionIdentity(InstanceIdentity):
     intrinsic to *which instance this is* — they're a per-launch decision —
     which is why they live here rather than on the parent. Constructed via
     `inst_id.with_modes(...)`, or directly by continuable_instances when the
-    picker pre-loads stored modes for the modify flow's pre-fill."""
-    modes: tuple[str, ...]              # per-instance opt-ins like ('auto',) or ('auto', 'DooD'); tuple keeps the dataclass hashable
+    picker pre-loads stored modes for the modify flow's pre-fill. Modes are
+    typed enum members (not strings) — the JSON-load boundary converts via
+    InstanceModifiers(s) and raises on unknowns."""
+    modes: tuple["InstanceModifiers", ...]              # per-instance opt-ins like (MODE_WARN_AUTO,) or (MODE_WARN_AUTO, MODE_WARN_DOOD); tuple keeps the dataclass hashable
 
     @property
     def chain(self) -> tuple[str, ...]:
@@ -314,14 +378,12 @@ class SessionIdentity(InstanceIdentity):
         order (consumed by memory_addendums.composed_addendum via
         `modifier.value in chain`).
 
-        Validates self.tags / self.modes against the InstanceModifiers
-        taxonomy on access — a typo'd filename tag or stale modes-map entry
-        surfaces as a ValueError here rather than as a silent drop from the
-        chain (and rather than as a deeper-down failure when an unknown
-        value reaches docker / compose)."""
-        if unknown := set(self.tags) - set(InstanceModifiers.tag_values()):
-            raise ValueError(f"Unknown tag(s): {sorted(unknown)}. Known tags: {list(InstanceModifiers.tag_values())}")
-        if unknown := set(self.modes) - set(InstanceModifiers.mode_values()):
-            raise ValueError(f"Unknown mode(s): {sorted(unknown)}. Known modes: {list(InstanceModifiers.mode_values())}")
+        Chain stays string-shaped because its consumers (chain_image_tag,
+        chain_compose_files) build image tags and Dockerfile filenames from
+        these values directly. Both tags and modes are typed enum members
+        by this point (AgentIdentity.tags / SessionIdentity.modes convert at
+        the property / JSON-load boundary respectively), so no runtime
+        validation block is needed here — unknowns crash at the boundary
+        rather than slipping through to compose."""
         return tuple(m.value for m in InstanceModifiers
-                     if m is InstanceModifiers.BASE or m.value in self.tags or m.value in self.modes)
+                     if m is InstanceModifiers.BASE or m in self.tags or m in self.modes)

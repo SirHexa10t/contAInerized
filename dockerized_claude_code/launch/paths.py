@@ -128,6 +128,7 @@ CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
 CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
 CLAUDE_SUMMARY_IN_CONTAINER = Path("/workspace/.claude_summary")   # project summary file the agent reads on demand (lives at the workspace mount root)
+BASHRC_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".bashrc"         # bind-mount target for settings/bashrc.sh; also the value BASH_ENV points at so non-interactive bash sources it
 RO_MOUNT_OPTION = "ro"
 
 
@@ -145,12 +146,11 @@ RO_MOUNT_OPTION = "ro"
 # stays the single declaration site while the names remain importable for any
 # future external use (currently none).
 
-# `/usr/local/bin` is the container target dir for the {auto} scripts — inlined
-# into both mount values rather than hoisted to a constant since it's only used
-# here.
+LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # container target dir for the {auto} scripts
+
 DOCKER_AUTO_MOUNTS = {
-    (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"/usr/local/bin/init-firewall.sh:{RO_MOUNT_OPTION}",
-    (AUTO_ENTRYPOINT_SH := DOCKER_DIR / "auto-entrypoint.sh"): f"/usr/local/bin/auto-entrypoint.sh:{RO_MOUNT_OPTION}",
+    (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"{LOCAL_BIN_IN_CONTAINER}/init-firewall.sh:{RO_MOUNT_OPTION}",
+    (AUTO_ENTRYPOINT_SH := DOCKER_DIR / "auto-entrypoint.sh"): f"{LOCAL_BIN_IN_CONTAINER}/auto-entrypoint.sh:{RO_MOUNT_OPTION}",
 }
 
 
@@ -189,7 +189,7 @@ DOCKER_BASE_MOUNTS = {
     DOCKERIZED_CLAUDE_ROOT / "custom_commands": f"{CLAUDE_CONFIG_IN_CONTAINER}/commands:{RO_MOUNT_OPTION}",         # shared slash commands
     DOCKERIZED_CLAUDE_ROOT / "custom_skills":   f"{SKILLS_IN_CONTAINER}:{RO_MOUNT_OPTION}",                        # shared skill directory — each subdir is a skill
     SETTINGS_DIR / "statusline.sh":             f"{CLAUDE_CONFIG_IN_CONTAINER}/statusline.sh:{RO_MOUNT_OPTION}",    # shared status-line script
-    SETTINGS_DIR / "bashrc.sh":                 f"{CLAUDE_HOME_IN_CONTAINER}/.bashrc:{RO_MOUNT_OPTION}",            # sourced by every non-interactive bash via BASH_ENV
+    SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
     SETTINGS_DIR / "settings.json":             f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}",    # status-line wiring + other shared Claude Code settings
     SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
@@ -233,14 +233,12 @@ COMPOSE_FILE_PATH = DOCKER_DIR / "compose.yml"
 # cache (CACHE_ROOT / rel) with its container destination (CLAUDE_HOME_IN_CONTAINER / rel).
 
 CACHE_REL_PATHS = [
-    # languages currently in the prog image
+    # [prog]-related
+    ".cache",  # XDG cache: uv, pip, poetry, pre-commit, huggingface, torch, yarn-v1, go-build, ccache, ...
     ".cargo/registry",           # Rust crates (.crate tarballs + index)
     ".cargo/git",                # Rust git dependencies
-    ".cache",                    # XDG cache: uv, pip, poetry, pre-commit, huggingface, torch, yarn-v1, go-build, ccache, ...
-    # speculative — empty until the relevant language is added to the Dockerfile
     "go/pkg/mod",                # Go module cache
     ".npm",                      # npm (non-XDG by design)
-    ".local/share/pnpm/store",   # pnpm content-addressed store
     ".m2/repository",            # Maven local repository
     ".gradle/caches",            # Gradle dependency + build caches
     ".gem",                      # Ruby gems
@@ -248,7 +246,10 @@ CACHE_REL_PATHS = [
     ".cpan",                     # Perl CPAN classic
     ".cabal/store",              # Haskell cabal package store
     ".stack/snapshots",          # Haskell stack resolver snapshots
+    ".local/share/pnpm/store",   # pnpm content-addressed store
 ]
+# Note: playwright's default browser-binary location is `~/.cache/ms-playwright/`,
+# which already lives under the `.cache` entry above — no separate mount needed.
 CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACHE_REL_PATHS}
 
 

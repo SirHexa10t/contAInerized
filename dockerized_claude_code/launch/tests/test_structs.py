@@ -14,7 +14,7 @@ class TestInstanceModifiersMembers(unittest.TestCase):
 
     def test_expected_members(self):
         names = [m.name for m in InstanceModifiers]
-        self.assertEqual(names, ["BASE", "TAG_PROG", "MODE_AUTO", "MODE_DOOD"])
+        self.assertEqual(names, ["BASE", "TAG_PROG", "MODE_WARN_AUTO", "MODE_WARN_DOOD", "MODE_WEB"])
 
     def test_base_value(self):
         self.assertEqual(InstanceModifiers.BASE.value, "base")
@@ -23,11 +23,11 @@ class TestInstanceModifiersMembers(unittest.TestCase):
         self.assertEqual(InstanceModifiers.TAG_PROG.value, "prog")
 
     def test_mode_auto_value(self):
-        self.assertEqual(InstanceModifiers.MODE_AUTO.value, "auto")
+        self.assertEqual(InstanceModifiers.MODE_WARN_AUTO.value, "auto")
 
     def test_mode_dood_value_preserves_case(self):
         # DooD's canonical form is mixed-case (CamelCase abbreviation)
-        self.assertEqual(InstanceModifiers.MODE_DOOD.value, "DooD")
+        self.assertEqual(InstanceModifiers.MODE_WARN_DOOD.value, "DooD")
 
     def test_each_has_description(self):
         for m in InstanceModifiers:
@@ -43,7 +43,7 @@ class TestInstanceModifiersSubsetViews(unittest.TestCase):
     def test_modes_in_declaration_order(self):
         self.assertEqual(
             list(InstanceModifiers.modes()),
-            [InstanceModifiers.MODE_AUTO, InstanceModifiers.MODE_DOOD],
+            [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WEB],
         )
 
     def test_base_excluded_from_tags(self):
@@ -56,7 +56,7 @@ class TestInstanceModifiersSubsetViews(unittest.TestCase):
         self.assertEqual(InstanceModifiers.tag_values(), ("prog",))
 
     def test_mode_values(self):
-        self.assertEqual(InstanceModifiers.mode_values(), ("auto", "DooD"))
+        self.assertEqual(InstanceModifiers.mode_values(), ("auto", "DooD", "web"))
 
 
 class TestInstanceModifiersSlug(unittest.TestCase):
@@ -67,11 +67,11 @@ class TestInstanceModifiersSlug(unittest.TestCase):
         self.assertEqual(InstanceModifiers.TAG_PROG.slug, "prog")
 
     def test_mode_auto_slug(self):
-        self.assertEqual(InstanceModifiers.MODE_AUTO.slug, "auto")
+        self.assertEqual(InstanceModifiers.MODE_WARN_AUTO.slug, "auto")
 
     def test_mode_dood_slug_lowercases(self):
         # slug lowercases the canonical value — DooD → dood
-        self.assertEqual(InstanceModifiers.MODE_DOOD.slug, "dood")
+        self.assertEqual(InstanceModifiers.MODE_WARN_DOOD.slug, "dood")
 
 
 class TestInstanceModifiersLabel(unittest.TestCase):
@@ -79,10 +79,10 @@ class TestInstanceModifiersLabel(unittest.TestCase):
         self.assertEqual(InstanceModifiers.TAG_PROG.label, "[prog]")
 
     def test_mode_label_uses_braces(self):
-        self.assertEqual(InstanceModifiers.MODE_AUTO.label, "{auto}")
+        self.assertEqual(InstanceModifiers.MODE_WARN_AUTO.label, "{auto}")
 
     def test_mode_dood_label_preserves_case(self):
-        self.assertEqual(InstanceModifiers.MODE_DOOD.label, "{DooD}")
+        self.assertEqual(InstanceModifiers.MODE_WARN_DOOD.label, "{DooD}")
 
     def test_base_label_is_bare_value(self):
         # BASE has no decorative wrapping — it's never user-facing, but label
@@ -96,29 +96,26 @@ class TestFormatPrefix(unittest.TestCase):
         self.assertEqual(InstanceModifiers.format_prefix([]), "")
 
     def test_single_tag(self):
-        self.assertEqual(InstanceModifiers.format_prefix(["prog"]), "[prog] ")
+        self.assertEqual(InstanceModifiers.format_prefix([InstanceModifiers.TAG_PROG]), "[prog] ")
 
     def test_single_mode(self):
-        self.assertEqual(InstanceModifiers.format_prefix(["auto"]), "{auto} ")
+        self.assertEqual(InstanceModifiers.format_prefix([InstanceModifiers.MODE_WARN_AUTO]), "{auto} ")
 
     def test_tag_then_mode(self):
-        self.assertEqual(InstanceModifiers.format_prefix(["prog", "auto"]), "[prog] {auto} ")
+        self.assertEqual(
+            InstanceModifiers.format_prefix([InstanceModifiers.TAG_PROG, InstanceModifiers.MODE_WARN_AUTO]),
+            "[prog] {auto} ",
+        )
 
     def test_preserves_input_order(self):
         # Output reflects the input sequence, not enum declaration order.
-        self.assertEqual(InstanceModifiers.format_prefix(["auto", "prog"]), "{auto} [prog] ")
-
-    def test_unknown_falls_back_to_tag_style(self):
-        # The docstring says unknowns get `[v]` rendering — handles typo'd filename tags
-        self.assertEqual(InstanceModifiers.format_prefix(["typo"]), "[typo] ")
-
-    def test_base_value_falls_back_to_unknown(self):
-        # BASE isn't in the labels dict (excluded from format_prefix's
-        # tag/mode-only construction), so "base" routes through the fallback.
-        self.assertEqual(InstanceModifiers.format_prefix(["base"]), "[base] ")
+        self.assertEqual(
+            InstanceModifiers.format_prefix([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.TAG_PROG]),
+            "{auto} [prog] ",
+        )
 
     def test_mode_dood_label(self):
-        self.assertEqual(InstanceModifiers.format_prefix(["DooD"]), "{DooD} ")
+        self.assertEqual(InstanceModifiers.format_prefix([InstanceModifiers.MODE_WARN_DOOD]), "{DooD} ")
 
 
 # ============================================================
@@ -191,50 +188,53 @@ class TestSessionIdentityChain(unittest.TestCase):
         self.assertEqual(self._sess([], []).chain, ("base",))
 
     def test_tag_appended(self):
-        self.assertEqual(self._sess(["prog"], []).chain, ("base", "prog"))
+        self.assertEqual(self._sess([InstanceModifiers.TAG_PROG], []).chain, ("base", "prog"))
 
     def test_mode_appended(self):
-        self.assertEqual(self._sess([], ["auto"]).chain, ("base", "auto"))
+        self.assertEqual(self._sess([], [InstanceModifiers.MODE_WARN_AUTO]).chain, ("base", "auto"))
 
     def test_full_chain(self):
         self.assertEqual(
-            self._sess(["prog"], ["auto", "DooD"]).chain,
+            self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]).chain,
             ("base", "prog", "auto", "DooD"),
         )
 
     def test_order_follows_declaration_not_input(self):
-        # Even if modes come in as ("DooD", "auto"), chain enforces declaration order.
+        # Even if modes come in as (DOOD, AUTO), chain enforces declaration order.
         self.assertEqual(
-            self._sess(["prog"], ["DooD", "auto"]).chain,
+            self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]).chain,
             ("base", "prog", "auto", "DooD"),
         )
 
     def test_base_always_first(self):
-        chain = self._sess(["prog"], ["auto"]).chain
+        chain = self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO]).chain
         self.assertEqual(chain[0], "base")
 
-    # --- validation ---
+    # --- validation moved to the property boundaries ---
 
-    def test_unknown_tag_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _ = self._sess(["typo"], []).chain
-        self.assertIn("Unknown tag", str(ctx.exception))
-        self.assertIn("typo", str(ctx.exception))
-
-    def test_unknown_mode_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            _ = self._sess([], ["badmode"]).chain
-        self.assertIn("Unknown mode", str(ctx.exception))
-        self.assertIn("badmode", str(ctx.exception))
-
-    def test_base_as_input_tag_is_rejected(self):
-        # BASE is implicit — passing "base" as a tag is treated as unknown.
+    def test_unknown_tag_unrepresentable(self):
+        # Tags are typed enum members — the property AgentIdentity.tags
+        # converts each filename-grammar string via InstanceModifiers.from_value,
+        # which raises ValueError on unknowns before SessionIdentity.chain
+        # ever sees a "typo'd" tag. Same fail-fast contract as modes.
         with self.assertRaises(ValueError):
-            _ = self._sess(["base"], []).chain
+            InstanceModifiers.from_value("typo")
+
+    def test_unknown_mode_unrepresentable(self):
+        with self.assertRaises(ValueError):
+            InstanceModifiers.from_value("badmode")
+
+    def test_base_value_not_a_tag_or_mode(self):
+        # BASE is implicit — looking it up via from_value succeeds (it IS a
+        # valid InstanceModifiers value), but it's neither a tag nor a mode,
+        # so chain construction excludes it from the tag/mode membership checks
+        # and only emits it via the always-on first slot.
+        self.assertIs(InstanceModifiers.from_value("base"), InstanceModifiers.BASE)
+        self.assertEqual(self._sess([InstanceModifiers.BASE], []).chain, ("base",))
 
     def test_chain_returns_tuple(self):
         # Tuple (immutable) — signals "don't mutate this".
-        self.assertIsInstance(self._sess(["prog"], ["auto"]).chain, tuple)
+        self.assertIsInstance(self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO]).chain, tuple)
 
 
 # ============================================================
@@ -297,50 +297,57 @@ class TestValidateWorkspace(unittest.TestCase):
 
 class TestModesMisconfiguration(unittest.TestCase):
     """Modes come from agent_modes_map.json — a JSON file the user can hand-edit.
-    Bad values (typo'd mode names, sundry case mistakes, dup entries) need to
-    surface as a loud failure rather than a silent half-build.
+    Bad string values surface as a loud failure at the JSON-load boundary
+    (InstanceModifiers(s) raises ValueError on unknowns) rather than being
+    silently absorbed into SessionIdentity.modes. These tests pin that contract.
 
-    Uses a SessionIdentity subclass that overrides .tags so we don't need a
-    real agent .md on disk — same pattern as TestSessionIdentityChain above."""
-
-    def _sess(self, modes, tags=()):
-        class _Sess(SessionIdentity):
-            @property
-            def tags(self):
-                return tuple(tags)
-        return _Sess(agent="x", session="s", workspace="/tmp",
-                     is_brand_new=False, modes=tuple(modes))
+    The chain-level mode validation block is gone (modes are typed enum members
+    at construction time, so chain doesn't need to revalidate). Tag misconfig
+    still validates at chain access time — that path is exercised by
+    TestSessionIdentityChain above."""
 
     def test_unknown_mode_raises_with_listed_value(self):
-        # The ValueError message should name the offending mode so the user can
-        # find it in their modes map.
+        # InstanceModifiers("badmode") raises ValueError; the message names the
+        # offending mode so the user can find it in their modes map.
         with self.assertRaises(ValueError) as ctx:
-            _ = self._sess(["badmode"]).chain
+            InstanceModifiers("badmode")
         self.assertIn("badmode", str(ctx.exception))
 
     def test_case_mismatch_is_caught(self):
         # `auto` is canonical; `Auto` / `AUTO` are unknown. Case sensitivity is
         # intentional — DooD's mixed-case name relies on case being meaningful.
         with self.assertRaises(ValueError):
-            _ = self._sess(["Auto"]).chain
+            InstanceModifiers("Auto")
         with self.assertRaises(ValueError):
-            _ = self._sess(["AUTO"]).chain
+            InstanceModifiers("AUTO")
 
     def test_mixed_valid_and_unknown_still_raises(self):
-        # One typo shouldn't slip through just because another mode is valid.
+        # The typical load boundary: converting each string in turn — one bad
+        # string raises mid-iteration, even if other strings are valid modes.
         with self.assertRaises(ValueError) as ctx:
-            _ = self._sess(["auto", "typo"]).chain
+            list(InstanceModifiers(s) for s in ["auto", "typo"])
         self.assertIn("typo", str(ctx.exception))
 
-    def test_duplicate_modes_are_idempotent(self):
-        # Duplicates in the input collapse via the set-based chain construction.
-        # Same as if they appeared once.
-        chain = self._sess(["auto", "auto"]).chain
-        self.assertEqual(chain.count("auto"), 1)
+    def test_duplicate_modes_are_idempotent_in_chain(self):
+        # Duplicates in the modes tuple collapse via set membership in chain
+        # construction. Same as if they appeared once.
+        class _Sess(SessionIdentity):
+            @property
+            def tags(self):
+                return ()
+        sess = _Sess(agent="x", session="s", workspace="/tmp", is_brand_new=False,
+                     modes=(InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_AUTO))
+        self.assertEqual(sess.chain.count("auto"), 1)
 
-    def test_empty_modes_list_yields_base_only_chain(self):
+    def test_empty_modes_tuple_yields_base_only_chain(self):
         # No modes ⇒ no mode-driven blocks; chain is just BASE.
-        self.assertEqual(self._sess([]).chain, ("base",))
+        class _Sess(SessionIdentity):
+            @property
+            def tags(self):
+                return ()
+        sess = _Sess(agent="x", session="s", workspace="/tmp", is_brand_new=False,
+                     modes=())
+        self.assertEqual(sess.chain, ("base",))
 
 
 if __name__ == "__main__":

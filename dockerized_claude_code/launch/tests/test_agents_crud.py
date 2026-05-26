@@ -17,7 +17,7 @@ from launch.agents_crud import (
 from launch.memory_addendums import (
     ADDENDUM_SECTION_TITLE, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
 )
-from launch.structs import SessionIdentity
+from launch.structs import InstanceModifiers, SessionIdentity
 
 
 # ============================================================
@@ -69,23 +69,21 @@ class TestTagSortKey(unittest.TestCase):
         self.assertEqual(tag_sort_key([]), ())
 
     def test_known_tag(self):
-        # "prog" is at index 0 of InstanceModifiers.tag_values()
-        self.assertEqual(tag_sort_key(["prog"]), (0,))
-
-    def test_unknown_tag_sinks_to_end(self):
-        # tag_values() == ("prog",) → unknown gets sentinel index 1
-        key = tag_sort_key(["typo"])
-        self.assertEqual(key, (1,))
+        # TAG_PROG is at index 0 of InstanceModifiers.tag_values()
+        self.assertEqual(tag_sort_key([InstanceModifiers.TAG_PROG]), (0,))
 
     def test_sorted_internally(self):
         # tag_sort_key sorts its members so the key is order-stable regardless
         # of input order. With only one known tag the result is a 1-tuple
         # whichever way it's passed.
-        self.assertEqual(tag_sort_key(["prog"]), tag_sort_key(["prog"]))
+        self.assertEqual(
+            tag_sort_key([InstanceModifiers.TAG_PROG]),
+            tag_sort_key([InstanceModifiers.TAG_PROG]),
+        )
 
     def test_untagged_sorts_before_tagged(self):
         # Empty tuple < any non-empty tuple lexicographically
-        self.assertLess(tag_sort_key([]), tag_sort_key(["prog"]))
+        self.assertLess(tag_sort_key([]), tag_sort_key([InstanceModifiers.TAG_PROG]))
 
 
 class TestModeSortKey(unittest.TestCase):
@@ -93,23 +91,19 @@ class TestModeSortKey(unittest.TestCase):
         self.assertEqual(mode_sort_key([]), ())
 
     def test_auto_only(self):
-        # mode_values() == ("auto", "DooD") → "auto" is index 0
-        self.assertEqual(mode_sort_key(["auto"]), (0,))
+        # mode_values() == ("auto", "DooD", "web") → MODE_WARN_AUTO is index 0
+        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_AUTO]), (0,))
 
     def test_dood_only(self):
-        self.assertEqual(mode_sort_key(["DooD"]), (1,))
+        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_DOOD]), (1,))
 
     def test_both_sorted_by_declaration_order(self):
         # Input order doesn't matter — output sorts by InstanceModifiers position.
-        self.assertEqual(mode_sort_key(["auto", "DooD"]), (0, 1))
-        self.assertEqual(mode_sort_key(["DooD", "auto"]), (0, 1))
-
-    def test_unknown_mode_sinks(self):
-        # mode_values() has 2 items → sentinel index is 2.
-        self.assertEqual(mode_sort_key(["bogus"]), (2,))
+        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]), (0, 1))
+        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]), (0, 1))
 
     def test_modeless_sorts_before_any(self):
-        self.assertLess(mode_sort_key([]), mode_sort_key(["auto"]))
+        self.assertLess(mode_sort_key([]), mode_sort_key([InstanceModifiers.MODE_WARN_AUTO]))
 
 
 # ============================================================
@@ -128,12 +122,12 @@ class _StubSess:
 class TestWriteModesEntry(unittest.TestCase):
     def test_sets_when_modes_present(self):
         m = {}
-        _write_modes_entry(m, _StubSess("poet__draft", ["auto"]))
+        _write_modes_entry(m, _StubSess("poet__draft", [InstanceModifiers.MODE_WARN_AUTO]))
         self.assertEqual(m, {"poet__draft": ["auto"]})
 
     def test_replaces_existing(self):
         m = {"poet__draft": ["DooD"]}
-        _write_modes_entry(m, _StubSess("poet__draft", ["auto"]))
+        _write_modes_entry(m, _StubSess("poet__draft", [InstanceModifiers.MODE_WARN_AUTO]))
         self.assertEqual(m, {"poet__draft": ["auto"]})
 
     def test_pops_when_empty(self):
@@ -152,22 +146,12 @@ class TestWriteModesEntry(unittest.TestCase):
         _write_modes_entry(m, _StubSess("a__1", []))
         self.assertEqual(m, {"b__1": ["DooD"]})
 
-    def test_duplicate_modes_persisted_as_given(self):
-        # _write_modes_entry doesn't de-duplicate — that's SessionIdentity.chain's
-        # job at the consumption end. Storing whatever the user/SessionIdentity
-        # provides keeps this layer purely a key-value writer.
+    def test_writes_canonical_value_string_per_member(self):
+        # Modes serialize as their `.value` (the JSON-friendly canonical form),
+        # preserving the in-memory tuple's declaration order.
         m = {}
-        _write_modes_entry(m, _StubSess("agent__sess", ["auto", "auto"]))
-        self.assertEqual(m["agent__sess"], ["auto", "auto"])
-
-    def test_persists_unknown_mode_value_as_given(self):
-        # Validation against the InstanceModifiers taxonomy happens at
-        # sess_id.chain access time (in SessionIdentity); _write_modes_entry
-        # treats the modes tuple as opaque data. Lets a future modifier rename
-        # land without a state-file migration step.
-        m = {}
-        _write_modes_entry(m, _StubSess("agent__sess", ["future_mode"]))
-        self.assertEqual(m["agent__sess"], ["future_mode"])
+        _write_modes_entry(m, _StubSess("agent__sess", [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]))
+        self.assertEqual(m["agent__sess"], ["auto", "DooD"])
 
 
 # ============================================================

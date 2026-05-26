@@ -32,7 +32,7 @@ from .structs import InstanceModifiers
 # First-launch template files (~/.claude-agents/user_extras/...)
 # ============================================================
 
-def plant_user_extras(modes: tuple[str, ...]) -> None:
+def plant_user_extras(modes: tuple[InstanceModifiers, ...]) -> None:
     """Idempotently drop the user-facing helper files into ~/.claude-agents/
     user_extras/ so users discovering the directories know what to put in
     them:
@@ -45,7 +45,7 @@ def plant_user_extras(modes: tuple[str, ...]) -> None:
     so existing user edits to either file are preserved across re-launches.
     Called by run.py:setup_state once modes are resolved."""
     copy_file(OPTIONAL_CREDS_README_TEMPLATE, OPTIONAL_CREDS_README_PATH)
-    if InstanceModifiers.MODE_AUTO.value in modes:
+    if InstanceModifiers.MODE_WARN_AUTO in modes:
         copy_file(FIREWALL_WHITELIST_TEMPLATE, FIREWALL_WHITELIST_FILE)
 
 

@@ -260,7 +260,7 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
     cmd = (
         ["docker", "compose"] + compose_args + ["run", "--rm", "-it", "--name", container_name]
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
-        + container_env_args()    # per-key -e flags from CONTAINER_ENV_FORWARDS / CONTAINER_ENV_FIXED
+        + container_env_args()    # per-key -e flags from CONTAINER_ENV_FORWARDS
         + conf_env_args(conf)     # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
         + resume_flag             # present if a resumed session

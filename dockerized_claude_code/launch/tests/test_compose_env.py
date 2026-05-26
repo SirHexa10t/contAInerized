@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from launch import paths
 from launch.compose_env import (
-    CONTAINER_ENV_FIXED, CONTAINER_ENV_FORWARDS, ComposeEnvKey, _compose_env,
+    CONTAINER_ENV_FORWARDS, ComposeEnvKey, _compose_env,
     conf_env_args, container_env_args, install_creds_flags, stage_compose_env,
     subprocess_env, token_env_dict,
 )
@@ -91,18 +91,26 @@ class TestStageComposeEnv(unittest.TestCase):
 # ============================================================
 
 
-class TestContainerEnvForwardsAndFixed(unittest.TestCase):
+class TestContainerEnvForwards(unittest.TestCase):
     def test_forwards_contains_agent_status_line(self):
         self.assertIn(ComposeEnvKey.AGENT_STATUS_LINE, CONTAINER_ENV_FORWARDS)
+
+    def test_forwards_contains_bash_env(self):
+        self.assertIn(ComposeEnvKey.BASH_ENV, CONTAINER_ENV_FORWARDS)
 
     def test_forwards_contains_each_token_env_var(self):
         for env_var in paths.OPTIONAL_CREDS_TOKEN_ENV_VARS.values():
             with self.subTest(env_var=env_var):
                 self.assertIn(env_var, CONTAINER_ENV_FORWARDS)
 
-    def test_fixed_sets_bash_env_to_bashrc(self):
-        bash_env = CONTAINER_ENV_FIXED[ComposeEnvKey.BASH_ENV]
-        self.assertEqual(str(bash_env), "/home/claude/.bashrc")
+    def test_container_emits_returns_only_flagged_members(self):
+        for member in ComposeEnvKey.container_emits():
+            with self.subTest(member=member.name):
+                self.assertTrue(member.container_emit)
+        for member in ComposeEnvKey:
+            if not member.container_emit:
+                with self.subTest(member=member.name):
+                    self.assertNotIn(member, ComposeEnvKey.container_emits())
 
 
 class TestContainerEnvArgs(unittest.TestCase):
@@ -114,22 +122,17 @@ class TestContainerEnvArgs(unittest.TestCase):
         _compose_env.clear()
         _compose_env.update(self._snapshot)
 
-    def test_fixed_entries_always_emitted(self):
-        args = container_env_args()
-        # BASH_ENV is in CONTAINER_ENV_FIXED — always present.
-        self.assertIn("-e", args)
-        self.assertTrue(any(a.startswith("BASH_ENV=") for a in args))
-
     def test_forwarded_value_emitted_when_staged(self):
         stage_compose_env(ComposeEnvKey.AGENT_STATUS_LINE, "STATUS")
         args = container_env_args()
         self.assertTrue(any(a == "AGENT_STATUS_LINE=STATUS" for a in args))
 
     def test_forwarded_value_skipped_when_not_staged(self):
-        # CONTAINER_ENV_FORWARDS includes JIRA_API_TOKEN (via the token env-vars
-        # set), but if no jira/token file exists, the value isn't staged and
+        # CONTAINER_ENV_FORWARDS includes BASH_ENV + JIRA_API_TOKEN, but if
+        # they aren't staged (set_container_env not called, no jira/token file),
         # the `-e` flag is silently dropped.
         args = container_env_args()
+        self.assertFalse(any("BASH_ENV" in a for a in args))
         self.assertFalse(any("JIRA_API_TOKEN" in a for a in args))
 
     def test_args_alternate_flag_and_value(self):
