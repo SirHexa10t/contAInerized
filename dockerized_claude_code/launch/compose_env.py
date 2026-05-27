@@ -27,7 +27,7 @@ everything `docker compose build/run` needs in one update — agent name,
 status line, build-context root, cred-flag fan-out, token forwards, and
 the in-container BASH_ENV literal.
 
-agent_composition / docker_config / run.py all import from here.
+agent_modifiers_handler / docker_config / run.py all import from here.
 """
 
 import os

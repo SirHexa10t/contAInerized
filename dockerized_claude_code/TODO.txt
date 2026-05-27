@@ -286,10 +286,6 @@ Add overwrite for credentials within project: if credentials folder exists in pr
     Change credential folders from <service_name> to .<service_name>  ?
 
 
-use colored_chain() in menu_picker ?
-    if done, simplify colored_label()?
-
-
 look for functions that only get called in tests
     see if the fragments-functions can be removed (or if any other functions) from menu_picker
 

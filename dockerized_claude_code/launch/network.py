@@ -8,7 +8,7 @@ Concurrency model (two-phase, streaming):
   - Phase 1 (critical): api.anthropic.com + console.anthropic.com resolve
     synchronously (from the caller's perspective) — these MUST be in the
     container's initial iptables ruleset, so the launcher blocks until
-    they're known. agent_composition._apply_auto fires the whole thing via
+    they're known. agent_modifiers_handler._apply_auto fires the whole thing via
     start_whitelist_resolution(state_dir) during compose_chain;
     docker_config.run_compose awaits via wait_for_critical_addresses()
     before staging WHITELIST_ADDRESSES and firing `docker compose run`.
@@ -36,7 +36,7 @@ the full resolved set from this launch (cache hits + fresh DNS results),
 so successive launches keep accumulating coverage while inside the TTL
 window. A stale file is ignored on read and rebuilt from scratch.
 
-Module boundary vs agent_composition: the resolution policy + curated domain
+Module boundary vs agent_modifiers_handler: the resolution policy + curated domain
 list are network-layer policy + DNS plumbing, not chain composition / handler
 dispatch — different concerns, different module. Future network-shaped logic
 (port scans, host reachability checks, etc.) co-locates here.
@@ -54,7 +54,7 @@ suspect if a whitelisted service is dropping requests right after launch.
 
 Imports nothing heavy: file_access for the user's whitelist file + atomic
 write helper, paths for the two status-file locations, stdlib for subprocess
-+ threading. agent_composition._apply_auto is the entry point caller (calls
++ threading. agent_modifiers_handler._apply_auto is the entry point caller (calls
 start_whitelist_resolution during compose_chain); docker_config.run_compose
 pairs the await + updater-spawn.
 

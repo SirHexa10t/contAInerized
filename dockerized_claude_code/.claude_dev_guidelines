@@ -31,7 +31,7 @@ Grouped by layer, top of the dependency graph last.
 
 - `launch/compose_env.py` — compose env-var staging (`ComposeEnvKey` taxonomy, `_compose_env` accumulator, `-e` flag emission).
 - `launch/docker_config.py` — docker subprocess wrappers + bind-mount accumulator + image-chain naming + `run_compose`.
-- `launch/agent_composition.py` — chain composition via `_apply_<modifier>` dispatch + `{auto}+{DooD}` warning + cache lifecycle.
+- `launch/agent_modifiers_handler.py` — chain composition via `_apply_<modifier>` dispatch + `{auto}+{DooD}` warning + cache lifecycle.
 - `launch/agents_crud.py` — instance state CRUD (create/modify/delete) + workspace + modes-map writers + picker-entry builders + sort keys.
 - `launch/user_additions.py` — user-side contributions to the container (optional-creds mounts + first-launch template plants).
 - `launch/audit.py` — read-only state-correctness checker, runnable as `python -m launch.audit`.
@@ -63,7 +63,7 @@ lazy imports, which is the bandage of last resort).
 utils ──► paths ──► file_access ──► structs ──┐
                                               ├─► small services (claude_code_config, memory_addendums, network)
                                               │
-                            small services ──► orchestration (compose_env, docker_config, agent_composition,
+                            small services ──► orchestration (compose_env, docker_config, agent_modifiers_handler,
                                                               agents_crud, user_additions, audit)
                                                        │
                                                        ▼
@@ -97,7 +97,7 @@ the bottom.
 
 → one of the `DOCKER_*_MOUNTS` dicts in `paths.py`. Because the per-launch
 mount-staging code (`docker_config.set_container_mounts` and the `_apply_<modifier>`
-handlers in `agent_composition`) just iterates these dicts — new entry is a
+handlers in `agent_modifiers_handler`) just iterates these dicts — new entry is a
 data-side change, not a code change. Pick the dict by scope: `DOCKER_BASE_MOUNTS`
 (every launch), `DOCKER_AUTO_MOUNTS` (`{auto}` only), `DOCKER_DOOD_MOUNTS` (`{DooD}`
 only), `CACHE_MOUNTS` (`[code]` cache shares).
@@ -110,7 +110,7 @@ Five touch points, in this order:
    per-instance modes.
 2. Add `docker/Dockerfile.<slug>` + `docker/compose.<slug>.yml`.
 3. Add `_apply_<slug>()` handler + one conditional in `compose_chain` in
-   `agent_composition.py`.
+   `agent_modifiers_handler.py`.
 4. (Optional) `Addendum(...)` instance in `memory_addendums.py` + entry under
    the modifier in `MODIFIER_ADDENDUMS` if you want a launch-time CLAUDE.md
    directive.

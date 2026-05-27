@@ -14,7 +14,7 @@ from launch.agents_crud import (
     ORDERED_MODEL_FAMILIES, _write_modes_entry, install_latest_md,
     mode_sort_key, parse_model_id, tag_sort_key,
 )
-from launch.memory_addendums import (
+from launch.template_code.memory_addendums import (
     ADDENDUM_SECTION_TITLE, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
 )
 from launch.structs import InstanceModifiers, InstanceIdentity

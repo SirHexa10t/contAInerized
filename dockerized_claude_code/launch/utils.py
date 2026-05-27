@@ -8,7 +8,12 @@ from anywhere without circular-import risk.
 """
 
 import re
+import sys
+from collections.abc import Callable
 from datetime import datetime
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 # === Formatting ===
@@ -89,3 +94,34 @@ def parse_agent_name(stem: str) -> str:
     return parse_stem(stem)[0]
 
 
+# === Exception-to-exit ===
+
+def call_or_exit(func: Callable[..., T], *args, exceptions=Exception, prefix: str = "  ", **kwargs) -> T:
+    """Call `func(*args, **kwargs)`; if it raises one of `exceptions`, print
+    the exception message (prefixed with `prefix`) and `sys.exit`. Returns
+    `func`'s return value on success. `exceptions` defaults to `Exception`
+    (catch-all); pass a specific class or tuple for narrower handling.
+    Keyword-only `exceptions` / `prefix` so they don't collide with kwargs
+    forwarded to `func`."""
+    try:
+        return func(*args, **kwargs)
+    except exceptions as e:
+        sys.exit(f"{prefix}{e}")
+
+
+# === User prompts ===
+
+def prompt_yn(header: str, body: list[str], prompt_label: str, default: bool = False) -> bool:
+    """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
+    list of explanation/caveat lines (empty strings render as blank lines for
+    visual separation), and `prompt_label` is what shows in the actual y/N input
+    (e.g. '{auto}'). Returns bool; Enter alone uses `default`."""
+    print()
+    print(f"  {header}")
+    for line in body:
+        print(f"  {line}" if line else "")
+    default_marker = "Y/n" if default else "y/N"
+    answer = input(f"  Enable {prompt_label}? [{default_marker}]: ").strip().lower()
+    if not answer:
+        return default
+    return answer in ("y", "yes")

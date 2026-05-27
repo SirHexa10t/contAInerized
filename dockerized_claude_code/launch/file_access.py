@@ -36,10 +36,10 @@ Caching strategy:
   - Same-process lifetime is the cache window across all of the above —
     each `python3 run.py` invocation is a fresh process.
 
-No build/composition logic (that's agent_composition), no identity dataclasses
+No build/composition logic (that's agent_modifiers_handler), no identity dataclasses
 (that's structs), no arg formatting for docker compose (that's docker_config).
 Imports paths + utils only — kept leaf-shaped so structs.py can depend on it
-without pulling in heavier modules. agent_composition, agents_crud, audit,
+without pulling in heavier modules. agent_modifiers_handler, agents_crud, audit,
 structs, user_additions, and run.py all import from here.
 """
 
@@ -228,7 +228,7 @@ def file_mtime(path: Path | str) -> float | None:
 
 def iter_file_stats(parent: Path) -> Iterator[tuple[Path, int, float]]:
     """Yield `(path, size, mtime)` for every regular file under `parent`.
-    Used by agent_composition.prune_caches for the size+age cache walk —
+    Used by agent_modifiers_handler.prune_caches for the size+age cache walk —
     bundling the rglob + is_file filter + stat call so the caller doesn't
     juggle three filesystem operations."""
     for f in parent.rglob("*"):
@@ -310,17 +310,6 @@ def read_json_field(path: Path | str, *keys: str) -> Any:
         return None
 
 
-def load_json_map(path: Path) -> dict[str, Any]:
-    """Parse a JSON-mapping file into a dict. Missing or empty files yield
-    {}. Used for state-file readers where the top-level shape is a single
-    JSON object (e.g. agent_workspace_map.json, agent_modes_map.json) —
-    distinct from read_json_field above, which walks into a nested field."""
-    if not path.exists():
-        return {}
-    content = read_text(path).strip()
-    return json.loads(content) if content else {}
-
-
 def conf_path_for(md_path: Path) -> Path | None:
     """Locate an agent's .conf path. A '(parent)' suffix in the filename aliases
     to '<parent>.conf'; otherwise '<name>.conf'; falls back to DEFAULT_CONF, or
@@ -377,12 +366,16 @@ _json_map_cache: dict[Path, dict[str, Any]] = {}   # single per-process cache sh
 
 
 def _cached_load_json_map(path: Path) -> dict[str, Any]:
-    """Load a JSON map from `path`, caching the result by path. Subsequent
-    calls return the cached dict by reference (so callers' in-place mutations
-    before save_*_map are visible to other loaders too — see section comment
-    above)."""
+    """Load a JSON map from `path` (top-level JSON object → dict; missing or
+    empty file → {}), caching the result by path. Subsequent calls return the
+    cached dict by reference (so callers' in-place mutations before save_*_map
+    are visible to other loaders too — see section comment above)."""
     if path not in _json_map_cache:
-        _json_map_cache[path] = load_json_map(path)
+        if path.exists():
+            content = read_text(path).strip()
+            _json_map_cache[path] = json.loads(content) if content else {}
+        else:
+            _json_map_cache[path] = {}
     return _json_map_cache[path]
 
 

@@ -4,7 +4,7 @@
 # docker-group GID through as a build arg.
 #
 # The /var/run/docker.sock bind-mount is Python-staged via paths.DOCKER_DOOD_MOUNTS
-# (iterated by agent_composition._apply_dood and appended to `docker compose
+# (iterated by agent_modifiers_handler._apply_dood and appended to `docker compose
 # run` as a `-v` flag) — not declared here, so the YAML is purely about
 # build wiring.
 #

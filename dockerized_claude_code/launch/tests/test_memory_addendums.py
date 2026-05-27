@@ -1,5 +1,5 @@
-"""Tests for launch.memory_addendums — Addendum shape, the addendum bodies,
-and the composed_addendum renderer.
+"""Tests for launch.template_code.memory_addendums — Addendum shape, the
+addendum bodies, and the composed_addendum renderer.
 
 `CREDENTIALS_NOTICE.body` is evaluated at module import (via
 `installed_cred_clis()`), so its concrete value depends on the launcher
@@ -8,7 +8,7 @@ environment. Tests here assert structure and patterns, not the exact CLI list.""
 import unittest
 from unittest.mock import patch
 
-from launch.memory_addendums import (
+from launch.template_code.memory_addendums import (
     ADDENDUM_SECTION_TITLE, Addendum, CREDENTIALS_NOTICE, FIREWALL_NOTICE,
     MAINTAIN_PRIVACY, MODIFIER_ADDENDUMS, SEEK_SUMMARY, composed_addendum,
 )

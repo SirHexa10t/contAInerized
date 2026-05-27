@@ -9,7 +9,7 @@
 # config — the wrapper just forwards "$@" and doesn't make claude-flag decisions.
 #
 # Bind-mounts for the firewall script + entrypoint wrapper are Python-staged
-# via paths.DOCKER_AUTO_MOUNTS (iterated by agent_composition._apply_auto and
+# via paths.DOCKER_AUTO_MOUNTS (iterated by agent_modifiers_handler._apply_auto and
 # appended to `docker compose run` as `-v` flags) — not declared here, so the
 # YAML is purely about build args, capabilities, env pass-through, and the
 # entrypoint command.

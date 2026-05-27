@@ -1,6 +1,6 @@
 # Compose layer for the [code] chain step. Swaps in docker/Dockerfile.code
 # (build-essential + Rust + Node), parameterises PARENT_IMAGE/TARGET_IMAGE so
-# the chain composer in launch/agent_composition.py can place this anywhere
+# the chain composer in launch/agent_modifiers_handler.py can place this anywhere
 # in the build sequence.
 #
 # Defaults reflect the standalone case (code directly on top of base):

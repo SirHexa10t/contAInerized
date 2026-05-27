@@ -9,7 +9,7 @@ in place — so adding a new modifier requires all three to land at once
 
 import unittest
 
-from launch import agent_composition, paths
+from launch import agent_modifiers_handler, paths
 from launch.structs import InstanceModifiers
 
 
@@ -26,8 +26,8 @@ class TestRepoLayout(unittest.TestCase):
     def test_settings_dir_exists(self):
         self.assertTrue(paths.SETTINGS_DIR.is_dir())
 
-    def test_templates_dir_exists(self):
-        self.assertTrue(paths.TEMPLATES_DIR.is_dir())
+    def test_template_files_dir_exists(self):
+        self.assertTrue(paths.TEMPLATE_FILES_DIR.is_dir())
 
 
 class TestBaseDockerArtifacts(unittest.TestCase):
@@ -41,7 +41,7 @@ class TestBaseDockerArtifacts(unittest.TestCase):
 class TestModifierArtifactsPresent(unittest.TestCase):
     """For every non-BASE modifier, the three files that compose its image
     layer must all exist: Dockerfile.<value>, compose.<value>.yml, and an
-    `_apply_<value>` callable in agent_composition — all lowercased
+    `_apply_<value>` callable in agent_modifiers_handler — all lowercased
     (matters for {DooD}, whose canonical value preserves the mixed case)."""
 
     def _non_base_modifiers(self):
@@ -64,12 +64,12 @@ class TestModifierArtifactsPresent(unittest.TestCase):
             with self.subTest(modifier=m.value):
                 handler_name = f"_apply_{m.value.lower()}"
                 self.assertTrue(
-                    hasattr(agent_composition, handler_name),
-                    f"agent_composition is missing {handler_name}() for {m.value}",
+                    hasattr(agent_modifiers_handler, handler_name),
+                    f"agent_modifiers_handler is missing {handler_name}() for {m.value}",
                 )
                 self.assertTrue(
-                    callable(getattr(agent_composition, handler_name)),
-                    f"agent_composition.{handler_name} is not callable",
+                    callable(getattr(agent_modifiers_handler, handler_name)),
+                    f"agent_modifiers_handler.{handler_name} is not callable",
                 )
 
     def test_base_has_no_dockerfile_suffix(self):
@@ -79,7 +79,7 @@ class TestModifierArtifactsPresent(unittest.TestCase):
 
     def test_base_has_no_apply_handler(self):
         # BASE has no side effects beyond being the starting image — no handler.
-        self.assertFalse(hasattr(agent_composition, "_apply_base"))
+        self.assertFalse(hasattr(agent_modifiers_handler, "_apply_base"))
 
 
 class TestUserExtrasTemplates(unittest.TestCase):

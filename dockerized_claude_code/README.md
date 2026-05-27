@@ -33,7 +33,8 @@ isolated Docker container with persistent per-instance state.
   Dockerfile stage with Rust + Node + uv. Modes are picked per instance at
   create/modify time: `{auto}` runs the agent unattended (`--dangerously-skip-permissions`)
   behind an iptables outbound whitelist; `{DooD}` bind-mounts the host's
-  Docker socket. Tags + modes compose into a layered build chain
+  Docker socket; `{web}` installs the playwright CLI for headless-browser
+  automation. Tags + modes compose into a layered build chain
   (`base → code → auto`, etc.) — each step has its own `Dockerfile.<name>`
   + `compose.<name>.yml`.
 - **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
@@ -276,14 +277,21 @@ Prints `All clear. N instance(s)…` when nothing is wrong.
      compiler) and bind-mounts the shared toolchain caches into the
      container. Untagged agents stay on `base`.
 
-   **Modes** (prompted per instance, also re-prompted on F2-modify):
+   **Modes** (prompted per instance, also re-prompted on F2-modify; prompts
+   only fire when prerequisites are satisfied — `{DooD}` and `{web}` only
+   apply to `[code]`-tagged agents):
 
    - `{auto}` — `--dangerously-skip-permissions` behind an iptables outbound
      whitelist (init-firewall.sh runs at container start). Lets the agent
      run unattended. ⚠ guardrail-only; combine with `{DooD}` and the agent
      can do anything on the host.
    - `{DooD}` — bind-mount `/var/run/docker.sock`. Lets the agent drive the
-     host's Docker daemon. ⚠ effective host-root.
+     host's Docker daemon. ⚠ effective host-root. Requires `[code]`.
+   - `{web}` — playwright CLI + system libs in the image, ~30MB add. Browser
+     binaries download on first `playwright install chromium` (or firefox /
+     webkit) into the shared `[code]` cache, so subsequent `[code][web]`
+     instances reuse them. No display server needed — chromium runs
+     headless. Requires `[code]`.
 
    Tag, mode, and conf-alias suffixes can combine and order doesn't matter —
    `refactorer[code](thinker).md` and `refactorer(thinker)[code].md` parse
@@ -387,21 +395,23 @@ installed, and the mounted creds make it ready to use.
 run.py                               # entry point + 7-stage launch() orchestrator (parse → resolve → resume? → persist → categorise → setup → run)
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), per-layer bind-mount dicts (DOCKER_BASE_MOUNTS, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
-  utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port. No disk access (that's file_access). Leaf module.
+  utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_yn (generic Y/N input), call_or_exit (try/except → sys.exit wrapper). No disk access. Leaf module.
   file_access.py                     # every disk-touching call routes through here. Agent filename grammar (parse_stem) + .md/.conf lookup (find_md_for_agent, conf_path_for, load_conf), cached load/save of agent_workspace_map.json + agent_modes_map.json, ensure_shared_oauth_files (touches the two OAuth files as `{}` if absent), force_remove with sudo + `sudo -k` fallback, installed_cred_clis (space-joins CLIs with creds present).
-  structs.py                         # identity dataclasses — AgentIdentity → InstanceIdentity (frozen=True, inheritance) + InstanceModifiers enum (BASE / TAG_CODE / MODE_AUTO / MODE_DOOD). InstanceIdentity.chain returns the active-modifier-values tuple (BASE first, declaration order) and validates self.tags/self.modes against the taxonomy.
+  structs.py                         # identity dataclasses — AgentIdentity → InstanceIdentity (frozen=True, inheritance) + InstanceModifiers enum (BASE / TAG_CODE / MODE_WARN_AUTO / MODE_WARN_DOOD / MODE_WEB). InstanceIdentity.chain returns the active-modifier-values tuple (BASE first, declaration order). Modifier coloring: per-member `colored_label()` + `ANSI_TO_PT_STYLE` mapping (status line, F8 legend, picker share one source). Prerequisite mapping (`_prerequisites()` + `applies_to(tags)`) gates per-mode prompts.
   compose_env.py                     # compose-side env-var staging — ComposeEnvKey enum, _compose_env accumulator + stage_compose_env, subprocess_env overlay, container_env_args (→ `-e KEY=VALUE` flags), conf_env_args, install_creds_flags, token_env_dict. set_container_env orchestrator (sister to docker_config's set_container_mounts).
   docker_config.py                   # docker subprocesses + bind-mount accumulator + image-chain naming. add_docker_mount, set_container_mounts, ensure_image, run_compose; docker CLI wrappers (require_docker, detect_docker_gid, wait_for_container_running, docker_exec_root, any_agent_container_running). Every direct `docker` call lives here.
-  memory_addendums.py                # launch-time directives for CLAUDE.md. Addendum(NamedTuple) instances — SEEK_SUMMARY, MAINTAIN_PRIVACY, CREDENTIALS_NOTICE, FIREWALL_NOTICE — mapped per modifier via MODIFIER_ADDENDUMS. composed_addendum(chain) renders the active sub-sections under a single `## Launch-time addendums` heading.
-  agent_composition.py               # compose_chain(inst_id) dispatch → _apply_code / _apply_auto / _apply_dood handlers; warn_if_dangerous_modes ({auto}+{DooD} red press-any-key warning); cache prepare/prune helpers ([code] only).
+  agent_modifiers_handler.py         # modifier-domain logic: compose_chain(inst_id) dispatch → _apply_code / _apply_auto / _apply_dood / _apply_web handlers; warn_if_dangerous_modes ({auto}+{DooD} red press-any-key warning); cache prepare/prune helpers ([code] only); prompt_modifier + prompt_for_modes (called via menu_picker.prompt_modes wrapper).
   network.py                         # {auto}-mode firewall coordination — BUILTIN_FIREWALL_DOMAINS (~135 entries), two-phase DNS resolution (sync Phase 1 → streaming Phase 2 via docker exec iptables -I), cross-launch resolved-IP cache (~/.claude-agents/resolved_domains.txt, 6h TTL), agent-visible status file (domains_pending_resolve.yml).
   agents_crud.py                     # instance-state CRUD — list_all_instances, update_workspace_map, set_instance_modes, install_latest_md (writes source `.md` + composed_addendum to state-dir CLAUDE.md in one go), modify_instance, delete_instance, resolve_pick, picker-entry builders (creatable_agents, continuable_instances), sort keys.
   user_additions.py                  # optional_creds_* (mounts, install env flags, token env vars) + plant_user_extras (auto-creates user_extras/optional_creds_readme.txt always; firewall_whitelist.txt only under {auto}). Bundled skills + commands ride along in DOCKER_BASE_MOUNTS; no per-skill code lives here.
-  menu_picker.py                     # prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + ask_for_workspace + prompt_modes + prompt_session + print_launch_banner.
+  menu_picker.py                     # prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + ask_for_workspace + prompt_session + print_launch_banner + thin prompt_modes wrapper over agent_modifiers_handler.prompt_for_modes.
   claude_code_config.py              # Claude-Code-side UX — build_status_line(inst_id) + set_terminal_title(name). Leaf-shaped.
   audit.py                           # state-correctness checker (run as `python -m launch.audit`). Per-entry helpers (_check_json_file, _modes_map_issues) are unit-testable in isolation; main() handles orchestration.
-  templates/                         # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/ on first {auto} / first launch respectively.
-  tests/                             # unittest suite — 14 files, 353 tests, ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
+  template_code/                     # per-modifier copy / data, keyed by InstanceModifiers member.
+    modifier_prompts.py              # MODIFIER_PROMPTS mapping — {modifier: (header, body)} for the Y/N prompts (auto / DooD / web). Pure data, no logic.
+    memory_addendums.py              # launch-time directives for CLAUDE.md. Addendum(NamedTuple) instances — SEEK_SUMMARY, MAINTAIN_PRIVACY, CREDENTIALS_NOTICE, FIREWALL_NOTICE — mapped per modifier via MODIFIER_ADDENDUMS. composed_addendum(chain) renders the active sub-sections under a single `## Launch-time addendums` heading.
+  template_files/                    # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/ on first {auto} / first launch respectively.
+  tests/                             # unittest suite — 342 tests, ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
 agents/                              # agent definitions — drop `<name>[tag](parent).md` (+ optional `.conf`) here
 custom_commands/                     # launcher-bundled slash commands (mounted into every container) — `/refactor`, `/unspaghettify`, `/write-readme`, `/write-summary`
 custom_skills/                       # launcher-bundled skills (mounted into every container) — currently `print/SKILL.md`
@@ -413,6 +423,7 @@ docker/
   Dockerfile.code, compose.code.yml  # [code] tag layer (Rust + Node + uv); conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
   Dockerfile.auto, compose.auto.yml  # {auto} mode layer (iptables + sudo + entrypoint wrapper)
   Dockerfile.dood, compose.dood.yml  # {DooD} mode layer (docker.sock bind-mount)
+  Dockerfile.web,  compose.web.yml   # {web} mode layer (playwright CLI + chromium apt deps; browsers download lazily into the [code] cache)
   init-firewall.sh                   # iptables outbound whitelist; container-side does no DNS — it sees pre-resolved IPs only
   auto-entrypoint.sh                 # runs init-firewall.sh, sudo -k, unsets WHITELIST_ADDRESSES, execs claude
 ```

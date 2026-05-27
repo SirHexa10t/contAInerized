@@ -4,7 +4,7 @@
 # (mounted by docker/compose.dood.yml) is read/writable from inside the container.
 #
 # Built when an instance has the DooD mode set (see agent_modes_map.json and
-# launch/agent_composition.py's apply_modes()). DooD is gated behind [code] in
+# launch/agent_modifiers_handler.py's _apply_dood()). DooD is gated behind [code] in
 # the prompt flow, so PARENT_IMAGE always resolves to something that includes
 # code — either claude-agents:code or a chain layer above it (e.g. code.auto).
 

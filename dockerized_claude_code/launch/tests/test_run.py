@@ -2,7 +2,7 @@
 dry-run short-circuit.
 
 The orchestrator tests mock every individual stage (select_pick, resolve_target,
-compose_runtime, setup_state, etc.) so we can verify that the only behavior
+compose_chain, setup_state, etc.) so we can verify that the only behavior
 that differs between a normal launch and a dry-run launch is whether
 run_compose gets invoked at the end."""
 
@@ -84,7 +84,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
             "compute_resume_flag": patch.object(run, "compute_resume_flag", return_value=[]),
             "update_workspace_map": patch.object(run, "update_workspace_map"),
             "set_instance_modes": patch.object(run, "set_instance_modes"),
-            "compose_runtime":  patch.object(run, "compose_runtime", return_value=chain),
+            "compose_chain":    patch.object(run, "compose_chain", return_value=chain),
             "setup_state":      patch.object(run, "setup_state", return_value=(conf, cred_names)),
             "print_launch_banner": patch.object(run, "print_launch_banner"),
             "run_compose":      patch.object(run, "run_compose"),
@@ -115,7 +115,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
         run.launch()
         mocks["setup_state"].assert_called_once()
-        mocks["compose_runtime"].assert_called_once()
+        mocks["compose_chain"].assert_called_once()
         mocks["update_workspace_map"].assert_called_once()
 
     def test_banner_prints_in_dry_run(self):

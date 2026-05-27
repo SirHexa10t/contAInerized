@@ -9,12 +9,11 @@ chain_compose_files), and the compose invocation itself (run_compose).
 Sister accumulator lives in compose_env: `_compose_env` for env-var staging.
 This module holds:
   - _docker_mounts: {source: "target[:ro]"} — staged via add_docker_mount,
-    flattened inline by run_compose into `-v` flags. staged_mounts() exposes
-    read-only access for the launch banner.
+    flattened inline by run_compose into `-v` flags.
 
 Imports from paths (filesystem constants), claude_code_config (terminal title),
 compose_env (env staging + container_env_args + conf_env_args + subprocess_env),
-and network (the {auto}-mode firewall coordination hooks). agent_composition
+and network (the {auto}-mode firewall coordination hooks). agent_modifiers_handler
 imports add_docker_mount + any_agent_container_running + detect_docker_gid
 from here; run.py is the top-level consumer.
 """
@@ -43,7 +42,7 @@ from .structs import InstanceIdentity
 # ============================================================
 # Every bind-mount for `docker compose run` flows through this dict. set_container_mounts
 # stages the always-on set (paths.DOCKER_BASE_MOUNTS + the per-instance workspace/state dirs);
-# agent_composition's tag/mode handlers stage chain-step contributions ([code] caches);
+# agent_modifiers_handler's tag/mode handlers stage chain-step contributions ([code] caches);
 # user_additions stages skills + optional creds. run_compose flattens the dict into
 # `-v src:tgt[:ro]` flags appended to the docker compose command. Mirror of
 # compose_env's `_compose_env` / stage_compose_env pattern — declarations flow
@@ -61,14 +60,6 @@ def add_docker_mount(source: Path | str, target: Path | str) -> None:
     when needed. Both args coerce to str at this boundary so callers can pass
     Path objects without thinking about it."""
     _docker_mounts[str(source)] = str(target)
-
-
-def staged_mounts() -> dict[str, str]:
-    """The {source: target[:ro]} dict of bind-mounts staged so far. Read-only —
-    callers should not mutate. Provided so the launch banner can introspect
-    what's about to be mounted without having per-category counts threaded
-    through every layer above."""
-    return _docker_mounts
 
 
 # ============================================================
@@ -118,7 +109,7 @@ CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container
 def detect_docker_gid() -> str | None:
     """Return the host's docker group GID as a string, or None if no docker
     group exists (or `getent` is unavailable — e.g. non-Linux hosts). Used by
-    agent_composition._apply_dood to stage DOCKER_GID for Dockerfile.dood, so
+    agent_modifiers_handler._apply_dood to stage DOCKER_GID for Dockerfile.dood, so
     claude can read/write the bind-mounted /var/run/docker.sock."""
     try:
         result = subprocess.run(
@@ -173,7 +164,7 @@ def any_agent_container_running() -> bool:
     """True if any container whose name starts with CONTAINER_NAME_PREFIX is
     currently running, OR if `docker ps` failed (conservative — treat the
     unknown state as 'might be running' so caller skips its cleanup). Used
-    by agent_composition.prune_caches as the 'is it safe to delete cache
+    by agent_modifiers_handler.prune_caches as the 'is it safe to delete cache
     files' guard."""
     r = subprocess.run(
         ["docker", "ps", "--filter", f"name={CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}"],

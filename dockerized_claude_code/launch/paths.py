@@ -31,9 +31,9 @@ DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root �
 AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .conf definitions
 DEFAULT_CONF = AGENTS_DIR / "default.conf"
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
-TEMPLATES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "templates"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
-OPTIONAL_CREDS_README_TEMPLATE = TEMPLATES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
-FIREWALL_WHITELIST_TEMPLATE    = TEMPLATES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
+TEMPLATE_FILES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
+OPTIONAL_CREDS_README_TEMPLATE = TEMPLATE_FILES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
+FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
 DOCKER_DIR = DOCKERIZED_CLAUDE_ROOT / "docker"                    # Dockerfile + compose.yml + per-layer Dockerfile.<x> / compose.<x>.yml
 
 
@@ -137,7 +137,7 @@ RO_MOUNT_OPTION = "ro"
 # ============================================================
 # Mounts staged when {auto} is in the chain — bind-mount the firewall init
 # script + entrypoint wrapper into well-known paths inside the container.
-# agent_composition._apply_auto iterates DOCKER_AUTO_MOUNTS via add_docker_mount;
+# agent_modifiers_handler._apply_auto iterates DOCKER_AUTO_MOUNTS via add_docker_mount;
 # gated by the handler being called, not by a YAML overlay. Mirror of the
 # DOCKER_BASE_MOUNTS pattern below, scoped to the {auto} chain step.
 #
@@ -160,7 +160,7 @@ DOCKER_AUTO_MOUNTS = {
 # Bind-mount the host's Docker socket into the container at the same path so
 # the agent's `docker` CLI can drive the host's Docker daemon. Read-write —
 # the socket needs both directions. The matching DOCKER_GID build-arg (staged
-# by agent_composition._apply_dood) makes the in-image `docker` group match
+# by agent_modifiers_handler._apply_dood) makes the in-image `docker` group match
 # the host's so claude can read/write this socket. Iterated by _apply_dood.
 
 DOCKER_DOOD_MOUNTS = {

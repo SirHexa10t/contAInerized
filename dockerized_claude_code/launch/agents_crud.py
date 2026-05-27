@@ -24,7 +24,7 @@ Picker-side sort keys (agent_sort_key / mode_sort_key / tag_sort_key) live
 here too — they're picker concerns, not composition concerns, so they sit
 next to the picker-entry factories that consume them. Imports from
 file_access (parse + map I/O + load_conf for the family sort), paths (path
-constants), structs, utils, and stdlib; nothing from agent_composition,
+constants), structs, utils, and stdlib; nothing from agent_modifiers_handler,
 run.py, or menu_picker — all of those import from here.
 """
 
@@ -32,13 +32,13 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from .agent_composition import warn_if_dangerous_modes
+from .agent_modifiers_handler import warn_if_dangerous_modes
 from .file_access import (
     force_remove, is_dir, iter_subdirs, load_conf, load_modes_map,
     load_workspace_map, move_path, path_exists, read_text, save_modes_map,
     save_workspace_map, write_text,
 )
-from .memory_addendums import composed_addendum
+from .template_code.memory_addendums import composed_addendum
 from .paths import AGENT_MD_BY_NAME, AGENTS_STATE, instance_state_dir_path
 from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP
 from .utils import ordering_index_or_end
@@ -84,7 +84,7 @@ def set_instance_modes(inst_id: InstanceIdentity) -> None:
     (which carries both the instance key and its resolved modes). An empty modes
     tuple removes the entry from the map (we don't store empty entries — keeps the
     file small and the 'no modes' case explicit by absence). Routes through
-    agent_composition.warn_if_dangerous_modes for the {auto}+{DooD} warning —
+    agent_modifiers_handler.warn_if_dangerous_modes for the {auto}+{DooD} warning —
     the dangerous-combination judgement lives with modifier semantics, this
     writer just persists state and triggers the post-write check."""
     m = load_modes_map()
@@ -159,7 +159,7 @@ def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity
 # Picker-entry sort keys
 # ============================================================
 # Used by creatable_agents (tag + family/version sort, here) and menu_picker's continuable_instances
-# (mode + family/version/session sort). Kept here rather than in agent_composition
+# (mode + family/version/session sort). Kept here rather than in agent_modifiers_handler
 # because they're picker output concerns — composition handlers don't sort
 # anything. Tag/mode position comes from InstanceModifiers (in structs);
 # ORDERED_MODEL_FAMILIES is picker-only so it lives here as a local constant.

@@ -48,8 +48,8 @@ class TestRepoDerivedConstants(unittest.TestCase):
     def test_settings_dir(self):
         self.assertEqual(paths.SETTINGS_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "settings")
 
-    def test_templates_dir(self):
-        self.assertEqual(paths.TEMPLATES_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "launch" / "templates")
+    def test_template_files_dir(self):
+        self.assertEqual(paths.TEMPLATE_FILES_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files")
 
 
 class TestContainerConstants(unittest.TestCase):

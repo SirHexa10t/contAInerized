@@ -21,12 +21,12 @@ post-write reconciliation."""
 
 from typing import NamedTuple
 
-from .file_access import installed_cred_clis
-from .paths import (
+from ..file_access import installed_cred_clis
+from ..paths import (
     CLAUDE_CONFIG_IN_CONTAINER, CLAUDE_SUMMARY_IN_CONTAINER,
     FIREWALL_WHITELIST_FILE, state_domain_resolve_status_path,
 )
-from .structs import InstanceModifiers
+from ..structs import InstanceModifiers
 
 
 class Addendum(NamedTuple):

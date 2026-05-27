@@ -18,24 +18,13 @@ Public API:
       Line prompt for a session suffix; rejects collisions with existing instances.
       -> session suffix string
 
-  prompt_auto(current_modifiers)
-      Y/N prompt for the {auto} mode opt-in (unattended-execution + firewall
-      explainer); used by run.py on new instances and by select_agent's modify flow.
-      `current_modifiers` is the union of tags + active modes — used to pre-fill
-      the Y/N default. Thin wrapper over prompt_modifier.
-      -> bool
-
-  prompt_dood(current_modifiers)
-      Y/N prompt for the {DooD} mode opt-in (with security explainer); used by run.py
-      on new [code] instances and by select_agent's modify flow. Thin wrapper over
-      prompt_modifier.
-      -> bool
-
   prompt_modes(tags, current_modes=())
-      Run all applicable mode prompts in InstanceModifiers.modes() priority order (auto, then
-      DooD if [code]); pre-fills defaults from the existing modes list. Used by
-      run.py (new instances) and select_agent's modify flow.
-      -> list[str] of newly-selected modes
+      Run all applicable mode prompts in InstanceModifiers.modes() priority
+      order (auto; DooD / web only for [code] agents); pre-fills defaults from
+      the existing modes list. Header / body copy per modifier lives in
+      template_code/modifier_prompts.py. Used by run.py (new instances) and
+      select_agent's modify flow.
+      -> list[InstanceModifiers] of newly-selected modes
 
   pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
       Generic full-screen picker primitive used by select_agent.
@@ -66,6 +55,7 @@ Generic-picker entry shape (pick_with_preview):
 
 import dataclasses
 import io
+import re
 import readline
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -87,6 +77,7 @@ from rich.console import Console                                           # pip
 from rich.markdown import Markdown
 from rich.theme import Theme
 
+from .agent_modifiers_handler import prompt_for_modes
 from .agents_crud import (
     agent_sort_key, creatable_agents, delete_instance,
     list_all_instances, mode_sort_key, modify_instance,
@@ -101,7 +92,7 @@ from .paths import (
     FIREWALL_WHITELIST_FILE,
 )
 from .structs import (
-    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP,
+    ANSI_TO_PT_STYLE, AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP,
 )
 from .utils import plural, relative_time
 
@@ -387,17 +378,15 @@ def _build_composition_legend() -> str:
     """Build the F8 'composition legend' shown over the preview pane.
     Tags + modes render as markdown tables for layout consistency with the
     Create-row previews. Per-row coloring comes from each modifier's
-    `colored_label(ansi=True)` — same warning-aware decision the picker uses
-    in `(style, label)` form, just emitted as an ANSI-escaped string here
-    so it can be inlined into the markdown table source. The
-    `markdown.code: none` override stops rich's default code styling from
-    overlaying — letting the injected ANSI colors win."""
+    `colored_label()` — warning-aware ANSI inlined into the markdown table
+    source. The `markdown.code: none` override stops rich's default code
+    styling from overlaying — letting the injected ANSI colors win."""
     rows_tags = "\n".join(
-        f"| {m.colored_label(ansi=True)} | {m.description} |"
+        f"| {m.colored_label()} | {m.description} |"
         for m in InstanceModifiers.tags()
     )
     rows_modes = "\n".join(
-        f"| {m.colored_label(ansi=True)} | {m.description} |"
+        f"| {m.colored_label()} | {m.description} |"
         for m in InstanceModifiers.modes()
     )
     tags_md = (
@@ -436,23 +425,34 @@ def _create_preview(agent: AgentIdentity) -> str:
     )
 
 
-def _colored_label_fragments(modifiers: Iterable[InstanceModifiers]) -> list[tuple[str, str]]:
-    """Per-member prompt_toolkit `(style, text)` fragments for a list of
-    modifiers, interleaved with plain space separators. The prompt_toolkit-
-    fragment counterpart to `InstanceModifiers.colored_chain` (which returns
-    an ANSI string for the status line); used by the cont-row tag / mode
-    columns so warning modes render red and safe ones green within the same
-    row. Input order is preserved here — callers pass already-ordered
-    tuples (AgentIdentity.tags / InstanceIdentity.modes)."""
-    return [frag for m in modifiers for frag in (m.colored_label(), ("", " "))]
+# Splitter for colored_chain output — captures each ANSI key in the
+# ANSI_TO_PT_STYLE mapping. With the capture group, `re.split` returns
+# [text-before-first-key, key, text, key, text, ...]: walking
+# (parts[1::2], parts[2::2]) as (key, text) pairs gives one tuple per
+# styled run.
+_KEYS_PATTERN = re.compile("(" + "|".join(re.escape(k) for k in ANSI_TO_PT_STYLE) + ")")
 
 
-def _fragments_text_len(fragments: list[tuple[str, str]]) -> int:
-    """Total rendered text length of a FormattedText fragment list — styles
-    are zero-width metadata, only the text content takes columns. Used to
-    align the shared tag/mode column on cont rows: subtract this from the
-    target width to compute trailing-space padding."""
-    return sum(len(text) for _, text in fragments)
+def _modifier_display(modifiers: Iterable[InstanceModifiers]) -> tuple[list[tuple[str, str]], int]:
+    """Render a modifier set for cont-row / Create-row display: parse
+    `InstanceModifiers.colored_chain`'s ANSI output into prompt_toolkit
+    `(style, text)` fragments via the `ANSI_TO_PT_STYLE` mapping. Returns
+    (fragments, visible width). Empty input → ([], 0). A trailing space
+    fragment is appended to non-empty output so the widest row in the column
+    gets a built-in separator before its right neighbor (the agent /
+    instance name)."""
+    chain = InstanceModifiers.colored_chain(modifiers)
+    if not chain:
+        return [], 0
+    parts = _KEYS_PATTERN.split(chain)
+    fragments: list[tuple[str, str]] = [
+        (ANSI_TO_PT_STYLE[key], text)
+        for key, text in zip(parts[1::2], parts[2::2])
+        if text
+    ]
+    fragments.append(("", " "))   # trailing separator — bakes into the column width
+    visible = sum(len(text) for _, text in fragments)
+    return fragments, visible
 
 
 def _normalize(display) -> list[tuple[str, str]]:
@@ -732,118 +732,13 @@ def prompt_session(agent: str, workspace: str) -> str:
         return suffix
 
 
-def prompt_yn(header: str, body: list[str], prompt_label: str, default: bool = False) -> bool:
-    """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
-    list of explanation/caveat lines (empty strings render as blank lines for
-    visual separation), and `prompt_label` is what shows in the actual y/N input
-    (e.g. '{auto}'). Returns bool; Enter alone uses `default`."""
-    print()
-    print(f"  {header}")
-    for line in body:
-        print(f"  {line}" if line else "")
-    default_marker = "Y/n" if default else "y/N"
-    answer = input(f"  Enable {prompt_label}? [{default_marker}]: ").strip().lower()
-    if not answer:
-        return default
-    return answer in ("y", "yes")
-
-
-def prompt_modifier(modifier, current_modifiers, *, header: str, body) -> bool:
-    """Y/N prompt for opting into `modifier`. `current_modifiers` is an iterable
-    of canonical-string modifier names (typically the union of tags + currently
-    active modes) — used to pre-fill the Y/N default (True iff `modifier.value`
-    is in there). Header / body explain the modifier's effect; the prompt label
-    comes from the modifier's `.label` property. Shared body for prompt_auto /
-    prompt_dood / future prompts: keep the per-modifier UX boilerplate (security
-    explainer text) at the call site, keep the prompt mechanics here."""
-    return prompt_yn(
-        header=header,
-        body=body,
-        prompt_label=modifier.label,
-        default=modifier.value in current_modifiers,
-    )
-
-
-def prompt_auto(current_modifiers) -> bool:
-    """Y/N prompt for opting into {auto} mode."""
-    return prompt_modifier(
-        InstanceModifiers.MODE_WARN_AUTO,
-        current_modifiers,
-        header="Auto / unattended mode?",
-        body=[
-            "Lets the agent run continuously without per-action permission prompts",
-            "(passes --dangerously-skip-permissions to claude). The container runs",
-            "behind an iptables outbound whitelist, so the agent can only reach",
-            "Anthropic, GitHub, npm, PyPI, crates.io and DNS — anything else is",
-            "dropped at the network layer.",
-            "",
-            "⚠ Even with the firewall, the agent has full filesystem write access",
-            "  in its workspace and can run arbitrary code there. Use only for",
-            "  tasks where you trust the agent to act on its own.",
-        ],
-    )
-
-
-def prompt_dood(current_modifiers) -> bool:
-    """Y/N prompt for opting into {DooD} (Docker-out-of-Docker) mode."""
-    return prompt_modifier(
-        InstanceModifiers.MODE_WARN_DOOD,
-        current_modifiers,
-        header=f"Docker-out-of-Docker ({InstanceModifiers.MODE_WARN_DOOD.value}) mode?",
-        body=[
-            "This is for agents that need to run their own Docker containers",
-            "(e.g., to test a project that uses docker compose). Without it,",
-            "the agent can't reach the host's Docker daemon.",
-            "",
-            f"⚠ Avoid unless you actually need it. {InstanceModifiers.MODE_WARN_DOOD.value} bind-mounts",
-            "  /var/run/docker.sock, which gives the container effective root",
-            "  on the host (it can start any container as root, read host",
-            "  paths via volume mounts, etc.).",
-        ],
-    )
-
-
-def prompt_web(current_modifiers) -> bool:
-    """Y/N prompt for opting into {web} (headless-browser automation) mode."""
-    return prompt_modifier(
-        InstanceModifiers.MODE_WEB,
-        current_modifiers,
-        header=f"Headless browser ({InstanceModifiers.MODE_WEB.value}) mode?",
-        body=[
-            "For agents that need to drive a real browser — web scraping, UI",
-            "testing, dynamic-page content extraction. The playwright CLI and",
-            "its system libs are installed in the image (~30MB add). Browser",
-            "binaries download on first use with `playwright install chromium`",
-            "(or firefox / webkit) — landing in the shared [code] cache, so",
-            "subsequent [code][web] instances reuse them.",
-            "",
-            "First [code][web] launch on a fresh host has a ~30s one-time",
-            "browser download. No display server needed — chromium runs",
-            "headless. Python bindings install per-project with `uv pip",
-            "install playwright` (~5MB).",
-        ],
-    )
-
-
 def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[InstanceModifiers, ...] = ()) -> list[InstanceModifiers]:
-    """Prompt for each mode in InstanceModifiers.modes() priority order, applying
-    per-mode applicability gates (DooD/web only fire for [code] agents).
-    `current_modes` is the existing list (pre-fills the Y/N defaults — empty
-    for new instances). Returns the new modes in priority order — used by
-    run.py for new instances and by select_agent's modify flow.
-
-    `current_modifiers` is the union used by the per-prompt default-Y/N logic;
-    we project members onto their `.value` strings so prompt_modifier's
-    `modifier.value in current_modifiers` check stays a plain string-in-list."""
-    current_modifiers = [m.value for m in (*tags, *current_modes)]
-    new_modes: list[InstanceModifiers] = []
-    if prompt_auto(current_modifiers):
-        new_modes.append(InstanceModifiers.MODE_WARN_AUTO)
-    if InstanceModifiers.TAG_CODE.value in current_modifiers and prompt_dood(current_modifiers):
-        new_modes.append(InstanceModifiers.MODE_WARN_DOOD)
-    if InstanceModifiers.TAG_CODE.value in current_modifiers and prompt_web(current_modifiers):
-        new_modes.append(InstanceModifiers.MODE_WEB)
-    return new_modes
+    """Thin wrapper over `agent_modifiers_handler.prompt_for_modes` — the actual
+    dispatch logic (priority order + per-mode applicability gates + header /
+    body lookup) lives in agent_modifiers_handler. This wrapper preserves the
+    `from launch.menu_picker import prompt_modes` public-API shape that
+    run.py and select_agent's modify flow rely on."""
+    return prompt_for_modes(tags, current_modes)
 
 
 def select_agent() -> AgentIdentity | InstanceIdentity | None:
@@ -867,19 +762,19 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
         # to align with the widest mode set, even though the columns don't
         # share a row.
         #
-        # Per-member coloring: each tag/mode renders via its own
-        # `InstanceModifiers.colored_label` (green/red by `_WARN_` membership)
-        # rather than one uniform style for the whole column — adding a new
-        # mode automatically picks up the right color via the enum.
-        tag_frags_by_agent = {a.agent: _colored_label_fragments(a.tags) for a in agents}
-        mode_frags_by_inst = {i.identity.instance: _colored_label_fragments(i.identity.modes) for i in instances}
-        tag_col_width  = max([_fragments_text_len(f) for f in tag_frags_by_agent.values()], default=0)
-        mode_col_width = max([_fragments_text_len(f) for f in mode_frags_by_inst.values()], default=0)
+        # Per-member coloring: each tag/mode renders via `_modifier_display`,
+        # which routes through `InstanceModifiers.colored_chain` and parses
+        # the ANSI output back into pt-fragments via the `ANSI_TO_PT_STYLE`
+        # mapping in structs. Adding a new color or shape tweaks structs, not
+        # the picker.
+        tag_by_agent = {a.agent: _modifier_display(a.tags) for a in agents}
+        mode_by_inst = {i.identity.instance: _modifier_display(i.identity.modes) for i in instances}
+        tag_col_width  = max((w for _, w in tag_by_agent.values()),  default=0)
+        mode_col_width = max((w for _, w in mode_by_inst.values()), default=0)
 
         entries: list[PickerEntry] = []
         for agent in agents:
-            tag_frags = tag_frags_by_agent[agent.agent]
-            tag_len = _fragments_text_len(tag_frags)
+            tag_frags, tag_len = tag_by_agent[agent.agent]
             entries.append(PickerEntry(
                 display=[
                     PickerRowMarker.NEW.fragment("  "),
@@ -895,8 +790,7 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
             ))
             for inst in instances_by_agent.get(agent.agent, []):
                 inst_id = inst.identity
-                mode_frags = mode_frags_by_inst[inst_id.instance]
-                mode_len = _fragments_text_len(mode_frags)
+                mode_frags, mode_len = mode_by_inst[inst_id.instance]
                 cont_display = [
                     PickerRowMarker.CONT.fragment("      "),
                     *mode_frags,

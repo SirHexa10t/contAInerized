@@ -138,7 +138,7 @@ Update an existing file, or create one if absent. Cover at minimum:
   explicit "X belongs in Y because Z":
   - *A new bind-mount source → `paths.py`'s mount-target dicts.*
   - *A new modifier (tag/mode) → enum in `structs.py` + `_apply_*` handler
-    in `agent_composition.py` + (optional) addendum text in
+    in `agent_modifiers_handler.py` + (optional) addendum text in
     `memory_addendums.py`.*
   - *A new state-file reader → `file_access.py` (all disk I/O lives there).*
   Concrete examples ground the rule in cases the codebase has actually seen.

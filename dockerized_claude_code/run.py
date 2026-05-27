@@ -3,7 +3,7 @@ import argparse
 import dataclasses
 import sys
 
-from launch.agent_composition import compose_chain
+from launch.agent_modifiers_handler import compose_chain
 from launch.agents_crud import (
     install_latest_md, resolve_pick, set_instance_modes,
     update_workspace_map,
@@ -21,6 +21,7 @@ from launch.structs import AgentIdentity, InstanceIdentity
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
 )
+from launch.utils import call_or_exit
 
 
 def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], bool]:
@@ -124,18 +125,6 @@ def compute_resume_flag(inst_id: InstanceIdentity) -> list[str]:
     return []
 
 
-def compose_runtime(inst_id: InstanceIdentity) -> list[str]:
-    """Stage 5 — Categorisation. Compute the build chain and run handler side
-    effects (env-var staging + bind-mount staging via the docker_config
-    accumulators, plus {auto}-mode firewall resolve kickoff). Modes are
-    already on the identity by this point (prompted in resolve_target for new
-    launches; loaded off the maps by the picker for cont). Returns chain."""
-    try:
-        return compose_chain(inst_id)
-    except (ValueError, RuntimeError) as e:
-        sys.exit(f"  {e}")
-
-
 def setup_state(inst_id: InstanceIdentity) -> tuple[dict[str, str], list[str]]:
     """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
     addendum section into its state dir as CLAUDE.md (a single overwrite —
@@ -176,7 +165,7 @@ def launch() -> None:
     update_workspace_map(inst_id)
     if inst_id.is_brand_new:
         set_instance_modes(inst_id)   # warns inside if both auto+DooD are set
-    chain = compose_runtime(inst_id)
+    chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))
     conf, cred_names = setup_state(inst_id)
     print_launch_banner(inst_id, cred_names)
     if dry_run:

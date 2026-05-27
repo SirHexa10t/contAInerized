@@ -19,7 +19,7 @@ Plus the modifier taxonomy:
                        description, and a 'tag' / 'mode' kind classifier; the
                        tags() / modes() classmethods give subset views. Both
                        agents_crud (for the auto+DooD warning + picker sort
-                       keys) and agent_composition (for handler dispatch + chain
+                       keys) and agent_modifiers_handler (for handler dispatch + chain
                        composition) consume this — it lives here because the
                        structs layer is the deepest both can import from
                        without circularity.
@@ -45,7 +45,6 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Literal, overload
 
 from .file_access import (
     conf_path_for, has_continuable_jsonl, is_dir, last_history_mtime,
@@ -57,6 +56,22 @@ from .utils import parse_stem
 # ============================================================
 # Modifier taxonomy
 # ============================================================
+
+# ANSI escape → prompt_toolkit style. Single source of truth for the
+# warning-aware colors emitted by InstanceModifiers.colored_label /
+# colored_chain — keys are the escapes embedded in the ANSI output, values
+# are the prompt_toolkit style strings consumers translate to when they need
+# fragment form (the picker imports this dict directly). Walrus operators
+# bind each escape to a module-private name so colored_label can reference
+# them without a parallel constants block to maintain. The two opening codes
+# are 8 bytes each by design — rich's markdown-table column-width detection
+# counts bytes including escapes, so unequal-length codes would shift the F8
+# legend's description column for whichever colour has the shorter prefix.
+ANSI_TO_PT_STYLE: dict[str, str] = {
+    (_WARN_ANSI  := "\033[01;91m"): "bold fg:ansibrightred",
+    (_SAFE_ANSI  := "\033[22;92m"): "fg:ansibrightgreen",
+    (_RESET_ANSI := "\033[0m"):     "",
+}
 
 class InstanceModifiers(Enum):
     """Every build-chain modifier — the always-on `BASE` plus filename-derived
@@ -120,33 +135,17 @@ class InstanceModifiers(Enum):
             return f"{{{self.value}}}"
         return self.value
 
-    @overload
-    def colored_label(self, ansi: Literal[False] = False) -> tuple[str, str]: ...
-    @overload
-    def colored_label(self, ansi: Literal[True]) -> str: ...
-    def colored_label(self, ansi: bool = False) -> tuple[str, str] | str:
-        """The member's `.label` paired with the warning-aware color: red
-        for members whose Python name contains `_WARN_` (the dangerous modes
-        flagged at the taxonomy level — MODE_WARN_AUTO drops permission
-        prompts, MODE_WARN_DOOD grants host-docker access), green otherwise.
-        Single source of truth for every site that colors a modifier label.
-
-        `ansi=False` (default — for the prompt_toolkit picker): returns a
-        `(style, text)` FormattedText fragment ready to drop into a
-        display list. The style is a prompt_toolkit style string.
-
-        `ansi=True` (for the rich-rendered F8 legend): returns a string
-        with embedded ANSI escapes around the label and a reset at the
-        end. The two opening codes are 8 bytes each by design — rich's
-        markdown-table column-width detection counts bytes (including
-        escapes), so unequal-length codes would shift the description
-        column for whichever colour has the shorter prefix."""
-        red   = "\033[01;91m" if ansi else "bold fg:ansibrightred"
-        green = "\033[22;92m" if ansi else "fg:ansibrightgreen"
-        color = red if "_WARN_" in self.name else green
-        if ansi:
-            return f"{color}{self.label}\033[0m"
-        return (color, self.label)
+    def colored_label(self) -> str:
+        """The member's `.label` wrapped in the warning-aware ANSI color:
+        bright red for members whose Python name contains `_WARN_` (the
+        dangerous modes flagged at the taxonomy level — MODE_WARN_AUTO drops
+        permission prompts, MODE_WARN_DOOD grants host-docker access), bright
+        green otherwise. Single source of truth for every site that colors a
+        modifier label. Consumers needing prompt_toolkit-fragment form (e.g.
+        the picker) translate the ANSI codes via the module-level
+        `ANSI_TO_PT_STYLE` mapping."""
+        color = _WARN_ANSI if "_WARN_" in self.name else _SAFE_ANSI
+        return f"{color}{self.label}{_RESET_ANSI}"
 
     @classmethod
     def in_order(cls, modifiers: Iterable["InstanceModifiers"]) -> tuple["InstanceModifiers", ...]:
@@ -159,11 +158,34 @@ class InstanceModifiers(Enum):
         return tuple(m for m in cls if m in given)
 
     @classmethod
+    @cache
+    def _prerequisites(cls) -> dict["InstanceModifiers", frozenset["InstanceModifiers"]]:
+        """Modifier → set of other modifiers that must be active for this one
+        to apply. Modifiers absent from the mapping have no prerequisites.
+        Looked up via `applies_to()`; defined here (single classmethod) rather
+        than as per-member values in the value-tuple so members without
+        prereqs aren't burdened with an empty placeholder, and so member
+        references resolve correctly (they're not yet members during the
+        class body's value-tuple construction)."""
+        return {
+            cls.MODE_WARN_DOOD: frozenset({cls.TAG_CODE}),
+            cls.MODE_WEB:       frozenset({cls.TAG_CODE}),
+        }
+
+    def applies_to(self, tags: set["InstanceModifiers"]) -> bool:
+        """True iff this modifier's prerequisites (if any) are all present in
+        `tags`. Modifiers with no prereqs always return True. Used by
+        `prompt_for_modes` to gate per-mode prompts on the agent's tag set —
+        {DooD} and {web} only apply to [code] agents."""
+        return InstanceModifiers._prerequisites().get(self, frozenset()) <= tags
+
+    @classmethod
     def colored_chain(cls, modifiers: Iterable["InstanceModifiers"]) -> str:
-        """Space-separated ANSI-colored labels in canonical (declaration) order,
-        for status-line display. Each member's `colored_label(ansi=True)`
+        """Space-separated ANSI-colored labels in canonical (declaration) order.
+        Used directly by the status line; the picker parses this back into
+        prompt_toolkit fragments via `ANSI_TO_PT_STYLE`. Each label
         self-resets so consecutive labels don't bleed colour."""
-        return " ".join(m.colored_label(ansi=True) for m in cls.in_order(modifiers))
+        return " ".join(m.colored_label() for m in cls.in_order(modifiers))
 
     # The four subset-view classmethods below are memoized via @functools.cache
     # (key = cls; single-class system → 100% hit rate after the first call). The

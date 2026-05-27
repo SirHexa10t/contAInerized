@@ -1,4 +1,4 @@
-"""Tests for launch.agent_composition — compose_chain return shape and
+"""Tests for launch.agent_modifiers_handler — compose_chain return shape and
 warn_if_dangerous_modes gate.
 
 compose_chain has side effects via _apply_* handlers (filesystem caches,
@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from launch import agent_composition
-from launch.agent_composition import compose_chain
+from launch import agent_modifiers_handler
+from launch.agent_modifiers_handler import compose_chain
 from launch.structs import InstanceModifiers, InstanceIdentity
 
 
@@ -51,9 +51,9 @@ class TestComposeChainReturn(unittest.TestCase):
 
     def setUp(self):
         self.patches = [
-            patch.object(agent_composition, "_apply_code"),
-            patch.object(agent_composition, "_apply_auto"),
-            patch.object(agent_composition, "_apply_dood"),
+            patch.object(agent_modifiers_handler, "_apply_code"),
+            patch.object(agent_modifiers_handler, "_apply_auto"),
+            patch.object(agent_modifiers_handler, "_apply_dood"),
         ]
         self.mocks = [p.start() for p in self.patches]
         self.mock_code, self.mock_auto, self.mock_dood = self.mocks
@@ -84,9 +84,9 @@ class TestComposeChainDispatch(unittest.TestCase):
 
     def setUp(self):
         self.patches = [
-            patch.object(agent_composition, "_apply_code"),
-            patch.object(agent_composition, "_apply_auto"),
-            patch.object(agent_composition, "_apply_dood"),
+            patch.object(agent_modifiers_handler, "_apply_code"),
+            patch.object(agent_modifiers_handler, "_apply_auto"),
+            patch.object(agent_modifiers_handler, "_apply_dood"),
         ]
         self.mocks = [p.start() for p in self.patches]
         self.mock_code, self.mock_auto, self.mock_dood = self.mocks
@@ -150,7 +150,7 @@ class TestComposeChainValidation(unittest.TestCase):
 
     def setUp(self):
         for name in ("_apply_code", "_apply_auto", "_apply_dood"):
-            patcher = patch.object(agent_composition, name)
+            patcher = patch.object(agent_modifiers_handler, name)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -180,25 +180,25 @@ class TestComposeChainValidation(unittest.TestCase):
 class TestWarnIfDangerousModes(unittest.TestCase):
     def test_no_warning_for_empty_modes(self):
         # No interactive prompt — function returns immediately
-        from launch.agent_composition import warn_if_dangerous_modes
+        from launch.agent_modifiers_handler import warn_if_dangerous_modes
         warn_if_dangerous_modes([])   # would block waiting for keypress if it triggered
 
     def test_no_warning_for_auto_alone(self):
-        from launch.agent_composition import warn_if_dangerous_modes
+        from launch.agent_modifiers_handler import warn_if_dangerous_modes
         warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO])
 
     def test_no_warning_for_dood_alone(self):
-        from launch.agent_composition import warn_if_dangerous_modes
+        from launch.agent_modifiers_handler import warn_if_dangerous_modes
         warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_DOOD])
 
     def test_warning_fires_for_auto_plus_dood(self):
         # The function prints and waits for keypress. We patch stdin and the
         # termios machinery so it returns quickly. The print itself is fine.
-        with patch("launch.agent_composition.sys.stdin") as mock_stdin, \
-             patch("launch.agent_composition.input", create=True, return_value=""), \
+        with patch("launch.agent_modifiers_handler.sys.stdin") as mock_stdin, \
+             patch("launch.agent_modifiers_handler.input", create=True, return_value=""), \
              patch("builtins.print"):
             mock_stdin.fileno.side_effect = OSError("no tty")   # forces input() fallback
-            from launch.agent_composition import warn_if_dangerous_modes
+            from launch.agent_modifiers_handler import warn_if_dangerous_modes
             warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD])
             # If we reach here without blocking, the keypress gate was triggered
             # and the input() fallback returned.
