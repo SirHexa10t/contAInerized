@@ -105,6 +105,7 @@ BUILTIN_FIREWALL_DOMAINS = [
     # GitHub (git, releases, raw, codeload, container registry)
     "www.github.com",
     "api.github.com",
+    "ssh.github.com",
     "www.raw.githubusercontent.com",
     "www.objects.githubusercontent.com",
     "codeload.github.com",

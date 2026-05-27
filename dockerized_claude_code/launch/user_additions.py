@@ -18,8 +18,10 @@ The split exists because the two concerns are independent layers:
     its file_access + docker_config helpers.
 """
 
-from .docker_config import add_docker_mount
-from .file_access import copy_file, present_optional_cred_services
+from pathlib import Path
+
+from .docker_config import add_docker_mount, mount_target_is_staged
+from .file_access import copy_file, enforce_ssh_dir_perms, present_optional_cred_services
 from .paths import (
     FIREWALL_WHITELIST_FILE, FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_README_PATH, OPTIONAL_CREDS_README_TEMPLATE,
@@ -33,18 +35,17 @@ from .structs import InstanceModifiers
 # ============================================================
 
 def plant_user_extras(modes: tuple[InstanceModifiers, ...]) -> None:
-    """Idempotently drop the user-facing helper files into ~/.claude-agents/
-    user_extras/ so users discovering the directories know what to put in
-    them:
-      - optional_creds_readme.txt — always; its presence helps users discover
-        the optional_creds/ dir whether or not they ever use it.
+    """Drop the user-facing helper files into ~/.claude-agents/user_extras/
+    so users discovering the directories know what to put in them:
+      - optional_creds_readme.txt — always; refreshed when the template moves
+        on (the file describes launcher behaviour and shouldn't drift behind).
       - firewall_whitelist.txt — only when {auto} is in `modes`. Outside
-        {auto} the file would just sit unused.
+        {auto} the file would just sit unused. Created on first launch and
+        left alone afterward — this file holds the user's actual whitelist
+        entries, so their edits are preserved.
 
-    Both copies go through copy_file with its default overwrite_if_dest=False,
-    so existing user edits to either file are preserved across re-launches.
     Called by run.py:setup_state once modes are resolved."""
-    copy_file(OPTIONAL_CREDS_README_TEMPLATE, OPTIONAL_CREDS_README_PATH)
+    copy_file(OPTIONAL_CREDS_README_TEMPLATE, OPTIONAL_CREDS_README_PATH, overwrite_if_changed=True)
     if InstanceModifiers.MODE_WARN_AUTO in modes:
         copy_file(FIREWALL_WHITELIST_TEMPLATE, FIREWALL_WHITELIST_FILE)
 
@@ -58,11 +59,45 @@ def optional_creds_mounts() -> list[str]:
     matches a known service, stage a bind-mount onto the CLI's default config
     path inside the container. Read-write — cloud CLIs refresh tokens / write
     cache. Missing entries are silently skipped — opt-in is via presence on
-    the host. Returns the sorted list of mounted service names (for the
-    launch banner). Tuple unpack discards the cli-name half — that's a
-    [code]-addendum concern, not a mount concern."""
+    the host. Returns the sorted list of mounted service names (trailing `/`
+    stripped) for the launch banner.
+
+    Two key-shape conventions in OPTIONAL_CREDS_MOUNTS:
+      - `<service>`  — bind-mount the source entry as-is to the target path
+                       (the existing pattern: aws, gcloud, ssh, etc.)
+      - `<name>/`    — contents-mount: top-level entries inside the source
+                       dir mount individually into the target dir. Each
+                       per-entry mount is collision-checked against
+                       previously-staged mounts (`mount_target_is_staged`);
+                       a clash raises RuntimeError so the launch exits with
+                       a clear "move/rename to proceed" message rather than
+                       silently shadowing a launcher-owned mount. Used for
+                       `home/` — loose dotfiles that don't belong to a known
+                       service.
+
+    Special case — `ssh`: host-side perms are fixed up before mounting (700
+    on the dir, 600 on each file, 644 on `*.pub` / `*_hosts`). ssh refuses to
+    read keys with looser perms; the user shouldn't have to know that."""
     services = sorted(present_optional_cred_services())
+    banner_names: list[str] = []
     for name in services:
+        src = optional_creds_service_path(name)
+        if name == "ssh":
+            enforce_ssh_dir_perms(src)
         mount_target, _ = OPTIONAL_CREDS_MOUNTS[name]
-        add_docker_mount(optional_creds_service_path(name), mount_target)
-    return services
+        if name.endswith("/"):
+            target_dir = Path(mount_target)
+            for entry in sorted(src.iterdir()):
+                entry_target = target_dir / entry.name
+                if mount_target_is_staged(entry_target):
+                    raise RuntimeError(
+                        f"optional_creds/{name}{entry.name} would shadow a "
+                        f"launcher-staged mount at {entry_target}. Move or rename "
+                        f"the {name}entry, or drop the conflicting launcher-side "
+                        f"mount, then retry."
+                    )
+                add_docker_mount(entry, entry_target)
+        else:
+            add_docker_mount(src, mount_target)
+        banner_names.append(name.rstrip("/"))
+    return banner_names

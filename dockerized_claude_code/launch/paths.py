@@ -274,7 +274,7 @@ OPTIONAL_CREDS_MOUNTS = {
     "aws":     (f"{CLAUDE_HOME_IN_CONTAINER}/.aws",                       "aws"),
     "gcloud":  (f"{CLAUDE_HOME_IN_CONTAINER}/.config/gcloud",             "gcloud"),
     "kube":    (f"{CLAUDE_HOME_IN_CONTAINER}/.kube",                      "kubectl"),
-    "ssh":     (f"{CLAUDE_HOME_IN_CONTAINER}/.ssh",                       None),
+    "ssh":     (f"{CLAUDE_HOME_IN_CONTAINER}/.ssh",                       "ssh"),
     "gh":      (f"{CLAUDE_HOME_IN_CONTAINER}/.config/gh",                 "gh"),
     "glab":    (f"{CLAUDE_HOME_IN_CONTAINER}/.config/glab-cli",           "glab"),
     "jira":    (f"{CLAUDE_HOME_IN_CONTAINER}/.config/.jira",              "jira"),
@@ -282,6 +282,9 @@ OPTIONAL_CREDS_MOUNTS = {
     "railway": (f"{CLAUDE_HOME_IN_CONTAINER}/.config/railway",            "railway"),
     "npmrc":   (f"{CLAUDE_HOME_IN_CONTAINER}/.npmrc",                     None),
     "pypirc":  (f"{CLAUDE_HOME_IN_CONTAINER}/.pypirc",                    None),
+    # Trailing-`/` convention: the launcher mounts the CONTENTS of this entry
+    # (each top-level child) into the target dir, rather than the entry as a whole.
+    "home/":   (f"{CLAUDE_HOME_IN_CONTAINER}/",                           None),
 }
 
 # Some services authenticate via an env-var token rather than (or alongside)

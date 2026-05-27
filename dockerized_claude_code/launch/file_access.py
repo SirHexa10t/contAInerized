@@ -159,16 +159,39 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content)
 
 
-def copy_file(src: Path, dest: Path, overwrite_if_dest: bool = False) -> None:
+def copy_file(src: Path, dest: Path, overwrite_if_changed: bool = False) -> None:
     """Copy `src` to `dest` (content + permissions + metadata, via shutil.copy2).
-    By default, no-op when `dest` already exists — pass overwrite_if_dest=True
-    when the caller wants a fresh copy each time (e.g. install_latest_md's
-    per-launch refresh of the agent's CLAUDE.md). Auto-creates dest's parent
-    directory tree, matching write_text's convention."""
-    if dest.exists() and not overwrite_if_dest:
+    Default behaviour: no-op when `dest` already exists — preserves user edits.
+    With `overwrite_if_changed=True`, reads both files and rewrites only when
+    they differ — for launcher-owned templates the user shouldn't be editing
+    (e.g. optional_creds_readme.txt: regenerated when the template moves on,
+    but no needless rewrite + mtime bump when nothing changed). Auto-creates
+    dest's parent directory tree, matching write_text's convention."""
+    if dest.exists() and (not overwrite_if_changed or src.read_bytes() == dest.read_bytes()):
         return
     ensure_dir(dest.parent)
     shutil.copy2(src, dest)
+
+
+def enforce_ssh_dir_perms(ssh_dir: Path) -> None:
+    """Apply SSH's strict permission requirements to a directory: 700 on the
+    dir itself, 600 on every regular file inside EXCEPT `*.pub` (public keys)
+    and `*_hosts` (`known_hosts`, `known_hosts2`) which get 644. ssh refuses
+    to read private keys whose perms aren't 600 — and refuses to load any
+    config from a dir whose perms aren't 700 — so this is what the user
+    would otherwise have to set by hand. No-op if `ssh_dir` doesn't exist
+    or isn't a directory. Top-level only (subdirs aren't traversed). The
+    `optional_creds/ssh/` dir is expected to hold *copies* (or fresh keys)
+    rather than symlinks to the user's everyday ~/.ssh; chmodding here
+    isn't expected to mutate their host setup."""
+    if not ssh_dir.is_dir():
+        return
+    ssh_dir.chmod(0o700)
+    for entry in ssh_dir.iterdir():
+        if not entry.is_file():
+            continue
+        relaxed = entry.suffix == ".pub" or entry.name.endswith("_hosts")
+        entry.chmod(0o644 if relaxed else 0o600)
 
 
 # --- Existence + kind queries ---

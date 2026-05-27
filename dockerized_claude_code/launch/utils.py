@@ -111,17 +111,52 @@ def call_or_exit(func: Callable[..., T], *args, exceptions=Exception, prefix: st
 
 # === User prompts ===
 
+def _print_header_and_body(header: str, body: list[str]) -> None:
+    """Render a multi-line prompt's preamble: leading blank, the header
+    indented two spaces, each body line indented two spaces (empty body
+    lines render as blank lines for visual separation), trailing blank.
+    Shared by prompt_yn / prompt_keypress so their visual cadence stays
+    identical regardless of the actual input gate that follows."""
+    print()
+    print(f"  {header}")
+    for line in body:
+        print(f"  {line}" if line else "")
+    print()
+
+
 def prompt_yn(header: str, body: list[str], prompt_label: str, default: bool = False) -> bool:
     """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
     list of explanation/caveat lines (empty strings render as blank lines for
     visual separation), and `prompt_label` is what shows in the actual y/N input
     (e.g. '{auto}'). Returns bool; Enter alone uses `default`."""
-    print()
-    print(f"  {header}")
-    for line in body:
-        print(f"  {line}" if line else "")
+    _print_header_and_body(header, body)
     default_marker = "Y/n" if default else "y/N"
     answer = input(f"  Enable {prompt_label}? [{default_marker}]: ").strip().lower()
     if not answer:
         return default
     return answer in ("y", "yes")
+
+
+def prompt_keypress(header: str, body: list[str]) -> None:
+    """Generic multi-line notice + press-any-key gate. Same `header` / `body`
+    shape as `prompt_yn` but waits on any single keypress instead of asking
+    y/N — for surfacing notices the user must acknowledge before continuing.
+    Pure text rendering; if the caller wants ANSI styling, bake it into the
+    strings (the function leaves the cursor on a default-styled line for the
+    press-any-key prompt, so the caller's body should self-reset). Falls
+    back to requiring Enter when no tty is available (no termios)."""
+    _print_header_and_body(header, body)
+    print("  [press any key to continue] ", end="", flush=True)
+    try:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)        # cbreak keeps Ctrl+C working — raw would swallow it
+            sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except (ImportError, OSError):   # non-Linux/macOS or no tty → fallback requires Enter
+        input()
+    print()

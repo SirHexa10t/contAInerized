@@ -286,14 +286,18 @@ Add overwrite for credentials within project: if credentials folder exists in pr
     Change credential folders from <service_name> to .<service_name>  ?
 
 
-look for functions that only get called in tests
-    see if the fragments-functions can be removed (or if any other functions) from menu_picker
-
 Check if man() needs an update
 
-insert .git credentials and configurations (maybe)
 
 Check if the commands that rely on python code should be turned into skills
+
+
+
+move the message from warn_if_dangerous_modes() into modifier_prompts.py
+
+
+
+
 
 
 

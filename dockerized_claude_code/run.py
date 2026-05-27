@@ -145,7 +145,10 @@ def setup_state(inst_id: InstanceIdentity) -> tuple[dict[str, str], list[str]]:
     set_container_mounts(inst_id)
     _, conf = load_conf(inst_id.md_path)
     plant_user_extras(inst_id.modes)
-    cred_names = optional_creds_mounts()
+    # optional_creds_mounts may raise RuntimeError on a clash from a contents-
+    # mount entry (e.g. `home/.bashrc` shadowing the bundled bashrc mount);
+    # call_or_exit surfaces it as a clean sys.exit with the helpful message.
+    cred_names = call_or_exit(optional_creds_mounts, exceptions=RuntimeError)
     return conf, cred_names
 
 

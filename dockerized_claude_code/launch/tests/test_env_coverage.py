@@ -229,6 +229,32 @@ class TestComposeArgsMatchDockerfile(unittest.TestCase):
                     f"{dockerfile_path.name} doesn't declare them as ARG",
                 )
 
+    def test_launcher_staged_args_are_forwarded_by_compose(self):
+        # Reverse direction: an ARG that the launcher actively stages
+        # (defined_env_vars) MUST be in the matching compose layer's `args:`
+        # block, otherwise the staged value silently drops on the floor at
+        # build time. Build-time-default ARGs (HOST_UID, VERSION,
+        # ARCH_SUFFIX from the _ALLOWLIST) don't apply — those aren't
+        # staged by Python, so compose-side passthrough isn't required.
+        staged = _defined_env_vars()
+        for m in InstanceModifiers:
+            if m is InstanceModifiers.BASE:
+                continue
+            with self.subTest(modifier=m.value):
+                compose_path = paths.compose_layer_path(m.value.lower())
+                dockerfile_path = paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
+                compose_args = self._compose_args_keys(compose_path.read_text())
+                dockerfile_staged_args = _arg_decls_in(dockerfile_path) & staged
+                missing = dockerfile_staged_args - compose_args
+                self.assertFalse(
+                    missing,
+                    f"{dockerfile_path.name} declares ARGs {sorted(missing)} "
+                    f"that the launcher stages, but {compose_path.name} doesn't "
+                    f"forward them via its `args:` block — the build-arg value "
+                    f"would silently drop. Add `<NAME>: ${{<NAME>:-0}}` (or "
+                    f"matching default) under the layer's `args:`.",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

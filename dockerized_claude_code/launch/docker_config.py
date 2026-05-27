@@ -62,6 +62,15 @@ def add_docker_mount(source: Path | str, target: Path | str) -> None:
     _docker_mounts[str(source)] = str(target)
 
 
+def mount_target_is_staged(target: Path | str) -> bool:
+    """True if any prior `add_docker_mount` call has already staged a mount at
+    the given target (the access-mode suffix on the staged value, if any, is
+    ignored). Used by overlay callers like `user_additions.home_overlay_mounts`
+    to refuse to shadow a launcher-owned mount."""
+    target_str = str(target)
+    return any(v.split(":", 1)[0] == target_str for v in _docker_mounts.values())
+
+
 # ============================================================
 # Image-chain naming
 # ============================================================

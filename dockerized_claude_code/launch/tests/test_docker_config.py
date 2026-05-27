@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from launch import paths
+from launch import docker_config, paths
 from launch.docker_config import chain_compose_files, chain_image_tag, set_container_mounts
 
 
@@ -93,6 +93,34 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
+
+
+class TestMountTargetIsStaged(unittest.TestCase):
+    """`mount_target_is_staged` underpins the home-overlay clash check —
+    any prior mount with the same target makes the helper return True so
+    `home_overlay_mounts` can refuse to shadow it."""
+
+    def setUp(self):
+        docker_config._docker_mounts.clear()
+
+    def tearDown(self):
+        docker_config._docker_mounts.clear()
+
+    def test_returns_false_when_no_mounts(self):
+        self.assertFalse(docker_config.mount_target_is_staged("/home/claude/.gitconfig"))
+
+    def test_returns_true_for_exact_target(self):
+        docker_config.add_docker_mount("/host/.bashrc", "/home/claude/.bashrc")
+        self.assertTrue(docker_config.mount_target_is_staged("/home/claude/.bashrc"))
+
+    def test_returns_false_for_unrelated_target(self):
+        docker_config.add_docker_mount("/host/.bashrc", "/home/claude/.bashrc")
+        self.assertFalse(docker_config.mount_target_is_staged("/home/claude/.gitconfig"))
+
+    def test_ignores_access_mode_suffix(self):
+        # Targets staged with `:ro` etc. should still match by the bare path.
+        docker_config.add_docker_mount("/host/whitelist.txt", "/etc/whitelist.txt:ro")
+        self.assertTrue(docker_config.mount_target_is_staged("/etc/whitelist.txt"))
 
 
 if __name__ == "__main__":

@@ -190,12 +190,15 @@ def subprocess_env() -> dict[str, str]:
 
 def install_creds_flags(services) -> dict[str, str]:
     """`{INSTALL_<TOOL>: '0' | '1'}` dict for Dockerfile.code's build-args.
-    One entry per OPTIONAL_CREDS_MOUNTS service; value is '1' when the
-    matching cred dir is present (in `services`), '0' otherwise.
-    Dockerfile.code branches on each flag to decide whether to install
-    that CLI."""
+    One entry per OPTIONAL_CREDS_MOUNTS service that has an associated CLI
+    install (cli_name is not None — npmrc/pypirc are config-only, and the
+    `home/` contents-mount entry isn't tied to any single tool). Value is
+    '1' when the matching cred dir is present (in `services`), '0' otherwise.
+    Dockerfile.code branches on each flag to decide whether to install that
+    CLI."""
     return {f"INSTALL_{name.upper()}": ("1" if name in services else "0")
-            for name in OPTIONAL_CREDS_MOUNTS}
+            for name, (_, cli) in OPTIONAL_CREDS_MOUNTS.items()
+            if cli is not None}
 
 
 def token_env_dict(tokens: dict[str, str]) -> dict[str, str]:

@@ -192,16 +192,13 @@ class TestWarnIfDangerousModes(unittest.TestCase):
         warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_DOOD])
 
     def test_warning_fires_for_auto_plus_dood(self):
-        # The function prints and waits for keypress. We patch stdin and the
-        # termios machinery so it returns quickly. The print itself is fine.
-        with patch("launch.agent_modifiers_handler.sys.stdin") as mock_stdin, \
-             patch("launch.agent_modifiers_handler.input", create=True, return_value=""), \
-             patch("builtins.print"):
-            mock_stdin.fileno.side_effect = OSError("no tty")   # forces input() fallback
+        # warn_if_dangerous_modes delegates to utils.prompt_keypress for each
+        # matching MODIFIER_NOTICE_PROMPTS entry. We patch prompt_keypress so
+        # we don't depend on tty / termios behaviour and can confirm dispatch.
+        with patch("launch.agent_modifiers_handler.prompt_keypress") as mock_kp:
             from launch.agent_modifiers_handler import warn_if_dangerous_modes
             warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD])
-            # If we reach here without blocking, the keypress gate was triggered
-            # and the input() fallback returned.
+        mock_kp.assert_called_once()
 
 
 if __name__ == "__main__":

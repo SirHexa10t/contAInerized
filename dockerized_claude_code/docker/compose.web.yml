@@ -21,3 +21,6 @@ services:
       dockerfile: docker/Dockerfile.web
       args:
         PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:code}
+        # Weekly-rotating cache-buster — gates the `uv tool install playwright`
+        # RUN. Default "bootstrap" matches the ARG default in Dockerfile.web.
+        SOFTWARE_STACK_REFRESH: ${SOFTWARE_STACK_REFRESH:-bootstrap}

@@ -114,13 +114,13 @@ class TestInstalledCredClis(unittest.TestCase):
             self.assertEqual(file_access.installed_cred_clis(), "kubectl")
 
     def test_cli_less_services_excluded(self):
-        # ssh/npmrc/pypirc have cli=None — they don't appear in the output even
+        # npmrc/pypirc have cli=None — they don't appear in the output even
         # when present on host.
-        with self._with_present({"ssh", "npmrc", "pypirc"}):
+        with self._with_present({"npmrc", "pypirc"}):
             self.assertEqual(file_access.installed_cred_clis(), "")
 
     def test_mix_with_and_without_clis(self):
-        with self._with_present({"ssh", "gh", "npmrc"}):
+        with self._with_present({"gh", "npmrc"}):
             self.assertEqual(file_access.installed_cred_clis(), "gh")
 
     def test_unknown_service_silently_skipped(self):
@@ -330,6 +330,70 @@ class TestEnsureSharedOauthFiles(unittest.TestCase):
         time.sleep(0.01)
         file_access.ensure_shared_oauth_files()
         self.assertEqual(self.account_path.stat().st_mtime, first_mtime)
+
+
+# ============================================================
+# enforce_ssh_dir_perms
+# ============================================================
+
+
+class TestEnforceSshDirPerms(unittest.TestCase):
+    """SSH demands 700 on the dir + 600 on private keys; the launcher should
+    apply that so users don't have to. *.pub and *_hosts files are non-secret
+    and get the relaxed 644."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.ssh = Path(self.tmpdir.name) / "ssh"
+        self.ssh.mkdir(mode=0o755)   # deliberately wrong perms
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _mode(self, p: Path) -> int:
+        return p.stat().st_mode & 0o777
+
+    def _make_file(self, name: str, initial_mode: int = 0o644) -> Path:
+        p = self.ssh / name
+        p.write_text("content")
+        p.chmod(initial_mode)
+        return p
+
+    def test_dir_perms_set_to_700(self):
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(self.ssh), 0o700)
+
+    def test_private_key_chmod_600(self):
+        key = self._make_file("id_ed25519", 0o644)
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(key), 0o600)
+
+    def test_ssh_config_chmod_600(self):
+        cfg = self._make_file("config", 0o644)
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(cfg), 0o600)
+
+    def test_pub_chmod_644(self):
+        pub = self._make_file("id_ed25519.pub", 0o600)
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(pub), 0o644)
+
+    def test_known_hosts_chmod_644(self):
+        kh = self._make_file("known_hosts", 0o600)
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(kh), 0o644)
+
+    def test_non_directory_silently_skipped(self):
+        # Missing or non-dir input → no-op (no exception).
+        file_access.enforce_ssh_dir_perms(Path("/does/not/exist"))
+        file_access.enforce_ssh_dir_perms(self.ssh / "id_ed25519")   # a file
+
+    def test_subdir_entries_skipped(self):
+        # Only top-level files get chmod'd; subdirs aren't touched.
+        subdir = self.ssh / "sub"
+        subdir.mkdir(mode=0o755)
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(subdir), 0o755)   # unchanged
 
 
 if __name__ == "__main__":

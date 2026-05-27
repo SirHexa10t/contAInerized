@@ -21,7 +21,6 @@ InstanceModifiers taxonomy from structs, prompt copy from template_code, and
 prompt_yn from utils; agents_crud, menu_picker, and run.py import from here.
 """
 
-import sys
 import time
 from collections.abc import Iterable
 
@@ -37,8 +36,8 @@ from .paths import (
     CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
 )
 from .structs import InstanceModifiers
-from .template_code.modifier_prompts import MODIFIER_PROMPTS
-from .utils import prompt_yn
+from .template_code.modifier_prompts import MODIFIER_NOTICE_PROMPTS, MODIFIER_YN_PROMPTS
+from .utils import prompt_keypress, prompt_yn
 
 # === Modifier taxonomy + chain-composition ordering ===
 # The InstanceModifiers enum (in structs.py) is the canonical ordered taxonomy
@@ -162,35 +161,16 @@ def _apply_auto(state_dir) -> None:
 # writes state; the "is this combination dangerous?" judgement is here.
 
 def warn_if_dangerous_modes(modes: Iterable[InstanceModifiers]) -> None:
-    """Stern red warning + press-any-key gate when `modes` contains a dangerous
-    combination — currently just {auto}+{DooD}. {auto} drops Claude Code's
-    permission prompts; {DooD} hands the agent the host's Docker daemon.
-    Together the agent can do effectively anything on the host, unattended.
-    Blocks until the user presses any key so the warning isn't silently
-    scrolled past. No-op when the dangerous combo isn't present, so callers
-    can fire this unconditionally after any mode-set write."""
+    """For each `MODIFIER_NOTICE_PROMPTS` entry whose combination is a subset
+    of `modes`, fire `prompt_keypress` with its (header, body). One warning +
+    press-any-key per matching combo — same dispatch shape as
+    `prompt_for_modes` does for `MODIFIER_YN_PROMPTS` via `prompt_modifier`.
+    No-op when no dangerous combo is present, so callers can fire this
+    unconditionally after any mode-set write."""
     active = set(modes)
-    if not ({InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD} <= active):
-        return
-    print()
-    print(f"\033[1;31m  ⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_WARN_AUTO.label} AND {InstanceModifiers.MODE_WARN_DOOD.label} - PROCEED WITH CAUTION,")
-    print("    AS THE AI AGENT HAS THE POWER TO DO ANYTHING ON YOUR COMPUTER,")
-    print("    AND DOESN'T REQUIRE PERMISSION!\033[0m")
-    print()
-    print("  [press any key to continue] ", end="", flush=True)
-    try:
-        import termios
-        import tty
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)        # cbreak keeps Ctrl+C working — raw would swallow it
-            sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    except (ImportError, OSError):   # non-Linux/macOS or no tty → fallback requires Enter
-        input()
-    print()
+    for combo, (header, body) in MODIFIER_NOTICE_PROMPTS.items():
+        if combo <= active:
+            prompt_keypress(header=header, body=body)
 
 
 # === Mode-prompt dispatch ===
@@ -202,11 +182,11 @@ def warn_if_dangerous_modes(modes: Iterable[InstanceModifiers]) -> None:
 
 def prompt_modifier(modifier: InstanceModifiers, current_modifiers) -> bool:
     """Y/N prompt for opting into `modifier`. Header + body copy looked up in
-    `MODIFIER_PROMPTS`; prompt label comes from the modifier's `.label`.
+    `MODIFIER_YN_PROMPTS`; prompt label comes from the modifier's `.label`.
     `current_modifiers` is an iterable of canonical-string modifier names
     (tags + currently-active modes) used to pre-fill the Y/N default (True
     iff `modifier.value` is in there)."""
-    header, body = MODIFIER_PROMPTS[modifier]
+    header, body = MODIFIER_YN_PROMPTS[modifier]
     return prompt_yn(
         header=header,
         body=body,
@@ -224,7 +204,7 @@ def prompt_for_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[I
     current_modifiers = [m.value for m in (*tags, *current_modes)]
     tag_set = set(tags)
     new_modes: list[InstanceModifiers] = []
-    for mode in InstanceModifiers.in_order(MODIFIER_PROMPTS):
+    for mode in InstanceModifiers.in_order(MODIFIER_YN_PROMPTS):
         if mode.applies_to(tag_set) and prompt_modifier(mode, current_modifiers):
             new_modes.append(mode)
     return new_modes

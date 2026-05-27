@@ -150,11 +150,17 @@ class TestContainerEnvArgs(unittest.TestCase):
 
 class TestInstallCredsFlags(unittest.TestCase):
     """install_creds_flags(present_services) → {INSTALL_<TOOL>: '1'|'0'} build-args.
-    One entry per OPTIONAL_CREDS_MOUNTS service; '1' when in `present_services`."""
+    One entry per OPTIONAL_CREDS_MOUNTS service that has a cli_name (i.e. an
+    actual install target in Dockerfile.code). Config-only entries (npmrc,
+    pypirc) and contents-mount entries (`home/`) get no flag — Dockerfile.code
+    doesn't declare a matching ARG for them. '1' when in `present_services`."""
+
+    def _installable_services(self):
+        return [n for n, (_, cli) in paths.OPTIONAL_CREDS_MOUNTS.items() if cli is not None]
 
     def test_no_creds_all_zero(self):
         flags = install_creds_flags(set())
-        for name in paths.OPTIONAL_CREDS_MOUNTS:
+        for name in self._installable_services():
             with self.subTest(service=name):
                 self.assertEqual(flags[f"INSTALL_{name.upper()}"], "0")
 
@@ -172,8 +178,18 @@ class TestInstallCredsFlags(unittest.TestCase):
 
     def test_keys_are_uppercased_service_names(self):
         flags = install_creds_flags(set())
-        for name in paths.OPTIONAL_CREDS_MOUNTS:
+        for name in self._installable_services():
             self.assertIn(f"INSTALL_{name.upper()}", flags)
+
+    def test_cli_less_entries_get_no_flag(self):
+        # npmrc / pypirc have cli=None — no INSTALL_<NAME> entry; the
+        # `home/` contents-mount entry also has cli=None.
+        flags = install_creds_flags({"npmrc", "pypirc", "home/"})
+        self.assertNotIn("INSTALL_NPMRC", flags)
+        self.assertNotIn("INSTALL_PYPIRC", flags)
+        # The slash-suffix key would also produce an invalid env-var name —
+        # the filter on cli=None doubles as a guard against that.
+        self.assertNotIn("INSTALL_HOME/", flags)
 
     def test_unknown_services_dont_create_flags(self):
         flags = install_creds_flags({"bogus_service"})

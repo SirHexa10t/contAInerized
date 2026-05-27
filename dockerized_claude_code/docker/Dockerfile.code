@@ -68,6 +68,14 @@ RUN : "${INSTALL_GLAB}" \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+ARG INSTALL_SSH=0
+RUN : "${INSTALL_SSH}" \
+ && if [ "$INSTALL_SSH" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends openssh-client \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Heavy install (~400-500MB); only paid by users who actually opt in via user_extras/optional_creds/gcloud/.
 ARG INSTALL_GCLOUD=0
 RUN : "${INSTALL_GCLOUD}" \

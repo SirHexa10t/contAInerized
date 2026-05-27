@@ -83,10 +83,14 @@ class TestOptionalCredsMounts(unittest.TestCase):
         _, cli = paths.OPTIONAL_CREDS_MOUNTS["kube"]
         self.assertEqual(cli, "kubectl")
 
-    def test_ssh_has_no_cli(self):
-        # ssh contributes config to the system ssh — no separate CLI install.
+    def test_ssh_maps_to_ssh_cli(self):
+        # cli_name is the agent-facing binary name (what shows up in the
+        # CREDENTIALS_NOTICE addendum). Presence of the ssh cred dir also
+        # triggers INSTALL_SSH=1 → Dockerfile.code apt-installs the
+        # openssh-client package (the package name is hardcoded in the
+        # Dockerfile, separate from this field).
         _, cli = paths.OPTIONAL_CREDS_MOUNTS["ssh"]
-        self.assertIsNone(cli)
+        self.assertEqual(cli, "ssh")
 
     def test_npmrc_has_no_cli(self):
         _, cli = paths.OPTIONAL_CREDS_MOUNTS["npmrc"]
