@@ -281,17 +281,24 @@ Add hooks:
     Block Bash commands (sudo and rm commands in auto mode)
 
 
-Whitelist:
-    cdn.playwright.dev
-
 
 Add overwrite for credentials within project: if credentials folder exists in project, use it INSTEAD of in ~/.claude-agents
     Change credential folders from <service_name> to .<service_name>  ?
 
 
-In the bottom banner, concat the tags and modes chain (in {} and [])
+use colored_chain() in menu_picker ?
+    if done, simplify colored_label()?
 
-rename [prog] to [code] ?
+
+look for functions that only get called in tests
+    see if the fragments-functions can be removed (or if any other functions) from menu_picker
+
+Check if AgentSession is really different from AgentSession - maybe the modes are picked soon enough to just create the session straight away
+    instance has a field called "session" - feels like it's already session-like.
+
+
+
+
 
 
 

@@ -1,23 +1,23 @@
-# Web-stack image — extends its PARENT_IMAGE (default claude-agents:prog) with
+# Web-stack image — extends its PARENT_IMAGE (default claude-agents:code) with
 # the headless-browser dependencies playwright needs: the playwright CLI itself
 # plus the ~20 apt libs chromium (and other engines) link against. Built when
 # an instance has the {web} mode set.
 #
 # Browser BINARIES are NOT installed here. They live in playwright's default
-# install path (`~/.cache/ms-playwright/`), which already sits inside [prog]'s
+# install path (`~/.cache/ms-playwright/`), which already sits inside [code]'s
 # `~/.cache` bind-mount — so the first `playwright install <browser>` call in
-# any [prog][web] instance lands the binaries on the host cache, and every
-# subsequent [prog][web] instance reuses them. Image stays lean (~30MB add
+# any [code][web] instance lands the binaries on the host cache, and every
+# subsequent [code][web] instance reuses them. Image stays lean (~30MB add
 # for apt libs + CLI, vs ~160MB if we baked chromium in).
 #
-# {web} is gated behind [prog] in the prompt flow, so PARENT_IMAGE always
-# resolves to something that includes prog — either claude-agents:prog or a
-# chain layer above it (e.g. prog.auto.dood).
+# {web} is gated behind [code] in the prompt flow, so PARENT_IMAGE always
+# resolves to something that includes code — either claude-agents:code or a
+# chain layer above it (e.g. code.auto.dood).
 #
 # No display server: chromium runs headless; the apt libs are the offscreen-
 # renderer / font / audio set the browser binary statically links against.
 
-ARG PARENT_IMAGE=claude-agents:prog
+ARG PARENT_IMAGE=claude-agents:code
 FROM ${PARENT_IMAGE}
 
 USER root
@@ -55,7 +55,7 @@ USER claude
 # Agents that want playwright importable from Python in their project do
 # `uv pip install playwright` in their own venv — package is ~5MB and finds
 # the runtime-downloaded browsers at the default `~/.cache/ms-playwright/`
-# location (which is the bind-mounted [prog] cache, so cross-instance
+# location (which is the bind-mounted [code] cache, so cross-instance
 # sharing is automatic).
 #
 # SOFTWARE_STACK_REFRESH busts the layer cache weekly so subsequent rebuilds

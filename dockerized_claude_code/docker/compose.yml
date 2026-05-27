@@ -18,7 +18,7 @@ services:
     #     commands, statusline, bashrc, summary helper, settings, keybindings.
     #   - per-instance workspace + state dir (set_container_mounts) — sources
     #     vary per launch, so they can't live in a static dict.
-    #   - per-mode/-tag contributions ([prog] caches, skills, optional creds)
+    #   - per-mode/-tag contributions ([code] caches, skills, optional creds)
     #     — staged by their respective handlers / facades.
     # MEMORY.md is not bind-mounted: each instance gets its own writable copy
     # under <state>/projects/-workspace/memory/MEMORY.md, populated/synced by

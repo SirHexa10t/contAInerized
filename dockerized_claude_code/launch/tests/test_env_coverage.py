@@ -30,7 +30,7 @@ from launch.structs import InstanceModifiers
 #                  Currently not parameterized from the launcher; the default
 #                  applies.
 #   VERSION /
-#   ARCH_SUFFIX  — shell-local variables set inside Dockerfile.prog's
+#   ARCH_SUFFIX  — shell-local variables set inside Dockerfile.code's
 #                  jira-cli install RUN block (version comes from the
 #                  GitHub API; arch from `dpkg --print-architecture`).
 #                  Not Docker ARGs — they live entirely within one RUN.
@@ -62,7 +62,7 @@ def _compose_files():
     """All compose .yml files the launcher uses: the base + every modifier
     layer (non-BASE)."""
     return [paths.COMPOSE_FILE_PATH] + [
-        paths.compose_layer_path(m.slug)
+        paths.compose_layer_path(m.value.lower())
         for m in InstanceModifiers
         if m is not InstanceModifiers.BASE
     ]
@@ -71,7 +71,7 @@ def _compose_files():
 def _dockerfiles():
     """The base Dockerfile + every modifier's Dockerfile."""
     return [paths.DOCKER_DIR / "Dockerfile"] + [
-        paths.DOCKER_DIR / f"Dockerfile.{m.slug}"
+        paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
         for m in InstanceModifiers
         if m is not InstanceModifiers.BASE
     ]
@@ -218,8 +218,8 @@ class TestComposeArgsMatchDockerfile(unittest.TestCase):
             if m is InstanceModifiers.BASE:
                 continue
             with self.subTest(modifier=m.value):
-                compose_path = paths.compose_layer_path(m.slug)
-                dockerfile_path = paths.DOCKER_DIR / f"Dockerfile.{m.slug}"
+                compose_path = paths.compose_layer_path(m.value.lower())
+                dockerfile_path = paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
                 compose_args = self._compose_args_keys(compose_path.read_text())
                 dockerfile_args = _arg_decls_in(dockerfile_path)
                 missing = compose_args - dockerfile_args

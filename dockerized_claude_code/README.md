@@ -28,16 +28,16 @@ isolated Docker container with persistent per-instance state.
   row's workspace is the fallback target, or `(INVALID DIR)` (red) when the
   stored workspace path no longer exists or isn't a directory — hit F2 to
   repoint it.
-- **Per-agent build tags & per-instance modes** — append `[prog]` to a
-  filename (e.g. `refactorer[prog](thinker).md`) to opt into the heavier
+- **Per-agent build tags & per-instance modes** — append `[code]` to a
+  filename (e.g. `refactorer[code](thinker).md`) to opt into the heavier
   Dockerfile stage with Rust + Node + uv. Modes are picked per instance at
   create/modify time: `{auto}` runs the agent unattended (`--dangerously-skip-permissions`)
   behind an iptables outbound whitelist; `{DooD}` bind-mounts the host's
   Docker socket. Tags + modes compose into a layered build chain
-  (`base → prog → auto`, etc.) — each step has its own `Dockerfile.<name>`
+  (`base → code → auto`, etc.) — each step has its own `Dockerfile.<name>`
   + `compose.<name>.yml`.
 - **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
-  `~/.claude-agents/cache/` and bind-mount into `[prog]`-tagged containers
+  `~/.claude-agents/cache/` and bind-mount into `[code]`-tagged containers
   (the base image has no compilers to use them). One agent's downloads
   benefit every later launch. Files older than 7 days are pruned from any
   cache that grows past 5 GB (skipped while a container is running).
@@ -95,12 +95,12 @@ Host requirements:
 Inside the container, the runtime image is built incrementally as a chain
 of layers. `docker/Dockerfile` (the **base** stage) installs Claude Code +
 `uv` + ripgrep — what every agent needs. On top of that, each chain step
-has its own `Dockerfile.<name>` (e.g. `Dockerfile.prog` adds `build-essential`,
+has its own `Dockerfile.<name>` (e.g. `Dockerfile.code` adds `build-essential`,
 Rust, Node; `Dockerfile.auto` adds iptables + sudo for the firewall) and
 matching `compose.<name>.yml` (extra mounts, capabilities, entrypoint).
 The chain assembled for a given launch is `["base", ...active tags,
 ...active modes]`; intermediate images are tagged `claude-agents:base`,
-`claude-agents:prog`, `claude-agents:prog.auto`, etc., so common prefixes
+`claude-agents:code`, `claude-agents:code.auto`, etc., so common prefixes
 are cached. Nothing else needs to be on the host for the agents themselves.
 
 ### Install — Linux
@@ -202,14 +202,14 @@ skills, optional creds, whitelist), then builds each chain step incrementally,
 then drops you into Claude Code:
 
 ```
-  Agent definition: agents/researcher[prog].md
+  Agent definition: agents/researcher[code].md
   Configuration:    agents/researcher.conf
-  Tags:             [prog]
+  Tags:             [code]
   Modes:            {auto}
   User whitelist:   3 domains (from ~/.claude-agents/user_extras/firewall_whitelist.txt)
   Building base → claude-agents:base...
-  Building prog → claude-agents:prog...
-  Building auto → claude-agents:prog.auto...
+  Building code → claude-agents:code...
+  Building auto → claude-agents:code.auto...
 [docker compose build output]
 init-firewall.sh: resolving whitelist of 137 domains (up to 64 in parallel, 8s timeout each)...
 init-firewall.sh: resolved all 137 domains.
@@ -272,7 +272,7 @@ Prints `All clear. N instance(s)…` when nothing is wrong.
 
    **Tags** (currently supported):
 
-   - `[prog]` — uses the `prog` Dockerfile stage (Rust + Node + a real
+   - `[code]` — uses the `code` Dockerfile stage (Rust + Node + a real
      compiler) and bind-mounts the shared toolchain caches into the
      container. Untagged agents stay on `base`.
 
@@ -286,7 +286,7 @@ Prints `All clear. N instance(s)…` when nothing is wrong.
      host's Docker daemon. ⚠ effective host-root.
 
    Tag, mode, and conf-alias suffixes can combine and order doesn't matter —
-   `refactorer[prog](thinker).md` and `refactorer(thinker)[prog].md` parse
+   `refactorer[code](thinker).md` and `refactorer(thinker)[code].md` parse
    identically. **Reserved syntax**: `[…]` for tags, `(…)` for the conf
    alias, `{…}` for modes (modes don't appear in filenames; the syntax is
    reserved for the picker UI). Don't use these characters in agent names.
@@ -302,7 +302,7 @@ Prints `All clear. N instance(s)…` when nothing is wrong.
   .credentials.json                  # shared API credentials
   agent_workspace_map.json           # instance_id → workspace path
   agent_modes_map.json               # instance_id → list of opted-in modes (e.g. ["auto", "DooD"])
-  cache/                             # shared toolchain caches (cargo, npm, …); mounted into [prog] agents only
+  cache/                             # shared toolchain caches (cargo, npm, …); mounted into [code] agents only
   user_extras/                       # hand-edited, non-project-specific user configuration
     firewall_whitelist.txt           # user-managed extra domains for {auto} mode (auto-created with a template preamble; comments + one domain per line)
     optional_creds/                  # opt-in passthrough creds; see "Optional Host Mounts" below
@@ -322,7 +322,7 @@ Each is independent; nothing here is required for a basic launch.
 | Mount | Source | Container path | Trigger |
 |---|---|---|---|
 | Workspace prompts | `<workspace>/.prompts/` | (left in-place at `/workspace/.prompts/`; surfaced by the in-container `man`) | dir present in workspace |
-| Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | agent filename includes `[prog]` |
+| Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | agent filename includes `[code]` |
 | Firewall whitelist | `~/.claude-agents/user_extras/firewall_whitelist.txt` | `/usr/local/etc/firewall_whitelist.txt` (ro) | instance has `{auto}` mode enabled |
 | Docker socket | `/var/run/docker.sock` (host) | `/var/run/docker.sock` | instance has `{DooD}` mode enabled (asked at create/modify) |
 | Optional creds | `~/.claude-agents/user_extras/optional_creds/<service>/` | varies by service (see below) | path exists on host |
@@ -335,7 +335,7 @@ the corresponding CLI just works. Read-write (cloud CLIs need to refresh
 tokens, write cache, etc.). Anything not in this list is ignored — extend
 `OPTIONAL_CREDS_MOUNTS` in `launch/paths.py` to recognize more tools.
 
-| `optional_creds/` entry | Container path | CLI | Auto-installed in `[prog]` |
+| `optional_creds/` entry | Container path | CLI | Auto-installed in `[code]` |
 |---|---|---|---|
 | `aws/`     | `/home/claude/.aws/`                       | `aws`     | ✓ via `uv tool install awscli` |
 | `gcloud/`  | `/home/claude/.config/gcloud/`             | `gcloud`, `gsutil` | ✓ via apt (Google Cloud apt repo) — heavy install (~400-500MB) |
@@ -346,15 +346,15 @@ tokens, write cache, etc.). Anything not in this list is ignored — extend
 | `jira/`    | `/home/claude/.config/.jira/`              | `jira` (ankitpokhrel/jira-cli) | ✓ static binary from GitHub releases. Drop `.config.yml` (server/login) here; put the API key in a plain-text file named `jira/token` — the launcher reads it and forwards as `$JIRA_API_TOKEN` (jira-cli's default token env var). Your Jira host (`<org>.atlassian.net`) needs to be in the {auto} whitelist for the CLI to reach it. |
 | `vercel/`  | `/home/claude/.local/share/com.vercel.cli/`| `vercel`  | ✓ via `npm install -g vercel` |
 | `railway/` | `/home/claude/.config/railway/`            | `railway` | ✓ via `npm install -g @railway/cli` |
-| `npmrc`    | `/home/claude/.npmrc`                      | `npm` (auth tokens) | — `npm` is in the prog image |
+| `npmrc`    | `/home/claude/.npmrc`                      | `npm` (auth tokens) | — `npm` is in the code image |
 | `pypirc`   | `/home/claude/.pypirc`                     | `twine` / pip uploads | — install yourself: `uv tool install twine` |
 
 **Auto-install:** for entries marked ✓, dropping the credentials dir on the
-host also flips an `INSTALL_<TOOL>=1` build-arg, and `Dockerfile.prog`
-installs the CLI on the next `[prog]` build. Each tool gets its own ARG, so
+host also flips an `INSTALL_<TOOL>=1` build-arg, and `Dockerfile.code`
+installs the CLI on the next `[code]` build. Each tool gets its own ARG, so
 adding a new credential only invalidates that tool's layer (downstream
 layers re-run as no-ops). Removing a credential reverses it on the next
-build. Auto-install only happens for `[prog]`-tagged agents; non-prog
+build. Auto-install only happens for `[code]`-tagged agents; non-code
 agents get the credentials passthrough but no CLI (those agents probably
 don't need cloud tools anyway).
 
@@ -370,7 +370,7 @@ doesn't appear in host-side `ps auxe`. Service→env-var mapping lives in
 service, add one entry there and one passthrough line to `docker/compose.yml`'s
 `environment:` block.
 
-To enable AWS in any `[prog]` agent, for example:
+To enable AWS in any `[code]` agent, for example:
 
 ```bash
 mkdir -p ~/.claude-agents/user_extras/optional_creds
@@ -378,7 +378,7 @@ ln -s ~/.aws ~/.claude-agents/user_extras/optional_creds/aws    # symlink so hos
 # or:  cp -r ~/.aws ~/.claude-agents/user_extras/optional_creds/aws
 ```
 
-Next launch of any `[prog]` agent: the prog image rebuilds with `awscli`
+Next launch of any `[code]` agent: the code image rebuilds with `awscli`
 installed, and the mounted creds make it ready to use.
 
 ## Project Layout
@@ -389,11 +389,11 @@ launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), per-layer bind-mount dicts (DOCKER_BASE_MOUNTS, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
   utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port. No disk access (that's file_access). Leaf module.
   file_access.py                     # every disk-touching call routes through here. Agent filename grammar (parse_stem) + .md/.conf lookup (find_md_for_agent, conf_path_for, load_conf), cached load/save of agent_workspace_map.json + agent_modes_map.json, ensure_shared_oauth_files (touches the two OAuth files as `{}` if absent), force_remove with sudo + `sudo -k` fallback, installed_cred_clis (space-joins CLIs with creds present).
-  structs.py                         # identity dataclasses — AgentIdentity → InstanceIdentity → SessionIdentity (frozen=True, inheritance) + InstanceModifiers enum (BASE / TAG_PROG / MODE_AUTO / MODE_DOOD). SessionIdentity.chain returns the active-modifier-values tuple (BASE first, declaration order) and validates self.tags/self.modes against the taxonomy.
+  structs.py                         # identity dataclasses — AgentIdentity → InstanceIdentity → SessionIdentity (frozen=True, inheritance) + InstanceModifiers enum (BASE / TAG_CODE / MODE_AUTO / MODE_DOOD). SessionIdentity.chain returns the active-modifier-values tuple (BASE first, declaration order) and validates self.tags/self.modes against the taxonomy.
   compose_env.py                     # compose-side env-var staging — ComposeEnvKey enum, _compose_env accumulator + stage_compose_env, subprocess_env overlay, container_env_args (→ `-e KEY=VALUE` flags), conf_env_args, install_creds_flags, token_env_dict. set_container_env orchestrator (sister to docker_config's set_container_mounts).
   docker_config.py                   # docker subprocesses + bind-mount accumulator + image-chain naming. add_docker_mount, set_container_mounts, ensure_image, run_compose; docker CLI wrappers (require_docker, detect_docker_gid, wait_for_container_running, docker_exec_root, any_agent_container_running). Every direct `docker` call lives here.
   memory_addendums.py                # launch-time directives for CLAUDE.md. Addendum(NamedTuple) instances — SEEK_SUMMARY, MAINTAIN_PRIVACY, CREDENTIALS_NOTICE, FIREWALL_NOTICE — mapped per modifier via MODIFIER_ADDENDUMS. composed_addendum(chain) renders the active sub-sections under a single `## Launch-time addendums` heading.
-  agent_composition.py               # compose_chain(sess_id) dispatch → _apply_prog / _apply_auto / _apply_dood handlers; warn_if_dangerous_modes ({auto}+{DooD} red press-any-key warning); cache prepare/prune helpers ([prog] only).
+  agent_composition.py               # compose_chain(sess_id) dispatch → _apply_code / _apply_auto / _apply_dood handlers; warn_if_dangerous_modes ({auto}+{DooD} red press-any-key warning); cache prepare/prune helpers ([code] only).
   network.py                         # {auto}-mode firewall coordination — BUILTIN_FIREWALL_DOMAINS (~135 entries), two-phase DNS resolution (sync Phase 1 → streaming Phase 2 via docker exec iptables -I), cross-launch resolved-IP cache (~/.claude-agents/resolved_domains.txt, 6h TTL), agent-visible status file (domains_pending_resolve.yml).
   agents_crud.py                     # instance-state CRUD — list_all_instances, update_workspace_map, set_instance_modes, install_latest_md (writes source `.md` + composed_addendum to state-dir CLAUDE.md in one go), modify_instance, delete_instance, resolve_pick, picker-entry builders (creatable_agents, continuable_instances), sort keys.
   user_additions.py                  # optional_creds_* (mounts, install env flags, token env vars) + plant_user_extras (auto-creates user_extras/optional_creds_readme.txt always; firewall_whitelist.txt only under {auto}). Bundled skills + commands ride along in DOCKER_BASE_MOUNTS; no per-skill code lives here.
@@ -410,7 +410,7 @@ settings/                            # status line + bashrc + Claude Code settin
 tips/                                # reference notes (`project_claude_files.md`, `running_audit.md`, `chat_syntax.md`, …). Read by humans, not the launcher.
 docker/
   Dockerfile, compose.yml            # base image + base compose (compose.yml uses `network: host` for builds to dodge BuildKit DNS issues)
-  Dockerfile.prog, compose.prog.yml  # [prog] tag layer (Rust + Node + uv); conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
+  Dockerfile.code, compose.code.yml  # [code] tag layer (Rust + Node + uv); conditional CLI installs gated by INSTALL_<TOOL>=1 build-args
   Dockerfile.auto, compose.auto.yml  # {auto} mode layer (iptables + sudo + entrypoint wrapper)
   Dockerfile.dood, compose.dood.yml  # {DooD} mode layer (docker.sock bind-mount)
   init-firewall.sh                   # iptables outbound whitelist; container-side does no DNS — it sees pre-resolved IPs only

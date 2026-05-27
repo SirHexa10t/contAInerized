@@ -2,8 +2,8 @@
 # jq/yq (data) + python3 + uv (Python) + rich-cli (used by /print) + Claude Code
 # itself. Tagged `claude-agents:base` by compose.
 #
-# Programming-oriented agents (filename includes [prog]) layer the heavier build
-# environment on top via docker/Dockerfile.prog (which does `FROM claude-agents:base`).
+# Programming-oriented agents (filename includes [code]) layer the heavier build
+# environment on top via docker/Dockerfile.code (which does `FROM claude-agents:base`).
 
 FROM debian:bookworm-slim
 

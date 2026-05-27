@@ -100,7 +100,7 @@ mount-staging code (`docker_config.set_container_mounts` and the `_apply_<modifi
 handlers in `agent_composition`) just iterates these dicts — new entry is a
 data-side change, not a code change. Pick the dict by scope: `DOCKER_BASE_MOUNTS`
 (every launch), `DOCKER_AUTO_MOUNTS` (`{auto}` only), `DOCKER_DOOD_MOUNTS` (`{DooD}`
-only), `CACHE_MOUNTS` (`[prog]` cache shares).
+only), `CACHE_MOUNTS` (`[code]` cache shares).
 
 ### A new modifier (tag or mode)
 

@@ -14,13 +14,13 @@ class TestInstanceModifiersMembers(unittest.TestCase):
 
     def test_expected_members(self):
         names = [m.name for m in InstanceModifiers]
-        self.assertEqual(names, ["BASE", "TAG_PROG", "MODE_WARN_AUTO", "MODE_WARN_DOOD", "MODE_WEB"])
+        self.assertEqual(names, ["BASE", "TAG_CODE", "MODE_WARN_AUTO", "MODE_WARN_DOOD", "MODE_WEB"])
 
     def test_base_value(self):
         self.assertEqual(InstanceModifiers.BASE.value, "base")
 
-    def test_tag_prog_value(self):
-        self.assertEqual(InstanceModifiers.TAG_PROG.value, "prog")
+    def test_tag_code_value(self):
+        self.assertEqual(InstanceModifiers.TAG_CODE.value, "code")
 
     def test_mode_auto_value(self):
         self.assertEqual(InstanceModifiers.MODE_WARN_AUTO.value, "auto")
@@ -37,8 +37,8 @@ class TestInstanceModifiersMembers(unittest.TestCase):
 class TestInstanceModifiersSubsetViews(unittest.TestCase):
     """tags() / modes() / *_values() — BASE is excluded from both subset views."""
 
-    def test_tags_only_prog(self):
-        self.assertEqual(list(InstanceModifiers.tags()), [InstanceModifiers.TAG_PROG])
+    def test_tags_only_code(self):
+        self.assertEqual(list(InstanceModifiers.tags()), [InstanceModifiers.TAG_CODE])
 
     def test_modes_in_declaration_order(self):
         self.assertEqual(
@@ -53,30 +53,15 @@ class TestInstanceModifiersSubsetViews(unittest.TestCase):
         self.assertNotIn(InstanceModifiers.BASE, InstanceModifiers.modes())
 
     def test_tag_values(self):
-        self.assertEqual(InstanceModifiers.tag_values(), ("prog",))
+        self.assertEqual(InstanceModifiers.tag_values(), ("code",))
 
     def test_mode_values(self):
         self.assertEqual(InstanceModifiers.mode_values(), ("auto", "DooD", "web"))
 
 
-class TestInstanceModifiersSlug(unittest.TestCase):
-    def test_base_slug(self):
-        self.assertEqual(InstanceModifiers.BASE.slug, "base")
-
-    def test_tag_prog_slug(self):
-        self.assertEqual(InstanceModifiers.TAG_PROG.slug, "prog")
-
-    def test_mode_auto_slug(self):
-        self.assertEqual(InstanceModifiers.MODE_WARN_AUTO.slug, "auto")
-
-    def test_mode_dood_slug_lowercases(self):
-        # slug lowercases the canonical value — DooD → dood
-        self.assertEqual(InstanceModifiers.MODE_WARN_DOOD.slug, "dood")
-
-
 class TestInstanceModifiersLabel(unittest.TestCase):
     def test_tag_label_uses_brackets(self):
-        self.assertEqual(InstanceModifiers.TAG_PROG.label, "[prog]")
+        self.assertEqual(InstanceModifiers.TAG_CODE.label, "[code]")
 
     def test_mode_label_uses_braces(self):
         self.assertEqual(InstanceModifiers.MODE_WARN_AUTO.label, "{auto}")
@@ -86,36 +71,45 @@ class TestInstanceModifiersLabel(unittest.TestCase):
 
     def test_base_label_is_bare_value(self):
         # BASE has no decorative wrapping — it's never user-facing, but label
-        # is reachable via the labels dict comprehension in format_prefix, so
-        # it shouldn't render with misleading mode-style braces.
+        # is reachable via colored_label / in_order, so it shouldn't render
+        # with misleading mode-style braces.
         self.assertEqual(InstanceModifiers.BASE.label, "base")
 
 
-class TestFormatPrefix(unittest.TestCase):
+class TestInOrder(unittest.TestCase):
     def test_empty(self):
-        self.assertEqual(InstanceModifiers.format_prefix([]), "")
+        self.assertEqual(InstanceModifiers.in_order([]), ())
 
-    def test_single_tag(self):
-        self.assertEqual(InstanceModifiers.format_prefix([InstanceModifiers.TAG_PROG]), "[prog] ")
-
-    def test_single_mode(self):
-        self.assertEqual(InstanceModifiers.format_prefix([InstanceModifiers.MODE_WARN_AUTO]), "{auto} ")
-
-    def test_tag_then_mode(self):
+    def test_single(self):
         self.assertEqual(
-            InstanceModifiers.format_prefix([InstanceModifiers.TAG_PROG, InstanceModifiers.MODE_WARN_AUTO]),
-            "[prog] {auto} ",
+            InstanceModifiers.in_order([InstanceModifiers.TAG_CODE]),
+            (InstanceModifiers.TAG_CODE,),
         )
 
-    def test_preserves_input_order(self):
-        # Output reflects the input sequence, not enum declaration order.
+    def test_sorts_by_enum_declaration_order(self):
+        # Input order shouldn't matter — output follows BASE → tags → modes.
         self.assertEqual(
-            InstanceModifiers.format_prefix([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.TAG_PROG]),
-            "{auto} [prog] ",
+            InstanceModifiers.in_order([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.TAG_CODE]),
+            (InstanceModifiers.TAG_CODE, InstanceModifiers.MODE_WARN_AUTO),
         )
 
-    def test_mode_dood_label(self):
-        self.assertEqual(InstanceModifiers.format_prefix([InstanceModifiers.MODE_WARN_DOOD]), "{DooD} ")
+    def test_dedupes(self):
+        self.assertEqual(
+            InstanceModifiers.in_order([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_AUTO]),
+            (InstanceModifiers.MODE_WARN_AUTO,),
+        )
+
+
+class TestColoredChain(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(InstanceModifiers.colored_chain([]), "")
+
+    def test_canonical_order_and_self_reset(self):
+        # Input order swapped from declaration order — output should still
+        # be `[code]` first, then `{auto}` per InstanceModifiers ordering.
+        out = InstanceModifiers.colored_chain([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.TAG_CODE])
+        # Green code → space → red auto, each ANSI-wrapped with self-reset.
+        self.assertEqual(out, "\033[22;92m[code]\033[0m \033[01;91m{auto}\033[0m")
 
 
 # ============================================================
@@ -188,26 +182,26 @@ class TestSessionIdentityChain(unittest.TestCase):
         self.assertEqual(self._sess([], []).chain, ("base",))
 
     def test_tag_appended(self):
-        self.assertEqual(self._sess([InstanceModifiers.TAG_PROG], []).chain, ("base", "prog"))
+        self.assertEqual(self._sess([InstanceModifiers.TAG_CODE], []).chain, ("base", "code"))
 
     def test_mode_appended(self):
         self.assertEqual(self._sess([], [InstanceModifiers.MODE_WARN_AUTO]).chain, ("base", "auto"))
 
     def test_full_chain(self):
         self.assertEqual(
-            self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]).chain,
-            ("base", "prog", "auto", "DooD"),
+            self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]).chain,
+            ("base", "code", "auto", "DooD"),
         )
 
     def test_order_follows_declaration_not_input(self):
         # Even if modes come in as (DOOD, AUTO), chain enforces declaration order.
         self.assertEqual(
-            self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]).chain,
-            ("base", "prog", "auto", "DooD"),
+            self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]).chain,
+            ("base", "code", "auto", "DooD"),
         )
 
     def test_base_always_first(self):
-        chain = self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO]).chain
+        chain = self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO]).chain
         self.assertEqual(chain[0], "base")
 
     # --- validation moved to the property boundaries ---
@@ -234,7 +228,7 @@ class TestSessionIdentityChain(unittest.TestCase):
 
     def test_chain_returns_tuple(self):
         # Tuple (immutable) — signals "don't mutate this".
-        self.assertIsInstance(self._sess([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO]).chain, tuple)
+        self.assertIsInstance(self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO]).chain, tuple)
 
 
 # ============================================================

@@ -60,7 +60,7 @@ def optional_creds_mounts() -> list[str]:
     cache. Missing entries are silently skipped — opt-in is via presence on
     the host. Returns the sorted list of mounted service names (for the
     launch banner). Tuple unpack discards the cli-name half — that's a
-    [prog]-addendum concern, not a mount concern."""
+    [code]-addendum concern, not a mount concern."""
     services = sorted(present_optional_cred_services())
     for name in services:
         mount_target, _ = OPTIONAL_CREDS_MOUNTS[name]

@@ -41,7 +41,7 @@ from .structs import InstanceModifiers
 # provide the two subset views. Adding a new tag/mode means one line in that
 # enum AND wiring its `_apply_<x>()` handler into `compose_chain` below.
 
-# === [prog]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
+# === [code]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
 CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
 CACHE_PRUNE_MIN_AGE_DAYS = 7   # files younger than this are kept even when over threshold
 SECONDS_PER_DAY = 86400        # used by prune_caches to convert MIN_AGE_DAYS into an epoch-seconds cutoff
@@ -78,8 +78,8 @@ def prune_caches() -> None:
             print(f"  Pruned {host.relative_to(CACHE_ROOT)}: freed {freed / 1024**3:.1f} GB (was {total / 1024**3:.1f} GB)")
 
 
-def _apply_prog() -> None:
-    """[prog] tag handler. Three side effects, no return value:
+def _apply_code() -> None:
+    """[code] tag handler. Three side effects, no return value:
       • prepare_caches() mkdirs the host cache dirs (so the bind-mount targets
         exist before the container starts; otherwise Docker creates them as
         root and we can't clean them up later).
@@ -87,7 +87,7 @@ def _apply_prog() -> None:
       • add_docker_mount stages each cache as a bind-mount for the upcoming
         `docker compose run` (read-write — toolchains write into them).
 
-    The compose/Dockerfile pair (compose.prog.yml + docker/Dockerfile.prog) is
+    The compose/Dockerfile pair (compose.code.yml + docker/Dockerfile.code) is
     NOT selected here — chain order in compose_chain handles that."""
     prepare_caches()
     prune_caches()
@@ -120,8 +120,8 @@ def _apply_dood() -> None:
 def _apply_web() -> None:
     """{web} mode: no per-launch side effects. Playwright's default
     browser-install location (`~/.cache/ms-playwright/`) sits under the
-    `~/.cache` mount that [prog]'s `_apply_prog` already stages, so the
-    host cache is shared across every [prog][web] instance with no extra
+    `~/.cache` mount that [code]'s `_apply_code` already stages, so the
+    host cache is shared across every [code][web] instance with no extra
     plumbing. This handler exists for the test_essential_files contract
     (every non-BASE modifier has an `_apply_<slug>` callable)."""
     pass
@@ -218,8 +218,8 @@ def compose_chain(sess_id) -> list[str]:
     iterates InstanceModifiers."""
     chain = sess_id.chain   # validates against InstanceModifiers taxonomy
 
-    if InstanceModifiers.TAG_PROG.value in chain:
-        _apply_prog()
+    if InstanceModifiers.TAG_CODE.value in chain:
+        _apply_code()
     if InstanceModifiers.MODE_WARN_AUTO.value in chain:
         _apply_auto(sess_id.state_dir)
     if InstanceModifiers.MODE_WARN_DOOD.value in chain:

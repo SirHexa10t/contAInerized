@@ -72,12 +72,12 @@ That wrapper is dead indirection — the call site can call `domain_helper(a, b)
 - **Dispatch table over `if/elif` chain.** When each branch is `if x == "foo": _foo(); elif x == "bar": _bar(); ...`, replace with a `{"foo": _foo, "bar": _bar}.get(x)` lookup. Adding a case becomes one line in one place.
 - **Walrus to bind constants inside their ordered list.** Instead of:
   ```python
-  TAG_PROG = "prog"
-  ORDERED_TAGS = [TAG_PROG]
+  TAG_CODE = "code"
+  ORDERED_TAGS = [TAG_CODE]
   ```
   use:
   ```python
-  ORDERED_TAGS = [TAG_PROG := "prog"]
+  ORDERED_TAGS = [TAG_CODE := "code"]
   ```
   One source, no chance of drift.
 - **Set operations for membership/validation.** For "items in X not in Y", use `X - Y` rather than a loop with a flag.

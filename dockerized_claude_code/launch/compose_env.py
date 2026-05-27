@@ -189,10 +189,10 @@ def subprocess_env() -> dict[str, str]:
 # user_additions, not here.
 
 def install_creds_flags(services) -> dict[str, str]:
-    """`{INSTALL_<TOOL>: '0' | '1'}` dict for Dockerfile.prog's build-args.
+    """`{INSTALL_<TOOL>: '0' | '1'}` dict for Dockerfile.code's build-args.
     One entry per OPTIONAL_CREDS_MOUNTS service; value is '1' when the
     matching cred dir is present (in `services`), '0' otherwise.
-    Dockerfile.prog branches on each flag to decide whether to install
+    Dockerfile.code branches on each flag to decide whether to install
     that CLI."""
     return {f"INSTALL_{name.upper()}": ("1" if name in services else "0")
             for name in OPTIONAL_CREDS_MOUNTS}

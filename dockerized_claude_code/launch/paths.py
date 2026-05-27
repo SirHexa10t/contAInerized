@@ -227,13 +227,13 @@ COMPOSE_FILE_PATH = DOCKER_DIR / "compose.yml"
 
 
 # ============================================================
-# Toolchain caches — shared across [prog] agents/sessions
+# Toolchain caches — shared across [code] agents/sessions
 # ============================================================
 # Same relative path on host and in container; CACHE_MOUNTS pairs each host
 # cache (CACHE_ROOT / rel) with its container destination (CLAUDE_HOME_IN_CONTAINER / rel).
 
 CACHE_REL_PATHS = [
-    # [prog]-related
+    # [code]-related
     ".cache",  # XDG cache: uv, pip, poetry, pre-commit, huggingface, torch, yarn-v1, go-build, ccache, ...
     ".cargo/registry",           # Rust crates (.crate tarballs + index)
     ".cargo/git",                # Rust git dependencies
@@ -264,8 +264,8 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACH
 # in docker_config — are spread into the compose env in set_container_env.)
 #
 # Value tuple: (container_mount_target, cli_name). `cli_name` is the binary
-# name of the CLI installed by Dockerfile.prog for this service (e.g. "kubectl"
-# for the "kube" service) — surfaced into the [prog] memory addendum so the
+# name of the CLI installed by Dockerfile.code for this service (e.g. "kubectl"
+# for the "kube" service) — surfaced into the [code] memory addendum so the
 # agent knows which tools its provided creds unlock. `None` for services that
 # only contribute config to an existing tool rather than installing a new one
 # (ssh uses the system ssh, npmrc/pypirc tune existing npm/pip behavior).

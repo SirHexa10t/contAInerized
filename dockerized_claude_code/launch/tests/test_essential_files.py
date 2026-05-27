@@ -3,7 +3,7 @@ exist at the paths it computes. Catches "renamed/moved a file but missed a
 reference" regressions immediately.
 
 For each InstanceModifier modifier (except BASE), this also verifies the
-modifier's Dockerfile, compose layer, and `_apply_<slug>` handler are all
+modifier's Dockerfile, compose layer, and `_apply_<value>` handler are all
 in place — so adding a new modifier requires all three to land at once
 (otherwise the build will fail at runtime; here it fails at test time)."""
 
@@ -40,8 +40,9 @@ class TestBaseDockerArtifacts(unittest.TestCase):
 
 class TestModifierArtifactsPresent(unittest.TestCase):
     """For every non-BASE modifier, the three files that compose its image
-    layer must all exist: Dockerfile.<slug>, compose.<slug>.yml, and an
-    `_apply_<slug>` callable in agent_composition."""
+    layer must all exist: Dockerfile.<value>, compose.<value>.yml, and an
+    `_apply_<value>` callable in agent_composition — all lowercased
+    (matters for {DooD}, whose canonical value preserves the mixed case)."""
 
     def _non_base_modifiers(self):
         return [m for m in InstanceModifiers if m is not InstanceModifiers.BASE]
@@ -49,7 +50,7 @@ class TestModifierArtifactsPresent(unittest.TestCase):
     def test_each_modifier_has_dockerfile(self):
         for m in self._non_base_modifiers():
             with self.subTest(modifier=m.value):
-                df = paths.DOCKER_DIR / f"Dockerfile.{m.slug}"
+                df = paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
                 self.assertTrue(df.is_file(), f"missing Dockerfile for {m.value}: {df}")
 
     def test_each_modifier_has_compose_layer(self):
@@ -61,7 +62,7 @@ class TestModifierArtifactsPresent(unittest.TestCase):
     def test_each_modifier_has_apply_handler(self):
         for m in self._non_base_modifiers():
             with self.subTest(modifier=m.value):
-                handler_name = f"_apply_{m.slug}"
+                handler_name = f"_apply_{m.value.lower()}"
                 self.assertTrue(
                     hasattr(agent_composition, handler_name),
                     f"agent_composition is missing {handler_name}() for {m.value}",

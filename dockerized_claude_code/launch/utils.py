@@ -59,14 +59,14 @@ def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
     Grammar: <name>(<bracketed-tag>|<parenthesized-parent>)*
       - `[tag]` accumulates into tags (list, in the order they appear).
       - `(parent)` is single-valued; if repeated, last wins.
-      - Order between brackets and parens is free: 'name[prog](thinker)' and
-        'name(thinker)[prog]' both parse the same way.
+      - Order between brackets and parens is free: 'name[code](thinker)' and
+        'name(thinker)[code]' both parse the same way.
 
     Examples:
         'name'                → ('name', [], None)
         'name(thinker)'       → ('name', [], 'thinker')
-        'name[prog]'          → ('name', ['prog'], None)
-        'name[prog](thinker)' → ('name', ['prog'], 'thinker')
+        'name[code]'          → ('name', ['code'], None)
+        'name[code](thinker)' → ('name', ['code'], 'thinker')
         'name[a][b]'          → ('name', ['a', 'b'], None)
     """
     m = re.match(r"^([^()\[\]]+)", stem)

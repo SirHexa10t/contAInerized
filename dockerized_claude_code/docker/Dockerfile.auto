@@ -11,7 +11,7 @@
 #
 # Chain note: PARENT_IMAGE is set by run.py based on what comes before {auto}
 # in the chain — typically claude-agents:base for an auto-only agent, or
-# claude-agents:prog for a [prog] {auto} agent. Default below is the standalone case.
+# claude-agents:code for a [code] {auto} agent. Default below is the standalone case.
 
 ARG PARENT_IMAGE=claude-agents:base
 FROM ${PARENT_IMAGE}

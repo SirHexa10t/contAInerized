@@ -43,7 +43,7 @@ from .structs import InstanceIdentity
 # ============================================================
 # Every bind-mount for `docker compose run` flows through this dict. set_container_mounts
 # stages the always-on set (paths.DOCKER_BASE_MOUNTS + the per-instance workspace/state dirs);
-# agent_composition's tag/mode handlers stage chain-step contributions ([prog] caches);
+# agent_composition's tag/mode handlers stage chain-step contributions ([code] caches);
 # user_additions stages skills + optional creds. run_compose flattens the dict into
 # `-v src:tgt[:ro]` flags appended to the docker compose command. Mirror of
 # compose_env's `_compose_env` / stage_compose_env pattern — declarations flow
@@ -77,7 +77,7 @@ def staged_mounts() -> dict[str, str]:
 
 def chain_image_tag(chain: list[str]) -> str:
     """The docker image tag for a chain. ['base'] → 'claude-agents:base'.
-    ['base', 'prog', 'auto'] → 'claude-agents:prog.auto' (lowercase to match
+    ['base', 'code', 'auto'] → 'claude-agents:code.auto' (lowercase to match
     the lowercase compose/Dockerfile filenames)."""
     if len(chain) == 1:
         return "claude-agents:base"
@@ -229,7 +229,7 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
     substitutes to the chain output, set the terminal title, then exec
     `docker compose run`. By the time we get here every bind-mount has been
     staged via add_docker_mount (base set, per-instance workspace/state,
-    [prog] caches, skills, optional creds) — flatten _docker_mounts into `-v`
+    [code] caches, skills, optional creds) — flatten _docker_mounts into `-v`
     flags inline. sys.exits with the container's return code.
 
     {auto}-mode firewall coordination: block on Phase 1 (critical Anthropic

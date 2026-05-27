@@ -69,21 +69,21 @@ class TestTagSortKey(unittest.TestCase):
         self.assertEqual(tag_sort_key([]), ())
 
     def test_known_tag(self):
-        # TAG_PROG is at index 0 of InstanceModifiers.tag_values()
-        self.assertEqual(tag_sort_key([InstanceModifiers.TAG_PROG]), (0,))
+        # TAG_CODE is at index 0 of InstanceModifiers.tag_values()
+        self.assertEqual(tag_sort_key([InstanceModifiers.TAG_CODE]), (0,))
 
     def test_sorted_internally(self):
         # tag_sort_key sorts its members so the key is order-stable regardless
         # of input order. With only one known tag the result is a 1-tuple
         # whichever way it's passed.
         self.assertEqual(
-            tag_sort_key([InstanceModifiers.TAG_PROG]),
-            tag_sort_key([InstanceModifiers.TAG_PROG]),
+            tag_sort_key([InstanceModifiers.TAG_CODE]),
+            tag_sort_key([InstanceModifiers.TAG_CODE]),
         )
 
     def test_untagged_sorts_before_tagged(self):
         # Empty tuple < any non-empty tuple lexicographically
-        self.assertLess(tag_sort_key([]), tag_sort_key([InstanceModifiers.TAG_PROG]))
+        self.assertLess(tag_sort_key([]), tag_sort_key([InstanceModifiers.TAG_CODE]))
 
 
 class TestModeSortKey(unittest.TestCase):

@@ -20,24 +20,27 @@ run_compose (terminal title); nothing else does."""
 
 from .file_access import read_json_field
 from .paths import ACCOUNT_FILE
-from .structs import InstanceIdentity
+from .structs import InstanceIdentity, InstanceModifiers, SessionIdentity
 
 
 def build_status_line(inst_id: InstanceIdentity) -> str:
     """ANSI label for Claude Code's bottom status line — cyan agent + grey
-    workspace + green email + blue instance (`<agent>__<session>`). The
-    `<email> :` prefix drops out when .claude.json is missing or lacks a
-    recognisable email field. Accepts any InstanceIdentity (or subclass —
-    SessionIdentity works too); only reads .agent / .session / .workspace /
-    .instance."""
+    workspace + green email + blue instance (`<agent>__<session>`), with the
+    modifier chain (warning-aware reds + greens) trailing. The `<email> :`
+    prefix drops out when .claude.json is missing or lacks a recognisable
+    email field. Accepts any InstanceIdentity (or subclass — SessionIdentity
+    works too); reads .agent / .session / .workspace / .instance / .tags,
+    plus .modes when the identity is a SessionIdentity."""
     CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
-    session_label = (f"{inst_id.agent.replace('-', ' ').title()} - {inst_id.session.replace('-', ' ').replace('_', ' ').title()}"
-                     f" {GREY}( {inst_id.workspace} ){RESET}")
-    identity_label = f"{BLUE}{inst_id.instance}{RESET}"
+    def cap(name):
+        return name.replace('-', ' ').replace('_', ' ').title()
+
     email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
-    if email:
-        identity_label = f"{GREEN}{email}{RESET} : {identity_label}"
-    return f"{CYAN}● {session_label}\t\t{identity_label}"
+    modes = inst_id.modes if isinstance(inst_id, SessionIdentity) else ()
+    chain = InstanceModifiers.colored_chain(inst_id.tags + modes)
+    return (f"{CYAN}● {cap(inst_id.agent)} - {cap(inst_id.session)} {GREY}( {inst_id.workspace} ){RESET}"
+            f"\t\t{GREEN}{email}{RESET}{ ' : ' if email else ''}{BLUE}{inst_id.instance}{RESET}"
+            f"  {chain}")
 
 
 def set_terminal_title(name: str) -> None:

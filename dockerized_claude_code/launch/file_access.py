@@ -469,7 +469,7 @@ def present_optional_cred_services() -> frozenset[str]:
 
 def installed_cred_clis() -> str:
     """Space-joined CLI names for present optional-cred services that install
-    a CLI in Dockerfile.prog (cli != None in OPTIONAL_CREDS_MOUNTS). Order
+    a CLI in Dockerfile.code (cli != None in OPTIONAL_CREDS_MOUNTS). Order
     follows the OPTIONAL_CREDS_MOUNTS declaration so the addendum reads in a
     stable order across launches. Used to render the body of
     memory_addendums.CREDENTIALS_NOTICE — a no-creds environment collapses

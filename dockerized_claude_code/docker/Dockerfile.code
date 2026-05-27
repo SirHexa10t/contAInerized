@@ -1,9 +1,9 @@
 # Programming-stack image — extends its PARENT_IMAGE (default claude-agents:base)
 # with build-essential, Rust toolchain, and Node.js LTS. Built when an agent's
-# filename includes the [prog] tag.
+# filename includes the [code] tag.
 #
 # Build chain: PARENT_IMAGE is set by run.py's ensure_image() to whatever
-# precedes prog in the chain — for prog as the first chain step, that's
+# precedes code in the chain — for code as the first chain step, that's
 # claude-agents:base. The default below is the standalone case.
 #
 # Optional CLI installs at the end are gated by INSTALL_<TOOL>=1 build-args, set

@@ -51,12 +51,12 @@ class TestComposeChainReturn(unittest.TestCase):
 
     def setUp(self):
         self.patches = [
-            patch.object(agent_composition, "_apply_prog"),
+            patch.object(agent_composition, "_apply_code"),
             patch.object(agent_composition, "_apply_auto"),
             patch.object(agent_composition, "_apply_dood"),
         ]
         self.mocks = [p.start() for p in self.patches]
-        self.mock_prog, self.mock_auto, self.mock_dood = self.mocks
+        self.mock_code, self.mock_auto, self.mock_dood = self.mocks
 
     def tearDown(self):
         for p in self.patches:
@@ -66,17 +66,17 @@ class TestComposeChainReturn(unittest.TestCase):
         sess = _FakeSess.make([], [], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base"])
 
-    def test_prog_chain(self):
-        sess = _FakeSess.make([InstanceModifiers.TAG_PROG], [], Path("/tmp/state"))
-        self.assertEqual(compose_chain(sess), ["base", "prog"])
+    def test_code_chain(self):
+        sess = _FakeSess.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state"))
+        self.assertEqual(compose_chain(sess), ["base", "code"])
 
     def test_full_chain_order(self):
-        sess = _FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state"))
-        self.assertEqual(compose_chain(sess), ["base", "prog", "auto", "DooD"])
+        sess = _FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state"))
+        self.assertEqual(compose_chain(sess), ["base", "code", "auto", "DooD"])
 
     def test_chain_order_independent_of_input(self):
-        sess = _FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state"))
-        self.assertEqual(compose_chain(sess), ["base", "prog", "auto", "DooD"])
+        sess = _FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state"))
+        self.assertEqual(compose_chain(sess), ["base", "code", "auto", "DooD"])
 
 
 class TestComposeChainDispatch(unittest.TestCase):
@@ -84,12 +84,12 @@ class TestComposeChainDispatch(unittest.TestCase):
 
     def setUp(self):
         self.patches = [
-            patch.object(agent_composition, "_apply_prog"),
+            patch.object(agent_composition, "_apply_code"),
             patch.object(agent_composition, "_apply_auto"),
             patch.object(agent_composition, "_apply_dood"),
         ]
         self.mocks = [p.start() for p in self.patches]
-        self.mock_prog, self.mock_auto, self.mock_dood = self.mocks
+        self.mock_code, self.mock_auto, self.mock_dood = self.mocks
 
     def tearDown(self):
         for p in self.patches:
@@ -97,13 +97,13 @@ class TestComposeChainDispatch(unittest.TestCase):
 
     def test_no_handlers_fired_for_base_only(self):
         compose_chain(_FakeSess.make([], [], Path("/tmp/state")))
-        self.mock_prog.assert_not_called()
+        self.mock_code.assert_not_called()
         self.mock_auto.assert_not_called()
         self.mock_dood.assert_not_called()
 
-    def test_prog_handler_fires_for_prog_tag(self):
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [], Path("/tmp/state")))
-        self.mock_prog.assert_called_once()
+    def test_code_handler_fires_for_code_tag(self):
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state")))
+        self.mock_code.assert_called_once()
         self.mock_auto.assert_not_called()
         self.mock_dood.assert_not_called()
 
@@ -117,30 +117,30 @@ class TestComposeChainDispatch(unittest.TestCase):
         self.mock_dood.assert_called_once()
 
     def test_all_three_fire_when_all_active(self):
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
-        self.mock_prog.assert_called_once()
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
+        self.mock_code.assert_called_once()
         self.mock_auto.assert_called_once()
         self.mock_dood.assert_called_once()
 
-    def test_prog_handler_not_fired_for_auto_only(self):
-        # No [prog] tag → no programming-toolchain caches are mounted, no
-        # programming-image layer is selected. Critical guarantee: a non-[prog]
-        # agent never inherits the [prog] tag's side effects.
+    def test_code_handler_not_fired_for_auto_only(self):
+        # No [code] tag → no programming-toolchain caches are mounted, no
+        # programming-image layer is selected. Critical guarantee: a non-[code]
+        # agent never inherits the [code] tag's side effects.
         compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
-        self.mock_prog.assert_not_called()
+        self.mock_code.assert_not_called()
 
-    def test_prog_handler_not_fired_for_dood_only(self):
+    def test_code_handler_not_fired_for_dood_only(self):
         compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
-        self.mock_prog.assert_not_called()
+        self.mock_code.assert_not_called()
 
     def test_auto_handler_not_fired_when_auto_inactive(self):
-        # Symmetric: a [prog] agent without {auto} doesn't trigger the firewall
+        # Symmetric: a [code] agent without {auto} doesn't trigger the firewall
         # resolve.
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state")))
         self.mock_auto.assert_not_called()
 
     def test_dood_handler_not_fired_when_dood_inactive(self):
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_PROG], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
+        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
         self.mock_dood.assert_not_called()
 
 
@@ -149,7 +149,7 @@ class TestComposeChainValidation(unittest.TestCase):
     by accessing sess_id.chain before any handler dispatch."""
 
     def setUp(self):
-        for name in ("_apply_prog", "_apply_auto", "_apply_dood"):
+        for name in ("_apply_code", "_apply_auto", "_apply_dood"):
             patcher = patch.object(agent_composition, name)
             patcher.start()
             self.addCleanup(patcher.stop)

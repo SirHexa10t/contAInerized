@@ -1,21 +1,21 @@
-# Compose layer for the [prog] chain step. Swaps in docker/Dockerfile.prog
+# Compose layer for the [code] chain step. Swaps in docker/Dockerfile.code
 # (build-essential + Rust + Node), parameterises PARENT_IMAGE/TARGET_IMAGE so
 # the chain composer in launch/agent_composition.py can place this anywhere
 # in the build sequence.
 #
-# Defaults reflect the standalone case (prog directly on top of base):
+# Defaults reflect the standalone case (code directly on top of base):
 #   PARENT_IMAGE = claude-agents:base
-#   TARGET_IMAGE = claude-agents:prog
+#   TARGET_IMAGE = claude-agents:code
 # run.py overrides both when the chain has more steps before/after.
 
 services:
   claude-code:
-    image: ${TARGET_IMAGE:-claude-agents:prog}
+    image: ${TARGET_IMAGE:-claude-agents:code}
     build:
-      dockerfile: docker/Dockerfile.prog
+      dockerfile: docker/Dockerfile.code
       args:
         PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:base}
-        # Each gates the matching optional CLI install in Dockerfile.prog. Set to
+        # Each gates the matching optional CLI install in Dockerfile.code. Set to
         # "1" by run.py when the corresponding user_extras/optional_creds/<name>/ exists
         # on the host (otherwise unset → "0", and the install RUN is a no-op).
         INSTALL_AWS:     ${INSTALL_AWS:-0}

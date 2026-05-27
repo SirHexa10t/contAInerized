@@ -56,9 +56,9 @@ class TestStageComposeEnv(unittest.TestCase):
         _compose_env.update(self._snapshot)
 
     def test_staged_value_visible_in_subprocess_env(self):
-        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, "claude-agents:prog")
+        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, "claude-agents:code")
         env = subprocess_env()
-        self.assertEqual(env["TARGET_IMAGE"], "claude-agents:prog")
+        self.assertEqual(env["TARGET_IMAGE"], "claude-agents:code")
 
     def test_non_string_value_coerced_at_subprocess_boundary(self):
         # The accumulator can hold Path/int; subprocess_env coerces to str.

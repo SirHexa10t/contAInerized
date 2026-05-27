@@ -17,17 +17,17 @@ class TestChainImageTag(unittest.TestCase):
         self.assertEqual(chain_image_tag(["base"]), "claude-agents:base")
 
     def test_single_layer(self):
-        self.assertEqual(chain_image_tag(["base", "prog"]), "claude-agents:prog")
+        self.assertEqual(chain_image_tag(["base", "code"]), "claude-agents:code")
 
     def test_two_layers_joined_with_dot(self):
-        self.assertEqual(chain_image_tag(["base", "prog", "auto"]), "claude-agents:prog.auto")
+        self.assertEqual(chain_image_tag(["base", "code", "auto"]), "claude-agents:code.auto")
 
     def test_dood_lowercased(self):
         # DooD's value is mixed-case; the tag form is lowercased to match
         # compose / Dockerfile filename conventions.
         self.assertEqual(
-            chain_image_tag(["base", "prog", "auto", "DooD"]),
-            "claude-agents:prog.auto.dood",
+            chain_image_tag(["base", "code", "auto", "DooD"]),
+            "claude-agents:code.auto.dood",
         )
 
     def test_just_dood_with_base(self):
@@ -40,17 +40,17 @@ class TestChainComposeFiles(unittest.TestCase):
         self.assertEqual(result, ["-f", str(paths.COMPOSE_FILE_PATH)])
 
     def test_appends_one_layer(self):
-        result = chain_compose_files(["base", "prog"])
+        result = chain_compose_files(["base", "code"])
         self.assertEqual(result, [
             "-f", str(paths.COMPOSE_FILE_PATH),
-            "-f", str(paths.compose_layer_path("prog")),
+            "-f", str(paths.compose_layer_path("code")),
         ])
 
     def test_appends_multiple_layers_in_order(self):
-        result = chain_compose_files(["base", "prog", "auto", "DooD"])
+        result = chain_compose_files(["base", "code", "auto", "DooD"])
         self.assertEqual(result, [
             "-f", str(paths.COMPOSE_FILE_PATH),
-            "-f", str(paths.compose_layer_path("prog")),
+            "-f", str(paths.compose_layer_path("code")),
             "-f", str(paths.compose_layer_path("auto")),
             "-f", str(paths.compose_layer_path("DooD")),   # compose_layer_path lowercases internally
         ])

@@ -1,8 +1,8 @@
-"""Tests for the [prog]-tag toolchain cache lifecycle — prepare_caches and
+"""Tests for the [code]-tag toolchain cache lifecycle — prepare_caches and
 prune_caches in agent_composition.
 
 Caches (one per language toolchain: .cargo, .npm, go module cache, …) are
-shared across [prog] agents to avoid re-downloading on every launch. The
+shared across [code] agents to avoid re-downloading on every launch. The
 lifecycle invariant is:
 
   - **Always create the host directories** before docker compose run starts,

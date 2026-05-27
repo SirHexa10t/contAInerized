@@ -46,7 +46,7 @@ this just shows both patterns side-by-side):
   │   └── known_hosts
   └── npmrc               ← file (not a directory); bind-mounted as /home/claude/.npmrc
 
-For [prog]-tagged agents, the matching CLI is also auto-installed in the prog image
+For [code]-tagged agents, the matching CLI is also auto-installed in the code image
 whenever the cred dir is present (each tool has its own INSTALL_<TOOL> build-arg in
-compose.prog.yml). Service-to-env-var mapping lives in OPTIONAL_CREDS_TOKEN_ENV_VARS
+compose.code.yml). Service-to-env-var mapping lives in OPTIONAL_CREDS_TOKEN_ENV_VARS
 (paths.py) — adding a new service is one entry in each map.

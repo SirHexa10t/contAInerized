@@ -176,8 +176,8 @@ class TestPathBuilderLambdas(unittest.TestCase):
 
     def test_compose_layer_path_already_lowercase(self):
         self.assertEqual(
-            paths.compose_layer_path("prog"),
-            paths.DOCKER_DIR / "compose.prog.yml",
+            paths.compose_layer_path("code"),
+            paths.DOCKER_DIR / "compose.code.yml",
         )
 
     def test_agent_conf_path(self):

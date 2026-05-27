@@ -8,11 +8,11 @@
 # run` as a `-v` flag) — not declared here, so the YAML is purely about
 # build wiring.
 #
-# Defaults reflect the standalone case (DooD directly on top of prog):
-#   PARENT_IMAGE = claude-agents:prog
-#   TARGET_IMAGE = claude-agents:prog.dood
-# run.py overrides both when chain has more steps between prog and dood
-# (e.g. PARENT_IMAGE = claude-agents:prog.auto when {auto} sits between).
+# Defaults reflect the standalone case (DooD directly on top of code):
+#   PARENT_IMAGE = claude-agents:code
+#   TARGET_IMAGE = claude-agents:code.dood
+# run.py overrides both when chain has more steps between code and dood
+# (e.g. PARENT_IMAGE = claude-agents:code.auto when {auto} sits between).
 #
 # DOCKER_GID is detected on the host via docker_config.detect_docker_gid and
 # staged by _apply_dood before the build, so the in-image `docker` group's
@@ -20,9 +20,9 @@
 
 services:
   claude-code:
-    image: ${TARGET_IMAGE:-claude-agents:prog.dood}
+    image: ${TARGET_IMAGE:-claude-agents:code.dood}
     build:
       dockerfile: docker/Dockerfile.dood
       args:
-        PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:prog}
+        PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:code}
         DOCKER_GID: ${DOCKER_GID:-999}

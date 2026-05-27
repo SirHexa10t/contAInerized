@@ -27,13 +27,13 @@ Public API:
 
   prompt_dood(current_modifiers)
       Y/N prompt for the {DooD} mode opt-in (with security explainer); used by run.py
-      on new [prog] instances and by select_agent's modify flow. Thin wrapper over
+      on new [code] instances and by select_agent's modify flow. Thin wrapper over
       prompt_modifier.
       -> bool
 
   prompt_modes(tags, current_modes=())
       Run all applicable mode prompts in InstanceModifiers.modes() priority order (auto, then
-      DooD if [prog]); pre-fills defaults from the existing modes list. Used by
+      DooD if [code]); pre-fills defaults from the existing modes list. Used by
       run.py (new instances) and select_agent's modify flow.
       -> list[str] of newly-selected modes
 
@@ -438,12 +438,12 @@ def _create_preview(agent: AgentIdentity) -> str:
 
 def _colored_label_fragments(modifiers: Iterable[InstanceModifiers]) -> list[tuple[str, str]]:
     """Per-member prompt_toolkit `(style, text)` fragments for a list of
-    modifiers, interleaved with plain space separators. Mirrors the shape of
-    `InstanceModifiers.format_prefix` ('[prog] {auto} ' — wrapping + trailing
-    space per member) but as a FormattedText fragment list with per-member
-    color from each modifier's `.colored_label`. Used by the cont-row tag /
-    mode columns so warning modes render red and safe ones green within the
-    same row."""
+    modifiers, interleaved with plain space separators. The prompt_toolkit-
+    fragment counterpart to `InstanceModifiers.colored_chain` (which returns
+    an ANSI string for the status line); used by the cont-row tag / mode
+    columns so warning modes render red and safe ones green within the same
+    row. Input order is preserved here — callers pass already-ordered
+    tuples (AgentIdentity.tags / SessionIdentity.modes)."""
     return [frag for m in modifiers for frag in (m.colored_label(), ("", " "))]
 
 
@@ -814,10 +814,10 @@ def prompt_web(current_modifiers) -> bool:
             "testing, dynamic-page content extraction. The playwright CLI and",
             "its system libs are installed in the image (~30MB add). Browser",
             "binaries download on first use with `playwright install chromium`",
-            "(or firefox / webkit) — landing in the shared [prog] cache, so",
-            "subsequent [prog][web] instances reuse them.",
+            "(or firefox / webkit) — landing in the shared [code] cache, so",
+            "subsequent [code][web] instances reuse them.",
             "",
-            "First [prog][web] launch on a fresh host has a ~30s one-time",
+            "First [code][web] launch on a fresh host has a ~30s one-time",
             "browser download. No display server needed — chromium runs",
             "headless. Python bindings install per-project with `uv pip",
             "install playwright` (~5MB).",
@@ -827,7 +827,7 @@ def prompt_web(current_modifiers) -> bool:
 
 def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[InstanceModifiers, ...] = ()) -> list[InstanceModifiers]:
     """Prompt for each mode in InstanceModifiers.modes() priority order, applying
-    per-mode applicability gates (DooD/web only fire for [prog] agents).
+    per-mode applicability gates (DooD/web only fire for [code] agents).
     `current_modes` is the existing list (pre-fills the Y/N defaults — empty
     for new instances). Returns the new modes in priority order — used by
     run.py for new instances and by select_agent's modify flow.
@@ -839,9 +839,9 @@ def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[Insta
     new_modes: list[InstanceModifiers] = []
     if prompt_auto(current_modifiers):
         new_modes.append(InstanceModifiers.MODE_WARN_AUTO)
-    if InstanceModifiers.TAG_PROG.value in current_modifiers and prompt_dood(current_modifiers):
+    if InstanceModifiers.TAG_CODE.value in current_modifiers and prompt_dood(current_modifiers):
         new_modes.append(InstanceModifiers.MODE_WARN_DOOD)
-    if InstanceModifiers.TAG_PROG.value in current_modifiers and prompt_web(current_modifiers):
+    if InstanceModifiers.TAG_CODE.value in current_modifiers and prompt_web(current_modifiers):
         new_modes.append(InstanceModifiers.MODE_WEB)
     return new_modes
 

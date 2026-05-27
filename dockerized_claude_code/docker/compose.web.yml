@@ -2,22 +2,22 @@
 # (chromium apt deps + playwright CLI) and parameterises PARENT_IMAGE /
 # TARGET_IMAGE.
 #
-# Defaults reflect the standalone case ({web} directly on top of [prog]):
-#   PARENT_IMAGE = claude-agents:prog
-#   TARGET_IMAGE = claude-agents:prog.web
-# run.py overrides both when chain has more steps between prog and web
-# (e.g. PARENT_IMAGE = claude-agents:prog.auto.dood when {auto}+{DooD}
+# Defaults reflect the standalone case ({web} directly on top of [code]):
+#   PARENT_IMAGE = claude-agents:code
+#   TARGET_IMAGE = claude-agents:code.web
+# run.py overrides both when chain has more steps between code and web
+# (e.g. PARENT_IMAGE = claude-agents:code.auto.dood when {auto}+{DooD}
 # sit between).
 #
 # No env-var staging needed: playwright's default install path
-# (`~/.cache/ms-playwright/`) already falls under [prog]'s `~/.cache`
+# (`~/.cache/ms-playwright/`) already falls under [code]'s `~/.cache`
 # bind-mount, so the first `playwright install <browser>` populates the
-# host cache and every subsequent [prog][web] instance reuses it.
+# host cache and every subsequent [code][web] instance reuses it.
 
 services:
   claude-code:
-    image: ${TARGET_IMAGE:-claude-agents:prog.web}
+    image: ${TARGET_IMAGE:-claude-agents:code.web}
     build:
       dockerfile: docker/Dockerfile.web
       args:
-        PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:prog}
+        PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:code}

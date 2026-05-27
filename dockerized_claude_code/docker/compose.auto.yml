@@ -18,7 +18,7 @@
 #   PARENT_IMAGE = claude-agents:base
 #   TARGET_IMAGE = claude-agents:auto
 # run.py overrides both when chain has prior steps (e.g. PARENT_IMAGE =
-# claude-agents:prog when [prog] {auto}).
+# claude-agents:code when [code] {auto}).
 
 services:
   claude-code:

@@ -124,17 +124,17 @@ class TestParseStem(unittest.TestCase):
         self.assertEqual(parse_stem("poet"), ("poet", [], None))
 
     def test_name_with_tag(self):
-        self.assertEqual(parse_stem("poet[prog]"), ("poet", ["prog"], None))
+        self.assertEqual(parse_stem("poet[code]"), ("poet", ["code"], None))
 
     def test_name_with_parent(self):
         self.assertEqual(parse_stem("poet(thinker)"), ("poet", [], "thinker"))
 
     def test_name_with_tag_then_parent(self):
-        self.assertEqual(parse_stem("poet[prog](thinker)"), ("poet", ["prog"], "thinker"))
+        self.assertEqual(parse_stem("poet[code](thinker)"), ("poet", ["code"], "thinker"))
 
     def test_name_with_parent_then_tag(self):
         # Order is free — same result either way
-        self.assertEqual(parse_stem("poet(thinker)[prog]"), ("poet", ["prog"], "thinker"))
+        self.assertEqual(parse_stem("poet(thinker)[code]"), ("poet", ["code"], "thinker"))
 
     def test_multiple_tags_accumulate_in_order(self):
         self.assertEqual(parse_stem("poet[a][b][c]"), ("poet", ["a", "b", "c"], None))
@@ -155,9 +155,9 @@ class TestParseAgentName(unittest.TestCase):
         # Asserts the name half of parse_stem's tuple — the wrapper that
         # AGENT_MD_BY_NAME's comprehension uses to index the dict.
         self.assertEqual(parse_agent_name("poet"), "poet")
-        self.assertEqual(parse_agent_name("poet[prog]"), "poet")
+        self.assertEqual(parse_agent_name("poet[code]"), "poet")
         self.assertEqual(parse_agent_name("poet(thinker)"), "poet")
-        self.assertEqual(parse_agent_name("poet[prog](thinker)"), "poet")
+        self.assertEqual(parse_agent_name("poet[code](thinker)"), "poet")
 
 
 if __name__ == "__main__":

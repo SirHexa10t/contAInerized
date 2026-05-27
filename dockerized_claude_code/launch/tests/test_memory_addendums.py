@@ -145,8 +145,8 @@ class TestModifierAddendumsDict(unittest.TestCase):
         # so every agent's CLAUDE.md carries it.
         self.assertIn(MAINTAIN_PRIVACY, MODIFIER_ADDENDUMS[InstanceModifiers.BASE])
 
-    def test_tag_prog_maps_to_credentials_notice(self):
-        self.assertIn(CREDENTIALS_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.TAG_PROG])
+    def test_tag_code_maps_to_credentials_notice(self):
+        self.assertIn(CREDENTIALS_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.TAG_CODE])
 
     def test_mode_auto_maps_to_firewall_notice(self):
         self.assertIn(FIREWALL_NOTICE, MODIFIER_ADDENDUMS[InstanceModifiers.MODE_WARN_AUTO])
@@ -206,7 +206,7 @@ class TestComposedAddendum(unittest.TestCase):
         self.assertEqual(result.count(f"## {ADDENDUM_SECTION_TITLE}"), 1)
 
     def test_modifier_order_follows_enum_declaration(self):
-        # InstanceModifiers declaration order: BASE → TAG_PROG → MODE_WARN_AUTO → MODE_WARN_DOOD.
+        # InstanceModifiers declaration order: BASE → TAG_CODE → MODE_WARN_AUTO → MODE_WARN_DOOD.
         # Even when chain is passed with 'auto' before 'base', the output must
         # follow enum order (composed_addendum iterates InstanceModifiers, not chain).
         result = composed_addendum(("auto", "base"))
@@ -261,8 +261,8 @@ class TestComposedAddendum(unittest.TestCase):
         # A chain value with no MODIFIER_ADDENDUMS entry contributes nothing.
         custom = {InstanceModifiers.BASE: [Addendum("Base", "base body")]}
         with patch.dict(MODIFIER_ADDENDUMS, custom, clear=True):
-            # 'prog' has no entry in our patched dict → only base contributes.
-            result = composed_addendum(("base", "prog"))
+            # 'code' has no entry in our patched dict → only base contributes.
+            result = composed_addendum(("base", "code"))
             self.assertIn("base body", result)
             self.assertEqual(result.count("###"), 1)
 

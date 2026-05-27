@@ -70,7 +70,7 @@ CREDENTIALS_NOTICE = Addendum(
 
 WEB_NOTICE = Addendum(
     "Headless browser",
-    f"""You're in `{InstanceModifiers.MODE_WEB.label}` mode — the `playwright` CLI is available for headless browser automation. Run `playwright install chromium` (or `firefox` / `webkit`) before first use; subsequent `[prog][web]` instances share the same browser cache so the install is idempotent and fast when warm. For Python: `uv pip install playwright` in your project venv.""",
+    f"""You're in `{InstanceModifiers.MODE_WEB.label}` mode — the `playwright` CLI is available for headless browser automation. Run `playwright install chromium` (or `firefox` / `webkit`) before first use; subsequent `[code][web]` instances share the same browser cache so the install is idempotent and fast when warm. For Python: `uv pip install playwright` in your project venv.""",
 )
 
 MAINTAIN_PRIVACY = Addendum(
@@ -91,7 +91,7 @@ A future reader of any persisted text should see the same content regardless of 
 # determines sub-section order in the rendered CLAUDE.md.
 MODIFIER_ADDENDUMS: dict[InstanceModifiers, list[Addendum]] = {
     InstanceModifiers.BASE:      [SEEK_SUMMARY, MAINTAIN_PRIVACY],
-    InstanceModifiers.TAG_PROG:  [CREDENTIALS_NOTICE],
+    InstanceModifiers.TAG_CODE:  [CREDENTIALS_NOTICE],
     InstanceModifiers.MODE_WARN_AUTO: [FIREWALL_NOTICE],
     InstanceModifiers.MODE_WEB:  [WEB_NOTICE],
 }

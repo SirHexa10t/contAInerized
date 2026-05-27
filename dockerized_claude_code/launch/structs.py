@@ -71,9 +71,6 @@ class InstanceModifiers(Enum):
     subset views.
     Each member carries:
       • `.value`         — canonical on-disk string (filename + JSON form)
-      • `.slug`          — lowercased value, used wherever a case-stable
-                           identifier is needed (image-tag construction, etc.;
-                           e.g. {DooD} → 'dood')
       • `.description`   — one-sentence picker-legend explanation
     Enum declaration order encodes chain composition order: base → tags → modes.
     Subset views (`tags()` / `modes()` for the members; `tag_values()` /
@@ -81,10 +78,10 @@ class InstanceModifiers(Enum):
     without buffering locally."""
 
     BASE      = ("base", "always-on starting image — every agent gets it; no user-facing toggle")
-    TAG_PROG  = ("prog", "programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)")
+    TAG_CODE  = ("code", "coding/programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)")
     MODE_WARN_AUTO = ("auto", "autonomous; Doesn't need permission to perform actions. Comes with a firewall for a slight security-increase. Danger: hard to control!")
     MODE_WARN_DOOD = ("DooD", "Docker outside-of Docker; Can run Docker. Danger: authority to do anything (effectively host-root)!")
-    MODE_WEB  = ("web", "headless browser automation (playwright + chromium baked in); for web-scraping / browser-testing / dynamic-page extraction. Built on [prog]; no display server needed.")
+    MODE_WEB  = ("web", "headless browser automation (playwright + chromium baked in); for web-scraping / browser-testing / dynamic-page extraction. Built on [code]; no display server needed.")
 
     def __new__(cls, value: str, description: str) -> "InstanceModifiers":
         # Set _value_ here (rather than in __init__) so the enum metaclass
@@ -114,12 +111,8 @@ class InstanceModifiers(Enum):
         return cls(value)  # type: ignore[call-arg]
 
     @property
-    def slug(self) -> str:
-        return self.value.lower()
-
-    @property
     def label(self) -> str:
-        """User-facing label with the kind-distinguishing wrapping: `[prog]` for
+        """User-facing label with the kind-distinguishing wrapping: `[code]` for
         tags (square brackets — the filename-grammar form), `{auto}` / `{DooD}`
         for modes (curly braces). Single source of truth for any picker prompt
         / dialog / banner that needs to name a specific modifier. BASE has no
@@ -160,15 +153,21 @@ class InstanceModifiers(Enum):
         return (color, self.label)
 
     @classmethod
-    def format_prefix(cls, modifiers: Iterable["InstanceModifiers"]) -> str:
-        """Render an iterable of typed modifier members as space-separated
-        bracketed labels with a trailing space: '[prog] {auto} ' / '' for
-        empty input. Wrapping comes from each member's `.label` (tags →
-        `[..]`, modes → `{..}`), so the wrapping convention lives on the
-        enum and callers don't replicate it. Both AgentIdentity.tags and
-        SessionIdentity.modes are typed `tuple[InstanceModifiers, ...]`,
-        so every caller in the codebase passes members."""
-        return "".join(m.label + " " for m in modifiers)
+    def in_order(cls, modifiers: Iterable["InstanceModifiers"]) -> tuple["InstanceModifiers", ...]:
+        """Return the given modifiers as a tuple in enum-declaration order,
+        deduped. Single source of truth for the 'subset of modifiers in
+        canonical (BASE → tags → modes) order' shape — chain composition,
+        status-line rendering, and any future site that needs to project a
+        modifier subset back onto the taxonomy's ordering route through here."""
+        given = set(modifiers)
+        return tuple(m for m in cls if m in given)
+
+    @classmethod
+    def colored_chain(cls, modifiers: Iterable["InstanceModifiers"]) -> str:
+        """Space-separated ANSI-colored labels in canonical (declaration) order,
+        for status-line display. Each member's `colored_label(ansi=True)`
+        self-resets so consecutive labels don't bleed colour."""
+        return " ".join(m.colored_label(ansi=True) for m in cls.in_order(modifiers))
 
     # The four subset-view classmethods below are memoized via @functools.cache
     # (key = cls; single-class system → 100% hit rate after the first call). The
@@ -240,8 +239,8 @@ class AgentIdentity:
     @property
     def tags(self) -> tuple["InstanceModifiers", ...]:
         """Filename-grammar tags from the .md's stem, converted to typed
-        modifier members (e.g. (InstanceModifiers.TAG_PROG,) for
-        `name[prog].md`). Tuple so the dataclass stays hashable should we
+        modifier members (e.g. (InstanceModifiers.TAG_CODE,) for
+        `name[code].md`). Tuple so the dataclass stays hashable should we
         ever want it as a dict key.
 
         Strings come out of `parse_stem`; we map each via `from_value` at
@@ -385,5 +384,5 @@ class SessionIdentity(InstanceIdentity):
         the property / JSON-load boundary respectively), so no runtime
         validation block is needed here — unknowns crash at the boundary
         rather than slipping through to compose."""
-        return tuple(m.value for m in InstanceModifiers
-                     if m is InstanceModifiers.BASE or m in self.tags or m in self.modes)
+        return tuple(m.value for m in InstanceModifiers.in_order(
+            (InstanceModifiers.BASE, *self.tags, *self.modes)))

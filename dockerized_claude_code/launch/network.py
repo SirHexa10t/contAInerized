@@ -212,6 +212,8 @@ BUILTIN_FIREWALL_DOMAINS = [
     "www.nuxt.com",
     "www.remix.run",
     "www.astro.build",
+    # Browser automation ({web} mode — browser-binary CDN, bare apex only)
+    "cdn.playwright.dev",
     # Backend frameworks — Python
     "docs.djangoproject.com",
     "flask.palletsprojects.com",
