@@ -11,11 +11,11 @@ from unittest.mock import patch
 
 from launch import agent_composition
 from launch.agent_composition import compose_chain
-from launch.structs import InstanceModifiers, SessionIdentity
+from launch.structs import InstanceModifiers, InstanceIdentity
 
 
-class _FakeSess(SessionIdentity):
-    """SessionIdentity subclass overriding `tags` + `state_dir` so we don't
+class _FakeInst(InstanceIdentity):
+    """InstanceIdentity subclass overriding `tags` + `state_dir` so we don't
     need real .md files on disk and we can point the state-dir at any path
     the test cares about. Frozen dataclass blocks normal __setattr__, so
     overrides are set via object.__setattr__ on instance attributes that
@@ -46,7 +46,7 @@ class _FakeSess(SessionIdentity):
 
 
 class TestComposeChainReturn(unittest.TestCase):
-    """compose_chain returns sess_id.chain as a list. We patch the three
+    """compose_chain returns inst_id.chain as a list. We patch the three
     _apply_* handlers so they don't actually mount anything or fire DNS."""
 
     def setUp(self):
@@ -63,19 +63,19 @@ class TestComposeChainReturn(unittest.TestCase):
             p.stop()
 
     def test_base_only_chain(self):
-        sess = _FakeSess.make([], [], Path("/tmp/state"))
+        sess = _FakeInst.make([], [], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base"])
 
     def test_code_chain(self):
-        sess = _FakeSess.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state"))
+        sess = _FakeInst.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base", "code"])
 
     def test_full_chain_order(self):
-        sess = _FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state"))
+        sess = _FakeInst.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base", "code", "auto", "DooD"])
 
     def test_chain_order_independent_of_input(self):
-        sess = _FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state"))
+        sess = _FakeInst.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state"))
         self.assertEqual(compose_chain(sess), ["base", "code", "auto", "DooD"])
 
 
@@ -96,28 +96,28 @@ class TestComposeChainDispatch(unittest.TestCase):
             p.stop()
 
     def test_no_handlers_fired_for_base_only(self):
-        compose_chain(_FakeSess.make([], [], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([], [], Path("/tmp/state")))
         self.mock_code.assert_not_called()
         self.mock_auto.assert_not_called()
         self.mock_dood.assert_not_called()
 
     def test_code_handler_fires_for_code_tag(self):
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state")))
         self.mock_code.assert_called_once()
         self.mock_auto.assert_not_called()
         self.mock_dood.assert_not_called()
 
     def test_auto_handler_receives_state_dir(self):
         state = Path("/tmp/some-state")
-        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_AUTO], state))
+        compose_chain(_FakeInst.make([], [InstanceModifiers.MODE_WARN_AUTO], state))
         self.mock_auto.assert_called_once_with(state)
 
     def test_dood_handler_fires_for_dood_mode(self):
-        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
         self.mock_dood.assert_called_once()
 
     def test_all_three_fire_when_all_active(self):
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
         self.mock_code.assert_called_once()
         self.mock_auto.assert_called_once()
         self.mock_dood.assert_called_once()
@@ -126,27 +126,27 @@ class TestComposeChainDispatch(unittest.TestCase):
         # No [code] tag → no programming-toolchain caches are mounted, no
         # programming-image layer is selected. Critical guarantee: a non-[code]
         # agent never inherits the [code] tag's side effects.
-        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
         self.mock_code.assert_not_called()
 
     def test_code_handler_not_fired_for_dood_only(self):
-        compose_chain(_FakeSess.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))
         self.mock_code.assert_not_called()
 
     def test_auto_handler_not_fired_when_auto_inactive(self):
         # Symmetric: a [code] agent without {auto} doesn't trigger the firewall
         # resolve.
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([InstanceModifiers.TAG_CODE], [], Path("/tmp/state")))
         self.mock_auto.assert_not_called()
 
     def test_dood_handler_not_fired_when_dood_inactive(self):
-        compose_chain(_FakeSess.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
+        compose_chain(_FakeInst.make([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/state")))
         self.mock_dood.assert_not_called()
 
 
 class TestComposeChainValidation(unittest.TestCase):
-    """Validation lives in SessionIdentity.chain — compose_chain surfaces it
-    by accessing sess_id.chain before any handler dispatch."""
+    """Validation lives in InstanceIdentity.chain — compose_chain surfaces it
+    by accessing inst_id.chain before any handler dispatch."""
 
     def setUp(self):
         for name in ("_apply_code", "_apply_auto", "_apply_dood"):
@@ -158,14 +158,14 @@ class TestComposeChainValidation(unittest.TestCase):
         # Tags are typed enum members — AgentIdentity.tags converts each
         # filename string via from_value at the property boundary, which
         # raises ValueError on unknowns. By the time compose_chain accesses
-        # sess_id.tags, every tag is a valid member; the chain itself no
+        # inst_id.tags, every tag is a valid member; the chain itself no
         # longer needs a runtime tag-validation block.
         with self.assertRaises(ValueError):
             InstanceModifiers.from_value("typo")
 
     def test_unknown_mode_unrepresentable(self):
         # Modes are typed enum members — the JSON-load boundary
-        # (InstanceModifiers(s)) raises ValueError before a SessionIdentity
+        # (InstanceModifiers(s)) raises ValueError before a InstanceIdentity
         # with an unknown mode can be constructed. The chain-level mode
         # validation block is therefore gone; only tag validation remains.
         with self.assertRaises(ValueError):

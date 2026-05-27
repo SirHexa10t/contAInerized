@@ -8,7 +8,7 @@ Public API:
       Run the agent/session picker (main menu + nested deletion submenu) until the
       user picks something or cancels. Discovers agents/instances and handles
       deletions internally.
-      -> ('new', AgentIdentity) | ('cont', SessionIdentity) | None on cancel/empty
+      -> ('new', AgentIdentity) | ('cont', InstanceIdentity) | None on cancel/empty
 
   ask_for_workspace(agent, default=None)
       Line prompt for a workspace path; tab-completes against the host filesystem.
@@ -46,12 +46,12 @@ Public API:
       Inline [y/N] prompt.
       -> bool
 
-  print_launch_banner(sess_id, cred_names)
+  print_launch_banner(inst_id, cred_names)
       Print the multi-line "about to launch" summary (agent definition, conf,
       tags, modes, skills, creds, user whitelist count) before docker compose
       builds the image. Conditional lines for tags/modes/skills/creds/whitelist
       — only shown when applicable. md_path / conf_path / tags / modes all come
-      off the SessionIdentity. The user-whitelist line counts
+      off the InstanceIdentity. The user-whitelist line counts
       user_firewall_whitelist_lines() on demand only when {auto} is in modes.
 
 Generic-picker entry shape (pick_with_preview):
@@ -101,7 +101,7 @@ from .paths import (
     FIREWALL_WHITELIST_FILE,
 )
 from .structs import (
-    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
+    AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP,
 )
 from .utils import plural, relative_time
 
@@ -268,7 +268,7 @@ class ContEntry:
     column / hint area; the is_*_dir booleans drive the
     CURRENT/DEFAULT/INVALID workspace tags (only one can be True per row —
     invalid implies ws_resolved is None, which makes the other two False)."""
-    identity: SessionIdentity
+    identity: InstanceIdentity
     modes_display: str
     workspace_display: str
     is_current_dir: bool
@@ -281,16 +281,16 @@ class ContEntry:
         """Cont-row preview markdown rendered to ANSI. Italic lead-in,
         horizontal rule, then a YAML-fenced metadata block (rich syntax-colors
         keys/values)."""
-        sess_id = self.identity
+        inst_id = self.identity
         return _render_md(
-            f"*Continue session `{sess_id.instance}`.*\n\n"
+            f"*Continue session `{inst_id.instance}`.*\n\n"
             f"---\n\n"
             f"```yaml\n"
-            f"Agent:     {sess_id.agent}\n"
-            f"Session:   {sess_id.session}\n"
+            f"Agent:     {inst_id.agent}\n"
+            f"Session:   {inst_id.session}\n"
             f"Workspace: {self.workspace_display}\n"
             f"Modes:     {self.modes_display}\n"
-            f"State:     {sess_id.state_dir}\n"
+            f"State:     {inst_id.state_dir}\n"
             f"Last used: {self.last_used_display}\n"
             f"```\n"
         )
@@ -301,7 +301,7 @@ class PickerEntry:
     """One row in `pick_with_preview`. `display` is the prompt_toolkit
     FormattedText fragment list (list of (style, text) tuples), `preview` is
     the right-pane markdown rendered to ANSI, `value` is what the picker
-    hands back on selection (AgentIdentity for Create rows, SessionIdentity
+    hands back on selection (AgentIdentity for Create rows, InstanceIdentity
     for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
     for Back rows). `deletable` / `modifiable` default True; the producer
     sets them False to disable Del / F2 on the row (Create / Back / opener).
@@ -327,7 +327,7 @@ def continuable_instances() -> list[ContEntry]:
     each mode's position in InstanceModifiers.modes()); within each mode group,
     sorted by (agent rank, session) as before. Marks instances whose workspace
     resolves to the current working directory (for the picker's CURRENT DIR
-    hint). The contained SessionIdentity is what the picker hands back on
+    hint). The contained InstanceIdentity is what the picker hands back on
     selection — stored workspace + modes are baked in so the modify flow's
     pre-fill can read them straight off the identity."""
     # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
@@ -351,10 +351,10 @@ def continuable_instances() -> list[ContEntry]:
         modes = tuple(InstanceModifiers.from_value(s) for s in modes_map.get(dir_name, []))
         ws = workspace_map.get(dir_name)
         ws_resolved = resolved_path(ws) if ws and is_dir(ws) else None
-        sess_id = SessionIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
-        last_mtime = sess_id.last_used_mtime
+        inst_id = InstanceIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
+        last_mtime = inst_id.last_used_mtime
         out.append(ContEntry(
-            identity=sess_id,
+            identity=inst_id,
             modes_display=", ".join(m.value for m in modes) or "(none)",
             workspace_display=ws if ws else NO_WORKSPACE_DISPLAY,                                    # show stored value even when invalid; `?` sentinel only when no map entry at all
             is_current_dir=ws_resolved == cwd,
@@ -443,7 +443,7 @@ def _colored_label_fragments(modifiers: Iterable[InstanceModifiers]) -> list[tup
     an ANSI string for the status line); used by the cont-row tag / mode
     columns so warning modes render red and safe ones green within the same
     row. Input order is preserved here — callers pass already-ordered
-    tuples (AgentIdentity.tags / SessionIdentity.modes)."""
+    tuples (AgentIdentity.tags / InstanceIdentity.modes)."""
     return [frag for m in modifiers for frag in (m.colored_label(), ("", " "))]
 
 
@@ -634,12 +634,12 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     def accent_style() -> str:
         """Colour the preview's left-edge accent bar based on the selected row's kind:
-        green for Create rows (AgentIdentity), yellow for Cont rows (InstanceIdentity
-        and its SessionIdentity subclass), dim default for menu/back rows."""
+        green for Create rows (AgentIdentity), yellow for Cont rows
+        (InstanceIdentity), dim default for menu/back rows."""
         if not state["shown"]:
             return PickerClass.DIVIDER.css
         value = entries[state["cursor"]].value
-        if isinstance(value, InstanceIdentity):     # cont row — SessionIdentity is a subclass; checked before AgentIdentity since InstanceIdentity isa AgentIdentity
+        if isinstance(value, InstanceIdentity):     # cont row — checked before AgentIdentity since InstanceIdentity isa AgentIdentity
             return PickerRowMarker.CONT.style       # fg:ansiyellow
         if isinstance(value, AgentIdentity):        # new row — plain AgentIdentity only
             return PickerRowMarker.NEW.style        # fg:ansigreen
@@ -846,7 +846,7 @@ def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[Insta
     return new_modes
 
 
-def select_agent() -> AgentIdentity | SessionIdentity | None:
+def select_agent() -> AgentIdentity | InstanceIdentity | None:
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
     Caller must ensure at least one agent .md exists before invoking."""
     while True:
@@ -894,14 +894,14 @@ def select_agent() -> AgentIdentity | SessionIdentity | None:
                 modifiable=False,
             ))
             for inst in instances_by_agent.get(agent.agent, []):
-                sess_id = inst.identity
-                mode_frags = mode_frags_by_inst[sess_id.instance]
+                inst_id = inst.identity
+                mode_frags = mode_frags_by_inst[inst_id.instance]
                 mode_len = _fragments_text_len(mode_frags)
                 cont_display = [
                     PickerRowMarker.CONT.fragment("      "),
                     *mode_frags,
                     ("", " " * (mode_col_width - mode_len)),
-                    (STYLE_AGENT_NAME, f"{sess_id.instance:<{instance_name_width}}"),
+                    (STYLE_AGENT_NAME, f"{inst_id.instance:<{instance_name_width}}"),
                     ("", "    "),
                 ]
                 if inst.is_current_dir:
@@ -914,7 +914,7 @@ def select_agent() -> AgentIdentity | SessionIdentity | None:
                 entries.append(PickerEntry(
                     display=cont_display,
                     preview=inst.preview,
-                    value=sess_id,
+                    value=inst_id,
                 ))
 
         entries.append(PickerEntry(
@@ -948,17 +948,17 @@ def select_agent() -> AgentIdentity | SessionIdentity | None:
                 print(f"Instance '{InstanceIdentity.instance_name(old_inst_id.agent, new_session)}' already exists. Pick another name.")
             new_workspace = ask_for_workspace(old_inst_id.agent, default=old_inst_id.workspace)
             new_modes = prompt_modes(old_inst_id.tags, old_inst_id.modes)
-            new_sess_id = dataclasses.replace(
+            new_inst_id = dataclasses.replace(
                 old_inst_id, session=new_session, workspace=new_workspace, modes=tuple(new_modes)
             )  # is_brand_new stays False via the dataclass replace
-            modify_instance(old_inst_id, new_sess_id)
+            modify_instance(old_inst_id, new_inst_id)
             continue
 
         if value is _OPEN_DELMENU:
             _delete_submenu()
             continue
 
-        return value  # AgentIdentity (new) | SessionIdentity (cont)
+        return value  # AgentIdentity (new) | InstanceIdentity (cont)
 
 
 def _delete_submenu() -> None:
@@ -969,14 +969,14 @@ def _delete_submenu() -> None:
             return
         entries: list[PickerEntry] = []
         for inst in instances:
-            sess_id = inst.identity
+            inst_id = inst.identity
             entries.append(PickerEntry(
                 display=[
                     PickerRowMarker.DLET.fragment("  "),
-                    (STYLE_DEL_NAME, sess_id.instance),
+                    (STYLE_DEL_NAME, inst_id.instance),
                 ],
                 preview=inst.preview,
-                value=sess_id,
+                value=inst_id,
             ))
         entries.append(PickerEntry(
             display=[PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],
@@ -992,26 +992,26 @@ def _delete_submenu() -> None:
             delete_instance(value)
 
 
-def print_launch_banner(sess_id, cred_names) -> None:
+def print_launch_banner(inst_id, cred_names) -> None:
     """Print the multi-line summary that appears before docker compose builds the
     image — agent definition path, conf path, active tags + modes, and skills/creds
     counts when applicable. Each line is conditional on having something to show
     (no empty 'Tags: ' if there are none). The user-whitelist line counts
     user_firewall_whitelist_lines() inline — only when {auto} is in modes, so
     non-{auto} launches don't touch the file at all. Takes the launch's
-    SessionIdentity and pulls md_path / conf_path / tags / modes off it directly."""
-    print(f"  Agent definition: {sess_id.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
-    print(f"  Configuration:    {sess_id.conf_path.relative_to(DOCKERIZED_CLAUDE_ROOT) if sess_id.conf_path else '(none — using defaults)'}")
+    InstanceIdentity and pulls md_path / conf_path / tags / modes off it directly."""
+    print(f"  Agent definition: {inst_id.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    print(f"  Configuration:    {inst_id.conf_path.relative_to(DOCKERIZED_CLAUDE_ROOT) if inst_id.conf_path else '(none — using defaults)'}")
     # Both tags and modes are typed enum members → `.label` directly. The
     # [..]/{..} wrapping comes from each member's `.label` property (single
     # source of truth in structs.InstanceModifiers).
-    if sess_id.tags:
-        print(f"  Tags:             {' '.join(t.label for t in sess_id.tags)}")
-    if sess_id.modes:
-        print(f"  Modes:            {' '.join(m.label for m in sess_id.modes)}")
+    if inst_id.tags:
+        print(f"  Tags:             {' '.join(t.label for t in inst_id.tags)}")
+    if inst_id.modes:
+        print(f"  Modes:            {' '.join(m.label for m in inst_id.modes)}")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
-    if InstanceModifiers.MODE_WARN_AUTO in sess_id.modes:
+    if InstanceModifiers.MODE_WARN_AUTO in inst_id.modes:
         whitelist_count = len(user_firewall_whitelist_lines())
         display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))
         print(f"  User whitelist:   {whitelist_count} domain{plural(whitelist_count)} (from {display_path})")

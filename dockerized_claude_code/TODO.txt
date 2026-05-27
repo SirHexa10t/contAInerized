@@ -189,7 +189,7 @@ communications between agents (on same PC; maybe commonly mounted file?)
 
 
 new tags:
-    [larp] - a role-player; pretend to be a Plato, or a man stuck on Mars...
+    [larp] or [act] - a role-player; pretend to be a Plato, or a man stuck on Mars...
         well defined through a writing bot; Character_Builder (an independent agent) - will ask you for all of the details and background info (or tweaks; you may choose a certain historical interpretation of a known character over some other, or at a specific period of the character's life. If it's an invented character; fill in the whole personal history)
 
 
@@ -293,12 +293,11 @@ use colored_chain() in menu_picker ?
 look for functions that only get called in tests
     see if the fragments-functions can be removed (or if any other functions) from menu_picker
 
-Check if AgentSession is really different from AgentSession - maybe the modes are picked soon enough to just create the session straight away
-    instance has a field called "session" - feels like it's already session-like.
+Check if man() needs an update
 
+insert .git credentials and configurations (maybe)
 
-
-
+Check if the commands that rely on python code should be turned into skills
 
 
 

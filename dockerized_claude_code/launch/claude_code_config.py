@@ -20,7 +20,7 @@ run_compose (terminal title); nothing else does."""
 
 from .file_access import read_json_field
 from .paths import ACCOUNT_FILE
-from .structs import InstanceIdentity, InstanceModifiers, SessionIdentity
+from .structs import InstanceIdentity, InstanceModifiers
 
 
 def build_status_line(inst_id: InstanceIdentity) -> str:
@@ -28,16 +28,13 @@ def build_status_line(inst_id: InstanceIdentity) -> str:
     workspace + green email + blue instance (`<agent>__<session>`), with the
     modifier chain (warning-aware reds + greens) trailing. The `<email> :`
     prefix drops out when .claude.json is missing or lacks a recognisable
-    email field. Accepts any InstanceIdentity (or subclass — SessionIdentity
-    works too); reads .agent / .session / .workspace / .instance / .tags,
-    plus .modes when the identity is a SessionIdentity."""
+    email field."""
     CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
     def cap(name):
         return name.replace('-', ' ').replace('_', ' ').title()
 
     email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
-    modes = inst_id.modes if isinstance(inst_id, SessionIdentity) else ()
-    chain = InstanceModifiers.colored_chain(inst_id.tags + modes)
+    chain = InstanceModifiers.colored_chain(inst_id.tags + inst_id.modes)
     return (f"{CYAN}● {cap(inst_id.agent)} - {cap(inst_id.session)} {GREY}( {inst_id.workspace} ){RESET}"
             f"\t\t{GREEN}{email}{RESET}{ ' : ' if email else ''}{BLUE}{inst_id.instance}{RESET}"
             f"  {chain}")

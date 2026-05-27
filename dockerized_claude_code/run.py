@@ -17,15 +17,15 @@ from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
 from launch.paths import AGENT_MD_BY_NAME, AGENTS_DIR
-from launch.structs import AgentIdentity, InstanceIdentity, SessionIdentity
+from launch.structs import AgentIdentity, InstanceIdentity
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
 )
 
 
-def parse_cli() -> tuple[AgentIdentity | SessionIdentity | None, list[str], bool]:
+def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], bool]:
     """Parse the launcher's CLI. Returns (picked, claude_args, dry_run):
-        picked      — AgentIdentity (new) | SessionIdentity (cont, is_brand_new=False)
+        picked      — AgentIdentity (new) | InstanceIdentity (cont, is_brand_new=False)
                       if a known agent/instance name was given as the positional arg,
                       else None (picker will run).
         claude_args — anything else from argv: flags argparse didn't recognize, plus
@@ -73,11 +73,11 @@ def parse_cli() -> tuple[AgentIdentity | SessionIdentity | None, list[str], bool
     return picked, claude_args, args.dry_run
 
 
-def select_pick() -> tuple[AgentIdentity | SessionIdentity, list[str], bool]:
+def select_pick() -> tuple[AgentIdentity | InstanceIdentity, list[str], bool]:
     """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
     back to the interactive picker if no target was given on the command line, exit
     cleanly if the user cancels. Returns (picked, claude_args, dry_run) — `picked`
-    is an AgentIdentity for new and a SessionIdentity for cont. The new/cont
+    is an AgentIdentity for new and an InstanceIdentity for cont. The new/cont
     distinction is encoded in the returned type (and downstream in
     inst_id.is_brand_new), so no parallel kind string is threaded alongside.
     `dry_run` comes straight off the CLI flag — see parse_cli."""
@@ -91,22 +91,24 @@ def select_pick() -> tuple[AgentIdentity | SessionIdentity, list[str], bool]:
 
 
 def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity:
-    """Stage 2 — Filesystem validation. Promote the picker-supplied identity to a
-    full InstanceIdentity: for new `picked` is an AgentIdentity, so prompt for
-    workspace and session (and stamp is_brand_new=True); for cont it's already a
-    SessionIdentity (stored workspace + modes + is_brand_new=False baked in), so
-    just validate the workspace and pass it through (re-prompting if the map
-    entry was missing). Modes resolution happens later in compose_runtime;
-    launch() promotes via with_modes() afterward."""
-    if isinstance(picked, InstanceIdentity):       # cont — workspace + session + is_brand_new already set
+    """Stage 2 — Filesystem validation + identity completion. For cont, `picked`
+    is already a full InstanceIdentity (stored workspace + modes +
+    is_brand_new=False baked in by the picker), so just validate the workspace
+    and pass it through (re-prompting if the map entry was missing). For new,
+    `picked` is an AgentIdentity — prompt workspace + session + modes here so
+    the returned InstanceIdentity is fully resolved before downstream stages
+    run. is_brand_new=True is stamped on at the same time."""
+    if isinstance(picked, InstanceIdentity):       # cont — workspace + session + modes + is_brand_new already set
         picked.validate_workspace()
-        if picked.workspace is None:               # stale / missing map entry — re-prompt and keep the SessionIdentity subclass
+        if picked.workspace is None:               # stale / missing map entry — re-prompt
             return dataclasses.replace(picked, workspace=ask_for_workspace(picked.agent))
         return picked
-    # new — AgentIdentity only; prompt workspace then session, stamp is_brand_new
+    # new — AgentIdentity only; prompt workspace, session, then modes
     workspace = ask_for_workspace(picked.agent)
     session = prompt_session(picked.agent, workspace)
-    return InstanceIdentity(agent=picked.agent, session=session, workspace=workspace, is_brand_new=True)
+    modes = prompt_modes(picked.tags, current_modes=())
+    return InstanceIdentity(agent=picked.agent, session=session, workspace=workspace,
+                            is_brand_new=True, modes=tuple(modes))
 
 
 def compute_resume_flag(inst_id: InstanceIdentity) -> list[str]:
@@ -122,32 +124,22 @@ def compute_resume_flag(inst_id: InstanceIdentity) -> list[str]:
     return []
 
 
-def compose_runtime(inst_id: InstanceIdentity) -> tuple[SessionIdentity, list[str]]:
-    """Stage 5 — Categorisation. Resolve modes (prompt for new instances in
-    priority order, load stored modes for cont), promote to a SessionIdentity,
-    compute the build chain, and run handler side effects (env-var staging
-    + bind-mount staging via the docker_config accumulators, plus {auto}-
-    mode firewall resolve kickoff). Takes an InstanceIdentity — tags come
-    off it directly (.tags property), is_brand_new tells us which branch
-    to take. compose_chain takes the resulting SessionIdentity directly
-    (it needs tags + modes + state_dir + .chain). Returns (sess_id, chain)."""
-    if inst_id.is_brand_new:
-        modes = prompt_modes(inst_id.tags, current_modes=())
-        set_instance_modes(inst_id.with_modes(modes))   # warns inside if both auto+DooD are set
-    else:
-        modes = inst_id.stored_modes
-    sess_id = inst_id.with_modes(modes)
+def compose_runtime(inst_id: InstanceIdentity) -> list[str]:
+    """Stage 5 — Categorisation. Compute the build chain and run handler side
+    effects (env-var staging + bind-mount staging via the docker_config
+    accumulators, plus {auto}-mode firewall resolve kickoff). Modes are
+    already on the identity by this point (prompted in resolve_target for new
+    launches; loaded off the maps by the picker for cont). Returns chain."""
     try:
-        chain = compose_chain(sess_id)
+        return compose_chain(inst_id)
     except (ValueError, RuntimeError) as e:
         sys.exit(f"  {e}")
-    return sess_id, chain
 
 
-def setup_state(sess_id: SessionIdentity) -> tuple[dict[str, str], list[str]]:
+def setup_state(inst_id: InstanceIdentity) -> tuple[dict[str, str], list[str]]:
     """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
     addendum section into its state dir as CLAUDE.md (a single overwrite —
-    install_latest_md keys off sess_id.chain for the addendums), ensure
+    install_latest_md keys off inst_id.chain for the addendums), ensure
     shared OAuth state files exist so docker doesn't auto-create them as
     root, populate the env vars compose substitutes at build/run time,
     stage the per-launch bind-mounts (base set + per-instance workspace/
@@ -158,38 +150,39 @@ def setup_state(sess_id: SessionIdentity) -> tuple[dict[str, str], list[str]]:
     directory natively. Returns (conf, cred_names) — mounts have all been
     staged via docker_config.add_docker_mount and don't need to flow
     through this return."""
-    install_latest_md(sess_id)
+    install_latest_md(inst_id)
     ensure_shared_oauth_files()
-    set_container_env(sess_id)
-    set_container_mounts(sess_id)
-    _, conf = load_conf(sess_id.md_path)
-    plant_user_extras(sess_id.modes)
+    set_container_env(inst_id)
+    set_container_mounts(inst_id)
+    _, conf = load_conf(inst_id.md_path)
+    plant_user_extras(inst_id.modes)
     cred_names = optional_creds_mounts()
     return conf, cred_names
 
 
 def launch() -> None:
     """Seven-stage orchestrator: input → filesystem validation → resume detection
-    → persist → categorise (modes/chain) → setup (state/env/mounts) → run. One
-    call per stage so a future operation slots in at the right point with
-    localised changes. Whether the launch is new vs continuing is carried on
-    the identity itself (inst_id.is_brand_new), not threaded as a separate arg.
-    `--dry-run` short-circuits the final stage — all state setup still happens
-    so test runs can inspect side effects, but the container build + run is
-    skipped."""
+    → persist → categorise (chain) → setup (state/env/mounts) → run. One call
+    per stage so a future operation slots in at the right point with localised
+    changes. Whether the launch is new vs continuing is carried on the identity
+    itself (inst_id.is_brand_new), not threaded as a separate arg. `--dry-run`
+    short-circuits the final stage — all state setup still happens so test runs
+    can inspect side effects, but the container build + run is skipped."""
     picked, claude_args, dry_run = select_pick()
     if not dry_run:
         require_docker()   # state setup doesn't need docker; only the final run_compose does
     inst_id = resolve_target(picked)
     resume_flag = compute_resume_flag(inst_id)
     update_workspace_map(inst_id)
-    sess_id, chain = compose_runtime(inst_id)
-    conf, cred_names = setup_state(sess_id)
-    print_launch_banner(sess_id, cred_names)
+    if inst_id.is_brand_new:
+        set_instance_modes(inst_id)   # warns inside if both auto+DooD are set
+    chain = compose_runtime(inst_id)
+    conf, cred_names = setup_state(inst_id)
+    print_launch_banner(inst_id, cred_names)
     if dry_run:
         print("  (--dry-run: state setup complete; skipping docker compose run.)")
         return
-    run_compose(chain, sess_id.instance, claude_args, resume_flag, conf)
+    run_compose(chain, inst_id.instance, claude_args, resume_flag, conf)
 
 
 if __name__ == "__main__":

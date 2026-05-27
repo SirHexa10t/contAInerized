@@ -2,7 +2,7 @@
 single markdown section appended to the agent's source `.md` at install time.
 
 Each addendum is an `(title, body)` pair. The active set is determined by which
-modifiers are in the session's chain (sess_id.chain); `composed_addendum`
+modifiers are in the session's chain (inst_id.chain); `composed_addendum`
 iterates `InstanceModifiers` in declaration order (BASE → tags → modes) so
 section ordering in the rendered CLAUDE.md matches modifier precedence, and
 emits one `### <title>` sub-section per non-empty addendum body under a single
@@ -15,7 +15,7 @@ heading. Empties drop out at compose time; if every body is empty,
 `composed_addendum` returns `""` and the caller appends nothing.
 
 Consumed by `agents_crud.install_latest_md`, which composes
-`source .md + "\\n\\n" + composed_addendum(sess_id.chain)` and writes the
+`source .md + "\\n\\n" + composed_addendum(inst_id.chain)` and writes the
 state-dir CLAUDE.md in a single pass — no splice, no wrapper markers, no
 post-write reconciliation."""
 
@@ -99,7 +99,7 @@ MODIFIER_ADDENDUMS: dict[InstanceModifiers, list[Addendum]] = {
 
 def composed_addendum(chain: tuple[str, ...]) -> str:
     """Render the full Launch-time-addendums markdown section for the active
-    chain (tuple of modifier `.value`s — `sess_id.chain`). Iterates
+    chain (tuple of modifier `.value`s — `inst_id.chain`). Iterates
     `InstanceModifiers` in declaration order; for each modifier in the chain,
     emits a `### <title>` sub-section per non-empty addendum body. Returns
     `""` when no modifier in the chain has any non-empty addendum body —

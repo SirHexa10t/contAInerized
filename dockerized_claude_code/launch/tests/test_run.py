@@ -73,7 +73,6 @@ class TestLaunchOrchestrator(unittest.TestCase):
         """Patch every stage launch() calls. Returns a dict of the active mocks
         so individual tests can inspect call args."""
         inst_id = MagicMock(is_brand_new=False)
-        sess_id = MagicMock()
         chain = ["base"]
         conf = MagicMock()
         cred_names = []
@@ -84,7 +83,8 @@ class TestLaunchOrchestrator(unittest.TestCase):
             "resolve_target":   patch.object(run, "resolve_target", return_value=inst_id),
             "compute_resume_flag": patch.object(run, "compute_resume_flag", return_value=[]),
             "update_workspace_map": patch.object(run, "update_workspace_map"),
-            "compose_runtime":  patch.object(run, "compose_runtime", return_value=(sess_id, chain)),
+            "set_instance_modes": patch.object(run, "set_instance_modes"),
+            "compose_runtime":  patch.object(run, "compose_runtime", return_value=chain),
             "setup_state":      patch.object(run, "setup_state", return_value=(conf, cred_names)),
             "print_launch_banner": patch.object(run, "print_launch_banner"),
             "run_compose":      patch.object(run, "run_compose"),

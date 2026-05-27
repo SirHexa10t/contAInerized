@@ -190,9 +190,9 @@ def warn_if_dangerous_modes(modes: Iterable[InstanceModifiers]) -> None:
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===
 
-def compose_chain(sess_id) -> list[str]:
+def compose_chain(inst_id) -> list[str]:
     """Run each active modifier's handler and return the docker build chain.
-    Accesses `sess_id.chain` once — that's where the validation (typo'd
+    Accesses `inst_id.chain` once — that's where the validation (typo'd
     tags / stale modes) lives, and it's the canonical modifier-value tuple
     in InstanceModifiers declaration order (BASE first, then user-active
     tags + modes). Dispatch then runs `_apply_<modifier>()` for each
@@ -201,7 +201,7 @@ def compose_chain(sess_id) -> list[str]:
     background DNS resolve, etc. BASE has no handler (no side effects
     beyond being the starting image).
 
-    sess_id.state_dir is the per-instance host path bind-mounted into the
+    inst_id.state_dir is the per-instance host path bind-mounted into the
     container — passed to _apply_auto for the {auto}-mode status file
     location; other handlers don't read it. write_text inside the network
     module auto-creates this dir, so it's safe to use here before
@@ -214,14 +214,14 @@ def compose_chain(sess_id) -> list[str]:
 
     Adding a new user-toggleable modifier means: a new entry in
     InstanceModifiers, the matching `_apply_*` function above, and one new
-    conditional below. sess_id.chain picks it up automatically — it
+    conditional below. inst_id.chain picks it up automatically — it
     iterates InstanceModifiers."""
-    chain = sess_id.chain   # validates against InstanceModifiers taxonomy
+    chain = inst_id.chain   # validates against InstanceModifiers taxonomy
 
     if InstanceModifiers.TAG_CODE.value in chain:
         _apply_code()
     if InstanceModifiers.MODE_WARN_AUTO.value in chain:
-        _apply_auto(sess_id.state_dir)
+        _apply_auto(inst_id.state_dir)
     if InstanceModifiers.MODE_WARN_DOOD.value in chain:
         _apply_dood()
     if InstanceModifiers.MODE_WEB.value in chain:

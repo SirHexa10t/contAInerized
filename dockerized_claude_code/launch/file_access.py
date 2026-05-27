@@ -354,9 +354,9 @@ def load_conf(md_path: Path) -> tuple[Path | None, dict]:
 # touched in load-mutate-save patterns by every state-mutating writer in
 # agents_crud (update_workspace_map, set_instance_modes, delete_instance,
 # modify_instance) plus the picker-entry factories (resolve_pick,
-# continuable_instances) and InstanceIdentity.stored_modes. A naive
-# implementation reads the file on every call — wasteful when the picker
-# rebuilds after a modify/delete loops back through 5+ load calls.
+# continuable_instances). A naive implementation reads the file on every
+# call — wasteful when the picker rebuilds after a modify/delete loops back
+# through 5+ load calls.
 #
 # Each `load_*_map` first call reads from disk and populates the
 # corresponding cache; subsequent calls return the cached dict directly.

@@ -40,7 +40,7 @@ from .file_access import (
 )
 from .memory_addendums import composed_addendum
 from .paths import AGENT_MD_BY_NAME, AGENTS_STATE, instance_state_dir_path
-from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity
+from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP
 from .utils import ordering_index_or_end
 
 
@@ -66,21 +66,21 @@ def update_workspace_map(inst_id: InstanceIdentity) -> None:
         save_workspace_map(m)
 
 
-def _write_modes_entry(m: dict[str, list[str]], sess_id: SessionIdentity) -> None:
-    """Mutate `m` (a modes-map dict) to reflect sess_id's modes for sess_id.instance:
+def _write_modes_entry(m: dict[str, list[str]], inst_id: InstanceIdentity) -> None:
+    """Mutate `m` (a modes-map dict) to reflect inst_id's modes for inst_id.instance:
     set the list when modes are non-empty, pop the entry otherwise. Pure dict
     mutation — callers bracket with their own load/save so a multi-edit pass
     can batch into a single disk write (see modify_instance). Modes are
-    serialized as their `.value` strings (JSON-friendly); sess_id.modes is a
+    serialized as their `.value` strings (JSON-friendly); inst_id.modes is a
     tuple of typed enum members on the in-memory side."""
-    if sess_id.modes:
-        m[sess_id.instance] = [mode.value for mode in sess_id.modes]
+    if inst_id.modes:
+        m[inst_id.instance] = [mode.value for mode in inst_id.modes]
     else:
-        m.pop(sess_id.instance, None)
+        m.pop(inst_id.instance, None)
 
 
-def set_instance_modes(sess_id: SessionIdentity) -> None:
-    """Persist the modes list for an instance, taken off the passed SessionIdentity
+def set_instance_modes(inst_id: InstanceIdentity) -> None:
+    """Persist the modes list for an instance, taken off the passed InstanceIdentity
     (which carries both the instance key and its resolved modes). An empty modes
     tuple removes the entry from the map (we don't store empty entries — keeps the
     file small and the 'no modes' case explicit by absence). Routes through
@@ -88,16 +88,16 @@ def set_instance_modes(sess_id: SessionIdentity) -> None:
     the dangerous-combination judgement lives with modifier semantics, this
     writer just persists state and triggers the post-write check."""
     m = load_modes_map()
-    _write_modes_entry(m, sess_id)
+    _write_modes_entry(m, inst_id)
     save_modes_map(m)
-    warn_if_dangerous_modes(sess_id.modes)
+    warn_if_dangerous_modes(inst_id.modes)
 
 
 # ============================================================
 # Per-instance state-dir writers
 # ============================================================
 
-def install_latest_md(sess_id: SessionIdentity) -> None:
+def install_latest_md(inst_id: InstanceIdentity) -> None:
     """Write the agent's source `.md` plus the active-chain addendum section
     into the state dir as CLAUDE.md, in a single overwrite. Refreshed each
     launch so a source-side edit AND any modifier toggle both propagate
@@ -105,9 +105,9 @@ def install_latest_md(sess_id: SessionIdentity) -> None:
     parent directory tree. The result is launcher-owned: a stale wrapper or
     legacy block from a previous launch is replaced wholesale, no marker-
     based reconciliation needed."""
-    body = read_text(sess_id.md_path)
-    addendum = composed_addendum(sess_id.chain)
-    write_text(sess_id.state_md, f"{body}\n\n{addendum}" if addendum else body)
+    body = read_text(inst_id.md_path)
+    addendum = composed_addendum(inst_id.chain)
+    write_text(inst_id.state_md, f"{body}\n\n{addendum}" if addendum else body)
 
 
 def delete_instance(inst_id: InstanceIdentity) -> None:
@@ -128,21 +128,21 @@ def delete_instance(inst_id: InstanceIdentity) -> None:
         save_modes_map(modes_map)
 
 
-def modify_instance(old_inst_id: SessionIdentity, new_sess_id: SessionIdentity) -> None:
-    """Move an instance's state dir to its new SessionIdentity (renaming if the
+def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity) -> None:
+    """Move an instance's state dir to its new InstanceIdentity (renaming if the
     instance id differs) and update both the workspace and modes mappings to
     match. No-op for the rename if old and new ids match; the maps are always
     rewritten so callers can change modes/workspace without renaming."""
-    renaming = new_sess_id.instance != old_inst_id.instance
+    renaming = new_inst_id.instance != old_inst_id.instance
     if renaming:
-        if path_exists(new_sess_id.state_dir):
-            raise ValueError(f"Instance '{new_sess_id.instance}' already exists.")
-        move_path(old_inst_id.state_dir, new_sess_id.state_dir)
+        if path_exists(new_inst_id.state_dir):
+            raise ValueError(f"Instance '{new_inst_id.instance}' already exists.")
+        move_path(old_inst_id.state_dir, new_inst_id.state_dir)
     # workspace map
     workspace_map = load_workspace_map()
     if renaming:
         workspace_map.pop(old_inst_id.instance, None)
-    workspace_map[new_sess_id.instance] = new_sess_id.workspace
+    workspace_map[new_inst_id.instance] = new_inst_id.workspace
     save_workspace_map(workspace_map)
     # modes map — single load/save (mirrors set_instance_modes' shape via the
     # shared helpers so a rename costs one file write instead of two), plus the
@@ -150,9 +150,9 @@ def modify_instance(old_inst_id: SessionIdentity, new_sess_id: SessionIdentity) 
     modes_map = load_modes_map()
     if renaming:
         modes_map.pop(old_inst_id.instance, None)
-    _write_modes_entry(modes_map, new_sess_id)
+    _write_modes_entry(modes_map, new_inst_id)
     save_modes_map(modes_map)
-    warn_if_dangerous_modes(new_sess_id.modes)
+    warn_if_dangerous_modes(new_inst_id.modes)
 
 
 # ============================================================
@@ -209,10 +209,10 @@ def mode_sort_key(modes: Iterable[InstanceModifiers]) -> tuple[int, ...]:
 # Identity factories — name-string / disk-scan → identity
 # ============================================================
 
-def resolve_pick(name: str) -> AgentIdentity | SessionIdentity | None:
+def resolve_pick(name: str) -> AgentIdentity | InstanceIdentity | None:
     """Resolve a name string into an identity matching select_agent's return shape.
     Two cases:
-        '<agent>__<session>' with a state dir on disk → SessionIdentity (is_brand_new=False)
+        '<agent>__<session>' with a state dir on disk → InstanceIdentity (is_brand_new=False)
         '<agent>'           with a matching .md       → AgentIdentity
     Returns None if neither matches (orphan state dir without .md, typo, etc.).
 
@@ -231,7 +231,7 @@ def resolve_pick(name: str) -> AgentIdentity | SessionIdentity | None:
             # JSON-load boundary for modes: convert each string → enum member
             # via InstanceModifiers(s), which raises ValueError on unknowns
             # (fail-fast for defective modes-map entries).
-            return SessionIdentity(
+            return InstanceIdentity(
                 agent=agent,
                 session=session,
                 workspace=load_workspace_map().get(name),

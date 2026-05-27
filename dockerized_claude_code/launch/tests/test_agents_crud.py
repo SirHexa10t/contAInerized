@@ -17,7 +17,7 @@ from launch.agents_crud import (
 from launch.memory_addendums import (
     ADDENDUM_SECTION_TITLE, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
 )
-from launch.structs import InstanceModifiers, SessionIdentity
+from launch.structs import InstanceModifiers, InstanceIdentity
 
 
 # ============================================================
@@ -159,8 +159,8 @@ class TestWriteModesEntry(unittest.TestCase):
 # ============================================================
 
 
-class _FakeSess(SessionIdentity):
-    """SessionIdentity subclass overriding `md_path`, `state_dir`, and `tags`
+class _FakeInst(InstanceIdentity):
+    """InstanceIdentity subclass overriding `md_path`, `state_dir`, and `tags`
     so install_latest_md can be exercised against temp paths without a real
     agent .md on disk. Frozen dataclass blocks normal __setattr__, so the
     overrides come through object.__setattr__ on attributes the subclass
@@ -206,7 +206,7 @@ class TestInstallLatestMd(unittest.TestCase):
 
     def _sess(self, body, *, tags=(), modes=()):
         self.md_path.write_text(body)
-        return _FakeSess.make(self.md_path, self.state_dir, tags=tags, modes=modes)
+        return _FakeInst.make(self.md_path, self.state_dir, tags=tags, modes=modes)
 
     def test_source_body_is_at_top_of_resulting_md(self):
         sess = self._sess("Source line 1\nSource line 2\n")

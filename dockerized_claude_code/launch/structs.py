@@ -1,16 +1,14 @@
 """Identity dataclasses + modifier taxonomy for the launcher.
 
-Three identity layers, bottom-up:
+Two identity layers, bottom-up:
 
   AgentIdentity     — what's true of the agent on disk: which .md file (and
                        derived .conf, [tag]s). Mode-, instance-, and workspace-
                        independent.
-  InstanceIdentity  — adds session suffix + workspace + is_brand_new (NEW vs
-                       continuing). Stable across mode changes — modes are a
-                       per-launch decision, layered on top by SessionIdentity.
-                       This is what 'one launch targets' from resume-detection
-                       onward.
-  SessionIdentity   — adds this launch's resolved modes.
+  InstanceIdentity  — adds session suffix + workspace + modes + is_brand_new
+                       (NEW vs continuing). Fully resolved for the launch —
+                       constructed once all three prompts (workspace, session,
+                       modes) have answered, or directly from disk for cont.
 
 Plus the modifier taxonomy:
 
@@ -29,12 +27,11 @@ Plus the modifier taxonomy:
 Inheritance (not composition) so a function taking the parent type happily
 accepts any subclass. Construction:
 
-  - resolve_pick / picker entries (in agents_crud) return AgentIdentity (new)
-    or SessionIdentity (cont, with stored workspace + modes + is_brand_new=False).
+  - resolve_pick / picker entries (in agents_crud / menu_picker) return
+    AgentIdentity (new) or InstanceIdentity (cont, with stored workspace +
+    modes + is_brand_new=False).
   - resolve_target (in run.py) promotes AgentIdentity → InstanceIdentity once
-    session + workspace are known, stamping is_brand_new=True at that promotion.
-  - inst_id.with_modes(modes) promotes InstanceIdentity → SessionIdentity once
-    compose_runtime has resolved them.
+    workspace + session + modes prompts have answered, stamping is_brand_new=True.
 
 Pure data-types module — leaf-ish within launch/, depending only on paths,
 file_access (for `conf_path_for` etc.), and utils (for `parse_stem`).
@@ -52,7 +49,6 @@ from typing import Literal, overload
 
 from .file_access import (
     conf_path_for, has_continuable_jsonl, is_dir, last_history_mtime,
-    load_modes_map,
 )
 from .paths import AGENT_MD_BY_NAME, AGENT_WORKSPACE_MAP_FILE, instance_state_dir_path, state_md_path
 from .utils import parse_stem
@@ -99,8 +95,8 @@ class InstanceModifiers(Enum):
     @classmethod
     def from_value(cls, value: str) -> "InstanceModifiers":
         """Look up a member by its `.value` string; raises ValueError on
-        unknowns. Used at JSON-load boundaries (stored_modes /
-        continuable_instances / resolve_pick) to convert modes-map strings
+        unknowns. Used at JSON-load boundaries (continuable_instances /
+        resolve_pick) to convert modes-map strings
         into typed members — defective entries fail fast here rather than
         propagating downstream as silent string mismatches.
 
@@ -252,15 +248,17 @@ class AgentIdentity:
 
 @dataclass(frozen=True)
 class InstanceIdentity(AgentIdentity):
-    """Per-instance identity: agent + which session + which workspace, plus a
-    flag for whether this launch is creating a brand-new instance or continuing
-    an existing one. Stable across mode changes — modes are layered on top by
-    SessionIdentity below. Constructed by resolve_target once session +
-    workspace are known, and used by everything up to (and including) the
-    modes resolution step."""
-    session: str                        # user-chosen suffix differentiating parallel instances of the same agent
-    workspace: str | None               # host-side path bind-mounted into the container at /workspace; None when continuable_instances built us from a stale workspace-map entry (resolve_target re-prompts; set_container_mounts also falls back to DEFAULT_WORKSPACE)
-    is_brand_new: bool                  # True for a freshly-promoted AgentIdentity, False for a cont pick — drives resume + modes-resolution branches
+    """Per-launch identity: agent + session + workspace + modes + is_brand_new.
+    Fully resolved by the time it's constructed — either via resolve_target
+    (which prompts workspace, session, and modes for brand-new launches) or
+    via continuable_instances / resolve_pick (which loads workspace + modes
+    off the maps for cont launches). Modes are typed enum members (not
+    strings) — JSON-load boundaries convert via InstanceModifiers.from_value
+    and raise on unknowns."""
+    session: str                                # user-chosen suffix differentiating parallel instances of the same agent
+    workspace: str | None                       # host-side path bind-mounted into the container at /workspace; None when continuable_instances built us from a stale workspace-map entry (resolve_target re-prompts; set_container_mounts also falls back to DEFAULT_WORKSPACE)
+    is_brand_new: bool                          # True for a freshly-promoted AgentIdentity, False for a cont pick — drives resume + modes-persistence branches
+    modes: tuple["InstanceModifiers", ...]      # per-instance opt-ins like (MODE_WARN_AUTO,) or (MODE_WARN_AUTO, MODE_WARN_DOOD); tuple keeps the dataclass hashable
 
     @property
     def instance(self) -> str:
@@ -281,22 +279,6 @@ class InstanceIdentity(AgentIdentity):
         return state_md_path(self.state_dir)
 
     @property
-    def stored_modes(self) -> list[InstanceModifiers]:
-        """Modes persisted in agent_modes_map.json for this instance (empty
-        list if no entry). Used by compose_runtime on cont launches to pick
-        up whatever the modify flow last persisted. Reads through file_access's
-        cached load_modes_map() so repeated property accesses don't re-read
-        the JSON file.
-
-        Strings load from JSON; we convert at this boundary via
-        InstanceModifiers(s) so the rest of the launcher works with typed
-        members. An unknown string raises ValueError (`InstanceModifiers(s)`
-        does the work) — that's the fail-fast contract for defective
-        modes-map entries; use `python -m launch.audit` to find them
-        without crashing."""
-        return [InstanceModifiers.from_value(s) for s in load_modes_map().get(self.instance, [])]
-
-    @property
     def has_continuable_history(self) -> bool:
         """Whether this instance has an actual conversation transcript that
         `claude --continue` can load — delegates the disk scan to file_access
@@ -311,6 +293,24 @@ class InstanceIdentity(AgentIdentity):
         Cont row preview for the 'Last used' relative timestamp. Delegates the
         rglob + stat to file_access."""
         return last_history_mtime(self.state_dir)
+
+    @property
+    def chain(self) -> tuple[str, ...]:
+        """Active modifier values for this launch in InstanceModifiers
+        declaration order — BASE always first, then tags, then modes. Drives
+        both the docker image build order (returned as-is from compose_chain)
+        and the launch-time CLAUDE.md addendum order (consumed by
+        memory_addendums.composed_addendum via `modifier.value in chain`).
+
+        Chain stays string-shaped because its consumers (chain_image_tag,
+        chain_compose_files) build image tags and Dockerfile filenames from
+        these values directly. Both tags and modes are typed enum members
+        by this point (AgentIdentity.tags / .modes convert at the property /
+        JSON-load boundary respectively), so no runtime validation block is
+        needed here — unknowns crash at the boundary rather than slipping
+        through to compose."""
+        return tuple(m.value for m in InstanceModifiers.in_order(
+            (InstanceModifiers.BASE, *self.tags, *self.modes)))
 
     def validate_workspace(self) -> None:
         """Exit if the workspace path is set but doesn't resolve to a real
@@ -328,19 +328,6 @@ class InstanceIdentity(AgentIdentity):
                 f"Fix the entry in {AGENT_WORKSPACE_MAP_FILE}"
             )
 
-    def with_modes(self, modes: Iterable[InstanceModifiers]) -> SessionIdentity:
-        """Promote this InstanceIdentity into a full SessionIdentity by
-        attaching the resolved modes — called once compose_runtime has prompted
-        (for brand-new) or loaded (for cont) the per-instance mode list.
-        Carries is_brand_new through unchanged. Modes are typed enum members;
-        callers loading from JSON convert via InstanceModifiers(s) at the
-        boundary (raises ValueError on unknowns — fail-fast for defective
-        modes-map entries)."""
-        return SessionIdentity(
-            agent=self.agent, session=self.session, workspace=self.workspace,
-            is_brand_new=self.is_brand_new, modes=tuple(modes),
-        )
-
     @staticmethod
     def instance_name(agent: str, session: str) -> str:
         """Compose the canonical state-dir id `<agent>__<session>` from raw
@@ -355,34 +342,3 @@ class InstanceIdentity(AgentIdentity):
         to the `state_dir` property — same prompt-side use case as
         instance_name. `_for` suffix avoids name-collision with the property."""
         return instance_state_dir_path(InstanceIdentity.instance_name(agent, session))
-
-
-@dataclass(frozen=True)
-class SessionIdentity(InstanceIdentity):
-    """Extends InstanceIdentity with this launch's resolved modes. Modes aren't
-    intrinsic to *which instance this is* — they're a per-launch decision —
-    which is why they live here rather than on the parent. Constructed via
-    `inst_id.with_modes(...)`, or directly by continuable_instances when the
-    picker pre-loads stored modes for the modify flow's pre-fill. Modes are
-    typed enum members (not strings) — the JSON-load boundary converts via
-    InstanceModifiers(s) and raises on unknowns."""
-    modes: tuple["InstanceModifiers", ...]              # per-instance opt-ins like (MODE_WARN_AUTO,) or (MODE_WARN_AUTO, MODE_WARN_DOOD); tuple keeps the dataclass hashable
-
-    @property
-    def chain(self) -> tuple[str, ...]:
-        """Active modifier values for this session in InstanceModifiers
-        declaration order — BASE always first, then the session's tags,
-        then its modes. Drives both the docker image build order (returned
-        as-is from compose_chain) and the launch-time CLAUDE.md addendum
-        order (consumed by memory_addendums.composed_addendum via
-        `modifier.value in chain`).
-
-        Chain stays string-shaped because its consumers (chain_image_tag,
-        chain_compose_files) build image tags and Dockerfile filenames from
-        these values directly. Both tags and modes are typed enum members
-        by this point (AgentIdentity.tags / SessionIdentity.modes convert at
-        the property / JSON-load boundary respectively), so no runtime
-        validation block is needed here — unknowns crash at the boundary
-        rather than slipping through to compose."""
-        return tuple(m.value for m in InstanceModifiers.in_order(
-            (InstanceModifiers.BASE, *self.tags, *self.modes)))

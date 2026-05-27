@@ -19,7 +19,7 @@ Grouped by layer, top of the dependency graph last.
 ### Disk + identity — depend only on leaves
 
 - `launch/file_access.py` — sole chokepoint for every disk-touching call (reads, writes, removes, queries, lists, stats).
-- `launch/structs.py` — identity dataclasses (`AgentIdentity` → `InstanceIdentity` → `SessionIdentity`) + `InstanceModifiers` enum taxonomy.
+- `launch/structs.py` — identity dataclasses (`AgentIdentity` → `InstanceIdentity` → `InstanceIdentity`) + `InstanceModifiers` enum taxonomy.
 
 ### Small services — depend on disk + identity
 
@@ -161,7 +161,7 @@ Tests go in `launch/tests/test_audit.py`.
 
 → a `@property` on the appropriate identity class in `structs.py`. Don't
 add a free function elsewhere — the dataclass owns its derivations. Same
-for any "compute X from sess_id" — it's `sess_id.x`, not `compute_x(sess_id)`.
+for any "compute X from inst_id" — it's `inst_id.x`, not `compute_x(inst_id)`.
 
 ### A new helper that's pure (no disk, no third-party)
 
@@ -179,7 +179,7 @@ Things to NOT do, with the reason:
   `file_access.py`.
 - **Don't add a constant `FOO_PATH` outside `paths.py`.** Search returns one
   hit for any path; that's the point.
-- **Don't add a free function that takes a `SessionIdentity` and computes
+- **Don't add a free function that takes a `InstanceIdentity` and computes
   one of its fields.** That's a `@property` on the dataclass — same call site
   shape, lives next to the rest of the identity surface.
 - **Don't introduce a new cycle (even a lazy one).** The existing `network

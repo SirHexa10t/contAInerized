@@ -4,9 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from launch.structs import (
-    InstanceIdentity, InstanceModifiers, SESSION_SEP, SessionIdentity,
-)
+from launch.structs import InstanceIdentity, InstanceModifiers, SESSION_SEP
 
 
 class TestInstanceModifiersMembers(unittest.TestCase):
@@ -137,41 +135,30 @@ class TestInstanceIdentityHelpers(unittest.TestCase):
         self.assertEqual(path.name, "poet__draft")
 
     def test_instance_property(self):
-        inst = InstanceIdentity(agent="poet", session="draft", workspace="/tmp", is_brand_new=True)
+        inst = InstanceIdentity(agent="poet", session="draft", workspace="/tmp", is_brand_new=True, modes=())
         self.assertEqual(inst.instance, "poet__draft")
 
-    def test_with_modes_returns_session_identity(self):
-        inst = InstanceIdentity(agent="poet", session="draft", workspace="/tmp", is_brand_new=False)
-        sess = inst.with_modes(["auto"])
-        self.assertIsInstance(sess, SessionIdentity)
-        self.assertEqual(sess.modes, ("auto",))
-        # Carries through the InstanceIdentity fields
-        self.assertEqual(sess.agent, "poet")
-        self.assertEqual(sess.session, "draft")
-        self.assertEqual(sess.workspace, "/tmp")
-        self.assertFalse(sess.is_brand_new)
-
 
 # ============================================================
-# SessionIdentity.chain — the central validation + ordering property
+# InstanceIdentity.chain — the central validation + ordering property
 # ============================================================
 
 
-class TestSessionIdentityChain(unittest.TestCase):
-    """SessionIdentity.chain validates tags/modes against the modifier taxonomy
+class TestInstanceIdentityChain(unittest.TestCase):
+    """InstanceIdentity.chain validates tags/modes against the modifier taxonomy
     and returns them in InstanceModifiers declaration order, with BASE first.
     Constructed with AgentIdentity.tags overridden via a subclass since the
     real `tags` property reads the .md file — these tests don't touch disk."""
 
-    def _sess(self, tags, modes):
-        """Build a SessionIdentity whose `.tags` returns the given iterable
+    def _inst(self, tags, modes):
+        """Build a InstanceIdentity whose `.tags` returns the given iterable
         instead of reading from a filename. Uses a tiny subclass override
         rather than mocking the underlying file-access path."""
-        class _Sess(SessionIdentity):
+        class _Inst(InstanceIdentity):
             @property
             def tags(self):
                 return tuple(tags)
-        return _Sess(
+        return _Inst(
             agent="x", session="s", workspace="/tmp",
             is_brand_new=False, modes=tuple(modes),
         )
@@ -179,29 +166,29 @@ class TestSessionIdentityChain(unittest.TestCase):
     # --- chain composition ---
 
     def test_empty_chain_is_just_base(self):
-        self.assertEqual(self._sess([], []).chain, ("base",))
+        self.assertEqual(self._inst([], []).chain, ("base",))
 
     def test_tag_appended(self):
-        self.assertEqual(self._sess([InstanceModifiers.TAG_CODE], []).chain, ("base", "code"))
+        self.assertEqual(self._inst([InstanceModifiers.TAG_CODE], []).chain, ("base", "code"))
 
     def test_mode_appended(self):
-        self.assertEqual(self._sess([], [InstanceModifiers.MODE_WARN_AUTO]).chain, ("base", "auto"))
+        self.assertEqual(self._inst([], [InstanceModifiers.MODE_WARN_AUTO]).chain, ("base", "auto"))
 
     def test_full_chain(self):
         self.assertEqual(
-            self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]).chain,
+            self._inst([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]).chain,
             ("base", "code", "auto", "DooD"),
         )
 
     def test_order_follows_declaration_not_input(self):
         # Even if modes come in as (DOOD, AUTO), chain enforces declaration order.
         self.assertEqual(
-            self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]).chain,
+            self._inst([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]).chain,
             ("base", "code", "auto", "DooD"),
         )
 
     def test_base_always_first(self):
-        chain = self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO]).chain
+        chain = self._inst([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO]).chain
         self.assertEqual(chain[0], "base")
 
     # --- validation moved to the property boundaries ---
@@ -209,7 +196,7 @@ class TestSessionIdentityChain(unittest.TestCase):
     def test_unknown_tag_unrepresentable(self):
         # Tags are typed enum members — the property AgentIdentity.tags
         # converts each filename-grammar string via InstanceModifiers.from_value,
-        # which raises ValueError on unknowns before SessionIdentity.chain
+        # which raises ValueError on unknowns before InstanceIdentity.chain
         # ever sees a "typo'd" tag. Same fail-fast contract as modes.
         with self.assertRaises(ValueError):
             InstanceModifiers.from_value("typo")
@@ -224,11 +211,11 @@ class TestSessionIdentityChain(unittest.TestCase):
         # so chain construction excludes it from the tag/mode membership checks
         # and only emits it via the always-on first slot.
         self.assertIs(InstanceModifiers.from_value("base"), InstanceModifiers.BASE)
-        self.assertEqual(self._sess([InstanceModifiers.BASE], []).chain, ("base",))
+        self.assertEqual(self._inst([InstanceModifiers.BASE], []).chain, ("base",))
 
     def test_chain_returns_tuple(self):
         # Tuple (immutable) — signals "don't mutate this".
-        self.assertIsInstance(self._sess([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO]).chain, tuple)
+        self.assertIsInstance(self._inst([InstanceModifiers.TAG_CODE], [InstanceModifiers.MODE_WARN_AUTO]).chain, tuple)
 
 
 # ============================================================
@@ -250,7 +237,7 @@ class TestValidateWorkspace(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def _inst(self, workspace):
-        return InstanceIdentity(agent="x", session="s", workspace=workspace, is_brand_new=False)
+        return InstanceIdentity(agent="x", session="s", workspace=workspace, is_brand_new=False, modes=())
 
     def test_valid_directory_passes_silently(self):
         # Workspace is an existing directory → no exit.
@@ -293,12 +280,12 @@ class TestModesMisconfiguration(unittest.TestCase):
     """Modes come from agent_modes_map.json — a JSON file the user can hand-edit.
     Bad string values surface as a loud failure at the JSON-load boundary
     (InstanceModifiers(s) raises ValueError on unknowns) rather than being
-    silently absorbed into SessionIdentity.modes. These tests pin that contract.
+    silently absorbed into InstanceIdentity.modes. These tests pin that contract.
 
     The chain-level mode validation block is gone (modes are typed enum members
     at construction time, so chain doesn't need to revalidate). Tag misconfig
     still validates at chain access time — that path is exercised by
-    TestSessionIdentityChain above."""
+    TestInstanceIdentityChain above."""
 
     def test_unknown_mode_raises_with_listed_value(self):
         # InstanceModifiers("badmode") raises ValueError; the message names the
@@ -325,23 +312,23 @@ class TestModesMisconfiguration(unittest.TestCase):
     def test_duplicate_modes_are_idempotent_in_chain(self):
         # Duplicates in the modes tuple collapse via set membership in chain
         # construction. Same as if they appeared once.
-        class _Sess(SessionIdentity):
+        class _Inst(InstanceIdentity):
             @property
             def tags(self):
                 return ()
-        sess = _Sess(agent="x", session="s", workspace="/tmp", is_brand_new=False,
+        inst = _Inst(agent="x", session="s", workspace="/tmp", is_brand_new=False,
                      modes=(InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_AUTO))
-        self.assertEqual(sess.chain.count("auto"), 1)
+        self.assertEqual(inst.chain.count("auto"), 1)
 
     def test_empty_modes_tuple_yields_base_only_chain(self):
         # No modes ⇒ no mode-driven blocks; chain is just BASE.
-        class _Sess(SessionIdentity):
+        class _Inst(InstanceIdentity):
             @property
             def tags(self):
                 return ()
-        sess = _Sess(agent="x", session="s", workspace="/tmp", is_brand_new=False,
+        inst = _Inst(agent="x", session="s", workspace="/tmp", is_brand_new=False,
                      modes=())
-        self.assertEqual(sess.chain, ("base",))
+        self.assertEqual(inst.chain, ("base",))
 
 
 if __name__ == "__main__":
