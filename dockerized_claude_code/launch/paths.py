@@ -129,6 +129,7 @@ CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
 CLAUDE_SUMMARY_IN_CONTAINER = Path("/workspace/.claude_summary")   # project summary file the agent reads on demand (lives at the workspace mount root)
 BASHRC_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".bashrc"         # bind-mount target for settings/bashrc.sh; also the value BASH_ENV points at so non-interactive bash sources it
+INSTALL_FAILURES_LOG_IN_CONTAINER = Path("/var/log/claude-agents/install_failures.log")   # claude-owned log file each INSTALL_<TOOL> RUN in Dockerfile.code appends to on failure; docker_config.prompt_install_failures reads it post-build. Mirror of the literal path used by every Dockerfile.code install block — keep in sync (no compose-arg threading yet)
 RO_MOUNT_OPTION = "ro"
 
 

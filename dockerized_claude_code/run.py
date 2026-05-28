@@ -10,7 +10,7 @@ from launch.agents_crud import (
 )
 from launch.compose_env import set_container_env
 from launch.docker_config import (
-    require_docker, run_compose, set_container_mounts,
+    ensure_image, prompt_install_failures, require_docker, run_compose, set_container_mounts,
 )
 from launch.file_access import ensure_shared_oauth_files, load_conf
 from launch.menu_picker import (
@@ -24,31 +24,25 @@ from launch.user_additions import (
 from launch.utils import call_or_exit
 
 
-def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], bool]:
-    """Parse the launcher's CLI. Returns (picked, claude_args, dry_run):
-        picked      — AgentIdentity (new) | InstanceIdentity (cont, is_brand_new=False)
-                      if a known agent/instance name was given as the positional arg,
-                      else None (picker will run).
-        claude_args — anything else from argv: flags argparse didn't recognize, plus
-                      the positional if it didn't resolve to a known target. These
-                      get appended to the `docker compose run … claude-code` command
-                      so they reach claude inside the container.
-        dry_run     — `--dry-run` flag. When True, launch() runs every stage
-                      (state setup, mount staging, etc.) but skips the final
-                      `docker compose run`. Lets tests exercise the launch
-                      pipeline end-to-end without actually building / running
-                      the container.
+def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], bool, bool]:
+    """Parse the launcher's CLI. Returns (picked, claude_args, dry_run, refresh_installs):
+        picked            — AgentIdentity (new) | InstanceIdentity (cont, is_brand_new=False)
+                            if a known agent/instance name was given as the positional arg,
+                            else None (picker will run).
+        claude_args       — anything else from argv: flags argparse didn't recognize, plus
+                            the positional if it didn't resolve to a known target. These
+                            get appended to the `docker compose run … claude-code` command
+                            so they reach claude inside the container.
+        dry_run           — `--dry-run` flag. When True, launch() runs every stage
+                            (state setup, mount staging, etc.) but skips the final
+                            `docker compose run`.
+        refresh_installs  — `--refresh-installs` flag. When True, every optional CLI
+                            install in Dockerfile.code re-runs (cache buster — used
+                            to retry previously-failed installs). Already-installed
+                            tools fast-path through their package manager's no-op.
 
     Use `--` to force args through to claude even when they look like our own flags
     (e.g. `python3 run.py poet -- --help` runs poet and passes --help to claude).
-
-    Examples — argv[1:] split into (positional `target`, leftover `claude_args`):
-        []                       → target=None,    claude_args=[]                # picker opens
-        ["poet"]                 → target="poet",  claude_args=[]
-        ["poet", "--print"]      → target="poet",  claude_args=["--print"]
-        ["--some-flag"]          → target=None,    claude_args=["--some-flag"]   # picker opens; flag → claude
-        ["poet", "--", "--help"] → target="poet",  claude_args=["--help"]        # `--` ends our parsing
-        ["bogus", "extra"]       → target="bogus", claude_args=["extra"]         # bogus unresolved → moved to claude_args
     """
     parser = argparse.ArgumentParser(
         prog="run.py",
@@ -64,31 +58,37 @@ def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], boo
         action="store_true",
         help="Run all state setup but skip the final `docker compose run` step.",
     )
+    parser.add_argument(
+        "--refresh-installs",
+        action="store_true",
+        help="Force-rebuild every optional CLI install in Dockerfile.code (busts the "
+             "FORCE_INSTALLS_REFRESH and SOFTWARE_STACK_REFRESH layer caches). Used "
+             "to retry installs that failed in a prior launch.",
+    )
     args, claude_args = parser.parse_known_args()
     if args.target is None:
-        return None, claude_args, args.dry_run
+        return None, claude_args, args.dry_run, args.refresh_installs
     picked = resolve_pick(args.target)
     if picked is None:
         # Unknown name — pass it through to claude as a positional, picker still runs.
-        return None, [args.target] + claude_args, args.dry_run
-    return picked, claude_args, args.dry_run
+        return None, [args.target] + claude_args, args.dry_run, args.refresh_installs
+    return picked, claude_args, args.dry_run, args.refresh_installs
 
 
-def select_pick() -> tuple[AgentIdentity | InstanceIdentity, list[str], bool]:
+def select_pick() -> tuple[AgentIdentity | InstanceIdentity, list[str], bool, bool]:
     """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
     back to the interactive picker if no target was given on the command line, exit
-    cleanly if the user cancels. Returns (picked, claude_args, dry_run) — `picked`
-    is an AgentIdentity for new and an InstanceIdentity for cont. The new/cont
-    distinction is encoded in the returned type (and downstream in
-    inst_id.is_brand_new), so no parallel kind string is threaded alongside.
-    `dry_run` comes straight off the CLI flag — see parse_cli."""
+    cleanly if the user cancels. Returns (picked, claude_args, dry_run,
+    refresh_installs) — `picked` is an AgentIdentity for new and an InstanceIdentity
+    for cont. The new/cont distinction is encoded in the returned type. `dry_run`
+    and `refresh_installs` come straight off the CLI flags — see parse_cli."""
     if not AGENT_MD_BY_NAME:
         sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
-    picked, claude_args, dry_run = parse_cli()
+    picked, claude_args, dry_run, refresh_installs = parse_cli()
     picked = picked or select_agent()
     if picked is None:
         sys.exit(0)
-    return picked, claude_args, dry_run
+    return picked, claude_args, dry_run, refresh_installs
 
 
 def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity:
@@ -125,7 +125,7 @@ def compute_resume_flag(inst_id: InstanceIdentity) -> list[str]:
     return []
 
 
-def setup_state(inst_id: InstanceIdentity) -> tuple[dict[str, str], list[str]]:
+def setup_state(inst_id: InstanceIdentity, refresh_installs: bool = False) -> tuple[dict[str, str], list[str]]:
     """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
     addendum section into its state dir as CLAUDE.md (a single overwrite —
     install_latest_md keys off inst_id.chain for the addendums), ensure
@@ -138,10 +138,14 @@ def setup_state(inst_id: InstanceIdentity) -> tuple[dict[str, str], list[str]]:
     Claude Code auto-discovers those from the workspace's `.claude/skills/`
     directory natively. Returns (conf, cred_names) — mounts have all been
     staged via docker_config.add_docker_mount and don't need to flow
-    through this return."""
+    through this return.
+
+    `refresh_installs` propagates to set_container_env, which busts both
+    refresh-cache-buster ARGs so every optional CLI install retries on the
+    upcoming build."""
     install_latest_md(inst_id)
     ensure_shared_oauth_files()
-    set_container_env(inst_id)
+    set_container_env(inst_id, refresh_installs=refresh_installs)
     set_container_mounts(inst_id)
     _, conf = load_conf(inst_id.md_path)
     plant_user_extras(inst_id.modes)
@@ -159,8 +163,9 @@ def launch() -> None:
     changes. Whether the launch is new vs continuing is carried on the identity
     itself (inst_id.is_brand_new), not threaded as a separate arg. `--dry-run`
     short-circuits the final stage — all state setup still happens so test runs
-    can inspect side effects, but the container build + run is skipped."""
-    picked, claude_args, dry_run = select_pick()
+    can inspect side effects, but the container build + run is skipped.
+    `--refresh-installs` busts the install layer caches via set_container_env."""
+    picked, claude_args, dry_run, refresh_installs = select_pick()
     if not dry_run:
         require_docker()   # state setup doesn't need docker; only the final run_compose does
     inst_id = resolve_target(picked)
@@ -169,11 +174,20 @@ def launch() -> None:
     if inst_id.is_brand_new:
         set_instance_modes(inst_id)   # warns inside if both auto+DooD are set
     chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))
-    conf, cred_names = setup_state(inst_id)
+    conf, cred_names = setup_state(inst_id, refresh_installs=refresh_installs)
     print_launch_banner(inst_id, cred_names)
     if dry_run:
         print("  (--dry-run: state setup complete; skipping docker compose run.)")
         return
+    # Build the chain ourselves so install-failure collection can read the
+    # log from the just-built image BEFORE run_compose spawns the container
+    # (i.e. the warning lands before Claude Code starts).
+    ensure_image(chain)
+    # If any optional CLI install failed during the build, this surfaces a
+    # press-any-key prompt with the names + retry command — gating before
+    # `docker compose run` execs into Claude Code's TUI so the warning isn't
+    # immediately clobbered. Self-contained; no return value to handle.
+    prompt_install_failures(chain, inst_id.instance)
     run_compose(chain, inst_id.instance, claude_args, resume_flag, conf)
 
 

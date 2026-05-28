@@ -190,3 +190,13 @@ Things to NOT do, with the reason:
 - **Don't re-export by importing-and-not-using.** If module A needs `X` and
   `X` lives in module C, import directly: `from .C import X`. Routing it
   through B (`from .B import X`) is a re-export hop with no value.
+- **Don't write raw `subprocess.run([cmd, ...], capture_output=True, text=True)`.**
+  Use `utils.shell_capture(*cmd)` — same shape, less noise, signals "this is a
+  read-only probe of a CLI tool." Every read-only docker/getent probe routes
+  through it. Reserve direct `subprocess.run` / `subprocess.call` for cases
+  that genuinely need extra kwargs (`timeout=`, `env=`, `check=True`).
+- **Functions that exist to prompt the user start with `prompt_`.** `prompt_yn`,
+  `prompt_keypress`, `prompt_install_failures`, `prompt_modes`, `prompt_session`,
+  `prompt_modifier` — name reflects the side-effect shape. Don't pick a name
+  that reads like a getter (`collect_*`, `check_*`, `get_*`) when the function
+  returns `None` and exists for the user-facing prompt.

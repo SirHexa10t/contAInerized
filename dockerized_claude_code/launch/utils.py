@@ -8,6 +8,7 @@ from anywhere without circular-import risk.
 """
 
 import re
+import subprocess
 import sys
 from collections.abc import Callable
 from datetime import datetime
@@ -92,6 +93,15 @@ def parse_agent_name(stem: str) -> str:
     """Just the `name` half of `parse_stem` — drops [tag] / (parent) suffixes
     from a filename stem. Used to index AGENT_MD_BY_NAME in agents_crud."""
     return parse_stem(stem)[0]
+
+
+# === Subprocess ===
+
+def shell_capture(*cmd: str) -> subprocess.CompletedProcess[str]:
+    """`subprocess.run(cmd, capture_output=True, text=True)` — the common
+    one-shot pattern for invoking a CLI tool and inspecting its stdout/stderr.
+    `check=False` (the default) so callers handle the returncode themselves."""
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 
 # === Exception-to-exit ===

@@ -31,6 +31,7 @@ agent_modifiers_handler / docker_config / run.py all import from here.
 """
 
 import os
+import time
 from datetime import date
 from enum import Enum, auto
 from functools import cache
@@ -84,7 +85,8 @@ class ComposeEnvKey(str, Enum):
     # Image build chain — driven into compose-YAML ${...} substitution
     TARGET_IMAGE             = (auto(), False)   # compose.yml `image:` — current step's tag (set per chain step + once more in run_compose)
     PARENT_IMAGE             = (auto(), False)   # compose.<step>.yml `FROM ${PARENT_IMAGE}` — prior step's tag; not set on base
-    SOFTWARE_STACK_REFRESH   = (auto(), False)   # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup, playwright)
+    SOFTWARE_STACK_REFRESH   = (auto(), False)   # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup, playwright); --refresh-installs overrides with a per-launch timestamp
+    FORCE_INSTALLS_REFRESH   = (auto(), False)  # cache-buster for every INSTALL_<TOOL> RUN in Dockerfile.code; defaults to "stable" so cred-gated installs hit cache on normal launches; --refresh-installs sets a per-launch timestamp so failed/stale installs get retried
     # Per-instance identity
     AGENT_NAME               = (auto(), False)   # agent's clean name — substituted into compose.yml's `container_name:`
     # Mode-driven build-args (compose-YAML ${...} substitution into the per-mode Dockerfile)
@@ -234,19 +236,30 @@ def container_env_args() -> list[str]:
 # Per-launch orchestration
 # ============================================================
 
-def set_container_env(inst_id: InstanceIdentity) -> None:
+def set_container_env(inst_id: InstanceIdentity, refresh_installs: bool = False) -> None:
     """Stage per-launch compose env vars in one bulk dict-update — called by
     run.py before docker compose build/run. Sister to docker_config's
     set_container_mounts (env vars vs bind-mounts); both run sequentially
     in setup_state. Accepts any InstanceIdentity (or subclass); reads
     .agent for the container name, plus whatever the status-line builder
-    consumes."""
+    consumes.
+
+    `refresh_installs` (driven by run.py's `--refresh-installs` CLI flag):
+    when True, both refresh-cache-buster ARGs (SOFTWARE_STACK_REFRESH and
+    FORCE_INSTALLS_REFRESH) get a fresh per-launch timestamp, forcing
+    every install layer in Dockerfile.code to rebuild. Used to retry
+    installs that failed in a prior launch (transient network issues,
+    GitHub API rate limits, etc.) without manual `--no-cache` invocations.
+    Default False — keeps SOFTWARE_STACK_REFRESH on its weekly rotation
+    and FORCE_INSTALLS_REFRESH at "stable" so the cache hits."""
+    refresh_value = f"forced-{int(time.time())}" if refresh_installs else None
     _compose_env.update({
-        ComposeEnvKey.SOFTWARE_STACK_REFRESH: date.today().strftime("%Y-W%W"),
-        ComposeEnvKey.AGENT_NAME:             inst_id.agent,
-        ComposeEnvKey.AGENT_STATUS_LINE:      build_status_line(inst_id),
-        ComposeEnvKey.BASH_ENV:               BASHRC_IN_CONTAINER,
-        ComposeEnvKey.DOCKERIZED_CLAUDE_ROOT: DOCKERIZED_CLAUDE_ROOT,
+        ComposeEnvKey.SOFTWARE_STACK_REFRESH:  refresh_value or date.today().strftime("%Y-W%W"),
+        ComposeEnvKey.FORCE_INSTALLS_REFRESH:  refresh_value or "stable",
+        ComposeEnvKey.AGENT_NAME:                inst_id.agent,
+        ComposeEnvKey.AGENT_STATUS_LINE:         build_status_line(inst_id),
+        ComposeEnvKey.BASH_ENV:                  BASHRC_IN_CONTAINER,
+        ComposeEnvKey.DOCKERIZED_CLAUDE_ROOT:    DOCKERIZED_CLAUDE_ROOT,
         # Dynamic-key updates from optional_creds/
         **install_creds_flags(present_optional_cred_services()),   # INSTALL_<TOOL>=0|1 build flags
         **token_env_dict(optional_cred_tokens()),                  # per-service tokens (e.g. JIRA_API_TOKEN)

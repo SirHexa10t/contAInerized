@@ -11,7 +11,7 @@ Docker-based launcher for pre-made Claude Code agents. Each persona ships its ow
 - Python 3.10+ host launcher (walrus operator in expressions, frozen dataclasses, modern union types, `from __future__ import annotations`)
 - `prompt_toolkit` (TUI picker), `python-dotenv` (`.conf` parsing), `rich` (markdown rendering for previews + F8 legend); stdlib `readline` for workspace tab-completion
 - Docker + Compose v2; base is `debian:bookworm-slim` + Claude Code + jq/yq/fd/tree/ripgrep; `[code]` adds Rust/Node/uv + python3-dotenv, `{auto}` adds iptables + sudo + firewall script, `{DooD}` mounts host docker socket, `{web}` adds playwright CLI + chromium apt deps
-- `unittest` test suite (342 tests, ~0.1s); `mypy` + `ruff` as the dev-side check stack (no CI gate)
+- `unittest` test suite (366 tests, ~0.1s); `mypy` + `ruff` as the dev-side check stack (no CI gate)
 
 ### Project Structure
 
@@ -19,24 +19,25 @@ Docker-based launcher for pre-made Claude Code agents. Each persona ships its ow
 run.py                              entry point: 7-stage launch() orchestrator; --dry-run flag skips run_compose for testable end-to-end. Calls `call_or_exit(compose_chain, ...)` inline at the Categorise stage — no compose_runtime wrapper.
 launch/
   paths.py                          centralised path constants — import root, zero in-project deps. Host (`AGENTS_STATE`, `USER_EXTRAS_DIR`, `OPTIONAL_CREDS_MOUNTS` as `{svc: (mount, cli|None)}` tuples, `OPTIONAL_CREDS_TOKEN_ENV_VARS`, `DEFAULTING_DIRS` + resolved `DEFAULT_WORKSPACE`), container (`CLAUDE_HOME_IN_CONTAINER`, `CLAUDE_CONFIG_IN_CONTAINER`, `CLAUDE_SUMMARY_IN_CONTAINER`, `BASHRC_IN_CONTAINER`), the four per-layer bind-mount dicts (`DOCKER_BASE_MOUNTS`, `DOCKER_AUTO_MOUNTS`, `DOCKER_DOOD_MOUNTS`, `CACHE_MOUNTS`), and path-builder lambdas. `TEMPLATE_FILES_DIR` points at `launch/template_files/`.
-  utils.py                          domain-neutral helpers — `plural`, `relative_time`, `ordering_index_or_end`, `split_host_port`, `parse_stem` (filename grammar), `prompt_yn` (generic Y/N input), `call_or_exit` (try/except → sys.exit wrapper, keyword-only `exceptions`/`prefix`). No disk access. Leaf module.
+  utils.py                          domain-neutral helpers — `plural`, `relative_time`, `ordering_index_or_end`, `split_host_port`, `parse_stem` (filename grammar), `prompt_yn` (Y/N input) + `prompt_keypress` (press-any-key gate; both share the `_print_header_and_body` cadence), `call_or_exit` (try/except → sys.exit wrapper, keyword-only `exceptions`/`prefix`). No disk access. Leaf module.
   file_access.py                    every disk-touching call routes through here. Mutations + existence/kind queries + listing + stats + host paths. `force_remove(path, *, name=None)` (sudo + `sudo -k` fallback for root-owned bind-mount leftovers). `ensure_shared_oauth_files()` touches `.claude.json` + `.credentials.json` as empty `{}` so Docker doesn't auto-create them as root on first launch. `installed_cred_clis()` space-joins CLI names of services with creds present. `find_md_for_agent` / `load_conf` / `present_optional_cred_services` are LRU-cached; `_cached_load_json_map` serves both workspace + modes maps from a single per-process cache.
   structs.py                        identity dataclasses (AgentIdentity → InstanceIdentity, frozen=True, inheritance; single tier now — `SessionIdentity` collapsed in). InstanceIdentity carries session/workspace/modes/is_brand_new and is fully resolved by the time it's constructed. `InstanceModifiers` enum members: `BASE`, `TAG_CODE`, `MODE_WARN_AUTO`, `MODE_WARN_DOOD`, `MODE_WEB`. Each member: `.value` (canonical str), `.label` (`[code]` / `{auto}` wrapping), `.description`, `.colored_label()` (warning-aware ANSI). Module-level `ANSI_TO_PT_STYLE` dict + walrus-bound `_WARN_ANSI` / `_SAFE_ANSI` / `_RESET_ANSI` constants — single source of truth for modifier coloring across status line, F8 legend, picker. Classmethods: `in_order(modifiers)` (canonical-order tuple), `colored_chain(modifiers)` (ANSI string), `_prerequisites()` (modifier → required-tags set), `applies_to(tags)` (prerequisite check).
-  compose_env.py                    compose-side env-var staging. `ComposeEnvKey(str, Enum)` with `_generate_next_value_` so `member.value == member.name` + a `container_emit` boolean flag per member (which keys auto-forward as `-e` flags via `container_env_args()`). `_compose_env` accumulator + `stage_compose_env(key, value)` + `subprocess_env()` overlay. Formatters (`install_creds_flags`, `token_env_dict`, `conf_env_args`). `set_container_env(inst_id)` orchestrator — sister to docker_config's `set_container_mounts`.
-  docker_config.py                  docker-subprocess + bind-mount accumulator + image-chain naming. `add_docker_mount` + `_docker_mounts` accumulator; `chain_image_tag` / `chain_compose_files`; docker CLI helpers (`require_docker`, `detect_docker_gid`, `wait_for_container_running`, `docker_exec_root`, `any_agent_container_running` — every direct `docker` call lives here); `set_container_mounts(inst_id)` (workspace=None falls back to DEFAULT_WORKSPACE); `ensure_image` + `run_compose`. `CONTAINER_NAME_PREFIX = "claude-code_"`.
-  agent_modifiers_handler.py        modifier-domain logic. `compose_chain(inst_id)` runs `_apply_code` / `_apply_auto` / `_apply_dood` / `_apply_web` dispatch (validation via `inst_id.chain` access), returns `list(inst_id.chain)`. `warn_if_dangerous_modes` ({auto}+{DooD} red press-any-key warning). Cache prepare/prune helpers (`prepare_caches`/`prune_caches`, [code] only). `prompt_modifier(modifier, current_modifiers)` looks up MODIFIER_PROMPTS + calls prompt_yn; `prompt_for_modes(tags, current_modes)` iterates `in_order(MODIFIER_PROMPTS)` and gates each via `mode.applies_to(tag_set)`.
+  compose_env.py                    compose-side env-var staging. `ComposeEnvKey(str, Enum)` with `_generate_next_value_` so `member.value == member.name` + a `container_emit` boolean flag per member (which keys auto-forward as `-e` flags via `container_env_args()`). Members include `SOFTWARE_STACK_REFRESH` (weekly ISO-week, gates rustup/uv/Claude Code) and `FORCE_INSTALLS_REFRESH` (gates every optional INSTALL_<TOOL> RUN; defaults to `"stable"`, set to `forced-<epoch>` when `--refresh-installs` fires). `_compose_env` accumulator + `stage_compose_env(key, value)` + `subprocess_env()` overlay. Formatters (`install_creds_flags` — filters on `cli is not None`, `token_env_dict`, `conf_env_args`). `set_container_env(inst_id, refresh_installs=False)` orchestrator.
+  docker_config.py                  docker-subprocess + bind-mount accumulator + image-chain naming. `add_docker_mount` + `_docker_mounts` accumulator + `mount_target_is_staged()` (clash check for home-overlay); `chain_image_tag` / `chain_compose_files`; docker CLI helpers (`require_docker`, `detect_docker_gid`, `wait_for_container_running`, `docker_exec_root`, `any_agent_container_running` — every direct `docker` call lives here, all routing through `utils.shell_capture`); `set_container_mounts(inst_id)` (workspace=None falls back to DEFAULT_WORKSPACE); `ensure_image` (called from run.py; no longer inside run_compose) + `run_compose`; `prompt_install_failures(chain, instance)` reads `/var/log/claude-agents/install_failures.log` via `docker run --rm --entrypoint cat` and self-prompts via `prompt_keypress` on non-empty. `CONTAINER_NAME_PREFIX = "claude-code_"`.
+  agent_modifiers_handler.py        modifier-domain logic. `compose_chain(inst_id)` runs `_apply_code` / `_apply_auto` / `_apply_dood` / `_apply_web` dispatch (validation via `inst_id.chain` access), returns `list(inst_id.chain)`. `warn_if_dangerous_modes` iterates `MODIFIER_NOTICE_PROMPTS`, fires `prompt_keypress` for each matching combination subset. Cache prepare/prune helpers (`prepare_caches`/`prune_caches`, [code] only). `prompt_modifier(modifier, current_modifiers)` looks up `MODIFIER_YN_PROMPTS` + calls prompt_yn; `prompt_for_modes(tags, current_modes)` iterates `in_order(MODIFIER_YN_PROMPTS)` and gates each via `mode.applies_to(tag_set)`.
   network.py                        {auto}-mode firewall: `BUILTIN_FIREWALL_DOMAINS` (~135 curated entries) + user whitelist, two-phase DNS cascade (critical Anthropic sync → rest streaming via `docker exec iptables -I`), cross-launch resolved-IP cache at `~/.claude-agents/resolved_domains.txt` (6h TTL), agent-visible `domains_pending_resolve.yml` status. `_phase2_thread` / `_phase2_queue` / `_phase1_executor` typed as Optional with explicit narrowing asserts at workers' entry.
   agents_crud.py                    instance-state CRUD: `list_all_instances`, `update_workspace_map`, `set_instance_modes` (calls `warn_if_dangerous_modes` after every write), `install_latest_md(inst_id)` (writes source `.md` + `composed_addendum(inst_id.chain)` to state-dir CLAUDE.md in one go), `modify_instance`, `delete_instance`, `resolve_pick` (CLI name → AgentIdentity | InstanceIdentity | None), picker-entry builders (`creatable_agents` / `continuable_instances`) + tag/mode sort keys.
-  user_additions.py                 thin facade: `optional_creds_mounts` (returns sorted service names; unpacks `(mount, cli)` tuples), `plant_user_extras` (always plants optional_creds README; firewall_whitelist.txt only under `{auto}`). Bundled skills + commands ride along in `DOCKER_BASE_MOUNTS`.
+  user_additions.py                 `optional_creds_mounts()` dispatches on trailing-`/` key shape — regular entries (aws/gcloud/jira/…) mount whole; `home/` key contents-mounts each top-level child into `/home/claude/<name>` with a per-entry clash check (`RuntimeError` on collision with a launcher-staged mount, caught by `call_or_exit`). `ssh` entry triggers `enforce_ssh_dir_perms` (700 dir / 600 files / 644 `*.pub` & `*_hosts`) before mounting. `plant_user_extras` always plants `optional_creds_readme.txt` (with `overwrite_if_changed=True` — refreshed when the template moves on); `firewall_whitelist.txt` only under `{auto}` and preserved on relaunch. Bundled skills + commands ride along in `DOCKER_BASE_MOUNTS`.
   menu_picker.py                    prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + `ask_for_workspace` + `prompt_session` + `print_launch_banner`. `prompt_modes` is a thin wrapper that calls `agent_modifiers_handler.prompt_for_modes` — the dispatch logic lives there, not here. Per-modifier picker-row coloring uses `colored_chain` + `ANSI_TO_PT_STYLE` parsing.
   claude_code_config.py             Claude-Code-side UX — `build_status_line(inst_id)` (cyan agent + grey workspace + green email + blue instance + ANSI modifier chain via `colored_chain`) + `set_terminal_title(name)`. Leaf-shaped.
   audit.py                          read-only state-correctness checker; `python -m launch.audit`. Reports: orphan state dirs, missing history.jsonl, ghost workspace-map entries, bad workspaces, modes-map issues, OAuth state-file issues.
-  template_code/                    per-modifier copy / data, keyed by InstanceModifiers member. Pure data, no logic.
-    modifier_prompts.py             MODIFIER_PROMPTS dict — `{modifier: (header, body)}` for the per-mode Y/N prompts. Consumed by `agent_modifiers_handler.prompt_modifier`.
-    memory_addendums.py             launch-time directives for CLAUDE.md. `Addendum(NamedTuple)` (`.title` + `.body`); four instances — `SEEK_SUMMARY`, `MAINTAIN_PRIVACY`, `CREDENTIALS_NOTICE` (body collapses to `""` if no creds installed), `FIREWALL_NOTICE`. `MODIFIER_ADDENDUMS`: BASE → [SEEK_SUMMARY, MAINTAIN_PRIVACY], TAG_CODE → [CREDENTIALS_NOTICE], MODE_WARN_AUTO → [FIREWALL_NOTICE]. `composed_addendum(chain)` renders the active sub-sections under one `## Launch-time addendums` heading.
+  template_code/                    user-facing copy / data, keyed by what fires it. Pure data, no logic.
+    modifier_prompts.py             `MODIFIER_YN_PROMPTS` (`{modifier: (header, body)}` for per-mode Y/N prompts, consumed by `prompt_modifier`) + `MODIFIER_NOTICE_PROMPTS` (`{frozenset[InstanceModifiers]: (header, body)}` for combination warnings — currently {auto}+{DooD} — consumed by `warn_if_dangerous_modes` via `prompt_keypress`; ANSI red baked into the strings so `prompt_keypress` stays style-agnostic).
+    docker_prompts.py               docker-side strings — `BUILDING_STEP` (per-chain-step progress), `AUTO_FIREWALL_WAITING` (Phase 1 await line), `INSTALL_FAILURES_HEADER` + `INSTALL_FAILURES_BODY` (consumed by `docker_config.prompt_install_failures`). All format-strings with documented placeholders.
+    memory_addendums.py             launch-time directives for CLAUDE.md. `Addendum(NamedTuple)` (`.title` + `.body`); instances — `SEEK_SUMMARY`, `MAINTAIN_PRIVACY`, `CREDENTIALS_NOTICE` (body collapses to `""` if no creds installed), `FIREWALL_NOTICE`, `WEB_NOTICE`. `MODIFIER_ADDENDUMS` maps each to the modifier that activates it. `composed_addendum(chain)` renders the active sub-sections under one `## Launch-time addendums` heading.
   template_files/                   first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into `~/.claude-agents/user_extras/` on first {auto} / first launch respectively.
   benchmark/                        ad-hoc micro-benchmarks (e.g. `bench_md_cache_vs_read.py`). Not in the test suite; run by hand.
-  tests/                            unittest suite — 14 files / 342 tests / ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from `/workspace`. Notable: `test_env_coverage.py` scans compose .yml + Dockerfile files and asserts every `${VAR}` ref is in our `ComposeEnvKey` ∪ `INSTALL_<TOOL>` ∪ token-vars taxonomy; `test_cache.py` covers the toolchain cache lifecycle; `test_essential_files.py` asserts every non-BASE modifier has a matching Dockerfile + compose layer + `_apply_<value.lower()>` handler.
+  tests/                            unittest suite — 15 files / 366 tests / ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from `/workspace`. Notable: `test_env_coverage.py` scans compose .yml + Dockerfile files and asserts every `${VAR}` ref is in our `ComposeEnvKey` ∪ `INSTALL_<TOOL>` ∪ token-vars taxonomy AND that every ARG a Dockerfile declares which the launcher stages is forwarded by the matching compose layer's `args:` (would have caught `INSTALL_SSH` / `SOFTWARE_STACK_REFRESH` silent-drop bugs); `test_cache.py` covers the toolchain cache lifecycle; `test_essential_files.py` asserts every non-BASE modifier has a matching Dockerfile + compose layer + `_apply_<value.lower()>` handler; `test_user_additions.py` exercises both the whole-mount and `home/` contents-mount paths.
 agents/                             agent definitions — drop `<name>[tag](parent).md` (+ optional `.conf`) here.
 custom_commands/                    launcher-bundled slash commands (mounted into every container via DOCKER_BASE_MOUNTS) — `refactor`, `unspaghettify`, `write-readme`, `write-summary`. `/refactor` and `/unspaghettify` end with a phase that writes to `.claude_dev_guidelines` (project root). Each `.md` has frontmatter (`description:`, `argument-hint:` where applicable).
 custom_skills/                      launcher-bundled skills (mounted via DOCKER_BASE_MOUNTS). Currently: `print/SKILL.md` (rich-cli pretty printer).
@@ -71,16 +72,16 @@ install_bashrc_alias.sh, install_dependencies.sh    one-time host setup.
 
 ### Architecture
 
-Entry: `python3 run.py [target] [--dry-run] [...claude-args]` → `launch()` (`run.py:152`).
+Entry: `python3 run.py [target] [--dry-run] [--refresh-installs] [...claude-args]` → `launch()`.
 
-1. **Input** (`select_pick`, `run.py:77`) — argparse parses `target` + `--dry-run`; `resolve_pick` returns `AgentIdentity | InstanceIdentity | None`.
+1. **Input** (`select_pick`) — argparse parses `target` + `--dry-run` + `--refresh-installs`; `resolve_pick` returns `AgentIdentity | InstanceIdentity | None`.
 2. **Docker gate** — `require_docker()` runs here UNLESS `--dry-run` (state-setup doesn't need docker; only the final `run_compose` does).
-3. **Filesystem validation + identity completion** (`resolve_target`, `run.py:94`) — for `new`, prompts workspace, session, then modes (via `prompt_modes` → `prompt_for_modes`); for `cont`, validates the workspace (re-prompting if the map entry is stale). Returns a fully-resolved InstanceIdentity. `validate_workspace` treats empty string / None as "missing" (and `set_container_mounts` falls back to DEFAULT_WORKSPACE downstream).
+3. **Filesystem validation + identity completion** (`resolve_target`) — for `new`, prompts workspace, session, then modes (via `prompt_modes` → `prompt_for_modes`); for `cont`, validates the workspace (re-prompting if the map entry is stale). Returns a fully-resolved InstanceIdentity. `validate_workspace` treats empty string / None as "missing" (and `set_container_mounts` falls back to DEFAULT_WORKSPACE downstream).
 4. **Resume detection** (`compute_resume_flag`) — `["--continue"]` only if conversation JSONL exists.
 5. **Persist** — `update_workspace_map(inst_id)`; if `is_brand_new`, `set_instance_modes(inst_id)`.
-6. **Categorise** — `chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))`. Inline at the call site; no `compose_runtime` wrapper. `_apply_code` / `_apply_auto` / `_apply_dood` / `_apply_web` dispatch happens inside `compose_chain`.
-7. **Setup** (`setup_state`) — `install_latest_md(inst_id)` → `ensure_shared_oauth_files` → `set_container_env` → `set_container_mounts` → `load_conf` → `plant_user_extras` → `optional_creds_mounts`.
-8. **Banner + run** — `print_launch_banner` summarises; `run_compose` builds each chain step, awaits {auto} Phase 1, spawns the firewall updater, then execs `docker compose ... run --rm -it --name claude-code_<instance> ... claude-code`. `--dry-run` short-circuits here.
+6. **Categorise** — `chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))`. Inline at the call site (no wrapper). `_apply_code` / `_apply_auto` / `_apply_dood` / `_apply_web` dispatch happens inside `compose_chain`.
+7. **Setup** (`setup_state(inst_id, refresh_installs)`) — `install_latest_md` → `ensure_shared_oauth_files` → `set_container_env(refresh_installs=…)` → `set_container_mounts` → `load_conf` → `plant_user_extras` → `optional_creds_mounts` (raises `RuntimeError` on home-overlay clash; caught by `call_or_exit`).
+8. **Banner + build + run** — `print_launch_banner`; **dry-run returns here**. Otherwise `ensure_image(chain)` (split out of `run_compose` so the next step can read its artifact), `prompt_install_failures(chain, inst_id.instance)` (self-prompts via `prompt_keypress` if `/var/log/claude-agents/install_failures.log` is non-empty), then `run_compose` awaits {auto} Phase 1, spawns the firewall updater, execs `docker compose run --rm -it --name claude-code_<instance> claude-code`.
 
 Bind mounts (host → container) — staged via `add_docker_mount`, flattened to `-v` flags in `run_compose`:
 - `$AI_WORKSPACE` → `/workspace` (falls back to `DEFAULT_WORKSPACE` if `inst_id.workspace` is None/empty)
@@ -101,12 +102,14 @@ Bind mounts (host → container) — staged via `add_docker_mount`, flattened to
 - **`InstanceIdentity.chain`** is the single source of truth for "what's active": ordered tuple, BASE first, validates self.tags/modes (raises `ValueError` on unknowns). Consumed by `compose_chain` (returns `list(chain)`) and `memory_addendums.composed_addendum(chain)`.
 - **Modifier prerequisites** live in `InstanceModifiers._prerequisites()` (modifier → required-tags frozenset); modifiers absent from the mapping have no prereqs. `mode.applies_to(tag_set)` is the queried interface. `prompt_for_modes` gates each prompt through this, so e.g. `{DooD}` / `{web}` only fire for `[code]` agents.
 - **Modifier display coloring**: `colored_label()` (per-member ANSI string), `colored_chain(modifiers)` (space-separated ANSI for status line), and module-level `ANSI_TO_PT_STYLE` (ANSI → prompt_toolkit style). The picker parses `colored_chain`'s output back to pt-fragments via that mapping — one rendering source feeds all surfaces (status line, F8 legend, picker rows).
-- **Adding a new tag/mode**: (1) append a member to `InstanceModifiers` (declaration order = chain order); (2) add `_apply_<value.lower()>()` in `agent_modifiers_handler` + one conditional in `compose_chain`; (3) create `docker/Dockerfile.<value.lower()>` + `docker/compose.<value.lower()>.yml`; (4) add a `(header, body)` entry to `MODIFIER_PROMPTS` (template_code/modifier_prompts.py); (5) optionally add a prerequisite entry to `_prerequisites()`; (6) optionally add an `Addendum` + entry in `MODIFIER_ADDENDUMS`. `test_essential_files.py` enforces #1-#3 pairings.
+- **Adding a new tag/mode**: (1) append a member to `InstanceModifiers` (declaration order = chain order); (2) add `_apply_<value.lower()>()` in `agent_modifiers_handler` + one conditional in `compose_chain`; (3) create `docker/Dockerfile.<value.lower()>` + `docker/compose.<value.lower()>.yml`; (4) add a `(header, body)` entry to `MODIFIER_YN_PROMPTS` (template_code/modifier_prompts.py); (5) optionally add a prerequisite entry to `_prerequisites()`; (6) optionally add an `Addendum` + entry in `MODIFIER_ADDENDUMS`. `test_essential_files.py` enforces #1-#3 pairings.
 - **Per-agent `.conf` fully replaces `default.conf`** (not merged — agent configs must re-declare defaults they still want).
 - **Every filesystem call goes through `file_access.py`** — including existence (`path_exists`), kind (`is_dir`/`is_file`/`is_symlink`), listing, stats, host paths, AND removal-with-sudo-fallback (`force_remove`). Inside file_access itself, Path methods are used directly.
 - **Compose env-var staging lives in `compose_env.py`** — `ComposeEnvKey(str, Enum)` with `_generate_next_value_` so `member.value == member.name`; per-member `container_emit: bool` selects which keys forward as `-e` flags (replaces a separate forward-list). `subprocess_env()` overlays the accumulator at subprocess time. `container_env_args()` flattens to `-e KEY=VALUE` for `run_compose`.
-- **Every direct `docker` CLI call lives in `docker_config.py`** — `subprocess.call(["docker", "compose", ...])`, `detect_docker_gid`, `wait_for_container_running`, `docker_exec_root`, `any_agent_container_running`. `network._updater_worker` + `network._insert_iptables_accept` lazy-import to break the cycle.
-- **`OPTIONAL_CREDS_MOUNTS` values are `(mount_path, cli_name | None)` tuples** — `cli_name` is the binary installed in Dockerfile.code (e.g. `kube` → `kubectl`); fed to `installed_cred_clis()` for the credentials addendum. Services with `cli=None` (ssh/npmrc/pypirc) contribute config but install nothing.
+- **Every direct `docker` CLI call lives in `docker_config.py`** — `subprocess.call(["docker", "compose", ...])`, `detect_docker_gid`, `wait_for_container_running`, `docker_exec_root`, `any_agent_container_running`. Read-only docker probes all route through `utils.shell_capture(*cmd)` (one-shot `subprocess.run(cmd, capture_output=True, text=True)`); the two `subprocess.call` build/run sites are the only stays-in-place. `network._updater_worker` + `network._insert_iptables_accept` lazy-import to break the cycle.
+- **`OPTIONAL_CREDS_MOUNTS` values are `(mount_path, cli_name | None)` tuples** — `cli_name` is the binary fed to `installed_cred_clis()` for the credentials addendum AND used by `install_creds_flags` to filter which `INSTALL_<TOOL>` build-args are emitted. `cli=None` entries (`npmrc`, `pypirc`, the `home/` contents-mount key) contribute config but no install gating.
+- **Key shapes in `OPTIONAL_CREDS_MOUNTS`** — bare `<service>` mounts the source as-is; trailing-`/` `<name>/` is a "contents-mount" entry (top-level children of the source bind individually into the target dir, per-entry clash check refuses to shadow a launcher-staged mount). Currently `home/` is the only contents-mount; intent is catch-all loose dotfiles (`.gitconfig`, `.gnupg/`, etc.).
+- **Resilient optional installs** — each `INSTALL_<TOOL>` RUN in `Dockerfile.code` wraps its install in `{ … } || { echo <tool> >> /var/log/claude-agents/install_failures.log; }` so transient failures (curl 403, repo unreachable) don't abort the build. Each RUN also leads with `sed -i '/^<tool>$/d'` to strip prior failure entries before retrying. The launcher's `prompt_install_failures` reads the log post-`ensure_image` and self-prompts via `prompt_keypress` — Claude Code's TUI takeover is gated until the user acknowledges. `--refresh-installs` overrides both `SOFTWARE_STACK_REFRESH` and `FORCE_INSTALLS_REFRESH` with a `forced-<epoch>` value to bust every install layer's cache for a retry pass.
 - **Env-var config layering** (edit at the layer that owns the key):
   - `Dockerfile` `ENV`: `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `USE_BUILTIN_RIPGREP=0`. Baked into image; needs rebuild.
   - `agents/{default,<parent>,<name>}.conf`: per-launch `-e KEY=VALUE` (agent fully replaces default).
@@ -114,7 +117,7 @@ Bind mounts (host → container) — staged via `add_docker_mount`, flattened to
   - `compose_env.ComposeEnvKey` members with `container_emit=True`: forwarded as `-e` flags by `container_env_args()`.
   - `compose_env.stage_compose_env(KEY, value)`: launch-time compose env (ComposeEnvKey members + dynamic INSTALL_/token strings).
 - **`{auto}` firewall**: host-side DNS via `getent ahostsv4` with cascading-timeout retry (3/5/8/13/21s); cross-launch IP cache at `~/.claude-agents/resolved_domains.txt` with 6h TTL. Two phases: Phase 1 (critical Anthropic) seeds initial `$WHITELIST_ADDRESSES`; Phase 2 streams the rest via `docker exec iptables -I` into the running container. Container-side `init-firewall.sh` does no DNS — only iptables over pre-resolved IPs.
-- **`{auto} + {DooD}` is dangerous** — `warn_if_dangerous_modes` (in `agent_modifiers_handler`) prints a red press-any-key warning after every mode-set write.
+- **`{auto} + {DooD}` is dangerous** — `warn_if_dangerous_modes` iterates `MODIFIER_NOTICE_PROMPTS` and fires `prompt_keypress` for each combination subset (currently just {auto}+{DooD}). New combos: add one frozenset entry; no code changes.
 - **Test discovery**: `python3 -m unittest discover -s launch/tests` from `/workspace`. Tests use `unittest` (no external test runner needed); function-level mocks (e.g. `_apply_*` handlers) exercise dispatch without filesystem/docker side effects. `test_run.py` exercises the full orchestration via mocks + `--dry-run`.
 - **Static-check stack**: `mypy launch/ run.py` (clean — third-party stubless deps ignored via `pyproject.toml` overrides); `ruff check .` (clean — `line-length=200`, `skip-magic-trailing-comma=true`, `E731` ignored for `paths.py`'s path-builder lambdas).
 - **`/refactor` and `/unspaghettify`** both end with a phase that persists their findings to `.claude_dev_guidelines` at the project root — refactor writes style/idioms/anti-patterns/type-policy; unspaghettify writes file roles + dependency direction + "new code about X belongs in Y because Z" examples. Each command's pass tells the agent to MERGE (not clobber) the other's sections.
@@ -130,55 +133,61 @@ Bind mounts (host → container) — staged via `add_docker_mount`, flattened to
 
 ### Current State
 
-Nothing in flight — the codebase just settled an arc of identity / coloring / prompt-dispatch consolidation. Notes whose behavior would surprise a fresh reader without explanation:
+Recent arc just landed: resilient optional-install handling + the `--refresh-installs` flag. Notes a fresh session would act differently knowing:
 
-- **`SessionIdentity` no longer exists.** Collapsed into `InstanceIdentity` so modes live on a single identity tier. The reason was the cont path was reading modes from disk twice per launch (once at picker time, once in `compose_runtime`'s old promotion step) — now `resolve_target` does the mode prompt for new launches and the picker loads modes once for cont. Don't reintroduce a `with_modes` / `stored_modes` indirection — a single `InstanceIdentity(agent, session, workspace, is_brand_new, modes)` is the type.
-- **`compose_runtime` removed.** Its body (try/except → sys.exit around `compose_chain`) is now inlined as `call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))` in `launch()`. `call_or_exit` is the reusable wrapper for the pattern; available in `utils.py` for any future site.
-- **Prerequisites mapping on the enum.** `_prerequisites()` + `applies_to(tags)` replaced the ad-hoc `has_code and prompt_modifier(...)` checks in `prompt_for_modes`. A second caller (e.g. JSON-load validation in `continuable_instances` / `resolve_pick` to reject hand-edited mode-map entries that violate prereqs) is a likely future use.
-- **Prompt copy moved to `launch/template_code/modifier_prompts.py`.** `prompt_auto` / `prompt_dood` / `prompt_web` deleted from `menu_picker`; the dispatcher iterates `in_order(MODIFIER_PROMPTS)` and gates each via `applies_to`. `menu_picker.prompt_modes` is a one-line wrapper over `agent_modifiers_handler.prompt_for_modes`.
-- **`memory_addendums` lives under `template_code/`** (sibling to `modifier_prompts`). Imports use `from .template_code.memory_addendums import ...`. Both belong there because they're per-modifier copy keyed by `InstanceModifiers` member.
+- **Optional installs never crash the build now.** Each `INSTALL_<TOOL>` RUN catches its own failure and logs the tool name to `/var/log/claude-agents/install_failures.log` (which is a claude-owned subdir of `/var/log` because `sed -i` needs write on the parent dir to atomically replace the file). Before this, a transient GitHub API 403 mid-jira-install aborted the whole image build — observed from the user side as "I can't even reach the agent." The catch-and-log pattern is uniform across all 9 install blocks; don't re-introduce raw failure-aborting RUNs.
+- **`--refresh-installs` CLI flag** busts both `SOFTWARE_STACK_REFRESH` and `FORCE_INSTALLS_REFRESH` with `forced-<epoch>`. Used to retry installs the launcher previously flagged as failed. Threading: `parse_cli` returns a 4-tuple `(picked, claude_args, dry_run, refresh_installs)`; `setup_state(..., refresh_installs=...)` forwards to `set_container_env`.
+- **`ensure_image` split out of `run_compose`.** Both called from `run.py:launch` directly so `prompt_install_failures` can read the failure log from the just-built image and surface the warning via `prompt_keypress` *before* `docker compose run` execs Claude Code's TUI. If you move build invocation back inside `run_compose`, you re-introduce the screen-takeover-before-warning problem.
+- **`docker_prompts.py` added under `template_code/`** alongside `modifier_prompts.py` + `memory_addendums.py`. Holds build-progress + install-failure strings consumed by `docker_config`. Pattern: data only, no logic — same convention as the other template_code/ files.
+- **ssh now has cli="ssh" + INSTALL_SSH apt branch** (the apt package is `openssh-client`, hardcoded in Dockerfile.code; cli_name is the binary the agent invokes). Previously the README claimed ssh was "already in base" — it wasn't. Reverse direction also caught by `test_env_coverage.test_launcher_staged_args_are_forwarded_by_compose` now: every ARG the launcher stages must be forwarded by the matching compose layer's `args:` block.
 
 `TODO.txt` lists future ideas: domain-tagged agents with extra apt/CLI tooling (image/video/3D/audio); per-agent backing model configurability; option to mount the project summary directly into MEMORY.md; inter-agent communication; `[larp]` role-play mode; phone notifications when `{auto}` agents finish.
 
 ### File Manifest
 
 <!-- manifest:begin -->
-1779894524 README.md
-1779893903 run.py
-1779892402 launch/tests/test_run.py
-1779892338 launch/utils.py
-1779891654 launch/agent_modifiers_handler.py
+1779921593 README.md
+1779921366 launch/template_code/docker_prompts.py
+1779921077 launch/tests/test_run.py
+1779921056 run.py
+1779921042 launch/docker_config.py
+1779920677 docker/Dockerfile.code
+1779919173 docker/compose.code.yml
+1779919161 launch/compose_env.py
+1779916104 TODO.txt
+1779915195 launch/network.py
+1779912803 docker/compose.web.yml
+1779912764 launch/tests/test_env_coverage.py
+1779910042 launch/utils.py
+1779909835 launch/template_code/modifier_prompts.py
+1779909467 launch/tests/test_agent_modifiers_handler.py
+1779909439 launch/agent_modifiers_handler.py
+1779909388 launch/tests/test_user_additions.py
+1779909348 launch/tests/test_paths.py
+1779909341 launch/paths.py
+1779908984 launch/file_access.py
+1779908516 launch/tests/test_compose_env.py
+1779908402 launch/user_additions.py
+1779908314 launch/tests/test_file_access.py
+1779907129 launch/template_files/optional_creds_readme.txt
+1779906102 launch/tests/test_docker_config.py
 1779891639 launch/structs.py
 1779889079 docker/Dockerfile.dood
 1779889059 .claude_dev_guidelines
 1779889053 custom_commands/unspaghettify.md
 1779889053 docker/compose.auto.yml
-1779889053 docker/compose.code.yml
 1779889053 docker/compose.dood.yml
 1779889046 launch/agents_crud.py
-1779889046 launch/compose_env.py
-1779889046 launch/docker_config.py
-1779889046 launch/file_access.py
 1779889046 launch/menu_picker.py
-1779889046 launch/network.py
-1779889046 launch/paths.py
-1779889046 launch/tests/test_agent_modifiers_handler.py
 1779889046 launch/tests/test_cache.py
 1779889046 launch/tests/test_essential_files.py
-1779888890 launch/tests/test_paths.py
-1779888760 launch/template_code/modifier_prompts.py
 1779888742 launch/tests/test_agents_crud.py
 1779888734 launch/tests/test_memory_addendums.py
 1779888717 launch/template_code/memory_addendums.py
 1779888702 launch/template_code/__init__.py
-1779886896 TODO.txt
 1779881884 launch/tests/test_structs.py
 1779881706 launch/claude_code_config.py
-1779837845 launch/tests/test_env_coverage.py
-1779834942 docker/Dockerfile.code
 1779834942 docker/Dockerfile.web
-1779834942 docker/compose.web.yml
-1779834942 launch/template_files/optional_creds_readme.txt
 1779834868 .claude/commands/test-project.md
 1779834868 .claude/commands/update-models.md
 1779834868 agents/bug-investigator[code](breakthrough).md
@@ -204,11 +213,7 @@ Nothing in flight — the codebase just settled an arc of identity / coloring / 
 1779834868 launch/benchmark/bench_md_cache_vs_read.py
 1779834868 launch/tests/__init__.py
 1779834868 launch/tests/test_audit.py
-1779834868 launch/tests/test_compose_env.py
-1779834868 launch/tests/test_docker_config.py
-1779834868 launch/tests/test_file_access.py
 1779834868 launch/tests/test_utils.py
-1779834868 launch/user_additions.py
 1779834868 settings/_summary.py
 1779834868 tips/caching_docker.md
 1779834868 tips/chat_syntax.md

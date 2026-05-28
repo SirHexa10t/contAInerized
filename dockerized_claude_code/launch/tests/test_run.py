@@ -22,45 +22,59 @@ if str(_ROOT) not in sys.path:
 import run  # noqa: E402  — must come after the sys.path.insert above
 
 
-class TestParseCliDryRunFlag(unittest.TestCase):
-    """parse_cli's third return value is the --dry-run boolean."""
+class TestParseCliFlags(unittest.TestCase):
+    """parse_cli returns (picked, claude_args, dry_run, refresh_installs).
+    Both boolean flags default False; each is exposed as its own CLI arg."""
 
     def test_default_false(self):
         with patch.object(sys, "argv", ["run.py"]):
-            _, _, dry_run = run.parse_cli()
+            _, _, dry_run, refresh = run.parse_cli()
         self.assertFalse(dry_run)
+        self.assertFalse(refresh)
 
     def test_flag_sets_true(self):
         with patch.object(sys, "argv", ["run.py", "--dry-run"]):
-            _, _, dry_run = run.parse_cli()
+            _, _, dry_run, refresh = run.parse_cli()
         self.assertTrue(dry_run)
+        self.assertFalse(refresh)
+
+    def test_refresh_installs_sets_true(self):
+        with patch.object(sys, "argv", ["run.py", "--refresh-installs"]):
+            _, _, dry_run, refresh = run.parse_cli()
+        self.assertFalse(dry_run)
+        self.assertTrue(refresh)
+
+    def test_both_flags_independent(self):
+        with patch.object(sys, "argv", ["run.py", "--dry-run", "--refresh-installs"]):
+            _, _, dry_run, refresh = run.parse_cli()
+        self.assertTrue(dry_run)
+        self.assertTrue(refresh)
 
     def test_flag_with_unknown_target(self):
         # Unknown target → picked=None, target string flows into claude_args.
-        # dry-run still parsed correctly.
         with patch.object(sys, "argv", ["run.py", "bogus_agent_name", "--dry-run"]):
-            picked, claude_args, dry_run = run.parse_cli()
+            picked, claude_args, dry_run, _ = run.parse_cli()
         self.assertIsNone(picked)
         self.assertIn("bogus_agent_name", claude_args)
         self.assertTrue(dry_run)
 
     def test_dry_run_before_target(self):
-        # Order shouldn't matter (argparse handles position-independence for
-        # the optional flag).
+        # Order shouldn't matter (argparse handles position-independence).
         with patch.object(sys, "argv", ["run.py", "--dry-run", "bogus"]):
-            _, _, dry_run = run.parse_cli()
+            _, _, dry_run, _ = run.parse_cli()
         self.assertTrue(dry_run)
 
     def test_flag_doesnt_leak_into_claude_args(self):
-        # --dry-run is OUR flag, not claude's — must not appear in the passthrough.
-        with patch.object(sys, "argv", ["run.py", "--dry-run"]):
-            _, claude_args, _ = run.parse_cli()
+        # Both flags are OURS; must not appear in the passthrough.
+        with patch.object(sys, "argv", ["run.py", "--dry-run", "--refresh-installs"]):
+            _, claude_args, _, _ = run.parse_cli()
         self.assertNotIn("--dry-run", claude_args)
+        self.assertNotIn("--refresh-installs", claude_args)
 
     def test_unknown_flags_still_passthrough(self):
         # Unknown flags (claude's) get passed through as claude_args.
         with patch.object(sys, "argv", ["run.py", "--print"]):
-            _, claude_args, _ = run.parse_cli()
+            _, claude_args, _, _ = run.parse_cli()
         self.assertIn("--print", claude_args)
 
 
@@ -78,7 +92,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
         cred_names = []
 
         mocks = {
-            "select_pick":      patch.object(run, "select_pick", return_value=(MagicMock(), [], dry_run)),
+            "select_pick":      patch.object(run, "select_pick", return_value=(MagicMock(), [], dry_run, False)),
             "require_docker":   patch.object(run, "require_docker"),
             "resolve_target":   patch.object(run, "resolve_target", return_value=inst_id),
             "compute_resume_flag": patch.object(run, "compute_resume_flag", return_value=[]),
@@ -87,6 +101,8 @@ class TestLaunchOrchestrator(unittest.TestCase):
             "compose_chain":    patch.object(run, "compose_chain", return_value=chain),
             "setup_state":      patch.object(run, "setup_state", return_value=(conf, cred_names)),
             "print_launch_banner": patch.object(run, "print_launch_banner"),
+            "ensure_image":     patch.object(run, "ensure_image"),
+            "prompt_install_failures": patch.object(run, "prompt_install_failures", return_value=None),
             "run_compose":      patch.object(run, "run_compose"),
         }
         active = {name: p.start() for name, p in mocks.items()}

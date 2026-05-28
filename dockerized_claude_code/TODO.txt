@@ -293,7 +293,6 @@ Check if the commands that rely on python code should be turned into skills
 
 
 
-move the message from warn_if_dangerous_modes() into modifier_prompts.py
 
 
 

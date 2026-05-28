@@ -19,6 +19,12 @@ services:
         # RUN blocks (Rust / uv / Claude Code) so they re-pull latest versions
         # when the value changes. Default "bootstrap" matches the ARG default.
         SOFTWARE_STACK_REFRESH: ${SOFTWARE_STACK_REFRESH:-bootstrap}
+        # Cache-buster for every INSTALL_<TOOL> RUN below. Defaults to "stable"
+        # (so optional-cred CLI installs hit the cache on normal launches);
+        # `python3 run.py --refresh-installs` overrides this with a fresh
+        # timestamp so previously-failed installs (jira API 403, etc.) get
+        # retried without manual `--no-cache` invocations.
+        FORCE_INSTALLS_REFRESH: ${FORCE_INSTALLS_REFRESH:-stable}
         # Each gates the matching optional CLI install in Dockerfile.code. Set to
         # "1" by run.py when the corresponding user_extras/optional_creds/<name>/ exists
         # on the host (otherwise unset → "0", and the install RUN is a no-op).

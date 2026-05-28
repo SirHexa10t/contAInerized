@@ -185,9 +185,11 @@ form you type (with `~` expanded but symlinks preserved) is stored verbatim in
 From the project root:
 
 ```bash
-python3 run.py                       # opens the picker
-python3 run.py poet                  # skip picker; new instance of `poet`
-python3 run.py poet__myproject       # skip picker; continue that instance
+python3 run.py                                          # opens the picker
+python3 run.py poet                                     # skip picker; new instance of `poet`
+python3 run.py poet__myproject                          # skip picker; continue that instance
+python3 run.py poet__myproject --dry-run                # run every setup stage but skip `docker compose run` (smoke-test the pipeline)
+python3 run.py poet__myproject --refresh-installs       # force-retry every optional-CLI install (recover from a transient failure flagged in a prior launch)
 ```
 
 (`run.py` has a shebang; `chmod +x run.py` once and you can run `./run.py …`
@@ -348,7 +350,7 @@ tokens, write cache, etc.). Anything not in this list is ignored — extend
 | `aws/`     | `/home/claude/.aws/`                       | `aws`     | ✓ via `uv tool install awscli` |
 | `gcloud/`  | `/home/claude/.config/gcloud/`             | `gcloud`, `gsutil` | ✓ via apt (Google Cloud apt repo) — heavy install (~400-500MB) |
 | `kube/`    | `/home/claude/.kube/`                      | `kubectl` | ✓ static binary into `~/.local/bin` |
-| `ssh/`     | `/home/claude/.ssh/`                       | `ssh`, `git` over ssh | — already in `base` image |
+| `ssh/`     | `/home/claude/.ssh/`                       | `ssh`, `git` over ssh | ✓ via apt (`openssh-client`). Launcher also fixes host-side perms before mounting — `700` on the dir, `600` on each file except `*.pub` / `*_hosts` which get `644`. Treat the contents here as *copies* of your everyday keys (or fresh agent-only keys); symlinking from `~/.ssh` propagates the chmod back to the originals. |
 | `gh/`      | `/home/claude/.config/gh/`                 | `gh`      | ✓ via apt (GitHub apt repo) |
 | `glab/`    | `/home/claude/.config/glab-cli/`           | `glab`    | ✓ via apt (GitLab packagecloud repo) |
 | `jira/`    | `/home/claude/.config/.jira/`              | `jira` (ankitpokhrel/jira-cli) | ✓ static binary from GitHub releases. Drop `.config.yml` (server/login) here; put the API key in a plain-text file named `jira/token` — the launcher reads it and forwards as `$JIRA_API_TOKEN` (jira-cli's default token env var). Your Jira host (`<org>.atlassian.net`) needs to be in the {auto} whitelist for the CLI to reach it. |
@@ -356,6 +358,7 @@ tokens, write cache, etc.). Anything not in this list is ignored — extend
 | `railway/` | `/home/claude/.config/railway/`            | `railway` | ✓ via `npm install -g @railway/cli` |
 | `npmrc`    | `/home/claude/.npmrc`                      | `npm` (auth tokens) | — `npm` is in the code image |
 | `pypirc`   | `/home/claude/.pypirc`                     | `twine` / pip uploads | — install yourself: `uv tool install twine` |
+| `home/`    | each top-level entry → `/home/claude/<name>` | (catch-all loose dotfiles — `.gitconfig`, `.git-credentials`, `.gnupg/`, `.tmux.conf`, etc.) | — Trailing-`/` key in `OPTIONAL_CREDS_MOUNTS` signals "mount the contents of this dir, each at the matching `/home/claude/<name>`". Files become file mounts; subdirectories become whole-dir mounts. Subdirs of `home/` itself are NOT walked. The launcher refuses to shadow a target already mounted by something else (e.g. `home/.bashrc` colliding with the bundled `settings/bashrc.sh`) and halts with a clear message. |
 
 **Auto-install:** for entries marked ✓, dropping the credentials dir on the
 host also flips an `INSTALL_<TOOL>=1` build-arg, and `Dockerfile.code`
@@ -389,17 +392,47 @@ ln -s ~/.aws ~/.claude-agents/user_extras/optional_creds/aws    # symlink so hos
 Next launch of any `[code]` agent: the code image rebuilds with `awscli`
 installed, and the mounted creds make it ready to use.
 
+### Resilient installs + `--refresh-installs`
+
+Each `INSTALL_<TOOL>` RUN block in `docker/Dockerfile.code` wraps its install
+steps in a `{ … } || { echo <tool> >> /var/log/claude-agents/install_failures.log; }`
+guard. A failed install (curl 403, apt repo unreachable, GitHub API rate
+limit, etc.) appends the tool's name to the failure log and the RUN exits
+0 — **the build never aborts on a single optional install going sideways**.
+After `ensure_image` completes, the launcher reads the log from the just-
+built image and, if it's non-empty, surfaces a press-any-key warning with
+the failed tool names + the exact retry command:
+
+```
+  ⚠ Failed installs: jira
+  To retry the installation, re-run with --refresh-installs:
+    python3 run.py poet__myproject --refresh-installs
+
+  [press any key to continue]
+```
+
+The keypress gate sits between the build and `docker compose run`, so the
+warning isn't immediately clobbered when Claude Code's TUI takes over.
+
+`--refresh-installs` busts both cache-buster build-args (`SOFTWARE_STACK_REFRESH`
+and `FORCE_INSTALLS_REFRESH`) with a per-launch timestamp, forcing every
+install layer in `Dockerfile.code` to rebuild — already-installed tools
+fast-path through their package manager's no-op (`apt install -y` on a
+present package, `npm install -g` on a present global, etc.); previously-
+failed installs get a fresh shot. Successful installs strip their own name
+from the failure log so the warning clears once a retry actually works.
+
 ## Project Layout
 
 ```
 run.py                               # entry point + 7-stage launch() orchestrator (parse → resolve → resume? → persist → categorise → setup → run)
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), per-layer bind-mount dicts (DOCKER_BASE_MOUNTS, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
-  utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_yn (generic Y/N input), call_or_exit (try/except → sys.exit wrapper). No disk access. Leaf module.
+  utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_yn (generic Y/N input), prompt_keypress (press-any-key gate over the same header+body shape), call_or_exit (try/except → sys.exit wrapper). No disk access. Leaf module.
   file_access.py                     # every disk-touching call routes through here. Agent filename grammar (parse_stem) + .md/.conf lookup (find_md_for_agent, conf_path_for, load_conf), cached load/save of agent_workspace_map.json + agent_modes_map.json, ensure_shared_oauth_files (touches the two OAuth files as `{}` if absent), force_remove with sudo + `sudo -k` fallback, installed_cred_clis (space-joins CLIs with creds present).
   structs.py                         # identity dataclasses — AgentIdentity → InstanceIdentity (frozen=True, inheritance) + InstanceModifiers enum (BASE / TAG_CODE / MODE_WARN_AUTO / MODE_WARN_DOOD / MODE_WEB). InstanceIdentity.chain returns the active-modifier-values tuple (BASE first, declaration order). Modifier coloring: per-member `colored_label()` + `ANSI_TO_PT_STYLE` mapping (status line, F8 legend, picker share one source). Prerequisite mapping (`_prerequisites()` + `applies_to(tags)`) gates per-mode prompts.
   compose_env.py                     # compose-side env-var staging — ComposeEnvKey enum, _compose_env accumulator + stage_compose_env, subprocess_env overlay, container_env_args (→ `-e KEY=VALUE` flags), conf_env_args, install_creds_flags, token_env_dict. set_container_env orchestrator (sister to docker_config's set_container_mounts).
-  docker_config.py                   # docker subprocesses + bind-mount accumulator + image-chain naming. add_docker_mount, set_container_mounts, ensure_image, run_compose; docker CLI wrappers (require_docker, detect_docker_gid, wait_for_container_running, docker_exec_root, any_agent_container_running). Every direct `docker` call lives here.
+  docker_config.py                   # docker subprocesses + bind-mount accumulator + image-chain naming. add_docker_mount, set_container_mounts, ensure_image, run_compose; prompt_install_failures (post-build read of /var/log/claude-agents/install_failures.log → self-prompts via prompt_keypress); docker CLI wrappers (require_docker, detect_docker_gid, wait_for_container_running, docker_exec_root, any_agent_container_running). Every direct `docker` call lives here.
   agent_modifiers_handler.py         # modifier-domain logic: compose_chain(inst_id) dispatch → _apply_code / _apply_auto / _apply_dood / _apply_web handlers; warn_if_dangerous_modes ({auto}+{DooD} red press-any-key warning); cache prepare/prune helpers ([code] only); prompt_modifier + prompt_for_modes (called via menu_picker.prompt_modes wrapper).
   network.py                         # {auto}-mode firewall coordination — BUILTIN_FIREWALL_DOMAINS (~135 entries), two-phase DNS resolution (sync Phase 1 → streaming Phase 2 via docker exec iptables -I), cross-launch resolved-IP cache (~/.claude-agents/resolved_domains.txt, 6h TTL), agent-visible status file (domains_pending_resolve.yml).
   agents_crud.py                     # instance-state CRUD — list_all_instances, update_workspace_map, set_instance_modes, install_latest_md (writes source `.md` + composed_addendum to state-dir CLAUDE.md in one go), modify_instance, delete_instance, resolve_pick, picker-entry builders (creatable_agents, continuable_instances), sort keys.
@@ -407,11 +440,12 @@ launch/
   menu_picker.py                     # prompt_toolkit picker UI + LEGEND_TEXT (F8 composition legend) + ask_for_workspace + prompt_session + print_launch_banner + thin prompt_modes wrapper over agent_modifiers_handler.prompt_for_modes.
   claude_code_config.py              # Claude-Code-side UX — build_status_line(inst_id) + set_terminal_title(name). Leaf-shaped.
   audit.py                           # state-correctness checker (run as `python -m launch.audit`). Per-entry helpers (_check_json_file, _modes_map_issues) are unit-testable in isolation; main() handles orchestration.
-  template_code/                     # per-modifier copy / data, keyed by InstanceModifiers member.
-    modifier_prompts.py              # MODIFIER_PROMPTS mapping — {modifier: (header, body)} for the Y/N prompts (auto / DooD / web). Pure data, no logic.
-    memory_addendums.py              # launch-time directives for CLAUDE.md. Addendum(NamedTuple) instances — SEEK_SUMMARY, MAINTAIN_PRIVACY, CREDENTIALS_NOTICE, FIREWALL_NOTICE — mapped per modifier via MODIFIER_ADDENDUMS. composed_addendum(chain) renders the active sub-sections under a single `## Launch-time addendums` heading.
+  template_code/                     # user-facing copy / data, keyed by what fires it. Pure data, no logic.
+    modifier_prompts.py              # MODIFIER_YN_PROMPTS ({modifier: (header, body)} for the per-mode Y/N prompts — auto / DooD / web) + MODIFIER_NOTICE_PROMPTS ({frozenset of modifiers: (header, body)} for combination warnings — {auto}+{DooD} surfaces a red press-any-key gate).
+    docker_prompts.py                # docker-side strings — build-step progress, {auto} firewall-waiting line, INSTALL_FAILURES_HEADER + INSTALL_FAILURES_BODY (consumed by docker_config.prompt_install_failures).
+    memory_addendums.py              # launch-time directives for CLAUDE.md. Addendum(NamedTuple) instances — SEEK_SUMMARY, MAINTAIN_PRIVACY, CREDENTIALS_NOTICE, FIREWALL_NOTICE, WEB_NOTICE — mapped per modifier via MODIFIER_ADDENDUMS. composed_addendum(chain) renders the active sub-sections under a single `## Launch-time addendums` heading.
   template_files/                    # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/ on first {auto} / first launch respectively.
-  tests/                             # unittest suite — 342 tests, ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
+  tests/                             # unittest suite — 366 tests, ~0.1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
 agents/                              # agent definitions — drop `<name>[tag](parent).md` (+ optional `.conf`) here
 custom_commands/                     # launcher-bundled slash commands (mounted into every container) — `/refactor`, `/unspaghettify`, `/write-readme`, `/write-summary`
 custom_skills/                       # launcher-bundled skills (mounted into every container) — currently `print/SKILL.md`
