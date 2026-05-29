@@ -13,6 +13,15 @@ Detect each tool / runtime dep. **When missing, attempt to install it inline** s
 A missing tool that we successfully install ends the run as "✓ now available"; a missing tool we couldn't install ends as "✗ still missing" — that distinction matters for the report.
 
 ```bash
+# docker — required by the dry-run step (require_docker fires in BOTH modes
+# now, so dry-run will exit early if docker isn't on PATH). Not auto-installable
+# here; surface the gap so the user knows to install Docker Engine.
+if command -v docker >/dev/null 2>&1; then
+    echo "✓ docker"
+else
+    echo "✗ docker MISSING — install Docker Engine from https://docs.docker.com/engine/install/"
+fi
+
 # CLI tools (ruff, mypy) — uv tool install puts them in an isolated env, no venv-activation needed
 for tool in ruff mypy; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -87,7 +96,7 @@ Exercise the launcher's full orchestration up to (but not including) `docker com
 python3 run.py --dry-run
 ```
 
-`require_docker` is gated on `not --dry-run`, so docker doesn't need to be installed for this step. Two caveats worth knowing:
+**`require_docker` runs in both modes now** — dry-run is a faithful projection of "what would happen on a real run," so a missing docker daemon surfaces as the same one-line exit a real run would produce. Install Docker Engine (the preflight check above flags it) before running this step. Two further caveats worth knowing:
 
 - **Picker is interactive.** With no target arg, the launcher opens the prompt_toolkit picker. If running this non-interactively, pass an existing instance name to skip the picker, e.g. `python3 run.py poet__myproject --dry-run`.
 - **New instances prompt for workspace + session name.** If the chosen instance doesn't exist yet, both will be asked. Set `AI_WORKSPACE=<path>` in the env to skip the workspace prompt; the session-name prompt is unavoidable for fresh instances.
@@ -99,8 +108,8 @@ Exit 0 = orchestration completed through every stage; failures surface as the us
 After everything runs, lead with the Preflight result + four step-result bullets, then list findings underneath each. Frame any per-step failure that's clearly an environmental gap (missing tool, missing Python dep) as such — not as a code regression. Example with a clean environment:
 
 ```
-Preflight: ✓ ruff, ✓ mypy, ✓ runtime deps
-- Tests:   340 passed, 0 failed
+Preflight: ✓ docker, ✓ ruff, ✓ mypy, ✓ runtime deps
+- Tests:   374 passed, 0 failed
 - Ruff:    2 findings
 - Mypy:    clean
 - Dry-run: clean
@@ -113,24 +122,36 @@ Mypy findings:
   (none)
 
 Dry-run:
-  (no errors; ran through select_pick → resolve_target → compose_runtime → setup_state, exited at run_compose's --dry-run guard)
+  (no errors; ran through gather_input → resolve_target → compose_chain → setup_state → ensure_image → run_compose; docker_compose_subprocess printed each "would invoke" line and returned)
 ```
 
 Example where preflight auto-installed everything that was missing (the run then proceeds with real findings):
 
 ```
-Preflight: ✓ ruff (installed inline), ✓ mypy (installed inline), ✓ runtime deps (installed inline)
-- Tests:   340 passed, 0 failed
+Preflight: ✓ docker, ✓ ruff (installed inline), ✓ mypy (installed inline), ✓ runtime deps (installed inline)
+- Tests:   374 passed, 0 failed
 - Ruff:    clean
 - Mypy:    clean
 - Dry-run: clean
 ```
 
+Example where docker is missing — dry-run no longer skips that check, so it surfaces as a step failure rather than a hidden assumption:
+
+```
+Preflight: ✗ docker MISSING, ✓ ruff, ✓ mypy, ✓ runtime deps
+- Tests:   374 passed, 0 failed
+- Ruff:    clean
+- Mypy:    clean
+- Dry-run: blocked — "docker is required but was not found in PATH" (require_docker runs in both modes now)
+
+Action: install Docker Engine, then re-run /test-project for the dry-run step.
+```
+
 Example where the auto-install couldn't proceed (e.g., `uv` itself was missing) — surface that gap up front so the per-step blockages aren't misread as code regressions:
 
 ```
-Preflight: ✗ ruff still missing (uv not in PATH), ✗ mypy still missing (uv not in PATH), ✗ runtime deps still missing
-- Tests:   340 passed, 1 module failed to import (env issue — see Preflight)
+Preflight: ✗ docker MISSING, ✗ ruff still missing (uv not in PATH), ✗ mypy still missing (uv not in PATH), ✗ runtime deps still missing
+- Tests:   374 passed, 1 module failed to import (env issue — see Preflight)
 - Ruff:    blocked (tool missing)
 - Mypy:    blocked (tool missing)
 - Dry-run: blocked (runtime deps missing — `python3 run.py` can't import menu_picker)

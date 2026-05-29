@@ -2,11 +2,12 @@
 and `docker compose run`. The image-build chain (ensure_image), the bind-mount
 accumulator that flattens into `-v` flags (set_container_mounts +
 add_docker_mount + mount_target_is_staged), small `docker` CLI wrappers
-(require_docker, detect_docker_gid, wait_for_container_running,
-docker_exec_root, any_agent_container_running), the image-chain naming helpers
-(chain_image_tag, chain_compose_files), the post-build install-failure
-surfacing (prompt_install_failures), and the compose invocation itself
-(run_compose).
+(require_docker, detect_docker_gid, docker_check_running_subprocess,
+wait_for_container_running, docker_exec_root_subprocess,
+docker_check_any_agent_running_subprocess, docker_compose_subprocess),
+the image-chain naming helpers (chain_image_tag, chain_compose_files), the
+post-build install-failure surfacing (prompt_install_failures), and the
+compose invocation itself (run_compose).
 
 Sister accumulator lives in compose_env: `_compose_env` for env-var staging.
 This module holds:
@@ -16,8 +17,8 @@ This module holds:
 Imports from paths (filesystem constants), claude_code_config (terminal title),
 compose_env (env staging + container_env_args + conf_env_args + subprocess_env),
 and network (the {auto}-mode firewall coordination hooks). agent_modifiers_handler
-imports add_docker_mount + any_agent_container_running + detect_docker_gid
-from here; run.py is the top-level consumer.
+imports add_docker_mount + docker_check_any_agent_running_subprocess +
+detect_docker_gid from here; run.py is the top-level consumer.
 """
 
 import shutil
@@ -40,7 +41,7 @@ from .structs import InstanceIdentity
 from .template_code.docker_prompts import (
     AUTO_FIREWALL_WAITING, BUILDING_STEP, INSTALL_FAILURES_BODY, INSTALL_FAILURES_HEADER,
 )
-from .utils import prompt_keypress, shell_capture
+from .utils import exit_if_missing, prompt_keypress, shell_capture, shell_returncode
 
 
 # ============================================================
@@ -103,25 +104,50 @@ def chain_compose_files(chain: list[str]) -> list[str]:
 # Docker subprocess helpers
 # ============================================================
 # Every docker-CLI touchpoint outside orchestration lives here: the PATH
-# presence check (require_docker) and the read-only probes used by firewall
-# coordination + cache pruning (detect_docker_gid, wait_for_container_running,
-# docker_exec_root, any_agent_container_running). The `docker compose
-# build/run` invocations in ensure_image / run_compose live below in the
-# orchestration section since they're tied to per-launch state.
+# presence check (require_docker), the read-only probes used by firewall
+# coordination + cache pruning (detect_docker_gid,
+# docker_check_running_subprocess, wait_for_container_running,
+# docker_exec_root_subprocess, docker_check_any_agent_running_subprocess),
+# and the `docker compose` invocation wrapper (docker_compose_subprocess)
+# used by ensure_image / run_compose below in the orchestration section.
 # CONTAINER_NAME_PREFIX is the one place the per-launch container name format
 # is defined — run_compose builds container names from it, and
-# any_agent_container_running filters `docker ps` by the same prefix; keeping
-# them consistent is a one-line change here.
+# docker_check_any_agent_running_subprocess filters `docker ps` by the same
+# prefix; keeping them consistent is a one-line change here.
 
-CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_compose) and the filter used to detect a running agent (any_agent_container_running)
+CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_compose) and the filter used to detect a running agent (docker_check_any_agent_running_subprocess)
+
+
+# ============================================================
+# Dry-run flag
+# ============================================================
+# Module-level toggle gating docker_compose_subprocess's actual subprocess
+# invocation. Set once at startup from run.py:launch via set_dry_run(); the
+# default False means "real run" so callers that import this module without
+# going through launch() (tests, audit) behave normally. The flag lives here
+# rather than threaded through every function because the only operation it
+# affects is the docker compose call itself — every other orchestration step
+# (mount staging, env staging, firewall coordination, banner printing)
+# happens identically in both modes, which is what makes --dry-run a
+# faithful projection of a real run.
+
+_dry_run = False
+
+
+def set_dry_run(value: bool) -> None:
+    """Set the module-level dry-run flag. Called from run.py:launch after CLI
+    parsing. docker_compose_subprocess checks this to gate its underlying
+    subprocess.call — every surrounding step still runs so the user sees an
+    accurate projection of what a real run would do."""
+    global _dry_run
+    _dry_run = value
 
 
 def require_docker() -> None:
     """Exit early with a clean message if `docker` isn't on PATH. Run.py calls this
     at startup so a missing daemon surfaces as a one-liner instead of a deeper-down
     docker-compose traceback later."""
-    if shutil.which("docker") is None:
-        sys.exit("docker is required but was not found in PATH.")
+    exit_if_missing(shutil.which("docker"), "docker is required but was not found in PATH.")
 
 
 def detect_docker_gid() -> str | None:
@@ -138,23 +164,37 @@ def detect_docker_gid() -> str | None:
     return None
 
 
+def docker_check_running_subprocess(container_name: str) -> bool:
+    """True if the named container is currently in the Running state per
+    `docker inspect`. False otherwise — returncode non-zero (container not
+    found / daemon unreachable), or `State.Running` is anything other than
+    the literal string `"true"` (docker's text output for that field).
+    One-shot probe; wait_for_container_running polls this in a loop for the
+    "just-created, not yet up" window."""
+    r = shell_capture("docker", "inspect", "--format={{.State.Running}}", container_name)
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
 def wait_for_container_running(container_name: str, timeout_seconds: float = 10) -> bool:
-    """Poll `docker inspect` until the named container reports State.Running==true
-    or `timeout_seconds` passes. Returns True if the container came up in time,
+    """Poll `docker_check_running_subprocess` until it returns True, or
+    `timeout_seconds` passes. Returns True if the container came up in time,
     False on timeout. `docker compose run` creates the container almost
     immediately but `docker inspect` returns 'not found' for a small window
     after — hence the poll. Used by the {auto}-mode firewall updater (in
-    network._updater_worker) before it starts issuing `docker exec` calls."""
+    network._updater_worker) before it starts issuing `docker exec` calls.
+
+    The walrus in the while-condition reads as "while within deadline and not
+    yet running, sleep". `running = False` is initialized to keep the name
+    bound for the return even when the walrus never fires (deadline already
+    passed on entry — `timeout_seconds <= 0`)."""
     deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        r = shell_capture("docker", "inspect", "--format={{.State.Running}}", container_name)
-        if r.returncode == 0 and r.stdout.strip() == "true":
-            return True
+    running = False
+    while time.monotonic() < deadline and not (running := docker_check_running_subprocess(container_name)):
         time.sleep(0.1)
-    return False
+    return running
 
 
-def docker_exec_root(container_name: str, *cmd: str) -> subprocess.CompletedProcess:
+def docker_exec_root_subprocess(container_name: str, *cmd: str) -> subprocess.CompletedProcess:
     """Run `docker exec --user root <container_name> <cmd...>` and return the
     CompletedProcess (capture_output=True, text=True so callers can inspect
     returncode + stdout/stderr).
@@ -169,12 +209,34 @@ def docker_exec_root(container_name: str, *cmd: str) -> subprocess.CompletedProc
     return shell_capture("docker", "exec", "--user", "root", container_name, *cmd)
 
 
-def any_agent_container_running() -> bool:
+def docker_compose_subprocess(args: list[str]) -> None:
+    """Run `docker compose <args>` with `subprocess_env()` overlaid; sys.exit
+    with the return code on non-zero, return silently on success. On dry-run
+    (set via set_dry_run), print what would have been invoked and return
+    without touching subprocess — every surrounding orchestration step still
+    runs, so dry-run projects accurately.
+
+    Both real-run callers want the exit-on-failure shape: ensure_image needs
+    to continue to the next chain step on success but die if any build fails;
+    run_compose is the program's terminal — on success the unwind through
+    launch() → __main__ exits the process with 0 naturally, equivalent to an
+    explicit sys.exit(0). The "docker compose" prefix + the staged env are
+    this codebase's universal compose-invocation pattern."""
+    if _dry_run:
+        print(f"  (dry-run: would invoke `docker compose {' '.join(args)}`)")
+        return
+    if (ret := shell_returncode("docker", "compose", *args, env=subprocess_env())) != 0:
+        sys.exit(ret)
+
+
+def docker_check_any_agent_running_subprocess() -> bool:
     """True if any container whose name starts with CONTAINER_NAME_PREFIX is
     currently running, OR if `docker ps` failed (conservative — treat the
     unknown state as 'might be running' so caller skips its cleanup). Used
     by agent_modifiers_handler.prune_caches as the 'is it safe to delete cache
-    files' guard."""
+    files' guard. Uses `bool(stdout.strip())` rather than `== "true"` because
+    `--format={{.Names}}` outputs container names (one per line) — any
+    non-empty output means matching containers exist."""
     r = shell_capture("docker", "ps", "--filter", f"name={CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}")
     return r.returncode != 0 or bool(r.stdout.strip())
 
@@ -215,9 +277,7 @@ def ensure_image(chain: list[str]) -> None:
         if prev_tag:
             stage_compose_env(ComposeEnvKey.PARENT_IMAGE, prev_tag)
         print(BUILDING_STEP.format(step=step, target=target))
-        ret = subprocess.call(["docker", "compose"] + compose_files + ["build"], env=subprocess_env())
-        if ret != 0:
-            sys.exit(ret)
+        docker_compose_subprocess(compose_files + ["build"])
         prev_tag = target
 
 
@@ -252,13 +312,15 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
     set the terminal title, then exec `docker compose run`. By the time we
     get here every bind-mount has been staged via add_docker_mount (base
     set, per-instance workspace/state, [code] caches, skills, optional
-    creds) — flatten _docker_mounts into `-v` flags inline. sys.exits with
-    the container's return code. The chain images themselves are built
-    upstream by ensure_image (called from run.py:launch before this).
+    creds) — flatten _docker_mounts into `-v` flags inline. On a non-zero
+    container return, docker_compose_subprocess sys.exits with that code;
+    on zero, returns normally and the __main__ unwind exits 0. The chain
+    images themselves are built upstream by ensure_image (called from
+    run.py:launch before this).
 
     {auto}-mode firewall coordination: block on Phase 1 (critical Anthropic
     DNS) to get the initial WHITELIST_ADDRESSES, then spawn the firewall
-    updater daemon thread BEFORE `subprocess.call` so it can drain Phase 2
+    updater daemon thread BEFORE `docker_compose_subprocess` so it can drain Phase 2
     results into the running container's iptables via `docker exec` while
     Claude Code starts up. `--name` is set explicitly to a deterministic
     string so the updater knows where to point — `docker compose run` would
@@ -276,12 +338,12 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
     if (addresses := wait_for_critical_addresses()) is not None:
         stage_compose_env(ComposeEnvKey.WHITELIST_ADDRESSES, " ".join(addresses))
     container_name = f"{CONTAINER_NAME_PREFIX}{instance}"
-    # Spawn the updater BEFORE subprocess.call (which blocks for the container's
+    # Spawn the updater BEFORE docker_compose_subprocess (which blocks for the container's
     # lifetime) — the daemon thread will see the container come up shortly and
     # start draining Phase 2 results onto iptables. No-op for non-{auto} launches.
     start_firewall_updater(container_name)
-    cmd = (
-        ["docker", "compose"] + compose_args + ["run", "--rm", "-it", "--name", container_name]
+    args = (
+        compose_args + ["run", "--rm", "-it", "--name", container_name]
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
         + container_env_args()    # per-key -e flags from CONTAINER_ENV_FORWARDS
         + conf_env_args(conf)     # -e flags setting each per-agent conf key=value in the container
@@ -289,4 +351,4 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
         + resume_flag             # present if a resumed session
         + claude_args             # leftover argv (unrecognised flags + unresolved positional) → claude
     )
-    sys.exit(subprocess.call(cmd, env=subprocess_env()))
+    docker_compose_subprocess(args)

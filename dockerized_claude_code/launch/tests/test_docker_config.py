@@ -123,5 +123,109 @@ class TestMountTargetIsStaged(unittest.TestCase):
         self.assertTrue(docker_config.mount_target_is_staged("/etc/whitelist.txt"))
 
 
+# ============================================================
+# Dry-run gating — moved from launch() into docker_compose_subprocess
+# ============================================================
+# Before this change, --dry-run early-returned from launch() before
+# ensure_image / run_compose ever ran, leaving most of the orchestration
+# unexercised by tests. The flag now sits on the module and only gates
+# the actual `docker compose` invocation inside docker_compose_subprocess.
+# Every test in this section asserts a path that was previously skipped on
+# dry-run and is now reachable.
+
+class TestSetDryRun(unittest.TestCase):
+    """set_dry_run is the single point of write for the module-level flag.
+    The setter exists (rather than callers poking `docker_config._dry_run`
+    directly) so the read site stays a module-private and any future
+    auditing of who flips the flag has one entry point to instrument."""
+
+    def tearDown(self):
+        docker_config.set_dry_run(False)
+
+    def test_sets_flag_true(self):
+        docker_config.set_dry_run(True)
+        self.assertTrue(docker_config._dry_run)
+
+    def test_resets_flag_false(self):
+        docker_config.set_dry_run(True)
+        docker_config.set_dry_run(False)
+        self.assertFalse(docker_config._dry_run)
+
+
+class TestDockerComposeSubprocessDryRun(unittest.TestCase):
+    """docker_compose_subprocess gates its shell_returncode call on the
+    module-level _dry_run flag. Real-run forwards to shell_returncode with
+    the docker-compose prefix + the staged env; dry-run prints the would-be
+    invocation and returns without touching subprocess."""
+
+    def setUp(self):
+        docker_config.set_dry_run(False)
+
+    def tearDown(self):
+        docker_config.set_dry_run(False)
+
+    def test_dry_run_skips_shell_returncode(self):
+        docker_config.set_dry_run(True)
+        with patch("launch.docker_config.shell_returncode") as mock_run, \
+             patch("builtins.print"):
+            docker_config.docker_compose_subprocess(["build", "--no-cache"])
+        mock_run.assert_not_called()
+
+    def test_real_run_invokes_shell_returncode_with_docker_compose_prefix(self):
+        with patch("launch.docker_config.shell_returncode", return_value=0) as mock_run:
+            docker_config.docker_compose_subprocess(["build"])
+        mock_run.assert_called_once()
+        # Positional args are ("docker", "compose", *args); env is a kwarg.
+        positional = mock_run.call_args.args
+        self.assertEqual(positional[:2], ("docker", "compose"))
+        self.assertEqual(positional[2:], ("build",))
+
+    def test_dry_run_prints_would_invoke_line(self):
+        docker_config.set_dry_run(True)
+        with patch("builtins.print") as mock_print, \
+             patch("launch.docker_config.shell_returncode"):
+            docker_config.docker_compose_subprocess(["-f", "x.yml", "build"])
+        mock_print.assert_called_once()
+        printed = mock_print.call_args.args[0]
+        self.assertIn("dry-run", printed)
+        self.assertIn("docker compose -f x.yml build", printed)
+
+
+class TestEnsureImageRunsOnDryRun(unittest.TestCase):
+    """Before the dry-run refactor, ensure_image was entirely skipped on
+    dry-run — the per-step env staging (TARGET_IMAGE + PARENT_IMAGE) and
+    the per-step build invocation were unreachable. With the gate moved
+    into docker_compose_subprocess, ensure_image now runs its loop in
+    both modes; each iteration stages the env and calls
+    docker_compose_subprocess (which no-ops internally on dry-run)."""
+
+    def setUp(self):
+        docker_config.set_dry_run(True)
+
+    def tearDown(self):
+        docker_config.set_dry_run(False)
+
+    def test_calls_compose_subprocess_once_per_chain_step(self):
+        with patch("launch.docker_config.docker_compose_subprocess") as mock_compose, \
+             patch("launch.docker_config.stage_compose_env"), \
+             patch("builtins.print"):
+            docker_config.ensure_image(["base", "code", "auto"])
+        self.assertEqual(mock_compose.call_count, 3)
+
+    def test_stages_target_image_for_each_step(self):
+        # First call stages base, second stages code (with PARENT_IMAGE=base),
+        # third stages auto (with PARENT_IMAGE=code). The env-staging is the
+        # core observable side effect — previously hidden behind the dry-run
+        # short-circuit.
+        with patch("launch.docker_config.docker_compose_subprocess"), \
+             patch("launch.docker_config.stage_compose_env") as mock_stage, \
+             patch("builtins.print"):
+            docker_config.ensure_image(["base", "code"])
+        # TARGET_IMAGE staged twice (once per step); PARENT_IMAGE once (for the non-base step).
+        staged_keys = [call.args[0].name for call in mock_stage.call_args_list]
+        self.assertEqual(staged_keys.count("TARGET_IMAGE"), 2)
+        self.assertEqual(staged_keys.count("PARENT_IMAGE"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

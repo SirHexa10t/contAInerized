@@ -10,7 +10,8 @@ from launch.agents_crud import (
 )
 from launch.compose_env import set_container_env
 from launch.docker_config import (
-    ensure_image, prompt_install_failures, require_docker, run_compose, set_container_mounts,
+    ensure_image, prompt_install_failures, require_docker, run_compose,
+    set_container_mounts, set_dry_run,
 )
 from launch.file_access import ensure_shared_oauth_files, load_conf
 from launch.menu_picker import (
@@ -21,7 +22,7 @@ from launch.structs import AgentIdentity, InstanceIdentity
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
 )
-from launch.utils import call_or_exit
+from launch.utils import call_or_exit, exit_if_missing
 
 
 def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], bool, bool]:
@@ -66,24 +67,21 @@ def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], boo
              "to retry installs that failed in a prior launch.",
     )
     args, claude_args = parser.parse_known_args()
-    if args.target is None:
-        return None, claude_args, args.dry_run, args.refresh_installs
     picked = resolve_pick(args.target)
-    if picked is None:
+    if args.target is not None and picked is None:
         # Unknown name — pass it through to claude as a positional, picker still runs.
-        return None, [args.target] + claude_args, args.dry_run, args.refresh_installs
+        claude_args = [args.target] + claude_args
     return picked, claude_args, args.dry_run, args.refresh_installs
 
 
-def select_pick() -> tuple[AgentIdentity | InstanceIdentity, list[str], bool, bool]:
+def gather_input() -> tuple[AgentIdentity | InstanceIdentity, list[str], bool, bool]:
     """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
     back to the interactive picker if no target was given on the command line, exit
     cleanly if the user cancels. Returns (picked, claude_args, dry_run,
     refresh_installs) — `picked` is an AgentIdentity for new and an InstanceIdentity
     for cont. The new/cont distinction is encoded in the returned type. `dry_run`
     and `refresh_installs` come straight off the CLI flags — see parse_cli."""
-    if not AGENT_MD_BY_NAME:
-        sys.exit(f"No agents found. Create an .md file in {AGENTS_DIR}/.")
+    exit_if_missing(AGENT_MD_BY_NAME, f"No agents found. Create an .md file in {AGENTS_DIR}/.")
     picked, claude_args, dry_run, refresh_installs = parse_cli()
     picked = picked or select_agent()
     if picked is None:
@@ -162,12 +160,15 @@ def launch() -> None:
     per stage so a future operation slots in at the right point with localised
     changes. Whether the launch is new vs continuing is carried on the identity
     itself (inst_id.is_brand_new), not threaded as a separate arg. `--dry-run`
-    short-circuits the final stage — all state setup still happens so test runs
-    can inspect side effects, but the container build + run is skipped.
+    propagates into docker_config via set_dry_run; the only behavioural
+    difference is that docker_compose_subprocess prints its would-be invocation
+    instead of running it — every other step (mount staging, env staging,
+    firewall coordination, banner) runs identically so dry-run projects what
+    a real run would do (including failing fast if docker isn't on PATH).
     `--refresh-installs` busts the install layer caches via set_container_env."""
-    picked, claude_args, dry_run, refresh_installs = select_pick()
-    if not dry_run:
-        require_docker()   # state setup doesn't need docker; only the final run_compose does
+    picked, claude_args, dry_run, refresh_installs = gather_input()
+    set_dry_run(dry_run)
+    require_docker()
     inst_id = resolve_target(picked)
     resume_flag = compute_resume_flag(inst_id)
     update_workspace_map(inst_id)
@@ -176,17 +177,11 @@ def launch() -> None:
     chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))
     conf, cred_names = setup_state(inst_id, refresh_installs=refresh_installs)
     print_launch_banner(inst_id, cred_names)
-    if dry_run:
-        print("  (--dry-run: state setup complete; skipping docker compose run.)")
-        return
-    # Build the chain ourselves so install-failure collection can read the
-    # log from the just-built image BEFORE run_compose spawns the container
-    # (i.e. the warning lands before Claude Code starts).
+    # Build the chain's images here (not inside run_compose) so the next
+    # step can read the just-built image's failure log before Claude Code's
+    # TUI takes over.
     ensure_image(chain)
-    # If any optional CLI install failed during the build, this surfaces a
-    # press-any-key prompt with the names + retry command — gating before
-    # `docker compose run` execs into Claude Code's TUI so the warning isn't
-    # immediately clobbered. Self-contained; no return value to handle.
+    # Surfaces any failed-install names + retry hint before run_compose execs into Claude Code's TUI.
     prompt_install_failures(chain, inst_id.instance)
     run_compose(chain, inst_id.instance, claude_args, resume_flag, conf)
 

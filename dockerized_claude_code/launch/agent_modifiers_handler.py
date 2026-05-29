@@ -26,7 +26,7 @@ from collections.abc import Iterable
 
 from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
-    add_docker_mount, any_agent_container_running, detect_docker_gid,
+    add_docker_mount, detect_docker_gid, docker_check_any_agent_running_subprocess,
 )
 from .file_access import (
     ensure_dir, iter_file_stats, path_exists, remove_path,
@@ -62,7 +62,7 @@ def prepare_caches() -> None:
 def prune_caches() -> None:
     """For caches above CACHE_PRUNE_THRESHOLD_GB, remove files older than CACHE_PRUNE_MIN_AGE_DAYS.
     Skipped when any agent container is running (to avoid yanking caches mid-build)."""
-    if any_agent_container_running():
+    if docker_check_any_agent_running_subprocess():
         return
     time_cutoff = time.time() - CACHE_PRUNE_MIN_AGE_DAYS * SECONDS_PER_DAY  # days → seconds (match epoch-second time.time())
     size_cutoff = CACHE_PRUNE_THRESHOLD_GB * 1024**3                        # GB   → bytes   (match st_size units)

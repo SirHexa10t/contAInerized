@@ -61,7 +61,7 @@ pairs the await + updater-spawn.
 Cycle note: docker_config imports this module (for is_critical_pending /
 wait_for_critical_addresses / start_firewall_updater), and the updater code
 below needs docker_config's docker-subprocess helpers (wait_for_container_running
-+ docker_exec_root) to inject iptables rules into the running container. The
++ docker_exec_root_subprocess) to inject iptables rules into the running container. The
 two functions that need them (_updater_worker, _insert_iptables_accept) do
 lazy `from .docker_config import ...` at call time so import-time evaluation
 doesn't hit a half-loaded module."""
@@ -81,7 +81,7 @@ from .file_access import (
     is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
 )
 from .paths import RESOLVED_DOMAINS_CACHE_FILE, state_domain_resolve_status_path
-from .utils import split_host_port
+from .utils import shell_capture, split_host_port
 
 
 # ============================================================
@@ -346,10 +346,7 @@ def _resolve_a_records(host: str, timeout: float) -> list[str]:
     if host in _resolution_cache:
         return list(_resolution_cache[host])
     try:
-        r = subprocess.run(
-            ["getent", "ahostsv4", host],
-            capture_output=True, text=True, timeout=timeout,
-        )
+        r = shell_capture("getent", "ahostsv4", host, timeout=timeout)
     except subprocess.TimeoutExpired:
         return []
     if r.returncode != 0:
@@ -835,13 +832,13 @@ def _insert_iptables_accept(container_name: str, ip: str, port: str) -> None:
     """Insert an iptables ACCEPT rule at position 1 of the OUTPUT chain (i.e.
     BEFORE the catch-all REJECT) for `ip`. If `port` is empty, opens the
     default HTTPS+HTTP pair; otherwise just that one port. Best-effort —
-    warns on failure but doesn't raise. Lazy import of docker_exec_root breaks
-    the docker_config↔network import cycle (see module-top docstring)."""
-    from .docker_config import docker_exec_root
+    warns on failure but doesn't raise. Lazy import of docker_exec_root_subprocess
+    breaks the docker_config↔network import cycle (see module-top docstring)."""
+    from .docker_config import docker_exec_root_subprocess
 
     targets = [port] if port else _DEFAULT_OPEN_PORTS
     for p in targets:
-        r = docker_exec_root(
+        r = docker_exec_root_subprocess(
             container_name,
             "iptables", "-I", "OUTPUT", "1",
             "-d", ip, "-p", "tcp", "--dport", str(p), "-j", "ACCEPT",

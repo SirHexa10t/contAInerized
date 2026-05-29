@@ -291,6 +291,8 @@ Check if man() needs an update
 
 Check if the commands that rely on python code should be turned into skills
 
+add agent-delegation count limit (and make it possible to delegate more than one)
+
 
 
 

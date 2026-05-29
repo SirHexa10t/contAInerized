@@ -97,14 +97,26 @@ def parse_agent_name(stem: str) -> str:
 
 # === Subprocess ===
 
-def shell_capture(*cmd: str) -> subprocess.CompletedProcess[str]:
+def shell_capture(*cmd: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """`subprocess.run(cmd, capture_output=True, text=True)` — the common
     one-shot pattern for invoking a CLI tool and inspecting its stdout/stderr.
-    `check=False` (the default) so callers handle the returncode themselves."""
-    return subprocess.run(cmd, capture_output=True, text=True)
+    `check=False` (the default) so callers handle the returncode themselves.
+    `timeout=N` (default None — no limit) raises subprocess.TimeoutExpired on
+    expiry; callers wrap the call in try/except where applicable."""
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-# === Exception-to-exit ===
+def shell_returncode(*cmd: str, env: dict[str, str] | None = None) -> int:
+    """Sister to shell_capture — runs `cmd` with stdout/stderr inherited so
+    output streams to the user's terminal. Returns the subprocess return code
+    so callers decide how to react (sys.exit with it, retry, ignore). `env`
+    optionally overlays the subprocess environment (default: inherit caller's
+    full env); pass `subprocess_env()` from compose_env when the launcher's
+    staged compose vars need to reach the child."""
+    return subprocess.run(cmd, env=env).returncode
+
+
+# === Exits ===
 
 def call_or_exit(func: Callable[..., T], *args, exceptions=Exception, prefix: str = "  ", **kwargs) -> T:
     """Call `func(*args, **kwargs)`; if it raises one of `exceptions`, print
@@ -117,6 +129,14 @@ def call_or_exit(func: Callable[..., T], *args, exceptions=Exception, prefix: st
         return func(*args, **kwargs)
     except exceptions as e:
         sys.exit(f"{prefix}{e}")
+
+
+def exit_if_missing(value, exit_message: str = "") -> None:
+    """Exit with `exit_message` if `value` is falsy (None / empty collection /
+    empty string / 0). Sister to `call_or_exit` — guards a precondition at a
+    boundary rather than wrapping a call that may raise."""
+    if not value:
+        sys.exit(exit_message)
 
 
 # === User prompts ===

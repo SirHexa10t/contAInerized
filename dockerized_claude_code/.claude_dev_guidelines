@@ -77,7 +77,7 @@ utils ──► paths ──► file_access ──► structs ──┐
 `network` at module level (for `is_critical_pending` / `start_firewall_updater` /
 `wait_for_critical_addresses`); `network._updater_worker` and
 `network._insert_iptables_accept` lazy-import `docker_config.wait_for_container_running`
-and `docker_config.docker_exec_root` from inside the function body. Both
+and `docker_config.docker_exec_root_subprocess` from inside the function body. Both
 docstrings call this out. Don't add new lazy imports without good reason —
 prefer to push the shared logic to a leaf-er module first.
 

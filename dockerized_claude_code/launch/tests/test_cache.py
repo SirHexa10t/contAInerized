@@ -31,7 +31,7 @@ from launch import agent_modifiers_handler
 
 class _CacheTestBase(unittest.TestCase):
     """Shared scaffolding: spin up a tmp host-cache root, patch CACHE_MOUNTS
-    to point at it, pull in any_agent_container_running so the prune guard
+    to point at it, pull in docker_check_any_agent_running_subprocess so the prune guard
     can be controlled per-test."""
 
     def setUp(self):
@@ -47,7 +47,7 @@ class _CacheTestBase(unittest.TestCase):
         self._patches = [
             patch.object(agent_modifiers_handler, "CACHE_MOUNTS", self.fake_mounts),
             patch.object(agent_modifiers_handler, "CACHE_ROOT", self.host_root),
-            patch.object(agent_modifiers_handler, "any_agent_container_running", return_value=False),
+            patch.object(agent_modifiers_handler, "docker_check_any_agent_running_subprocess", return_value=False),
             # Silence the "Pruned cache_a: freed X.X GB" status line that
             # prune_caches prints when it actually frees something — irrelevant
             # to assertions, noisy in test output.
@@ -121,7 +121,7 @@ class TestPruneCaches(_CacheTestBase):
         # short-circuits — no file should be touched.
         self._write_file(self.cache_a / "old", size=2000, age_days=30)
         old_mtime = (self.cache_a / "old").stat().st_mtime
-        with patch.object(agent_modifiers_handler, "any_agent_container_running", return_value=True):
+        with patch.object(agent_modifiers_handler, "docker_check_any_agent_running_subprocess", return_value=True):
             agent_modifiers_handler.prune_caches()
         self.assertTrue((self.cache_a / "old").exists())
         # mtime unchanged confirms nothing rewrote / touched it
@@ -235,7 +235,7 @@ class TestCacheLifecycleScenario(_CacheTestBase):
         self._write_file(self.cache_a / "old", size=2000, age_days=30)
 
         # 2. An agent is running — prune is a no-op.
-        with patch.object(agent_modifiers_handler, "any_agent_container_running", return_value=True):
+        with patch.object(agent_modifiers_handler, "docker_check_any_agent_running_subprocess", return_value=True):
             agent_modifiers_handler.prune_caches()
         self.assertTrue((self.cache_a / "old").exists(), "prune ran despite agent container running")
 

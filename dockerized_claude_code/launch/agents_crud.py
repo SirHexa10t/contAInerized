@@ -46,9 +46,9 @@ from .utils import ordering_index_or_end
 
 def list_all_instances() -> list[str]:
     """Return every `{agent}__{session}` dir under AGENTS_STATE (filesystem order;
-    callers that need a specific order sort themselves)."""
-    if not path_exists(AGENTS_STATE):
-        return []
+    callers that need a specific order sort themselves). Empty list on a fresh
+    install — iter_subdirs is None-safe so the missing-AGENTS_STATE case
+    folds through naturally."""
     return [d.name for d in iter_subdirs(AGENTS_STATE) if SESSION_SEP in d.name]
 
 
@@ -115,17 +115,18 @@ def delete_instance(inst_id: InstanceIdentity) -> None:
     Path removal goes through `force_remove(name=...)` which logs the removal,
     handles root-owned Docker bind-mount leftovers via sudo, and pauses for
     keypress on failure. Already-gone state dirs are treated as success so the
-    map entries are still cleaned up."""
+    map entries are still cleaned up. Map writes are unconditional (mirrors
+    modify_instance's always-save shape); `dict.pop(key, None)` is idempotent
+    on a missing entry, and the extra file write on a no-op deletion is
+    negligible since this is interactive picker code."""
     if not force_remove(inst_id.state_dir, name=inst_id.instance):
         return   # force_remove printed errors and waited for keypress
     workspace_map = load_workspace_map()
-    if inst_id.instance in workspace_map:
-        del workspace_map[inst_id.instance]
-        save_workspace_map(workspace_map)
+    workspace_map.pop(inst_id.instance, None)
+    save_workspace_map(workspace_map)
     modes_map = load_modes_map()
-    if inst_id.instance in modes_map:
-        del modes_map[inst_id.instance]
-        save_modes_map(modes_map)
+    modes_map.pop(inst_id.instance, None)
+    save_modes_map(modes_map)
 
 
 def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity) -> None:
@@ -209,12 +210,14 @@ def mode_sort_key(modes: Iterable[InstanceModifiers]) -> tuple[int, ...]:
 # Identity factories — name-string / disk-scan → identity
 # ============================================================
 
-def resolve_pick(name: str) -> AgentIdentity | InstanceIdentity | None:
+def resolve_pick(name: str | None) -> AgentIdentity | InstanceIdentity | None:
     """Resolve a name string into an identity matching select_agent's return shape.
     Two cases:
         '<agent>__<session>' with a state dir on disk → InstanceIdentity (is_brand_new=False)
         '<agent>'           with a matching .md       → AgentIdentity
-    Returns None if neither matches (orphan state dir without .md, typo, etc.).
+    Returns None if `name` is None / empty, or if neither match (orphan state
+    dir without .md, typo, etc.). The None-safe input lets parse_cli pass
+    `args.target` through without a guard.
 
     The cont path packages stored workspace + modes into the identity so the
     downstream flow doesn't need a second pass over the maps; the workspace may
@@ -225,6 +228,8 @@ def resolve_pick(name: str) -> AgentIdentity | InstanceIdentity | None:
 
     Used by run.py's parse_cli to convert sys.argv[1] into the same shape the
     picker would have returned, so launch's downstream flow is uniform."""
+    if not name:
+        return None
     if SESSION_SEP in name and is_dir(instance_state_dir_path(name)):
         agent, _, session = name.partition(SESSION_SEP)
         if agent in AGENT_MD_BY_NAME:

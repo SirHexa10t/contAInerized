@@ -47,7 +47,6 @@ import glob
 import json
 import os
 import shutil
-import subprocess
 import time
 from collections.abc import Iterator
 from functools import lru_cache
@@ -63,7 +62,7 @@ from .paths import (
     OPTIONAL_CREDS_TOKEN_ENV_VARS, agent_conf_path, optional_creds_service_path,
     optional_creds_token_path, state_history_path, state_workspace_jsonls,
 )
-from .utils import parse_stem
+from .utils import parse_stem, shell_returncode
 
 # ============================================================
 # Filesystem primitives — every disk-touching syscall flows through this file
@@ -131,12 +130,12 @@ def force_remove(path: Path, *, name: str | None = None) -> bool:
         pass          # fall through to sudo escalation
 
     print("\n  Permission denied — root-owned (Docker bind-mount artifact). Elevating with sudo...")
-    result = subprocess.run(["sudo", "rm", "-rf", str(path)], check=False)
-    subprocess.run(["sudo", "-k"], check=False)   # clear cached credentials
-    if result.returncode == 0:
+    ret = shell_returncode("sudo", "rm", "-rf", str(path))
+    shell_returncode("sudo", "-k")   # clear cached credentials
+    if ret == 0:
         return True
 
-    print(f"\n  sudo cleanup failed (exit {result.returncode}).")
+    print(f"\n  sudo cleanup failed (exit {ret}).")
     print(f"  Manual cleanup:  sudo rm -rf '{path}'")
     if name:
         input("\n  Press Enter to continue...")
@@ -221,9 +220,14 @@ def is_symlink(path: Path | str) -> bool:
 # --- Listing + searching ---
 
 def iter_subdirs(parent: Path) -> Iterator[Path]:
-    """Yield immediate subdirectories of `parent` (filesystem order).
-    Callers wanting all entries should call parent.iterdir() — but no caller
-    currently does, so the filter is folded in here."""
+    """Yield immediate subdirectories of `parent` (filesystem order). No-op
+    on a missing parent so callers don't need a `path_exists` guard before
+    iterating — matches the "missing dir == empty listing" intent every
+    caller wants. Callers wanting all entries (not just dirs) should call
+    parent.iterdir() — but no caller currently does, so the filter is folded
+    in here."""
+    if not parent.exists():
+        return
     for entry in parent.iterdir():
         if entry.is_dir():
             yield entry

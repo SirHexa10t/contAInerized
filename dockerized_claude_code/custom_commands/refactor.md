@@ -42,7 +42,13 @@ If any are present, surface them first and propose a stabilization pass before t
 
 Each pass surfaces a different smell category. Stop at any pass that finds nothing; don't manufacture findings.
 
-### 1. Imports that fingerprint misplaced logic
+### 1. Misplaced logic — imports and operation scope
+
+Two scales of the same concern: code in the wrong place creates drag that
+shows up as imports the file doesn't need or guards the caller has to
+re-implement at every call site.
+
+**File-level: imports that fingerprint misplaced logic.**
 
 For each import, ask: does the *logic that uses it* belong in this file, or is the import a footprint of logic that should live elsewhere? When logic moves, imports follow.
 
@@ -53,6 +59,33 @@ Smells:
 - **Single-use stdlib imports inside one function.** `os`, `subprocess`, `Path` etc. each used in exactly one expression deep inside one function — strong signal that function is at the wrong layer.
 
 After applying: re-list imports. Every remaining one should serve the file's purpose at *its* level (e.g., a bootstrap shouldn't import `subprocess`).
+
+**Function-level: operations that don't fit the function holding them.**
+
+Same principle one level down: each *operation* inside a function should serve
+the function's stated job. When an operation drifts outside that scope it
+creates drag — callers grow guards around it, the function's name lies, future
+edits touch the wrong site. Two directions to consider:
+
+- **Pull operations *into* a function whose scope they fit.** If every caller
+  wraps `foo()` with the same setup, guard, or post-step, that work belongs
+  *inside* `foo()` — extending its responsibility by a hair beats having
+  every caller re-implement the same hair. Concrete shapes: a function that's
+  always called with a None-check is asking to be None-safe internally; an
+  iterator that's always wrapped in `if dir.exists()` should no-op on a
+  missing source; a subprocess wrapper that every caller follows with `if
+  ret: sys.exit(ret)` should absorb the exit. Each callsite then loses an
+  `if`, and the function's contract becomes "I handle my edges."
+- **Push operations *out of* a function whose scope they don't fit.** A
+  function named `compute_X` that also writes a file, sends a metric, or
+  mutates a global is doing too much. (Pass 8 covers naming-the-lie; this is
+  the *move* side — split the off-scope work into its right home.) If you
+  can't justify the extra responsibility under the function's one-sentence
+  job description, it doesn't belong.
+
+The test: state each function's job in one sentence. Anything it does that
+doesn't serve that sentence is a candidate for relocation — inward (the work
+belongs to a callee) or outward (it belongs to a caller / sibling).
 
 ### 2. Wrappers that became pure delegation
 
@@ -90,6 +123,13 @@ The shape of *how* a function reads. Watch for patterns that hide intent under n
 - **Nested ternaries → early returns.** `x = a if cond else (b if cond2 else c)` is harder to scan than three guarded `return`s, especially when the conditions are independent.
 - **Deep nesting → flatten.** Pyramid-of-doom code (4+ levels of indentation from any combination of `if`/`for`/`while`, callbacks, or promise chains) usually flattens to a linear sequence: invert conditions for early returns, extract inner blocks to named helpers, replace callbacks with `await`. Each level of indentation is one more thing the reader has to hold on the stack.
 - **Complex boolean chains → named predicates.** `if a and (b or c) and not d and e` is unreadable. Extract the meaningful predicate as a named local: `is_authorized = a and (b or c) and not d` — the condition self-documents and most explanatory comments become unnecessary.
+- **Removable `if`s — push the guard into the callee.** When every caller writes `if x is not None: foo(x)` or `if not dir.exists(): return []` before iterating, the guard belongs *inside* the function whose domain it concerns. Make `foo` None-safe internally (`if x is None: return ...`) or make the iterator no-op on a missing source — and every caller sheds one `if`. Pattern: the callee's domain owns "what empty/None/missing means in my world"; the caller shouldn't second-guess.
+- **Removable `if`s — fold loop-exits into the while-condition.** A polling loop `while ...: if check(): return X; sleep()` folds to `while ... and not (result := check()): sleep(); return result`. The exit condition becomes explicit in the while line — reads as "while X and Y, wait" which matches how the function would be described in English. Walrus binds the result for the post-loop return.
+- **Removable `if`s — idempotent operations.** Replace `if k in d: del d[k]; save(d)` with `d.pop(k, None); save(d)`. `set.discard(x)` over `if x in s: s.remove(x)`. `s.add(x)` without an `if x not in s` guard — set add is idempotent at no cost; adding twice is the same as adding once. Where the language provides an idempotent form for "remove if present" / "add if absent", the surrounding `if` is dead weight — the operation already handles the absent / already-present case silently.
+- **Removable `if`s — compute the value directly.** When the `if`'s only job is picking between values the expression could already produce on its own, drop it. `if x % 2 == 0: y = 0 else: y = 1` → `y = x % 2`. `if s: result = s.upper() else: result = ""` → `result = s.upper()` (empty string's `.upper()` is empty). `if name: greeting = f"Hi, {name}" else: greeting = "Hi"` → `greeting = f"Hi, {name}".rstrip(", ")` (or use `f"Hi{', ' + name if name else ''}"`). Where the underlying expression already produces the correct value across the relevant input range, the surrounding `if` is paraphrasing the computation — drop it.
+- **Fewer returns when branches share shape.** `if cond: return X + 1 else: return X - 1` → `return X + 1 if cond else X - 1`. Two distinct returns are the right shape for distinct cases (decision-tree form — different things happen in each branch); branches that differ only in a value or arg collapse to one expression. Don't force-merge branches with different side effects or shapes — that just packs heterogeneous logic onto one line.
+
+**Don't touch genuine dispatch.** An `if/elif/else` chain that fans into structurally-different operations — per-type handlers, per-state transitions, per-tag setups — is real control flow. The `if`s ARE the program logic, not gates around it. Pass 3 handles the dispatch-table transformation when the chain is large enough to merit it; the four `if`-removal bullets above apply to *guarding* `if`s, not switch-like fan-outs.
 
 ### 5. Naming and shape
 
