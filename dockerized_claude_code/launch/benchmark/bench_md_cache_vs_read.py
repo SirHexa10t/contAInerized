@@ -2,7 +2,7 @@
 """Benchmark: file reads (OS-page-cache-hot) vs in-process dict lookups for
 the project's agent .md files.
 
-Loads every entry of `AGENT_MD_BY_NAME.values()` into a dict (one disk read
+Loads every entry of `agent_md_index().values()` into a dict (one disk read
 per file), then runs N iterations of:
   (a) re-reading every file from disk via Path.read_text()
   (b) looking up every file's content from the dict
@@ -17,17 +17,17 @@ Run from the project root:
 
 import time
 
-from ..paths import AGENT_MD_BY_NAME
+from ..file_access import agent_md_index
 
 
-N = 10_000   # outer iterations; inner is len(AGENT_MD_BY_NAME). Total ops ≈ 100k for a typical agent count.
+N = 10_000   # outer iterations; inner is the agent count. Total ops ≈ 100k for a typical agent count.
 
 
 def main() -> None:
-    if not AGENT_MD_BY_NAME:
+    if not agent_md_index():
         print("No .md files in agents/ — nothing to benchmark.")
         return
-    paths = tuple(AGENT_MD_BY_NAME.values())
+    paths = tuple(agent_md_index().values())
 
     # Stage 1 — populate the dict (also warms the OS page cache for stage 2).
     cache = {p: p.read_text() for p in paths}

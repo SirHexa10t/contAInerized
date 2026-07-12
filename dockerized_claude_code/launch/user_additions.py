@@ -93,8 +93,8 @@ def optional_creds_mounts() -> list[str]:
                     raise RuntimeError(
                         f"optional_creds/{name}{entry.name} would shadow a "
                         f"launcher-staged mount at {entry_target}. Move or rename "
-                        f"the {name}entry, or drop the conflicting launcher-side "
-                        f"mount, then retry."
+                        f"the {name}{entry.name} entry, or drop the conflicting "
+                        f"launcher-side mount, then retry."
                     )
                 add_docker_mount(entry, entry_target)
         else:

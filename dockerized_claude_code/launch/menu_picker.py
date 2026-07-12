@@ -8,14 +8,15 @@ Public API:
       Run the agent/session picker (main menu + nested deletion submenu) until the
       user picks something or cancels. Discovers agents/instances and handles
       deletions internally.
-      -> ('new', AgentIdentity) | ('cont', InstanceIdentity) | None on cancel/empty
+      -> AgentIdentity (new) | InstanceIdentity (cont) | None on cancel/empty
 
   ask_for_workspace(agent, default=None)
       Line prompt for a workspace path; tab-completes against the host filesystem.
       -> absolute path string
 
-  prompt_session(agent, workspace)
-      Line prompt for a session suffix; rejects collisions with existing instances.
+  prompt_session(agent, workspace, current=None)
+      Line prompt for a session suffix; rejects collisions with existing
+      instances (except `current` — the modify flow's keep-the-name case).
       -> session suffix string
 
   prompt_modes(tags, current_modes=())
@@ -83,12 +84,12 @@ from .agents_crud import (
     list_all_instances, mode_sort_key, modify_instance,
 )
 from .file_access import (
-    expand_user_path, home_dir, is_dir, load_modes_map, load_workspace_map,
-    path_exists, read_text, resolved_cwd, resolved_path, tab_complete_paths,
-    user_firewall_whitelist_lines,
+    agent_md_index, expand_user_path, home_dir, is_dir, load_modes_map,
+    load_workspace_map, path_exists, read_text, resolved_cwd, resolved_path,
+    tab_complete_paths, user_firewall_whitelist_lines,
 )
 from .paths import (
-    AGENT_MD_BY_NAME, DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
+    DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
     FIREWALL_WHITELIST_FILE,
 )
 from .structs import (
@@ -333,7 +334,7 @@ def continuable_instances() -> list[ContEntry]:
     out = []
     for dir_name in list_all_instances():
         agent, _, session = dir_name.partition(SESSION_SEP)
-        if agent not in AGENT_MD_BY_NAME:
+        if agent not in agent_md_index():
             continue
         # Convert JSON string values → typed enum members at this boundary.
         # `from_value` raises ValueError on unknowns (defective modes-map
@@ -411,8 +412,9 @@ LEGEND_TEXT = _build_composition_legend()   # module-level so the picker doesn't
 
 def _agent_description(md_text: str) -> str:
     """First line of an agent .md, stripped of any markdown heading marker — used as
-    the right-hand description on a Create row in the picker."""
-    return md_text.splitlines()[0].lstrip("# ").strip()
+    the right-hand description on a Create row in the picker. An empty .md
+    yields "" rather than crashing the picker on splitlines()[0]."""
+    return next(iter(md_text.splitlines()), "").lstrip("# ").strip()
 
 
 def _create_preview(agent: AgentIdentity) -> str:
@@ -717,16 +719,20 @@ def ask_for_workspace(agent: str, default: str | None = None) -> str:
         readline.set_completer_delims(prior_delims)
 
 
-def prompt_session(agent: str, workspace: str) -> str:
-    """Prompt for a session suffix; default = last segment of the workspace path.
-    Rejects collisions with existing `{agent}__{suffix}` state dirs."""
-    default = Path(workspace).name
+def prompt_session(agent: str, workspace: str, current: str | None = None) -> str:
+    """Prompt for a session suffix. Default = `current` (the modify flow —
+    keep the existing name) or the last segment of the workspace path (the
+    create flow). Rejects collisions with existing `{agent}__{suffix}` state
+    dirs — except `current` itself, which is always accepted (keeping your
+    own name isn't a collision). Shared by both flows so the collision loop
+    exists exactly once."""
+    default = current if current is not None else Path(workspace).name
     while True:
         suffix = input(f"Session suffix for '{agent}' [{default}]: ").strip() or default
         if not suffix:
             print("Session suffix cannot be empty.")
             continue
-        if path_exists(InstanceIdentity.state_dir_for(agent, suffix)):
+        if suffix != current and path_exists(InstanceIdentity.state_dir_for(agent, suffix)):
             print(f"Instance '{InstanceIdentity.instance_name(agent, suffix)}' already exists. Pick another name.")
             continue
         return suffix
@@ -833,14 +839,11 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
 
         if action == PickerAction.MODIFY:  # picker enforces modifiability — only cont rows reach here
             old_inst_id = value
-            while True:
-                new_session = input(f"New session suffix for '{old_inst_id.agent}' [{old_inst_id.session}]: ").strip() or old_inst_id.session
-                if new_session == old_inst_id.session:
-                    break  # keeping the same session — no collision possible
-                if not path_exists(InstanceIdentity.state_dir_for(old_inst_id.agent, new_session)):
-                    break  # not colliding with an existing instance
-                print(f"Instance '{InstanceIdentity.instance_name(old_inst_id.agent, new_session)}' already exists. Pick another name.")
+            # Same prompt order as creation (resolve_target): workspace →
+            # session → modes. The session prompt is the shared one — with
+            # current= it accepts keeping the existing name.
             new_workspace = ask_for_workspace(old_inst_id.agent, default=old_inst_id.workspace)
+            new_session = prompt_session(old_inst_id.agent, new_workspace, current=old_inst_id.session)
             new_modes = prompt_modes(old_inst_id.tags, old_inst_id.modes)
             new_inst_id = dataclasses.replace(
                 old_inst_id, session=new_session, workspace=new_workspace, modes=tuple(new_modes)
@@ -886,7 +889,7 @@ def _delete_submenu() -> None:
             delete_instance(value)
 
 
-def print_launch_banner(inst_id, cred_names) -> None:
+def print_launch_banner(inst_id: InstanceIdentity, cred_names: list[str]) -> None:
     """Print the multi-line summary that appears before docker compose builds the
     image — agent definition path, conf path, active tags + modes, and skills/creds
     counts when applicable. Each line is conditional on having something to show

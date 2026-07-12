@@ -66,6 +66,15 @@ class TestRelativeTime(unittest.TestCase):
     def test_many_days(self):
         self.assertEqual(relative_time(self._mtime_n_ago(days=14)), "14 days ago")
 
+    def test_future_mtime_clamps_to_just_now(self):
+        # Clock skew / NTP jump / copied file can put an mtime in the future.
+        # The negative timedelta normalizes to days=-1 + positive seconds,
+        # which used to render nonsense like "23 hours ago" — clamp instead.
+        self.assertEqual(relative_time(self._mtime_n_ago(hours=-2)), "just now")
+
+    def test_slightly_future_mtime_clamps_to_just_now(self):
+        self.assertEqual(relative_time(self._mtime_n_ago(seconds=-1)), "just now")
+
 
 class TestOrderingIndexOrEnd(unittest.TestCase):
     def test_first(self):
@@ -142,12 +151,55 @@ class TestParseStem(unittest.TestCase):
     def test_repeated_parent_last_wins(self):
         self.assertEqual(parse_stem("poet(a)(b)"), ("poet", [], "b"))
 
-    def test_empty_stem(self):
-        # No name regex match → fallback returns the stem as-is
-        self.assertEqual(parse_stem(""), ("", [], None))
-
     def test_complex_combo(self):
         self.assertEqual(parse_stem("name[a](parent)[b]"), ("name", ["a", "b"], "parent"))
+
+
+class TestParseStemMalformed(unittest.TestCase):
+    """Malformed stems raise ValueError instead of silently dropping the
+    malformed parts — the old lenient behavior meant a typo'd filename like
+    `poet[code.md` launched the agent without its [code] toolchain and
+    nothing ever said so."""
+
+    def test_unclosed_tag_bracket_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("poet[code")
+
+    def test_unclosed_parent_paren_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("poet(thinker")
+
+    def test_stray_text_between_groups_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("poet[a]junk[b]")
+
+    def test_trailing_garbage_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("poet[code]x")
+
+    def test_empty_tag_group_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("poet[]")
+
+    def test_empty_parent_group_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("poet()")
+
+    def test_leading_bracket_raises(self):
+        # Stem must start with a name, not a group.
+        with self.assertRaises(ValueError):
+            parse_stem("[code]poet")
+
+    def test_empty_stem_raises(self):
+        with self.assertRaises(ValueError):
+            parse_stem("")
+
+    def test_error_message_names_the_stem(self):
+        # The warning path in paths._agent_md_index prints this message —
+        # it must identify the offending file for the user.
+        with self.assertRaises(ValueError) as ctx:
+            parse_stem("poet[code")
+        self.assertIn("poet[code", str(ctx.exception))
 
 
 class TestParseAgentName(unittest.TestCase):

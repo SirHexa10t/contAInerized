@@ -65,8 +65,24 @@ def add_docker_mount(source: Path | str, target: Path | str) -> None:
     docker access-mode suffix (`:ro`, also `:z`/`:Z`, `:cached`/`:delegated`,
     propagation modes) is the caller's responsibility — bake it into target
     when needed. Both args coerce to str at this boundary so callers can pass
-    Path objects without thinking about it."""
-    _docker_mounts[str(source)] = str(target)
+    Path objects without thinking about it.
+
+    Re-staging an identical (source, target) pair is an idempotent no-op.
+    A *conflicting* duplicate raises RuntimeError: the same target from a
+    different source would emit two `-v` flags docker rejects at run time
+    (or the accumulator's source-keying would silently drop one mount for
+    same-source/new-target) — better a clean launcher error at staging time
+    than a cryptic docker one later. User-reachable clashes (`home/`
+    contents-mounts) are pre-checked with a friendlier message in
+    user_additions before ever reaching this guard."""
+    src, tgt = str(source), str(target)
+    staged = _docker_mounts.get(src)
+    if staged is not None and staged != tgt:
+        raise RuntimeError(f"bind-mount source {src} is already staged at {staged}; refusing to re-stage it at {tgt}")
+    bare_target = tgt.split(":", 1)[0]
+    if any(v.split(":", 1)[0] == bare_target and s != src for s, v in _docker_mounts.items()):
+        raise RuntimeError(f"bind-mount target {bare_target} is already staged from a different source; refusing to shadow it with {src}")
+    _docker_mounts[src] = tgt
 
 
 def mount_target_is_staged(target: Path | str) -> bool:
@@ -291,7 +307,14 @@ def prompt_install_failures(chain: list[str], instance: str) -> None:
     nothing flows back to the caller. Uses `docker run --rm --entrypoint cat`
     for the one-shot read — one extra subprocess per launch (~few hundred ms
     after a warm image cache). Called by run.py between ensure_image and
-    run_compose so the list reflects the build that just finished."""
+    run_compose so the list reflects the build that just finished.
+
+    No-op on dry-run: ensure_image built nothing, so the only readable log
+    would be a stale one from a previous real build — spinning up a real
+    container to surface stale warnings would break dry-run's "project,
+    don't touch" contract."""
+    if _dry_run:
+        return
     result = shell_capture(
         "docker", "run", "--rm", "--entrypoint", "cat",
         chain_image_tag(chain), str(INSTALL_FAILURES_LOG_IN_CONTAINER),

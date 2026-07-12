@@ -5,6 +5,8 @@ in launch.utils now, so its grammar tests are over in test_utils.
 Filesystem-touching tests use tmpdir + targeted patches so they don't depend
 on the host's actual launcher state."""
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -70,6 +72,120 @@ class TestJsonMapCache(unittest.TestCase):
         m["new_key"] = "added"
         again = file_access._cached_load_json_map(self.path)
         self.assertEqual(again["new_key"], "added")
+
+    def test_empty_file_loads_as_empty_map(self):
+        # A zero-byte map file (e.g. created by an interrupted first write
+        # before writes were atomic) is valid "no entries" state, not an error.
+        self.path.write_text("")
+        self.assertEqual(file_access._cached_load_json_map(self.path), {})
+
+    def test_corrupt_json_exits_with_repair_hint(self):
+        # A torn/hand-mangled map must NOT surface as a raw JSONDecodeError
+        # traceback on every launch — it exits cleanly, naming the file and
+        # pointing at the audit tool. (audit.py parses these files itself
+        # precisely so it can report the same corruption non-fatally.)
+        self.path.write_text('{"a": 1,,,')
+        with self.assertRaises(SystemExit) as ctx:
+            file_access._cached_load_json_map(self.path)
+        message = str(ctx.exception)
+        self.assertIn(self.path.name, message)
+        self.assertIn("launch.audit", message)
+
+    def test_corrupt_json_does_not_poison_cache(self):
+        # After the clean exit, a repaired file must load normally — the
+        # failed parse must not have cached anything.
+        self.path.write_text("{bad")
+        with self.assertRaises(SystemExit):
+            file_access._cached_load_json_map(self.path)
+        self.path.write_text(json.dumps({"fixed": True}))
+        self.assertEqual(file_access._cached_load_json_map(self.path), {"fixed": True})
+
+
+# ============================================================
+# agent_md_index — agents/ name → md-path index
+# ============================================================
+
+
+class TestAgentMdIndex(unittest.TestCase):
+    """_agent_md_index skips malformed filenames with a stderr warning naming
+    the file — one typo'd agent must neither crash every launch nor (the old
+    behavior) be indexed with its tags silently dropped."""
+
+    def _index(self, filenames):
+        with tempfile.TemporaryDirectory() as d:
+            for fn in filenames:
+                (Path(d) / fn).write_text("# stub\n")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                index = file_access._agent_md_index(Path(d))
+            return index, err.getvalue()
+
+    def test_wellformed_files_indexed_by_clean_name(self):
+        index, err = self._index(["golem.md", "researcher[code].md", "kid(parent).md"])
+        self.assertEqual(set(index), {"golem", "researcher", "kid"})
+        self.assertEqual(err, "")
+
+    def test_malformed_file_skipped_with_warning(self):
+        index, err = self._index(["good.md", "broken[code.md"])
+        self.assertEqual(set(index), {"good"})
+        self.assertIn("broken[code.md", err)
+        self.assertIn("warning", err)
+
+    def test_all_malformed_yields_empty_index(self):
+        index, err = self._index(["oops[.md", "[lead].md"])
+        self.assertEqual(index, {})
+        self.assertEqual(err.count("warning"), 2)
+
+    def test_cached_accessor_returns_same_object(self):
+        # agent_md_index is lru_cached — repeated calls share one dict (and
+        # one disk scan) per process.
+        self.assertIs(file_access.agent_md_index(), file_access.agent_md_index())
+
+    def test_real_agents_dir_indexes_every_md(self):
+        # The repo's shipped agents/ must all be well-formed — the cached
+        # index should have one entry per .md file, no skips.
+        from launch.paths import AGENTS_DIR
+        self.assertEqual(len(file_access.agent_md_index()), len(list(AGENTS_DIR.glob("*.md"))))
+
+
+# ============================================================
+# write_text — atomic replace semantics
+# ============================================================
+
+
+class TestWriteTextAtomic(unittest.TestCase):
+    """write_text goes through a same-directory temp file + os.replace so an
+    interrupt mid-write can never truncate existing state (the JSON maps were
+    previously corruptible by a Ctrl+C landing inside the write)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmpdir.name) / "sub" / "out.txt"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_writes_content_and_creates_parents(self):
+        file_access.write_text(self.path, "hello")
+        self.assertEqual(self.path.read_text(), "hello")
+
+    def test_overwrites_existing_content(self):
+        file_access.write_text(self.path, "first")
+        file_access.write_text(self.path, "second")
+        self.assertEqual(self.path.read_text(), "second")
+
+    def test_no_temp_litter_after_write(self):
+        file_access.write_text(self.path, "hello")
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["out.txt"])
+
+    def test_failed_replace_preserves_original_and_cleans_temp(self):
+        # The atomicity contract: if anything goes wrong before the final
+        # rename, the original file is untouched and no temp file lingers.
+        file_access.write_text(self.path, "original")
+        with patch("launch.file_access.os.replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                file_access.write_text(self.path, "partial")
+        self.assertEqual(self.path.read_text(), "original")
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["out.txt"])
 
 
 # ============================================================
@@ -382,6 +498,14 @@ class TestEnforceSshDirPerms(unittest.TestCase):
         kh = self._make_file("known_hosts", 0o600)
         file_access.enforce_ssh_dir_perms(self.ssh)
         self.assertEqual(self._mode(kh), 0o644)
+
+    def test_known_hosts2_chmod_644(self):
+        # "known_hosts2" doesn't literally end with "_hosts" — the endswith
+        # check needs the ("_hosts", "_hosts2") pair or ssh's secondary
+        # known-hosts file silently lands in the 600 bucket.
+        kh2 = self._make_file("known_hosts2", 0o600)
+        file_access.enforce_ssh_dir_perms(self.ssh)
+        self.assertEqual(self._mode(kh2), 0o644)
 
     def test_non_directory_silently_skipped(self):
         # Missing or non-dir input → no-op (no exception).

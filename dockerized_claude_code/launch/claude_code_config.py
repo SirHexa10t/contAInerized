@@ -35,8 +35,11 @@ def build_status_line(inst_id: InstanceIdentity) -> str:
 
     email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
     chain = InstanceModifiers.colored_chain(inst_id.tags + inst_id.modes)
+    # Whole prefix (email + separator) drops out when the field is absent —
+    # interpolating the raw lookup would render the literal string "None".
+    email_part = f"{GREEN}{email}{RESET} : " if email else ""
     return (f"{CYAN}● {cap(inst_id.agent)} - {cap(inst_id.session)} {GREY}( {inst_id.workspace} ){RESET}"
-            f"\t\t{GREEN}{email}{RESET}{ ' : ' if email else ''}{BLUE}{inst_id.instance}{RESET}"
+            f"\t\t{email_part}{BLUE}{inst_id.instance}{RESET}"
             f"  {chain}")
 
 

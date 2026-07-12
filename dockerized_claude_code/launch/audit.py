@@ -21,32 +21,35 @@ Run from the project root:
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .agents_crud import list_all_instances
-from .file_access import (
-    is_dir, load_modes_map, load_workspace_map, path_exists, read_text,
-)
+from .file_access import agent_md_index, is_dir, path_exists, read_text
 from .paths import (
-    ACCOUNT_FILE, AGENT_MD_BY_NAME, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
+    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
     AGENTS_STATE, CREDENTIALS_FILE, instance_state_dir_path, state_history_path,
 )
 from .structs import InstanceModifiers, SESSION_SEP
 
 
-def _load_or_issue(kind: str, path: Path, loader: Callable[[], dict[str, Any]]) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
-    """Load `path` via `loader`; return (mapping, issues). On missing file or
-    JSONDecodeError, return ({}, [single issue tagged with `kind`]). `kind`
-    is the issue category ('ws_map' / 'modes_map') reported on failure."""
+def _load_or_issue(kind: str, path: Path) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+    """Parse the JSON map at `path`; return (mapping, issues). On missing file
+    or invalid JSON, return ({}, [single issue tagged with `kind`]); an empty
+    file parses as {} (matching the launcher's semantics). `kind` is the issue
+    category ('ws_map' / 'modes_map') reported on failure. Parses directly
+    rather than through file_access's cached loaders — those sys.exit on
+    corruption (fail-fast is right for a launch), while the audit's job is to
+    report the same corruption non-fatally and keep checking."""
     if not path_exists(path):
         return {}, [(kind, path.name, "file is missing")]
+    content = read_text(path).strip()
     try:
-        return loader(), []
+        return (json.loads(content) if content else {}), []
     except json.JSONDecodeError as e:
         return {}, [(kind, path.name, f"invalid JSON: {e}")]
 
 
-def _check_json_file(path) -> str | None:
+def _check_json_file(path: Path) -> str | None:
     """Return an issue string if the file is missing, empty, has invalid JSON, or holds an
     empty object/array; None otherwise."""
     if not path_exists(path):
@@ -94,9 +97,9 @@ def main() -> None:
 
     # Map files may legitimately be missing on a fresh install — _load_or_issue
     # reports + degrades to {} so the per-entry checks below still run cleanly.
-    mapping, ws_issues = _load_or_issue("ws_map", AGENT_WORKSPACE_MAP_FILE, load_workspace_map)
+    mapping, ws_issues = _load_or_issue("ws_map", AGENT_WORKSPACE_MAP_FILE)
     issues.extend(ws_issues)
-    modes, modes_issues = _load_or_issue("modes_map", AGENT_MODES_MAP_FILE, load_modes_map)
+    modes, modes_issues = _load_or_issue("modes_map", AGENT_MODES_MAP_FILE)
     issues.extend(modes_issues)
 
     # Shared OAuth files — these must be populated after login.
@@ -113,7 +116,7 @@ def main() -> None:
     # (source `.md` + composed-addendum), so any pre-launch divergence is transient.
     for dir_name in instances:
         agent, _, session = dir_name.partition(SESSION_SEP)
-        if agent not in AGENT_MD_BY_NAME:
+        if agent not in agent_md_index():
             issues.append(("orphan", dir_name, f"agent '{agent}' has no .md file"))
             continue
         if not state_history_path(instance_state_dir_path(dir_name)).is_file():

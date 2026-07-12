@@ -107,10 +107,12 @@ class TestComposeChainDispatch(unittest.TestCase):
         self.mock_auto.assert_not_called()
         self.mock_dood.assert_not_called()
 
-    def test_auto_handler_receives_state_dir(self):
-        state = Path("/tmp/some-state")
-        compose_chain(_FakeInst.make([], [InstanceModifiers.MODE_WARN_AUTO], state))
-        self.mock_auto.assert_called_once_with(state)
+    def test_auto_handler_receives_identity(self):
+        # Uniform handler signature: every _apply_* gets the InstanceIdentity;
+        # _apply_auto reads .state_dir off it for the status-file location.
+        sess = _FakeInst.make([], [InstanceModifiers.MODE_WARN_AUTO], Path("/tmp/some-state"))
+        compose_chain(sess)
+        self.mock_auto.assert_called_once_with(sess)
 
     def test_dood_handler_fires_for_dood_mode(self):
         compose_chain(_FakeInst.make([], [InstanceModifiers.MODE_WARN_DOOD], Path("/tmp/state")))

@@ -47,9 +47,9 @@ from functools import cache
 from pathlib import Path
 
 from .file_access import (
-    conf_path_for, has_continuable_jsonl, is_dir, last_history_mtime,
+    agent_md_index, conf_path_for, has_continuable_jsonl, is_dir, last_history_mtime,
 )
-from .paths import AGENT_MD_BY_NAME, AGENT_WORKSPACE_MAP_FILE, instance_state_dir_path, state_md_path
+from .paths import AGENT_WORKSPACE_MAP_FILE, instance_state_dir_path, state_md_path
 from .utils import parse_stem
 
 
@@ -237,13 +237,13 @@ class AgentIdentity:
     @property
     def md_path(self) -> Path:
         """Source agent .md file under agents/, looked up by agent name via
-        AGENT_MD_BY_NAME (dict access — O(1)). The agent's filename .stem
-        still carries [tags] / (parent) — the conf_path / tags properties
-        parse those out. Identity is constructed after the agent's existence
-        has been verified upstream, so the lookup won't return None in
-        practice — the assert narrows the Optional and would also surface a
-        callsite that skipped the upstream verification."""
-        md = AGENT_MD_BY_NAME.get(self.agent)
+        file_access.agent_md_index (cached dict access — O(1)). The agent's
+        filename .stem still carries [tags] / (parent) — the conf_path / tags
+        properties parse those out. Identity is constructed after the agent's
+        existence has been verified upstream, so the lookup won't return None
+        in practice — the assert narrows the Optional and would also surface
+        a callsite that skipped the upstream verification."""
+        md = agent_md_index().get(self.agent)
         assert md is not None, f"AgentIdentity({self.agent!r}) has no .md file — verify upstream"
         return md
 
@@ -338,10 +338,12 @@ class InstanceIdentity(AgentIdentity):
         """Exit if the workspace path is set but doesn't resolve to a real
         directory (stale agent_workspace_map.json entry). Workspace=None /
         empty string passes through silently so the caller can decide to
-        prompt for a new value instead of treating absence as an error —
-        empty-string is normalized to None here since `Path("").is_dir()`
-        spuriously returns True (it resolves to cwd) and we don't want to
-        bind-mount the launcher's cwd into the container."""
+        prompt for a new value instead of treating absence as an error
+        (resolve_target treats both as "missing → re-prompt" via `not
+        workspace`). The explicit empty-string guard matters because
+        `Path("").is_dir()` spuriously returns True (it resolves to cwd)
+        and we don't want to bind-mount the launcher's cwd into the
+        container."""
         if not self.workspace:
             return
         if not is_dir(self.workspace):

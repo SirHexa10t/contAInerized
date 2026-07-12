@@ -95,6 +95,80 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
 
+class TestAddDockerMountCollisions(unittest.TestCase):
+    """add_docker_mount rejects conflicting duplicates at staging time. Two
+    `-v` flags for one target make docker error out at run time with a
+    message that names neither culprit; the source-keyed accumulator would
+    silently *drop* a mount on same-source/new-target. Both now fail fast
+    with a message naming the paths. Identical re-stages stay no-ops."""
+
+    def setUp(self):
+        docker_config._docker_mounts.clear()
+
+    def tearDown(self):
+        docker_config._docker_mounts.clear()
+
+    def test_identical_restage_is_idempotent(self):
+        docker_config.add_docker_mount("/src", "/tgt")
+        docker_config.add_docker_mount("/src", "/tgt")
+        self.assertEqual(docker_config._docker_mounts, {"/src": "/tgt"})
+
+    def test_same_target_from_different_source_raises(self):
+        docker_config.add_docker_mount("/src1", "/tgt")
+        with self.assertRaises(RuntimeError) as ctx:
+            docker_config.add_docker_mount("/src2", "/tgt")
+        self.assertIn("/tgt", str(ctx.exception))
+        self.assertIn("/src2", str(ctx.exception))
+
+    def test_target_collision_ignores_access_mode_suffix(self):
+        # `/x:ro` and `/x` are the same container path — still a collision.
+        docker_config.add_docker_mount("/src1", "/tgt:ro")
+        with self.assertRaises(RuntimeError):
+            docker_config.add_docker_mount("/src2", "/tgt")
+
+    def test_same_source_at_new_target_raises(self):
+        # The dict is keyed by source — a second target for the same source
+        # used to silently REPLACE the first mount. Now it's an error.
+        docker_config.add_docker_mount("/src", "/tgt1")
+        with self.assertRaises(RuntimeError):
+            docker_config.add_docker_mount("/src", "/tgt2")
+        self.assertEqual(docker_config._docker_mounts, {"/src": "/tgt1"})   # original intact
+
+    def test_distinct_mounts_accumulate(self):
+        docker_config.add_docker_mount("/a", "/x")
+        docker_config.add_docker_mount("/b", "/y:ro")
+        self.assertEqual(len(docker_config._docker_mounts), 2)
+
+    def test_nested_targets_are_not_collisions(self):
+        # /home/claude/.config and /home/claude/.config/.jira are different
+        # mount points (docker nests them) — only exact-path matches collide.
+        docker_config.add_docker_mount("/a", "/home/claude/.config")
+        docker_config.add_docker_mount("/b", "/home/claude/.config/.jira")
+        self.assertEqual(len(docker_config._docker_mounts), 2)
+
+
+class TestPromptInstallFailuresDryRun(unittest.TestCase):
+    """--dry-run builds nothing, so prompt_install_failures must not spin up
+    a container: the only log it could read is a stale one from a previous
+    real build, and `docker run` is a real side effect dry-run promises not
+    to have. (Pre-fix, dry-run ran the read for real.)"""
+
+    def tearDown(self):
+        docker_config.set_dry_run(False)
+
+    def test_dry_run_skips_the_docker_read(self):
+        docker_config.set_dry_run(True)
+        with patch("launch.docker_config.shell_capture") as mock_capture:
+            docker_config.prompt_install_failures(["base", "code"], "poet__x")
+        mock_capture.assert_not_called()
+
+    def test_real_run_reads_the_image_log(self):
+        completed = SimpleNamespace(returncode=1, stdout="")   # rc!=0 → no log in image → silent return
+        with patch("launch.docker_config.shell_capture", return_value=completed) as mock_capture:
+            docker_config.prompt_install_failures(["base", "code"], "poet__x")
+        mock_capture.assert_called_once()
+
+
 class TestMountTargetIsStaged(unittest.TestCase):
     """`mount_target_is_staged` underpins the home-overlay clash check —
     any prior mount with the same target makes the helper return True so

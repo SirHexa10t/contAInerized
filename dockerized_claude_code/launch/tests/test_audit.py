@@ -1,9 +1,10 @@
 """Tests for launch.audit — the launcher's state-integrity report.
 
-Two pure helpers cover the audit's per-data-source logic:
+Three pure helpers cover the audit's per-data-source logic:
   `_check_json_file`   — classifies a JSON state file's status
+  `_load_or_issue`     — parses a JSON map, degrading corruption to an issue
   `_modes_map_issues`  — validates modes-map entries (ghost/empty/bad)
-Both are easily-testable in isolation. `main()` is the I/O orchestrator that
+All are easily-testable in isolation. `main()` is the I/O orchestrator that
 loads the maps and walks state dirs — left out of unit tests since it
 exercises the same primitives plus a great deal of file system access."""
 
@@ -12,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from launch.audit import _check_json_file, _modes_map_issues
+from launch.audit import _check_json_file, _load_or_issue, _modes_map_issues
 
 
 class TestCheckJsonFile(unittest.TestCase):
@@ -169,6 +170,48 @@ class TestModesMapIssues(unittest.TestCase):
             },
         )
         self.assertNotIn("agent__valid", kinds_by_target)
+
+
+class TestLoadOrIssue(unittest.TestCase):
+    """_load_or_issue parses the map files directly — NOT through
+    file_access's cached loaders, which now sys.exit on corruption. The audit
+    must degrade the same corruption to a reported issue and keep checking."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmpdir.name) / "some_map.json"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_valid_map_loads_with_no_issues(self):
+        self.path.write_text(json.dumps({"a__b": "/ws"}))
+        mapping, issues = _load_or_issue("ws_map", self.path)
+        self.assertEqual(mapping, {"a__b": "/ws"})
+        self.assertEqual(issues, [])
+
+    def test_missing_file_degrades_to_single_issue(self):
+        mapping, issues = _load_or_issue("ws_map", self.path)
+        self.assertEqual(mapping, {})
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0][0], "ws_map")
+        self.assertIn("missing", issues[0][2])
+
+    def test_corrupt_json_degrades_to_single_issue_not_exit(self):
+        # The launch-path loader exits on this input; the audit must not.
+        self.path.write_text('{"a": 1,,,')
+        mapping, issues = _load_or_issue("modes_map", self.path)
+        self.assertEqual(mapping, {})
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0][0], "modes_map")
+        self.assertIn("invalid JSON", issues[0][2])
+
+    def test_empty_file_is_empty_map_with_no_issues(self):
+        # Matches the launcher's own semantics: zero-byte map == no entries.
+        self.path.write_text("")
+        mapping, issues = _load_or_issue("ws_map", self.path)
+        self.assertEqual(mapping, {})
+        self.assertEqual(issues, [])
 
 
 if __name__ == "__main__":

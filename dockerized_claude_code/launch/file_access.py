@@ -6,9 +6,9 @@ state-dir lifecycle in agents_crud, where the file ops are inseparable
 from the domain logic).
 
 Grouped by section in this file:
-  - Agent file lookup (conf_path_for, load_conf) — md_path → .conf.
-    Filename-stem parsing (parse_stem / parse_agent_name) lives in `utils`;
-    the name → md path index (AGENT_MD_BY_NAME) lives in `agents_crud`.
+  - Agent file lookup (agent_md_index [cached], conf_path_for, load_conf) —
+    the name → md-path index plus md_path → .conf resolution. Filename-stem
+    parsing (parse_stem / parse_agent_name) lives in `utils`.
   - JSON state maps load/save with cache (load/save_workspace_map,
     load/save_modes_map) — agent_workspace_map.json + agent_modes_map.json
   - Per-instance state-dir queries (has_continuable_jsonl, last_history_mtime)
@@ -47,6 +47,7 @@ import glob
 import json
 import os
 import shutil
+import sys
 import time
 from collections.abc import Iterator
 from functools import lru_cache
@@ -56,13 +57,13 @@ from typing import Any
 from dotenv import dotenv_values  # pip install python-dotenv
 
 from .paths import (
-    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE,
+    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
     CREDENTIALS_FILE, DEFAULT_CONF, FIREWALL_WHITELIST_FILE,
     FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS, agent_conf_path, optional_creds_service_path,
     optional_creds_token_path, state_history_path, state_workspace_jsonls,
 )
-from .utils import parse_stem, shell_returncode
+from .utils import parse_agent_name, parse_stem, shell_returncode
 
 # ============================================================
 # Filesystem primitives — every disk-touching syscall flows through this file
@@ -106,11 +107,11 @@ def force_remove(path: Path, *, name: str | None = None) -> bool:
     don't linger past this single operation.
 
     `name` is an optional human-friendly identifier — when provided, the path
-    is treated as user-initiated removal (no "stale" descriptor in the log)
-    and a sudo failure pauses for keypress so the user can read the failure
-    before the function returns (used by `agents_crud.delete_instance`, mid-
-    picker UX). Without `name`, the removal is logged as "stale" cleanup and
-    the function returns silently on failure.
+    is treated as user-initiated removal (no "stale" descriptor in the log).
+    This layer only prints what happened; interactive gating on failure is
+    the caller's job (agents_crud.delete_instance holds the picker open with
+    prompt_keypress so the user can read the failure) — file access shouldn't
+    block on user input.
 
     Returns True on success (including "already absent"); False if even sudo
     couldn't remove the path."""
@@ -137,8 +138,6 @@ def force_remove(path: Path, *, name: str | None = None) -> bool:
 
     print(f"\n  sudo cleanup failed (exit {ret}).")
     print(f"  Manual cleanup:  sudo rm -rf '{path}'")
-    if name:
-        input("\n  Press Enter to continue...")
     return False
 
 
@@ -150,12 +149,26 @@ def move_path(src: Path, dst: Path) -> None:
 
 
 def write_text(path: Path, content: str) -> None:
-    """Write `content` to `path` as text (overwriting if present). Auto-creates
-    the parent directory tree if missing, so callers don't need a separate
-    ensure_dir call. Use ensure_dir directly only for non-write reasons
-    (creating a directory that's a bind-mount target / mount point, etc.)."""
+    """Write `content` to `path` as text (overwriting if present) — atomically:
+    content lands in a same-directory temp file first, then `os.replace`s over
+    `path`. A Ctrl+C / crash mid-write can therefore never truncate existing
+    state (the old torn-write path corrupted the JSON maps), and concurrent
+    readers — including the in-container view of a bind-mounted state dir —
+    only ever observe the old or the new content, never a partial file.
+    (The temp file lives next to `path` so the rename stays on one filesystem;
+    the pid suffix keeps two launcher processes from colliding.)
+    Auto-creates the parent directory tree if missing, so callers don't need a
+    separate ensure_dir call. Use ensure_dir directly only for non-write
+    reasons (creating a directory that's a bind-mount target / mount point,
+    etc.)."""
     ensure_dir(path.parent)
-    path.write_text(content)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(content)
+        os.replace(tmp, path)
+    except BaseException:            # incl. KeyboardInterrupt — the exact torn-write scenario this guards
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def copy_file(src: Path, dest: Path, overwrite_if_changed: bool = False) -> None:
@@ -175,7 +188,7 @@ def copy_file(src: Path, dest: Path, overwrite_if_changed: bool = False) -> None
 def enforce_ssh_dir_perms(ssh_dir: Path) -> None:
     """Apply SSH's strict permission requirements to a directory: 700 on the
     dir itself, 600 on every regular file inside EXCEPT `*.pub` (public keys)
-    and `*_hosts` (`known_hosts`, `known_hosts2`) which get 644. ssh refuses
+    and `*_hosts` / `*_hosts2` (`known_hosts`, `known_hosts2`) which get 644. ssh refuses
     to read private keys whose perms aren't 600 — and refuses to load any
     config from a dir whose perms aren't 700 — so this is what the user
     would otherwise have to set by hand. No-op if `ssh_dir` doesn't exist
@@ -189,7 +202,7 @@ def enforce_ssh_dir_perms(ssh_dir: Path) -> None:
     for entry in ssh_dir.iterdir():
         if not entry.is_file():
             continue
-        relaxed = entry.suffix == ".pub" or entry.name.endswith("_hosts")
+        relaxed = entry.suffix == ".pub" or entry.name.endswith(("_hosts", "_hosts2"))
         entry.chmod(0o644 if relaxed else 0o600)
 
 
@@ -337,6 +350,35 @@ def read_json_field(path: Path | str, *keys: str) -> Any:
         return None
 
 
+def _agent_md_index(agents_dir: Path) -> dict[str, Path]:
+    """Build the {clean agent name: md path} index for `agents_dir`, skipping
+    files whose stem violates the filename grammar (parse_agent_name raises
+    ValueError) with a stderr warning naming the file. Skipping keeps one
+    typo'd filename from crashing every launch, while the warning keeps the
+    typo from hiding — the malformed agent simply doesn't appear in the
+    picker until its name is fixed. Sorted glob so duplicate clean names
+    resolve deterministically (last one wins)."""
+    index: dict[str, Path] = {}
+    for p in sorted(agents_dir.glob("*.md")):
+        try:
+            index[parse_agent_name(p.stem)] = p
+        except ValueError as e:
+            print(f"  warning: ignoring agent file {p.name}: {e}", file=sys.stderr)
+    return index
+
+
+@lru_cache(maxsize=None)
+def agent_md_index() -> dict[str, Path]:
+    """Snapshot of every agent .md in AGENTS_DIR, indexed by clean agent name
+    (filename grammar: `<name>[tag](parent).md`). Cached for the launcher
+    process lifetime — agents/ is hand-populated and stable across a single
+    `run.py` invocation, and the lazy read keeps module import free of disk
+    I/O. Iterate `.values()` for the path list, membership-check `.keys()`
+    for the name set; AgentIdentity.md_path looks an entry up by name. The
+    returned dict is SHARED across callers and must not be mutated."""
+    return _agent_md_index(AGENTS_DIR)
+
+
 def conf_path_for(md_path: Path) -> Path | None:
     """Locate an agent's .conf path. A '(parent)' suffix in the filename aliases
     to '<parent>.conf'; otherwise '<name>.conf'; falls back to DEFAULT_CONF, or
@@ -349,10 +391,12 @@ def conf_path_for(md_path: Path) -> Path | None:
 
 
 @lru_cache(maxsize=None)
-def load_conf(md_path: Path) -> tuple[Path | None, dict]:
+def load_conf(md_path: Path) -> tuple[Path | None, dict[str, str]]:
     """Locate and load an agent's .conf. Returns (path_or_None, values_dict).
     Path resolution lives in conf_path_for above; this wrapper adds the dotenv
-    parse for the values dict.
+    parse for the values dict. Valueless keys (a bare `KEY` line with no `=`,
+    which dotenv reads as None) are dropped — forwarding them to the container
+    as `-e KEY=None` was never meaningful.
 
     Cached for the launcher process's lifetime — agent_sort_key calls this
     per pairwise sort comparison in the picker (which is O(N log N) reads of
@@ -360,7 +404,8 @@ def load_conf(md_path: Path) -> tuple[Path | None, dict]:
     across all callers and must not be mutated; current consumers
     (agent_sort_key, run.py's setup_state → conf_env_args) only read."""
     path = conf_path_for(md_path)
-    return path, (dotenv_values(path) if path else {})
+    values = {k: v for k, v in dotenv_values(path).items() if v is not None} if path else {}
+    return path, values
 
 
 # ============================================================
@@ -396,11 +441,24 @@ def _cached_load_json_map(path: Path) -> dict[str, Any]:
     """Load a JSON map from `path` (top-level JSON object → dict; missing or
     empty file → {}), caching the result by path. Subsequent calls return the
     cached dict by reference (so callers' in-place mutations before save_*_map
-    are visible to other loaders too — see section comment above)."""
+    are visible to other loaders too — see section comment above).
+
+    A corrupted file exits with a clean repair hint instead of a traceback —
+    before this guard, one bad byte in agent_workspace_map.json crashed every
+    subsequent launch until the user diagnosed the stack trace themselves.
+    (audit.py parses these files independently so it can report the same
+    corruption non-fatally.)"""
     if path not in _json_map_cache:
         if path.exists():
             content = read_text(path).strip()
-            _json_map_cache[path] = json.loads(content) if content else {}
+            try:
+                _json_map_cache[path] = json.loads(content) if content else {}
+            except json.JSONDecodeError as e:
+                sys.exit(
+                    f"  {path.name} is corrupted JSON ({e}).\n"
+                    f"  Repair or delete {path}, then relaunch.\n"
+                    f"  (`python -m launch.audit` reports all state issues non-fatally.)"
+                )
         else:
             _json_map_cache[path] = {}
     return _json_map_cache[path]

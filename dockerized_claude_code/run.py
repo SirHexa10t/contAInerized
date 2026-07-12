@@ -2,6 +2,7 @@
 import argparse
 import dataclasses
 import sys
+from typing import NamedTuple
 
 from launch.agent_modifiers_handler import compose_chain
 from launch.agents_crud import (
@@ -13,11 +14,11 @@ from launch.docker_config import (
     ensure_image, prompt_install_failures, require_docker, run_compose,
     set_container_mounts, set_dry_run,
 )
-from launch.file_access import ensure_shared_oauth_files, load_conf
+from launch.file_access import agent_md_index, ensure_shared_oauth_files, load_conf
 from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_modes, prompt_session, select_agent,
 )
-from launch.paths import AGENT_MD_BY_NAME, AGENTS_DIR
+from launch.paths import AGENTS_DIR
 from launch.structs import AgentIdentity, InstanceIdentity
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
@@ -25,22 +26,38 @@ from launch.user_additions import (
 from launch.utils import call_or_exit, exit_if_missing
 
 
-def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], bool, bool]:
-    """Parse the launcher's CLI. Returns (picked, claude_args, dry_run, refresh_installs):
-        picked            — AgentIdentity (new) | InstanceIdentity (cont, is_brand_new=False)
-                            if a known agent/instance name was given as the positional arg,
-                            else None (picker will run).
-        claude_args       — anything else from argv: flags argparse didn't recognize, plus
-                            the positional if it didn't resolve to a known target. These
-                            get appended to the `docker compose run … claude-code` command
-                            so they reach claude inside the container.
-        dry_run           — `--dry-run` flag. When True, launch() runs every stage
-                            (state setup, mount staging, etc.) but skips the final
-                            `docker compose run`.
-        refresh_installs  — `--refresh-installs` flag. When True, every optional CLI
-                            install in Dockerfile.code re-runs (cache buster — used
-                            to retry previously-failed installs). Already-installed
-                            tools fast-path through their package manager's no-op.
+class LaunchOptions(NamedTuple):
+    """One launch's CLI-derived inputs — what parse_cli returns and the later
+    stages consume. NamedTuple (not a bare tuple) so call sites read
+    `opts.dry_run` instead of positional index 2, and flag N+1 is one new
+    field here instead of a wider tuple threaded through every signature.
+    Field meanings:
+        picked            — AgentIdentity (new) | InstanceIdentity (cont,
+                            is_brand_new=False) if a known agent/instance name
+                            was given as the positional arg, else None (the
+                            picker will run; gather_input fills it in).
+        claude_args       — anything else from argv: flags argparse didn't
+                            recognize, plus the positional if it didn't resolve
+                            to a known target. Appended to the
+                            `docker compose run … claude-code` command so they
+                            reach claude inside the container.
+        dry_run           — `--dry-run` flag. launch() runs every stage but the
+                            docker-touching steps no-op (compose invocation
+                            prints; install-failure read skips).
+        refresh_installs  — `--refresh-installs` flag. Every optional CLI
+                            install in Dockerfile.code re-runs (cache buster —
+                            used to retry previously-failed installs).
+                            Already-installed tools fast-path through their
+                            package manager's no-op."""
+    picked: AgentIdentity | InstanceIdentity | None
+    claude_args: list[str]
+    dry_run: bool
+    refresh_installs: bool
+
+
+def parse_cli() -> LaunchOptions:
+    """Parse the launcher's CLI into a LaunchOptions (see its docstring for
+    field semantics).
 
     Use `--` to force args through to claude even when they look like our own flags
     (e.g. `python3 run.py poet -- --help` runs poet and passes --help to claude).
@@ -71,22 +88,29 @@ def parse_cli() -> tuple[AgentIdentity | InstanceIdentity | None, list[str], boo
     if args.target is not None and picked is None:
         # Unknown name — pass it through to claude as a positional, picker still runs.
         claude_args = [args.target] + claude_args
-    return picked, claude_args, args.dry_run, args.refresh_installs
+    return LaunchOptions(picked, claude_args, args.dry_run, args.refresh_installs)
 
 
-def gather_input() -> tuple[AgentIdentity | InstanceIdentity, list[str], bool, bool]:
-    """Stage 1 — Input. Verify there are agents to pick from, parse CLI args, fall
-    back to the interactive picker if no target was given on the command line, exit
-    cleanly if the user cancels. Returns (picked, claude_args, dry_run,
-    refresh_installs) — `picked` is an AgentIdentity for new and an InstanceIdentity
-    for cont. The new/cont distinction is encoded in the returned type. `dry_run`
-    and `refresh_installs` come straight off the CLI flags — see parse_cli."""
-    exit_if_missing(AGENT_MD_BY_NAME, f"No agents found. Create an .md file in {AGENTS_DIR}/.")
-    picked, claude_args, dry_run, refresh_installs = parse_cli()
-    picked = picked or select_agent()
+def gather_input() -> LaunchOptions:
+    """Stage 1 — Input. Verify there are agents to pick from, parse CLI args,
+    gate on docker being installed, fall back to the interactive picker if no
+    target was given on the command line, exit cleanly if the user cancels.
+    Returns parse_cli's LaunchOptions with `picked` guaranteed non-None —
+    an AgentIdentity for new, an InstanceIdentity for cont (the new/cont
+    distinction is encoded in the type).
+
+    The docker gate sits between parse_cli and the picker deliberately:
+    after parse_cli so `--help` still works on a docker-less machine, but
+    before select_agent so the user isn't walked through the picker and
+    prompts for a launch that was never going to happen. It fires in dry-run
+    too — dry-run is a faithful projection of a real run."""
+    exit_if_missing(agent_md_index(), f"No agents found. Create an .md file in {AGENTS_DIR}/.")
+    opts = parse_cli()
+    require_docker()
+    picked = opts.picked or select_agent()
     if picked is None:
         sys.exit(0)
-    return picked, claude_args, dry_run, refresh_installs
+    return opts._replace(picked=picked)
 
 
 def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity:
@@ -99,7 +123,7 @@ def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity
     run. is_brand_new=True is stamped on at the same time."""
     if isinstance(picked, InstanceIdentity):       # cont — workspace + session + modes + is_brand_new already set
         picked.validate_workspace()
-        if picked.workspace is None:               # stale / missing map entry — re-prompt
+        if not picked.workspace:                   # stale / missing map entry (None or "") — re-prompt
             return dataclasses.replace(picked, workspace=ask_for_workspace(picked.agent))
         return picked
     # new — AgentIdentity only; prompt workspace, session, then modes
@@ -161,21 +185,23 @@ def launch() -> None:
     changes. Whether the launch is new vs continuing is carried on the identity
     itself (inst_id.is_brand_new), not threaded as a separate arg. `--dry-run`
     propagates into docker_config via set_dry_run; the only behavioural
-    difference is that docker_compose_subprocess prints its would-be invocation
-    instead of running it — every other step (mount staging, env staging,
-    firewall coordination, banner) runs identically so dry-run projects what
-    a real run would do (including failing fast if docker isn't on PATH).
+    differences are that docker_compose_subprocess prints its would-be
+    invocation instead of running it and prompt_install_failures skips its
+    image read (nothing was built, so any log it found would be stale) —
+    every other step (mount staging, env staging, firewall coordination,
+    banner) runs identically so dry-run projects what a real run would do
+    (including failing fast, inside gather_input, if docker isn't on PATH).
     `--refresh-installs` busts the install layer caches via set_container_env."""
-    picked, claude_args, dry_run, refresh_installs = gather_input()
-    set_dry_run(dry_run)
-    require_docker()
-    inst_id = resolve_target(picked)
+    opts = gather_input()
+    assert opts.picked is not None   # gather_input exits on picker cancel — narrows for the type checker
+    set_dry_run(opts.dry_run)
+    inst_id = resolve_target(opts.picked)
     resume_flag = compute_resume_flag(inst_id)
     update_workspace_map(inst_id)
     if inst_id.is_brand_new:
         set_instance_modes(inst_id)   # warns inside if both auto+DooD are set
     chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))
-    conf, cred_names = setup_state(inst_id, refresh_installs=refresh_installs)
+    conf, cred_names = setup_state(inst_id, refresh_installs=opts.refresh_installs)
     print_launch_banner(inst_id, cred_names)
     # Build the chain's images here (not inside run_compose) so the next
     # step can read the just-built image's failure log before Claude Code's
@@ -183,7 +209,7 @@ def launch() -> None:
     ensure_image(chain)
     # Surfaces any failed-install names + retry hint before run_compose execs into Claude Code's TUI.
     prompt_install_failures(chain, inst_id.instance)
-    run_compose(chain, inst_id.instance, claude_args, resume_flag, conf)
+    run_compose(chain, inst_id.instance, opts.claude_args, resume_flag, conf)
 
 
 if __name__ == "__main__":

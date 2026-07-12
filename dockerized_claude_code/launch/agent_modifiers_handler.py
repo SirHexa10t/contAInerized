@@ -22,7 +22,7 @@ prompt_yn from utils; agents_crud, menu_picker, and run.py import from here.
 """
 
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 
 from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
@@ -35,7 +35,7 @@ from .network import start_whitelist_resolution
 from .paths import (
     CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
 )
-from .structs import InstanceModifiers
+from .structs import InstanceIdentity, InstanceModifiers
 from .template_code.modifier_prompts import MODIFIER_NOTICE_PROMPTS, MODIFIER_YN_PROMPTS
 from .utils import prompt_keypress, prompt_yn
 
@@ -43,7 +43,9 @@ from .utils import prompt_keypress, prompt_yn
 # The InstanceModifiers enum (in structs.py) is the canonical ordered taxonomy
 # — declaration order encodes chain composition order, and tags() / modes()
 # provide the two subset views. Adding a new tag/mode means one line in that
-# enum AND wiring its `_apply_<x>()` handler into `compose_chain` below.
+# enum AND a matching `_apply_<value>()` handler below — compose_chain
+# dispatches by naming convention (test_essential_files enforces the pairing),
+# so there is no dispatch table or conditional ladder to update.
 
 # === [code]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
 CACHE_PRUNE_THRESHOLD_GB = 5   # per-cache size at which prune kicks in
@@ -82,7 +84,7 @@ def prune_caches() -> None:
             print(f"  Pruned {host.relative_to(CACHE_ROOT)}: freed {freed / 1024**3:.1f} GB (was {total / 1024**3:.1f} GB)")
 
 
-def _apply_code() -> None:
+def _apply_code(inst_id: InstanceIdentity) -> None:
     """[code] tag handler. Three side effects, no return value:
       • prepare_caches() mkdirs the host cache dirs (so the bind-mount targets
         exist before the container starts; otherwise Docker creates them as
@@ -90,6 +92,10 @@ def _apply_code() -> None:
       • prune_caches() opportunistically trims oversized caches.
       • add_docker_mount stages each cache as a bind-mount for the upcoming
         `docker compose run` (read-write — toolchains write into them).
+
+    `inst_id` is unused here — every `_apply_*` handler shares the same
+    signature so compose_chain can dispatch them uniformly by naming
+    convention.
 
     The compose/Dockerfile pair (compose.code.yml + docker/Dockerfile.code) is
     NOT selected here — chain order in compose_chain handles that."""
@@ -101,14 +107,14 @@ def _apply_code() -> None:
 
 # === Mode dispatch — like tags, but per-instance (set at create/modify time, stored in agent_modes_map.json) ===
 
-def _apply_dood() -> None:
+def _apply_dood(inst_id: InstanceIdentity) -> None:
     """{DooD} mode: bind-mount the host's /var/run/docker.sock (via DOCKER_DOOD_MOUNTS)
     so the agent can drive the host's Docker daemon (run sub-containers, build images,
     etc.). Looks up the host's docker-group GID via docker_config.detect_docker_gid
     and stages it as the DOCKER_GID compose var so the compose layer picks it up as a
     build-arg. Without a docker group on the host, the agent couldn't access the
     bind-mounted socket — so we fail loudly here rather than build an image that
-    won't work."""
+    won't work. `inst_id` is unused — uniform `_apply_*` handler signature."""
     gid = detect_docker_gid()
     if gid is None:
         raise RuntimeError(
@@ -121,25 +127,26 @@ def _apply_dood() -> None:
         add_docker_mount(source, target)
 
 
-def _apply_web() -> None:
+def _apply_web(inst_id: InstanceIdentity) -> None:
     """{web} mode: no per-launch side effects. Playwright's default
     browser-install location (`~/.cache/ms-playwright/`) sits under the
     `~/.cache` mount that [code]'s `_apply_code` already stages, so the
     host cache is shared across every [code][web] instance with no extra
     plumbing. This handler exists for the test_essential_files contract
-    (every non-BASE modifier has an `_apply_<slug>` callable)."""
+    (every non-BASE modifier has an `_apply_<slug>` callable). `inst_id`
+    is unused — uniform `_apply_*` handler signature."""
     pass
 
 
-def _apply_auto(state_dir) -> None:
+def _apply_auto(inst_id: InstanceIdentity) -> None:
     """{auto} mode: kick off the two-phase firewall whitelist resolve so it
     overlaps with `docker compose build` (which ensure_image fires right
     after compose_chain returns), then stage the firewall script + entrypoint
     wrapper bind-mounts. Two steps:
-      1. Fire start_whitelist_resolution(state_dir): clears any stale status
-         from a previous run on this instance, then runs Phase 1 (critical
-         Anthropic DNS — synchronous from the caller's perspective, since
-         docker_config.run_compose blocks on wait_for_critical_addresses
+      1. Fire start_whitelist_resolution(inst_id.state_dir): clears any stale
+         status from a previous run on this instance, then runs Phase 1
+         (critical Anthropic DNS — synchronous from the caller's perspective,
+         since docker_config.run_compose blocks on wait_for_critical_addresses
          before staging WHITELIST_ADDRESSES) and kicks off Phase 2 (rest)
          streaming in the background to feed the firewall updater spawned
          just before `docker compose run`.
@@ -148,7 +155,7 @@ def _apply_auto(state_dir) -> None:
          container. The agent-visible status file (`domains_pending_resolve.yml`)
          lives in the state dir and is already exposed via set_container_mounts'
          per-instance mount, so no extra plumbing for it."""
-    start_whitelist_resolution(state_dir)
+    start_whitelist_resolution(inst_id.state_dir)
     for source, target in DOCKER_AUTO_MOUNTS.items():
         add_docker_mount(source, target)
 
@@ -180,7 +187,7 @@ def warn_if_dangerous_modes(modes: Iterable[InstanceModifiers]) -> None:
 # so run.py / select_agent's modify flow can call it without importing this
 # module directly.
 
-def prompt_modifier(modifier: InstanceModifiers, current_modifiers) -> bool:
+def prompt_modifier(modifier: InstanceModifiers, current_modifiers: Collection[str]) -> bool:
     """Y/N prompt for opting into `modifier`. Header + body copy looked up in
     `MODIFIER_YN_PROMPTS`; prompt label comes from the modifier's `.label`.
     `current_modifiers` is an iterable of canonical-string modifier names
@@ -212,22 +219,28 @@ def prompt_for_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[I
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===
 
-def compose_chain(inst_id) -> list[str]:
+def compose_chain(inst_id: InstanceIdentity) -> list[str]:
     """Run each active modifier's handler and return the docker build chain.
     Accesses `inst_id.chain` once — that's where the validation (typo'd
     tags / stale modes) lives, and it's the canonical modifier-value tuple
     in InstanceModifiers declaration order (BASE first, then user-active
-    tags + modes). Dispatch then runs `_apply_<modifier>()` for each
-    user-toggleable modifier whose value is in the chain — side effects
-    only: stage compose env vars / bind-mounts, kick off the {auto}-mode
-    background DNS resolve, etc. BASE has no handler (no side effects
-    beyond being the starting image).
+    tags + modes). Dispatch then runs the matching `_apply_<value>` handler
+    (looked up by naming convention — see below) for each user-toggleable
+    modifier in the chain — side effects only: stage compose env vars /
+    bind-mounts, kick off the {auto}-mode background DNS resolve, etc.
+    BASE has no handler (no side effects beyond being the starting image).
 
-    inst_id.state_dir is the per-instance host path bind-mounted into the
-    container — passed to _apply_auto for the {auto}-mode status file
-    location; other handlers don't read it. write_text inside the network
-    module auto-creates this dir, so it's safe to use here before
-    setup_state runs.
+    Every handler takes the InstanceIdentity (most ignore it; _apply_auto
+    reads .state_dir for the {auto}-mode status file location). write_text
+    inside the network module auto-creates that dir, so it's safe to use
+    here before setup_state runs.
+
+    Dispatch is by naming convention — `_apply_<modifier.value.lower()>`
+    looked up in this module at call time (so tests can patch individual
+    handlers). test_essential_files enforces the convention: every non-BASE
+    member must have a matching handler, so a missing one fails at test
+    time (and, defensively, as a loud KeyError here rather than a silent
+    skip).
 
     Returns the chain list of strings — drives image naming
     (claude-agents:<chain[1:] joined by dot>, or claude-agents:base for the
@@ -235,18 +248,14 @@ def compose_chain(inst_id) -> list[str]:
     chain_compose_files in docker_config.
 
     Adding a new user-toggleable modifier means: a new entry in
-    InstanceModifiers, the matching `_apply_*` function above, and one new
-    conditional below. inst_id.chain picks it up automatically — it
-    iterates InstanceModifiers."""
+    InstanceModifiers + the matching `_apply_<value>` function above —
+    dispatch wires itself up from the name. inst_id.chain picks the member
+    up automatically too — it iterates InstanceModifiers."""
     chain = inst_id.chain   # validates against InstanceModifiers taxonomy
 
-    if InstanceModifiers.TAG_CODE.value in chain:
-        _apply_code()
-    if InstanceModifiers.MODE_WARN_AUTO.value in chain:
-        _apply_auto(inst_id.state_dir)
-    if InstanceModifiers.MODE_WARN_DOOD.value in chain:
-        _apply_dood()
-    if InstanceModifiers.MODE_WEB.value in chain:
-        _apply_web()
+    for modifier in InstanceModifiers:
+        if modifier is InstanceModifiers.BASE or modifier.value not in chain:
+            continue
+        globals()[f"_apply_{modifier.value.lower()}"](inst_id)
 
     return list(chain)

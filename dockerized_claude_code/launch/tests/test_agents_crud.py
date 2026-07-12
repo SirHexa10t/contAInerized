@@ -11,8 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from launch.agents_crud import (
-    ORDERED_MODEL_FAMILIES, _write_modes_entry, install_latest_md,
-    mode_sort_key, parse_model_id, tag_sort_key,
+    ORDERED_MODEL_FAMILIES, _write_modes_entry, agent_sort_key,
+    install_latest_md, mode_sort_key, parse_model_id, tag_sort_key,
 )
 from launch.template_code.memory_addendums import (
     ADDENDUM_SECTION_TITLE, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
@@ -52,11 +52,64 @@ class TestParseModelId(unittest.TestCase):
         # _FAMILY_RE uses `.search`, so the family can be anywhere
         self.assertEqual(parse_model_id("some-prefix-opus-4-7"), ("opus", 4, 7))
 
+    def test_fable_family_recognised(self):
+        # Regression: the Claude 5 launch left "fable" out of
+        # ORDERED_MODEL_FAMILIES, so every fable-backed agent parsed as
+        # "unknown family" and sank below haiku in the picker.
+        self.assertEqual(parse_model_id("claude-fable-5"), ("fable", 5, 0))
+
 
 class TestOrderedModelFamilies(unittest.TestCase):
     def test_priority_order(self):
-        # opus first, haiku last — affects agent_sort_key
-        self.assertEqual(ORDERED_MODEL_FAMILIES, ["opus", "sonnet", "haiku"])
+        # Most capable family first, haiku last — affects agent_sort_key.
+        self.assertEqual(ORDERED_MODEL_FAMILIES, ["fable", "opus", "sonnet", "haiku"])
+
+    def test_every_shipped_conf_family_is_known(self):
+        # The picker sorts unknown families past the end — silently, which is
+        # how the fable gap went unnoticed. Guard: every ANTHROPIC_MODEL in
+        # the repo's shipped confs must parse to a known family.
+        from launch.file_access import agent_md_index, load_conf
+        for name, md_path in agent_md_index().items():
+            _, conf = load_conf(md_path)
+            model = conf.get("ANTHROPIC_MODEL", "")
+            if not model:
+                continue
+            with self.subTest(agent=name, model=model):
+                self.assertIsNotNone(
+                    parse_model_id(model),
+                    f"{name}'s model {model!r} has no recognised family — "
+                    f"add it to ORDERED_MODEL_FAMILIES or the agent sorts last",
+                )
+
+
+class TestAgentSortKeyFamilies(unittest.TestCase):
+    """agent_sort_key orders by family capability (fable → opus → sonnet →
+    haiku), version descending inside a family, then name; agents with an
+    unrecognised or missing model sink past every known family."""
+
+    def _key_for(self, name: str, model: str):
+        with patch("launch.agents_crud.load_conf",
+                   return_value=(None, {"ANTHROPIC_MODEL": model} if model else {})):
+            return agent_sort_key((name, Path(f"/fake/{name}.md")))
+
+    def test_fable_sorts_before_opus_and_haiku(self):
+        keys = {
+            "f": self._key_for("f", "claude-fable-5"),
+            "o": self._key_for("o", "claude-opus-4-8"),
+            "s": self._key_for("s", "claude-sonnet-4-6"),
+            "h": self._key_for("h", "claude-haiku-4-5"),
+        }
+        self.assertEqual(sorted(keys, key=keys.get), ["f", "o", "s", "h"])
+
+    def test_unknown_family_sinks_last(self):
+        known = self._key_for("k", "claude-haiku-4-5")
+        unknown = self._key_for("u", "claude-mystery-9")
+        self.assertLess(known, unknown)
+
+    def test_higher_version_first_within_family(self):
+        newer = self._key_for("n", "claude-opus-4-8")
+        older = self._key_for("o", "claude-opus-4-7")
+        self.assertLess(newer, older)
 
 
 # ============================================================

@@ -10,7 +10,7 @@ from anywhere without circular-import risk.
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import TypeVar
 
@@ -28,8 +28,12 @@ def plural(n: int) -> str:
 def relative_time(mtime: float) -> str:
     """Human-readable relative time from an epoch mtime (e.g. '3 days ago',
     '5 minutes ago'). Display-only — used by the picker's Cont preview for
-    the 'Last used' line."""
+    the 'Last used' line. A future mtime (clock skew, NTP jump, copied file)
+    clamps to 'just now' — a negative timedelta would otherwise normalize to
+    days=-1 + positive seconds and render nonsense like '23 hours ago'."""
     delta = datetime.now() - datetime.fromtimestamp(mtime)
+    if delta.total_seconds() < 0:
+        return "just now"
     if delta.days >= 1:
         return f"{delta.days} day{plural(delta.days)} ago"
     hours = delta.seconds // 3600
@@ -41,10 +45,13 @@ def relative_time(mtime: float) -> str:
 
 # === Sorting ===
 
-def ordering_index_or_end(value, ordering) -> int:
+def ordering_index_or_end(value: object, ordering: Sequence[object]) -> int:
     """Position of `value` in `ordering`, or `len(ordering)` if absent —
     pushes unknowns past the end when used as a sort-key element. Backs the
-    picker's tag-set and mode-set sort keys in agents_crud."""
+    picker's tag-set and mode-set sort keys in agents_crud. `object`-typed
+    (not a TypeVar) because membership/index only need equality, and one
+    caller legitimately probes with None (agent_sort_key's unknown-family
+    sentinel)."""
     return ordering.index(value) if value in ordering else len(ordering)
 
 
@@ -68,6 +75,11 @@ def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
       - Order between brackets and parens is free: 'name[code](thinker)' and
         'name(thinker)[code]' both parse the same way.
 
+    Raises ValueError on a malformed stem — missing name, unclosed bracket,
+    empty `[]` / `()` group, or stray text between groups. Silently dropping
+    the malformed parts (the old behavior) meant a typo like `poet[code.md`
+    launched the agent without its [code] toolchain and nobody was told.
+
     Examples:
         'name'                → ('name', [], None)
         'name(thinker)'       → ('name', [], 'thinker')
@@ -77,11 +89,14 @@ def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
     """
     m = re.match(r"^([^()\[\]]+)", stem)
     if not m:
-        return (stem, [], None)
+        raise ValueError(f"agent filename stem {stem!r} must start with a name, before any [tag] / (parent) group")
     name = m.group(1)
+    rest = stem[len(name):]
+    if not re.fullmatch(r"(?:\([^()]+\)|\[[^\[\]]+\])*", rest):
+        raise ValueError(f"agent filename stem {stem!r} has a malformed [tag] / (parent) suffix after {name!r} (unclosed or empty bracket, or stray text)")
     tags = []
     parent = None
-    for paren, bracket in re.findall(r"\(([^()]+)\)|\[([^\[\]]+)\]", stem[len(name):]):
+    for paren, bracket in re.findall(r"\(([^()]+)\)|\[([^\[\]]+)\]", rest):
         if paren:
             parent = paren
         else:
@@ -91,7 +106,8 @@ def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
 
 def parse_agent_name(stem: str) -> str:
     """Just the `name` half of `parse_stem` — drops [tag] / (parent) suffixes
-    from a filename stem. Used to index AGENT_MD_BY_NAME in agents_crud."""
+    from a filename stem. Used to build file_access.agent_md_index.
+    Raises ValueError on malformed stems, same contract as parse_stem."""
     return parse_stem(stem)[0]
 
 

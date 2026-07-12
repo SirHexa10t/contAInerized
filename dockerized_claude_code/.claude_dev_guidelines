@@ -14,18 +14,18 @@ Grouped by layer, top of the dependency graph last.
 ### Leaves — depend on nothing in-project
 
 - `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split).
-- `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined.
+- `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined. Constants + path-builder lambdas only — no disk listings (those are file_access work).
+- `launch/template_code/` — pure data, no logic: per-modifier prompt copy (`modifier_prompts.py`), docker-side strings (`docker_prompts.py`), launch-time CLAUDE.md addendums (`memory_addendums.py`), firewall domain list + CDN provider ranges (`firewall_domains.py`).
 
 ### Disk + identity — depend only on leaves
 
-- `launch/file_access.py` — sole chokepoint for every disk-touching call (reads, writes, removes, queries, lists, stats).
-- `launch/structs.py` — identity dataclasses (`AgentIdentity` → `InstanceIdentity` → `InstanceIdentity`) + `InstanceModifiers` enum taxonomy.
+- `launch/file_access.py` — sole chokepoint for every disk-touching call (reads, atomic writes, removes, queries, lists, stats) — including the agents/ name → md-path index (`agent_md_index`, cached).
+- `launch/structs.py` — identity dataclasses (`AgentIdentity` → `InstanceIdentity`) + `InstanceModifiers` enum taxonomy.
 
 ### Small services — depend on disk + identity
 
 - `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
-- `launch/memory_addendums.py` — launch-time addendums composed into per-instance `CLAUDE.md` (per modifier in the active chain).
-- `launch/network.py` — `{auto}`-mode firewall: host-side DNS cascade + cross-launch IP cache + streaming iptables updater.
+- `launch/network.py` — `{auto}`-mode firewall: whitelist expansion + CDN-range widening, host-side DNS cascade, cross-launch IP cache, burst-batched iptables updater.
 
 ### Orchestration — depend on services
 
@@ -46,7 +46,7 @@ Grouped by layer, top of the dependency graph last.
 
 ### Other directories
 
-- `launch/templates/` — source-side files `file_access.copy_file` plants to `user_extras/` on first launch.
+- `launch/template_files/` — source-side files `file_access.copy_file` plants to `user_extras/` on first launch.
 - `launch/tests/` — unittest suite (`python3 -m unittest discover -s launch/tests` from project root).
 - `agents/` — agent definitions (`<name>[tag](parent).md` + optional matching `.conf`).
 - `docker/` — `Dockerfile.<step>` + `compose.<step>.yml` per modifier; `init-firewall.sh` + `auto-entrypoint.sh` for `{auto}`.
@@ -60,17 +60,20 @@ The arrows must stay one-way. A reversal creates a cycle (or hides one behind
 lazy imports, which is the bandage of last resort).
 
 ```
-utils ──► paths ──► file_access ──► structs ──┐
-                                              ├─► small services (claude_code_config, memory_addendums, network)
-                                              │
-                            small services ──► orchestration (compose_env, docker_config, agent_modifiers_handler,
-                                                              agents_crud, user_additions, audit)
-                                                       │
-                                                       ▼
-                                                       UI (menu_picker)
-                                                       │
-                                                       ▼
-                                                       entry (run.py)
+leaves: utils, paths, template_code/   (independent — none imports in-project)
+                  │
+                  ▼
+            file_access ──► structs ──┐
+                                      ├─► small services (claude_code_config, network)
+                                      │
+                    small services ──► orchestration (compose_env, docker_config, agent_modifiers_handler,
+                                                      agents_crud, user_additions, audit)
+                                               │
+                                               ▼
+                                               UI (menu_picker)
+                                               │
+                                               ▼
+                                               entry (run.py)
 ```
 
 **One acknowledged cycle:** `docker_config ↔ network`. `docker_config` imports
@@ -109,13 +112,16 @@ Five touch points, in this order:
    = chain order). Prefix `TAG_` for filename-grammar tags, `MODE_` for
    per-instance modes.
 2. Add `docker/Dockerfile.<slug>` + `docker/compose.<slug>.yml`.
-3. Add `_apply_<slug>()` handler + one conditional in `compose_chain` in
-   `agent_modifiers_handler.py`.
-4. (Optional) `Addendum(...)` instance in `memory_addendums.py` + entry under
-   the modifier in `MODIFIER_ADDENDUMS` if you want a launch-time CLAUDE.md
-   directive.
-5. (Optional) prompt + the mode in `menu_picker.prompt_modes` if it's a per-
-   instance mode (user opt-in).
+3. Add an `_apply_<slug>(inst_id)` handler in `agent_modifiers_handler.py` —
+   `compose_chain` dispatches by naming convention, so the handler wires
+   itself up (no conditional or table entry to add). All handlers share the
+   uniform `(inst_id)` signature.
+4. (Optional) `Addendum(...)` instance in `template_code/memory_addendums.py`
+   + entry under the modifier in `MODIFIER_ADDENDUMS` if you want a
+   launch-time CLAUDE.md directive.
+5. (Optional) a `(header, body)` entry in
+   `template_code/modifier_prompts.py`'s `MODIFIER_YN_PROMPTS` if it's a
+   per-instance mode (user opt-in — `prompt_for_modes` iterates that dict).
 
 `launch/tests/test_essential_files.py` enforces 1–3 by asserting every non-BASE
 member has matching Dockerfile + compose + `_apply_<slug>` handler.
@@ -136,9 +142,15 @@ launch, add to `CONTAINER_ENV_FIXED`. Dynamic INSTALL_<TOOL> / token vars
 derive from `OPTIONAL_CREDS_MOUNTS` and `OPTIONAL_CREDS_TOKEN_ENV_VARS` in
 `paths.py` — adding a new optional-cred service flows through both.
 
+### A new directory-contents lookup (like the agents/ name → md index)
+
+→ `file_access.py`, as a cached function (see `agent_md_index`). Because a
+directory *listing* is disk I/O — the chokepoint rule — even when the result
+feels constant-like; `paths.py` stays declarations-only.
+
 ### A new launch-time CLAUDE.md directive
 
-→ `memory_addendums.py`. Add an `Addendum(title=..., body=...)` instance,
+→ `template_code/memory_addendums.py`. Add an `Addendum(title=..., body=...)` instance,
 then list it under the relevant modifier in `MODIFIER_ADDENDUMS`. `composed_addendum(chain)`
 picks it up via `chain` membership and renders it as a `### <title>` section
 under the single `## Launch-time addendums` block. Bodies can `format(...)`

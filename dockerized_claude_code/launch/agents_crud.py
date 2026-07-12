@@ -4,8 +4,9 @@ agent state, plus the factories that turn raw on-disk state into the identity
 
 Roughly grouped by section in this file:
   - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
-  - update_workspace_map / set_instance_modes — single-entry writers
-  - warn_dood_with_auto — interactive prompt used by mode writers
+  - update_workspace_map / set_instance_modes — single-entry writers (both
+    persistence paths route the {auto}+{DooD} warning through
+    agent_modifiers_handler.warn_if_dangerous_modes after writing)
   - install_latest_md / delete_instance / modify_instance — per-instance
     state-dir writers (install_latest_md composes the active-chain addendum
     section onto the source `.md` body and writes the result as CLAUDE.md
@@ -34,14 +35,14 @@ from pathlib import Path
 
 from .agent_modifiers_handler import warn_if_dangerous_modes
 from .file_access import (
-    force_remove, is_dir, iter_subdirs, load_conf, load_modes_map,
-    load_workspace_map, move_path, path_exists, read_text, save_modes_map,
-    save_workspace_map, write_text,
+    agent_md_index, force_remove, is_dir, iter_subdirs, load_conf,
+    load_modes_map, load_workspace_map, move_path, path_exists, read_text,
+    save_modes_map, save_workspace_map, write_text,
 )
 from .template_code.memory_addendums import composed_addendum
-from .paths import AGENT_MD_BY_NAME, AGENTS_STATE, instance_state_dir_path
+from .paths import AGENTS_STATE, instance_state_dir_path
 from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP
-from .utils import ordering_index_or_end
+from .utils import ordering_index_or_end, prompt_keypress
 
 
 def list_all_instances() -> list[str]:
@@ -112,15 +113,23 @@ def install_latest_md(inst_id: InstanceIdentity) -> None:
 
 def delete_instance(inst_id: InstanceIdentity) -> None:
     """Remove this instance's state dir and its workspace + modes mapping entries.
-    Path removal goes through `force_remove(name=...)` which logs the removal,
-    handles root-owned Docker bind-mount leftovers via sudo, and pauses for
-    keypress on failure. Already-gone state dirs are treated as success so the
+    Path removal goes through `force_remove(name=...)` which logs the removal
+    and handles root-owned Docker bind-mount leftovers via sudo. On failure,
+    the map entries are left in place (the instance still exists on disk) and
+    we gate on a keypress so the user reads the printed failure before the
+    picker redraws over it — the interactive pause lives here, not in the
+    file-access layer. Already-gone state dirs are treated as success so the
     map entries are still cleaned up. Map writes are unconditional (mirrors
     modify_instance's always-save shape); `dict.pop(key, None)` is idempotent
     on a missing entry, and the extra file write on a no-op deletion is
     negligible since this is interactive picker code."""
     if not force_remove(inst_id.state_dir, name=inst_id.instance):
-        return   # force_remove printed errors and waited for keypress
+        prompt_keypress(
+            header=f"Could not remove '{inst_id.instance}' — see the messages above.",
+            body=["Its workspace/modes map entries were left in place;",
+                  "remove the directory manually, then delete the instance again."],
+        )
+        return
     workspace_map = load_workspace_map()
     workspace_map.pop(inst_id.instance, None)
     save_workspace_map(workspace_map)
@@ -165,7 +174,7 @@ def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity
 # anything. Tag/mode position comes from InstanceModifiers (in structs);
 # ORDERED_MODEL_FAMILIES is picker-only so it lives here as a local constant.
 
-ORDERED_MODEL_FAMILIES = ["opus", "sonnet", "haiku"]
+ORDERED_MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last)
 _FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
 
 
@@ -232,7 +241,7 @@ def resolve_pick(name: str | None) -> AgentIdentity | InstanceIdentity | None:
         return None
     if SESSION_SEP in name and is_dir(instance_state_dir_path(name)):
         agent, _, session = name.partition(SESSION_SEP)
-        if agent in AGENT_MD_BY_NAME:
+        if agent in agent_md_index():
             # JSON-load boundary for modes: convert each string → enum member
             # via InstanceModifiers(s), which raises ValueError on unknowns
             # (fail-fast for defective modes-map entries).
@@ -243,7 +252,7 @@ def resolve_pick(name: str | None) -> AgentIdentity | InstanceIdentity | None:
                 is_brand_new=False,
                 modes=tuple(InstanceModifiers.from_value(s) for s in load_modes_map().get(name, [])),
             )
-    if name in AGENT_MD_BY_NAME:
+    if name in agent_md_index():
         return AgentIdentity(agent=name)
     return None
 
@@ -253,13 +262,11 @@ def creatable_agents() -> list[AgentIdentity]:
     (untagged first, then groups ordered by each tag's position in InstanceModifiers.tags());
     within each tag group, the existing model family/version sort applies.
     `AgentIdentity.tags` / `.md_path` are properties (the md_path lookup
-    hits AGENT_MD_BY_NAME, parse_stem is cheap), so the sort doesn't need
+    hits file_access.agent_md_index, parse_stem is cheap), so the sort doesn't need
     a side cache."""
-    out = [AgentIdentity(agent=name) for name in AGENT_MD_BY_NAME]
+    out = [AgentIdentity(agent=name) for name in agent_md_index()]
     out.sort(key=lambda a: (
         tag_sort_key(a.tags),                       # untagged sinks to top; rest follow InstanceModifiers.tags() positions
         agent_sort_key((a.agent, a.md_path)),       # within each tag group: family/version/name
     ))
     return out
-
-

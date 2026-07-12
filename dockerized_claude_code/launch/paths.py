@@ -4,17 +4,15 @@ bind-mount targets, defaults for workspace selection (including the host-shell
 $AI_WORKSPACE override read at startup), and the bind-mount source paths the
 docker compose YAMLs consume via ${...} substitutions.
 
-Imports only from `utils` (for `parse_agent_name`, used to build
-AGENT_MD_BY_NAME at module import) — utils is itself a true leaf, so the
-no-cycle guarantee still holds. Pure data + a couple of host-environment
-reads (`$AI_WORKSPACE`, `os.getcwd()`) folded into the DEFAULT_WORKSPACE
-expression."""
+True leaf: imports nothing in-project. Pure constants + path-builder lambdas,
+plus a couple of host-environment reads (`$AI_WORKSPACE`, `os.getcwd()`)
+folded into the DEFAULT_WORKSPACE expression. Directory *contents* lookups
+(the agents/ name → md-path index) live in file_access.agent_md_index — disk
+listing is file-access work, not a path constant."""
 
 import os
 from pathlib import Path
 from typing import Callable, Iterator
-
-from .utils import parse_agent_name
 
 
 # ============================================================
@@ -42,7 +40,7 @@ DOCKER_DIR = DOCKERIZED_CLAUDE_ROOT / "docker"                    # Dockerfile +
 # ============================================================
 # `_HOME` is the host user's home dir, captured once so paths built from it
 # don't repeatedly call Path.home(). Used by AGENTS_STATE and DEFAULTING_DIRS;
-# leaking-underscore name marks it as paths-internal.
+# leading-underscore name marks it as paths-internal.
 
 _HOME = Path.home()
 AGENTS_STATE = _HOME / ".claude-agents"
@@ -127,7 +125,8 @@ if not Path(DEFAULT_WORKSPACE).is_dir():
 CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
 CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
-CLAUDE_SUMMARY_IN_CONTAINER = Path("/workspace/.claude_summary")   # project summary file the agent reads on demand (lives at the workspace mount root)
+WORKSPACE_IN_CONTAINER = Path("/workspace")                        # bind-mount target for the picked workspace — the project dir every agent sees
+CLAUDE_SUMMARY_IN_CONTAINER = WORKSPACE_IN_CONTAINER / ".claude_summary"   # project summary file the agent reads on demand (lives at the workspace mount root)
 BASHRC_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".bashrc"         # bind-mount target for settings/bashrc.sh; also the value BASH_ENV points at so non-interactive bash sources it
 INSTALL_FAILURES_LOG_IN_CONTAINER = Path("/var/log/claude-agents/install_failures.log")   # claude-owned log file each INSTALL_<TOOL> RUN in Dockerfile.code appends to on failure; docker_config.prompt_install_failures reads it post-build. Mirror of the literal path used by every Dockerfile.code install block — keep in sync (no compose-arg threading yet)
 RO_MOUNT_OPTION = "ro"
@@ -205,14 +204,10 @@ DOCKER_BASE_MOUNTS = {
 # call sites. Centralised here so the file-path contract is in one place
 # rather than scattered as magic strings.
 
-# Snapshot of every agent .md currently in AGENTS_DIR, indexed by the agent's
-# clean name (filename grammar: `<name>[tag](parent).md`). Captured at module
-# import — agents/ is hand-populated and stable across a single `run.py`
-# invocation. Iterate `.values()` for the path list, `.keys()` (or membership
-# checks) for the name set; AgentIdentity.md_path looks an entry up by name.
-# agents/ pairs each `<agent>.md` with a matching `<agent or parent>.conf`
-# (see `agent_conf_path` at the bottom of this file).
-AGENT_MD_BY_NAME: dict[str, Path] = {parse_agent_name(p.stem): p for p in AGENTS_DIR.glob("*.md")}
+# The name → md-path index for agents/ lives in file_access.agent_md_index —
+# a directory *listing* is file-access work, not a path constant. agents/
+# pairs each `<agent>.md` with a matching `<agent or parent>.conf` (see
+# `agent_conf_path` at the bottom of this file).
 
 # Full host path the optional_creds README is planted at on first launch.
 OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"

@@ -32,6 +32,7 @@ agent_modifiers_handler / docker_config / run.py all import from here.
 
 import os
 import time
+from collections.abc import Collection
 from datetime import date
 from enum import Enum, auto
 from functools import cache
@@ -166,7 +167,7 @@ CONTAINER_ENV_FORWARDS = (*ComposeEnvKey.container_emits(), *OPTIONAL_CREDS_TOKE
 _compose_env: dict[str, Any] = {}
 
 
-def stage_compose_env(key: ComposeEnvKey, value) -> None:
+def stage_compose_env(key: ComposeEnvKey, value: Any) -> None:
     """Buffer a single compose env-var entry (any value type — `subprocess_env`
     coerces to str at the subprocess boundary). Pass one of the
     ComposeEnvKey members as the key. set_container_env writes its bulk
@@ -190,7 +191,7 @@ def subprocess_env() -> dict[str, str]:
 # for the same user-side data goes through add_docker_mount in
 # user_additions, not here.
 
-def install_creds_flags(services) -> dict[str, str]:
+def install_creds_flags(services: Collection[str]) -> dict[str, str]:
     """`{INSTALL_<TOOL>: '0' | '1'}` dict for Dockerfile.code's build-args.
     One entry per OPTIONAL_CREDS_MOUNTS service that has an associated CLI
     install (cli_name is not None — npmrc/pypirc are config-only, and the

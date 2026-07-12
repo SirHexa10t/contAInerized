@@ -7,6 +7,7 @@ that differs between a normal launch and a dry-run launch is whether
 run_compose gets invoked at the end."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,8 +25,9 @@ from launch.structs import InstanceIdentity  # noqa: E402  — same reason
 
 
 class TestParseCliFlags(unittest.TestCase):
-    """parse_cli returns (picked, claude_args, dry_run, refresh_installs).
-    Both boolean flags default False; each is exposed as its own CLI arg."""
+    """parse_cli returns a LaunchOptions NamedTuple — (picked, claude_args,
+    dry_run, refresh_installs); tuple-unpacking keeps working. Both boolean
+    flags default False; each is exposed as its own CLI arg."""
 
     def test_default_false(self):
         with patch.object(sys, "argv", ["run.py"]):
@@ -81,7 +83,7 @@ class TestParseCliFlags(unittest.TestCase):
     def test_known_target_resolves_and_name_doesnt_leak(self):
         # Known agent name → picked is set; the name doesn't reach claude_args
         # (otherwise claude would receive it as a positional duplicate). "golem"
-        # exists in agents/ so resolve_pick finds it via AGENT_MD_BY_NAME.
+        # exists in agents/ so resolve_pick finds it via agent_md_index().
         with patch.object(sys, "argv", ["run.py", "golem"]):
             picked, claude_args, _, _ = run.parse_cli()
         self.assertIsNotNone(picked)
@@ -110,7 +112,7 @@ class TestParseCliFlags(unittest.TestCase):
         # modes map; we patch those file_access points so the test stays hermetic
         # (no writes to ~/.claude-agents/). The agent itself ("golem") must be a
         # real one — resolve_pick's instance branch still requires <agent>.md to
-        # exist in agents/ via AGENT_MD_BY_NAME.
+        # exist in agents/ via agent_md_index().
         instance_name = "golem__test_fixture"
         with patch.object(sys, "argv", ["run.py", instance_name]), \
              patch("launch.agents_crud.is_dir", return_value=True), \
@@ -138,7 +140,9 @@ class TestLaunchOrchestrator(unittest.TestCase):
     is purely about the flow shape. The dry-run gate now lives inside
     docker_compose_subprocess (set via docker_config.set_dry_run); from
     launch()'s perspective every stage fires in both modes — including
-    require_docker, ensure_image, and run_compose."""
+    ensure_image and run_compose. (require_docker fires inside gather_input —
+    after CLI parsing, before the picker — so it's covered by TestGatherInput
+    below, not by these orchestrator-level mocks.)"""
 
     def _mock_pipeline_through_to_run_compose(self, *, dry_run):
         """Patch every stage launch() calls. Returns a dict of the active mocks
@@ -149,9 +153,8 @@ class TestLaunchOrchestrator(unittest.TestCase):
         cred_names = []
 
         mocks = {
-            "gather_input":     patch.object(run, "gather_input", return_value=(MagicMock(), [], dry_run, False)),
+            "gather_input":     patch.object(run, "gather_input", return_value=run.LaunchOptions(MagicMock(), [], dry_run, False)),
             "set_dry_run":      patch.object(run, "set_dry_run"),
-            "require_docker":   patch.object(run, "require_docker"),
             "resolve_target":   patch.object(run, "resolve_target", return_value=inst_id),
             "compute_resume_flag": patch.object(run, "compute_resume_flag", return_value=[]),
             "update_workspace_map": patch.object(run, "update_workspace_map"),
@@ -203,20 +206,6 @@ class TestLaunchOrchestrator(unittest.TestCase):
         run.launch()
         mocks["print_launch_banner"].assert_called_once()
 
-    def test_require_docker_called_in_normal_launch(self):
-        # Sanity: a normal launch still gates on docker being on PATH.
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=False)
-        run.launch()
-        mocks["require_docker"].assert_called_once()
-
-    def test_require_docker_called_in_dry_run(self):
-        # require_docker fires regardless of dry_run — dry-run is a projection
-        # of "what would happen", so the docker-missing failure mode should
-        # surface in dry-run too (not be hidden by a guard).
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
-        run.launch()
-        mocks["require_docker"].assert_called_once()
-
     def test_set_dry_run_called_with_flag_value(self):
         # The dry_run CLI flag propagates into docker_config via set_dry_run
         # immediately after gather_input. docker_compose_subprocess then
@@ -231,14 +220,100 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks["set_dry_run"].assert_called_once_with(False)
 
     def test_ensure_image_and_install_failures_run_in_dry_run(self):
-        # Both fire in dry-run — ensure_image's docker compose calls no-op
-        # inside docker_compose_subprocess; prompt_install_failures still
-        # runs (the underlying shell_capture either reads a stale log or
-        # silently fails when the image doesn't exist).
+        # Both are still *called* in dry-run — ensure_image's docker compose
+        # invocations no-op inside docker_compose_subprocess, and
+        # prompt_install_failures gates itself internally (it skips the image
+        # read entirely on dry-run: nothing was built, so any log it found
+        # would be stale — see test_docker_config for that gate).
         mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
         run.launch()
         mocks["ensure_image"].assert_called_once()
         mocks["prompt_install_failures"].assert_called_once()
+
+
+class TestGatherInput(unittest.TestCase):
+    """gather_input owns the docker gate: it must fire after parse_cli (so
+    `--help` still works on a docker-less machine) but before select_agent
+    (so nobody answers the picker + prompts for a launch that was never going
+    to happen — the pre-fix behavior)."""
+
+    def test_docker_gate_precedes_picker(self):
+        calls = []
+        picked = MagicMock()
+        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(None, [], False, False)), \
+             patch.object(run, "require_docker", side_effect=lambda: calls.append("require_docker")), \
+             patch.object(run, "select_agent", side_effect=lambda: calls.append("select_agent") or picked):
+            result = run.gather_input()
+        self.assertEqual(calls, ["require_docker", "select_agent"])
+        self.assertIs(result.picked, picked)
+
+    def test_docker_gate_fires_even_with_direct_target(self):
+        # A CLI-named target skips the picker but not the docker gate.
+        target = MagicMock()
+        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(target, ["--verbose"], True, False)), \
+             patch.object(run, "require_docker") as mock_docker, \
+             patch.object(run, "select_agent") as mock_picker:
+            opts = run.gather_input()
+        mock_docker.assert_called_once()
+        mock_picker.assert_not_called()
+        self.assertIs(opts.picked, target)
+        self.assertEqual(opts.claude_args, ["--verbose"])
+        self.assertTrue(opts.dry_run)
+
+    def test_missing_docker_stops_before_picker(self):
+        # require_docker exits via exit_if_missing — the picker must never
+        # open after that.
+        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(None, [], False, False)), \
+             patch.object(run, "require_docker", side_effect=SystemExit("docker is required")), \
+             patch.object(run, "select_agent") as mock_picker:
+            with self.assertRaises(SystemExit):
+                run.gather_input()
+        mock_picker.assert_not_called()
+
+    def test_picker_cancel_exits_zero(self):
+        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(None, [], False, False)), \
+             patch.object(run, "require_docker"), \
+             patch.object(run, "select_agent", return_value=None):
+            with self.assertRaises(SystemExit) as ctx:
+                run.gather_input()
+        self.assertEqual(ctx.exception.code, 0)
+
+
+class TestResolveTarget(unittest.TestCase):
+    """resolve_target re-prompts for cont identities whose stored workspace is
+    missing — which means None (no map entry) AND "" (empty map entry). The
+    two used to diverge: "" slipped past the `is None` check and silently
+    fell back to DEFAULT_WORKSPACE downstream instead of re-prompting."""
+
+    def _cont(self, workspace):
+        return InstanceIdentity(agent="golem", session="s", workspace=workspace,
+                                is_brand_new=False, modes=())
+
+    def test_none_workspace_reprompts(self):
+        with patch.object(run, "ask_for_workspace", return_value="/tmp") as mock_ask:
+            out = run.resolve_target(self._cont(None))
+        mock_ask.assert_called_once()
+        self.assertEqual(out.workspace, "/tmp")
+        self.assertFalse(out.is_brand_new)   # dataclasses.replace must not disturb the cont flag
+
+    def test_empty_string_workspace_reprompts(self):
+        with patch.object(run, "ask_for_workspace", return_value="/tmp") as mock_ask:
+            out = run.resolve_target(self._cont(""))
+        mock_ask.assert_called_once()
+        self.assertEqual(out.workspace, "/tmp")
+
+    def test_valid_workspace_passes_through_unprompted(self):
+        with tempfile.TemporaryDirectory() as real_dir, \
+             patch.object(run, "ask_for_workspace") as mock_ask:
+            out = run.resolve_target(self._cont(real_dir))
+        mock_ask.assert_not_called()
+        self.assertEqual(out.workspace, real_dir)
+
+    def test_invalid_workspace_exits(self):
+        # Set-but-bogus path is a stale map entry — validate_workspace exits
+        # with the fix-the-map message rather than mounting garbage.
+        with self.assertRaises(SystemExit):
+            run.resolve_target(self._cont("/no/such/dir/for/sure"))
 
 
 if __name__ == "__main__":
