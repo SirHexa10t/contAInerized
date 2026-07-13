@@ -2,12 +2,23 @@
 #
 # Each non-empty, non-comment line is treated as an address (domain or IPv4) to allow
 # alongside the built-in list (Anthropic API, GitHub, npm, PyPI, crates.io, ...).
-# See BUILTIN_FIREWALL_DOMAINS in launch/network.py for the full set.
+# See BUILTIN_FIREWALL_DOMAINS in launch/template_code/firewall_domains.py for the full set.
 #
-# - Matching is by IP, not hostname — each entry is resolved once at firewall init.
+# - Matching is by IP, not hostname — each entry is resolved at firewall init, then re-resolved
+#   every few minutes for the container's lifetime, so DNS/VPN/CDN changes heal without a relaunch.
 # - Specify `www.foo.com` to also include `foo.com`. The opposite doesn't apply: if you specify `foo.com`, no "www." variant would be included (since not every site has a CDN front).
-# - Wildcards like `*.foo.com` don't expand — each subdomain you want needs its own line. A leading `*.` is silently stripped, so `*.foo.com` is treated the same as `foo.com`.
+# - Wildcards: `*.foo.com` covers unknown/rotating subdomains IF foo.com sits on a CDN provider the
+#   launcher knows (Cloudflare / Fastly / GitHub / CloudFront / Google — ranges fetched live from
+#   each provider's published list) — the provider's entire address space is opened, which is the
+#   only way subdomain hosts minted per request can be matched by an IP firewall. If the base host
+#   isn't on a known provider, only its own IPs are opened and the entry is listed under
+#   `wildcard_gaps:` in the status file (domains_pending_resolve.yml in the instance state dir).
+#   Not sure which of your entries qualify? Run `tips/evaluate_addresses.sh <domains...>` from the
+#   launcher repo — it prints the `*.` lines worth pasting here, with the provider as a comment.
 # - Raw IPv4 addresses and CIDR ranges are accepted too (e.g. `1.2.3.4` or `10.0.0.0/8`) — they skip DNS and go straight to iptables. Useful when you know the IP or subnet but the hostname doesn't resolve, want to pin one IP for a domain with rotating addresses, or need to allow a whole private range. ⚠ `0.0.0.0/0` allows ALL outbound — defeats the firewall.
+# - IPv6 addresses/ranges are NOT supported (the container network and firewall are IPv4-only) —
+#   they're skipped with a note under `skipped:` in the status file. Whitelist the hostname instead;
+#   tools fall back to IPv4 on their own.
 # - Default ports opened per allowed IP are 443 (HTTPS) + 80 (HTTP). Append `:<port>` to an entry to open only that port instead (e.g. `db.example.com:3306` for MySQL, `1.2.3.4:5432` for Postgres, `10.0.0.0/24:22` for SSH on a private subnet). Without a suffix, every existing entry keeps the HTTPS+HTTP default.
 #
 # Examples — uncomment any line below to grant outbound access on the next {auto} launch:
@@ -17,6 +28,9 @@
 # stackoverflow.com
 # www.finance.yahoo.com     # will register WITH + WITHOUT the www. (2 different IP addresses)
 # docs.python.org           # already covered by default list; doesn't matter. Repetitions are fine.
+# *.example-site.com        # wildcard — if example-site.com sits on a known CDN, the provider's whole
+#                           #   published ranges open, covering subdomains that rotate or are minted
+#                           #   per request (per-shard media/download hosts and the like)
 # 198.52.101.45             # raw IPv4 works too — this one is RFC-5737 docs-reserved, just illustrative
 # 198.51.100.0/24           # CIDR range too — covers 198.51.100.0 through 198.51.100.255
 # 10.103.91.22:3306         # `:port` suffix opens only that port (MySQL here) — otherwise 443+80 are opened
@@ -39,5 +53,7 @@
 #                                   #   curl -s https://ip-ranges.amazonaws.com/ip-ranges.json | jq -r '.prefixes[] | select(.service == "S3" and .region == "us-east-1") | .ip_prefix'
 # s3.amazonaws.com                  # AWS S3 global endpoint (won't save you from doing the above-mentioned lookup)
 #
-# Changes apply on the next {auto} instance launch — the firewall runs at container startup, and snapshots
-# the resolved IPs for each domain.
+# Changes to THIS FILE apply on the next {auto} instance launch (the entry list is read once, at
+# container startup). The resolved IPs behind the entries, however, refresh continuously: the
+# launcher re-resolves every listed hostname every few minutes and adds rules for new addresses,
+# so a VPN exit change or CDN rotation mid-session heals on its own.

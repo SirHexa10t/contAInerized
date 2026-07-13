@@ -15,7 +15,7 @@ Grouped by layer, top of the dependency graph last.
 
 - `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split).
 - `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined. Constants + path-builder lambdas only — no disk listings (those are file_access work).
-- `launch/template_code/` — pure data, no logic: per-modifier prompt copy (`modifier_prompts.py`), docker-side strings (`docker_prompts.py`), launch-time CLAUDE.md addendums (`memory_addendums.py`), firewall domain list + CDN provider ranges (`firewall_domains.py`).
+- `launch/template_code/` — pure data, no logic: per-modifier prompt copy (`modifier_prompts.py`), docker-side strings (`docker_prompts.py`), launch-time CLAUDE.md addendums (`memory_addendums.py`), firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; network.py fetches them live).
 
 ### Disk + identity — depend only on leaves
 
@@ -25,7 +25,7 @@ Grouped by layer, top of the dependency graph last.
 ### Small services — depend on disk + identity
 
 - `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
-- `launch/network.py` — `{auto}`-mode firewall: whitelist expansion + CDN-range widening, host-side DNS cascade, cross-launch IP cache, burst-batched iptables updater.
+- `launch/network.py` — `{auto}`-mode firewall: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater, and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift.
 
 ### Orchestration — depend on services
 

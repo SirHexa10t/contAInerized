@@ -10,6 +10,7 @@ Check-stack state:
 - At audit time: 381 tests passing, `ruff check .` clean, `mypy launch/ run.py` clean.
 - After the first fix pass (B1–B9 minus B4, plus the "small ones"): 441 tests passing, ruff clean, mypy clean.
 - After the second pass (structure S1–S9, index relocation, modify-flow UX, network/CDN overhaul, coverage + doc bundles — see §12): **526 tests passing**, ruff clean, mypy clean.
+- After the third pass (firewall coverage overhaul: wildcards, live-fetched provider ranges, drift-heal refresher, IPv6 handling — see §13): **563 tests passing**, ruff clean, mypy clean.
 
 ---
 
@@ -344,3 +345,93 @@ Every row summarizes cleanly — the file layout needs no surgery.
 - **Resolver-output validation** — `_resolve_a_records` now drops any token
   that isn't a plain IPv4 address; `_iptables_rules_for` re-validates before
   scripting (defense in depth).
+
+## 13. Third-pass change log — firewall/CDN coverage overhaul
+
+Trigger: recurring in-container `ConnectionRefused` on hosts that were *supposed*
+to be whitelisted — CDN subdomain hosts that rotate or are minted per request
+(uncoverable by per-host entries), `github.com` going dark mid-session after the
+machine's DNS answers changed (its per-POP `/32` edges churn too fast for any
+curated block list), release downloads dying on the unlisted
+`release-assets.githubusercontent.com` redirect host, and pasted IPv6 literals
+burning the full DNS cascade into `failed:` noise.
+
+- **Wildcard whitelist entries** — `*.foo.com` is no longer silently stripped.
+  The base host resolves; if it sits on a known CDN provider, ALL of that
+  provider's published blocks open (subdomains can't be enumerated via DNS, so
+  the provider's whole edge is the only IP-shaped grant matching what `*.`
+  asks). Unknown-provider wildcards degrade to base-host pinning and are
+  surfaced in a new `wildcard_gaps:` status section. An explicit `:port`
+  narrows the block tokens rather than downgrading to pinning.
+- **Provider ranges fetched, never baked** — the static `CDN_IPV4_RANGES`
+  table is gone; no IP address space lives in the source. Each provider's
+  published list is fetched at launch (`network._RANGE_FETCHERS`: cloudflare
+  ips-v4 text, fastly public-ip-list JSON, github /meta edge services, AWS
+  ip-ranges filtered to CLOUDFRONT, google as the netmask-aware difference
+  goog.json − cloud.json — provider services without rentable-cloud space)
+  and cached per provider under `~/.claude-agents/cdn_ranges/`. Degradation
+  chain per provider: fresh cache → live fetch (saved back) → stale cache
+  (warn) → provider skipped for the launch (its hosts stay IP-pinned).
+  Fetched bodies are external input: everything funnels through
+  `_clean_cidrs` (parse-as-IPv4-or-drop, collapse) before rule generation.
+  Live fetching also covers what curation never could — e.g. GitHub's
+  fast-churning per-POP `/32` edges are now simply part of the set.
+- **Post-launch drift healing** — after Phase 2's stream ends, the updater
+  hands off to a refresher daemon that re-resolves the entire hostname list
+  every 5 minutes and batch-inserts rules for newly-reported addresses.
+  Additive only (nothing revoked mid-session; a failed cycle never demotes a
+  host). This closes the VPN-swap / CDN-steering stranding the 6h cache used
+  to make WORSE — and heals launch-time `failed:` hosts, which the status file
+  now moves back to `resolved:`.
+- **Cache demoted from substitute to safety net** — every launch resolves
+  fresh DNS for every host; the cross-launch cache only unions in (host vs
+  container resolver divergence) and rescues outright failures. Only fresh
+  answers are persisted back, so a dead IP ages out after one TTL instead of
+  being immortalized by the rolling mtime.
+- **Cache TTL extended to 3 days** — one `_CACHE_TTL_SECONDS` shared by the
+  resolved-domains cache and the per-provider range caches (was 6h for
+  resolutions). Safe at 3 days precisely because of the demotion above:
+  neither cache ever masks live data — stale resolution entries can only ADD
+  rules, and published provider ranges change on the order of months.
+- **IPv6 entries skipped with reason** — v6 literals/CIDRs land in a new
+  `skipped:` status section ("IPv4-only; whitelist the hostname or v4 range
+  instead") instead of cascading through 50s of DNS timeouts into `failed:`.
+- **IPv6 egress denied in-container** — `init-firewall.sh` now applies an
+  ip6tables deny-all (loopback + established-inbound replies only). On a
+  v6-enabled docker network the old script left v6 completely unfirewalled —
+  a full whitelist bypass. Aborts the launch if a v6 default route exists but
+  ip6tables can't apply.
+- **Builtin list fixes** — added `objects.githubusercontent.com` +
+  `release-assets.githubusercontent.com` (where GitHub release downloads
+  actually 302), `gist.githubusercontent.com`, `static.rust-lang.org` (rustup
+  components inside `[code]{auto}`); replaced the fictitious
+  `www.raw.githubusercontent.com` / `www.objects.githubusercontent.com` forms
+  (they only resolved via wildcard DNS luck) with the real hostnames.
+- **Status file** — `failed:` reworded (hosts are re-attempted by the
+  refresher), new `skipped:` + `wildcard_gaps:` sections, `cdn:` notes
+  wildcard-widened hosts as `<provider> (all blocks — wildcard)`.
+  `FIREWALL_NOTICE` and the whitelist template document all of it.
+- **Dead code** — `_WhitelistResolutionStatus.resolved_snapshot()` removed
+  (its only caller now persists `_fresh_resolutions` instead).
+- Tests: 563 (was 526) — wildcard expansion/widening, IPv6 skip, union/
+  fallback cache semantics, refresher pass (new-token flush, steady-state
+  no-op, never-demote, late CDN widening), updater→refresher handoff, status
+  sections, plus the fetch layer: per-provider parsers driven by canned
+  payloads, `_clean_cidrs` validation/collapse, `_subtract_networks`
+  netmask math, and the cache/fallback degradation chain. Widening-policy
+  tests seed a stand-in provider table via `_set_provider_blocks` — no
+  network anywhere in the suite. `benchmark/bench_firewall_updater.py`
+  unaffected.
+
+Companion utility: `tips/evaluate_addresses.sh` (source it and call
+`evaluate_addresses "${domains[@]}"`, or execute it with domains as args)
+classifies a list of whitelist entries — resolves each base host against the
+same live provider ranges and prints ready-to-paste `*.<apex>  # via
+<provider>` lines for the ones a wildcard would actually help; everything
+else goes to stderr with the reason. The whitelist template points to it.
+
+Deferred (flagged, not done): re-reading the user whitelist file on each
+refresher pass would let entries added mid-session apply without a relaunch —
+needs cache-busting in `user_firewall_whitelist_lines` and skip/pending
+bookkeeping for late entries; worth a look if mid-session whitelist edits
+become a habit.

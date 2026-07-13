@@ -2,11 +2,12 @@
 
 Everything here runs without DNS, docker, or threads-under-test: the pure
 transformations (_expand_whitelist, _cdn_provider_ranges, _tokens_for,
-_iptables_rules_for, _index_by_host) are exercised directly; the cascade gets
-a fake resolver; the updater worker is driven synchronously with a pre-filled
-queue; the status tracker writes into a tmp dir. Module-level state the
-functions share (_seen_cdn_ranges, _resolution_cache, _phase2_queue) is
-reset around each test that touches it."""
+_iptables_rules_for, _index_by_host) are exercised directly; the cascade and
+the refresher pass get a fake resolver; the updater worker is driven
+synchronously with a pre-filled queue; the status tracker writes into a tmp
+dir. Module-level state the functions share (_seen_cdn_ranges,
+_resolution_cache, _fresh_resolutions, _emitted_tokens, _all_entries_by_host,
+_phase2_queue) is reset around each test that touches it."""
 
 import contextlib
 import io
@@ -16,85 +17,267 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from launch import network
 from launch.network import (
-    HostnameEntry, _cascade, _cdn_provider_ranges, _expand_whitelist,
-    _index_by_host, _iptables_rules_for, _tokens_for,
+    HostnameEntry, _cascade, _cdn_provider_ranges, _clean_cidrs,
+    _expand_whitelist, _index_by_host, _iptables_rules_for, _is_ipv6_literal,
+    _subtract_networks, _tokens_for,
 )
-from launch.template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS, CDN_IPV4_RANGES
+from launch.template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
 
-# Addresses used as fixtures below — inside well-known curated blocks.
-_CLOUDFLARE_IP = "104.16.1.1"        # inside cloudflare 104.16.0.0/13
-_FASTLY_IP = "151.101.1.1"           # inside fastly 151.101.0.0/16
-_NON_CDN_IP = "203.0.113.7"          # TEST-NET-3 — in no provider block
+# Provider ranges are fetched at launch, never baked — tests seed this stand-in
+# table via network._set_provider_blocks so widening policy is exercised
+# against known data. Addresses below sit inside these seeded blocks.
+_TEST_PROVIDER_BLOCKS = {
+    "cloudflare": ["104.16.0.0/13", "172.64.0.0/13", "198.41.128.0/17"],
+    "fastly": ["151.101.0.0/16", "199.232.0.0/16"],
+    "multi": ["192.0.2.0/24", "198.18.0.0/15", "203.0.112.0/24"],
+}
+_CLOUDFLARE_IP = "104.16.1.1"        # inside seeded cloudflare 104.16.0.0/13
+_FASTLY_IP = "151.101.1.1"           # inside seeded fastly 151.101.0.0/16
+_MULTI_IP = "198.18.5.5"             # inside seeded multi 198.18.0.0/15
+_NON_CDN_IP = "203.0.113.7"          # TEST-NET-3 — in no seeded block
 
 
 class TestExpandWhitelist(unittest.TestCase):
     """_expand_whitelist is the security-relevant entry transformation:
-    dedupe, `*.` strip, apex-from-www, literal/hostname split."""
+    IPv6 skip, dedupe, wildcard flagging, apex-from-www, literal/hostname
+    split."""
 
     def test_hostname_entry_shape(self):
-        _, hostnames = _expand_whitelist(["foo.com:8443"])
-        self.assertEqual(hostnames, [HostnameEntry(entry="foo.com:8443", host="foo.com", port="8443")])
+        result = _expand_whitelist(["foo.com:8443"])
+        self.assertEqual(result.hostnames,
+                         [HostnameEntry(entry="foo.com:8443", host="foo.com", port="8443", wildcard=False)])
 
     def test_www_entry_also_allows_apex(self):
-        _, hostnames = _expand_whitelist(["www.foo.com"])
-        self.assertEqual({h.host for h in hostnames}, {"www.foo.com", "foo.com"})
+        result = _expand_whitelist(["www.foo.com"])
+        self.assertEqual({h.host for h in result.hostnames}, {"www.foo.com", "foo.com"})
 
     def test_bare_apex_does_not_add_www(self):
         # The convenience is one-directional — apex entries stay apex-only.
-        _, hostnames = _expand_whitelist(["foo.com"])
-        self.assertEqual({h.host for h in hostnames}, {"foo.com"})
+        result = _expand_whitelist(["foo.com"])
+        self.assertEqual({h.host for h in result.hostnames}, {"foo.com"})
 
-    def test_wildcard_prefix_stripped(self):
-        _, hostnames = _expand_whitelist(["*.foo.com"])
-        self.assertEqual({h.host for h in hostnames}, {"foo.com"})
+    def test_wildcard_kept_with_stripped_host(self):
+        # `*.` is no longer discarded: the base host resolves, and the flag
+        # asks _tokens_for for whole-provider widening.
+        result = _expand_whitelist(["*.foo.com"])
+        self.assertEqual(result.hostnames,
+                         [HostnameEntry(entry="*.foo.com", host="foo.com", port="", wildcard=True)])
 
-    def test_duplicates_collapse(self):
-        _, hostnames = _expand_whitelist(["foo.com", "foo.com", "*.foo.com"])
-        self.assertEqual(len(hostnames), 1)
+    def test_wildcard_port_preserved(self):
+        result = _expand_whitelist(["*.foo.com:8443"])
+        self.assertEqual(result.hostnames,
+                         [HostnameEntry(entry="*.foo.com:8443", host="foo.com", port="8443", wildcard=True)])
+
+    def test_wildcard_wins_over_plain_duplicate(self):
+        # Same (host, port) with and without `*.` collapses to the wildcard —
+        # it's the superset grant.
+        result = _expand_whitelist(["foo.com", "foo.com", "*.foo.com"])
+        self.assertEqual(len(result.hostnames), 1)
+        self.assertTrue(result.hostnames[0].wildcard)
+
+    def test_ipv6_literals_skipped_with_reason(self):
+        # Pasted v6 addresses used to burn the full DNS cascade and land in
+        # failed: — now they're set aside with an actionable reason.
+        result = _expand_whitelist(["2a00:1450:400c:c07::", "2a04:4e42::/32", "foo.com"])
+        self.assertEqual([h.host for h in result.hostnames], ["foo.com"])
+        self.assertEqual(
+            {entry for entry, _ in result.skipped},
+            {"2a00:1450:400c:c07::", "2a04:4e42::/32"},
+        )
+        for _entry, reason in result.skipped:
+            self.assertEqual(reason, network._SKIPPED_IPV6_REASON)
 
     def test_literal_ip_and_cidr_split_out(self):
-        literals, hostnames = _expand_whitelist(["1.2.3.4", "10.0.0.0/8:443", "foo.com"])
-        self.assertEqual(literals, ["1.2.3.4", "10.0.0.0/8:443"])
-        self.assertEqual([h.host for h in hostnames], ["foo.com"])
+        result = _expand_whitelist(["1.2.3.4", "10.0.0.0/8:443", "foo.com"])
+        self.assertEqual(result.literals, ["1.2.3.4", "10.0.0.0/8:443"])
+        self.assertEqual([h.host for h in result.hostnames], ["foo.com"])
 
     def test_port_preserved_on_hostname(self):
-        _, hostnames = _expand_whitelist(["foo.com:8080"])
-        self.assertEqual(hostnames[0].port, "8080")
+        result = _expand_whitelist(["foo.com:8080"])
+        self.assertEqual(result.hostnames[0].port, "8080")
 
     def test_output_sorted_deterministically(self):
-        _, first = _expand_whitelist(["b.com", "a.com", "c.com"])
-        _, second = _expand_whitelist(["c.com", "a.com", "b.com"])
+        first = _expand_whitelist(["b.com", "a.com", "c.com"]).hostnames
+        second = _expand_whitelist(["c.com", "a.com", "b.com"]).hostnames
         self.assertEqual(first, second)
         self.assertEqual([h.host for h in first], ["a.com", "b.com", "c.com"])
 
     def test_builtin_list_expands_cleanly(self):
         # The shipped domain list must all classify as hostnames (no stray
-        # literal IPs hiding in it) and produce a non-trivial pending set.
-        literals, hostnames = _expand_whitelist(BUILTIN_FIREWALL_DOMAINS)
-        self.assertEqual(literals, [])
-        self.assertGreater(len(hostnames), len(BUILTIN_FIREWALL_DOMAINS))   # www-stripping adds apexes
+        # literal IPs or v6 hiding in it) and produce a non-trivial pending set.
+        result = _expand_whitelist(BUILTIN_FIREWALL_DOMAINS)
+        self.assertEqual(result.literals, [])
+        self.assertEqual(result.skipped, [])
+        self.assertGreater(len(result.hostnames), len(BUILTIN_FIREWALL_DOMAINS))   # www-stripping adds apexes
 
 
-class TestCdnData(unittest.TestCase):
-    """The curated CDN table itself — every block must parse as IPv4 CIDR
-    (a malformed or v6 entry would break the import-time _CDN_NETWORKS build)."""
+class TestIsIpv6Literal(unittest.TestCase):
+    def test_v6_address_and_cidr_detected(self):
+        self.assertTrue(_is_ipv6_literal("2a00:1450:400c:c07::"))
+        self.assertTrue(_is_ipv6_literal("2a04:4e42::/32"))
 
-    def test_every_block_parses_as_ipv4_network(self):
-        for provider, cidrs in CDN_IPV4_RANGES.items():
-            self.assertTrue(cidrs, f"{provider} has no blocks")
-            for cidr in cidrs:
-                with self.subTest(provider=provider, cidr=cidr):
-                    ipaddress.IPv4Network(cidr)   # raises on malformed / v6
-
-    def test_expected_providers_present(self):
-        self.assertEqual(set(CDN_IPV4_RANGES), {"cloudflare", "fastly", "github", "cloudfront"})
+    def test_hostnames_and_v4_pass_through(self):
+        for entry in ("foo.com", "www.foo.com:443", "1.2.3.4", "10.0.0.0/8", "*.foo.com"):
+            self.assertFalse(_is_ipv6_literal(entry), entry)
 
 
-class TestCdnProviderRanges(unittest.TestCase):
+class TestCleanCidrs(unittest.TestCase):
+    """Fetched range lists are external input: only well-formed IPv4 CIDRs
+    may survive into rule generation, in collapsed canonical form."""
+
+    def test_garbage_and_v6_dropped(self):
+        cleaned = _clean_cidrs(["104.16.0.0/13", "2606:4700::/32", "not-a-range", ""])
+        self.assertEqual(cleaned, ["104.16.0.0/13"])
+
+    def test_adjacent_blocks_collapse(self):
+        self.assertEqual(_clean_cidrs(["10.0.0.0/25", "10.0.0.128/25"]), ["10.0.0.0/24"])
+
+    def test_host_bits_normalized(self):
+        # Lenient on sloppy published data: host bits are masked, not fatal.
+        self.assertEqual(_clean_cidrs(["10.0.0.5/24"]), ["10.0.0.0/24"])
+
+
+class TestSubtractNetworks(unittest.TestCase):
+    """Netmask-aware difference — the 'provider's own services' computation
+    for providers that publish all-space and rentable-space separately."""
+
+    def test_removal_inside_base_splits_it(self):
+        result = _subtract_networks(["10.0.0.0/8"], ["10.1.0.0/16"])
+        self.assertNotIn("10.0.0.0/8", result)
+        nets = [ipaddress.IPv4Network(c) for c in result]
+        self.assertFalse(any(ipaddress.IPv4Address("10.1.2.3") in n for n in nets))
+        self.assertTrue(any(ipaddress.IPv4Address("10.2.2.3") in n for n in nets))
+
+    def test_removal_covering_base_erases_it(self):
+        self.assertEqual(_subtract_networks(["10.5.0.0/16"], ["10.0.0.0/8"]), [])
+
+    def test_equal_networks_cancel(self):
+        self.assertEqual(_subtract_networks(["192.0.2.0/24"], ["192.0.2.0/24"]), [])
+
+    def test_disjoint_removal_changes_nothing(self):
+        self.assertEqual(_subtract_networks(["192.0.2.0/24"], ["198.51.100.0/24"]), ["192.0.2.0/24"])
+
+
+class TestRangeParsers(unittest.TestCase):
+    """Each provider fetcher's parsing, driven by canned payloads — no
+    network involved (_http_get is patched per test)."""
+
+    def _with_body(self, fetcher, body):
+        with patch.object(network, "_http_get", return_value=body):
+            return fetcher()
+
+    def test_cloudflare_plain_text_lines(self):
+        self.assertEqual(
+            self._with_body(network._cloudflare_ranges, "104.16.0.0/13\n172.64.0.0/13\n"),
+            ["104.16.0.0/13", "172.64.0.0/13"],
+        )
+
+    def test_fastly_addresses_key(self):
+        body = '{"addresses": ["151.101.0.0/16"], "ipv6_addresses": ["2a04:4e40::/32"]}'
+        self.assertEqual(self._with_body(network._fastly_ranges, body), ["151.101.0.0/16"])
+
+    def test_github_meta_edge_services_v4_only(self):
+        body = ('{"web": ["140.82.112.0/20", "2a0a:a440::/29"], "api": ["140.82.112.0/20"],'
+                ' "git": ["192.30.252.0/22"], "packages": [], "pages": ["185.199.108.0/22"],'
+                ' "actions": ["4.148.0.0/16"]}')   # actions is NOT an edge service — ignored
+        self.assertEqual(
+            self._with_body(network._github_ranges, body),
+            ["140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22"],
+        )
+
+    def test_cloudfront_filters_aws_service(self):
+        body = ('{"prefixes": ['
+                '{"ip_prefix": "13.32.0.0/15", "service": "CLOUDFRONT"},'
+                '{"ip_prefix": "52.94.76.0/22", "service": "EC2"}]}')
+        self.assertEqual(self._with_body(network._cloudfront_ranges, body), ["13.32.0.0/15"])
+
+    def test_google_subtracts_rentable_cloud_space(self):
+        payloads = {
+            "https://www.gstatic.com/ipranges/goog.json":
+                '{"prefixes": [{"ipv4Prefix": "192.0.2.0/24"}, {"ipv4Prefix": "198.51.100.0/24"}, {"ipv6Prefix": "2001:db8::/32"}]}',
+            "https://www.gstatic.com/ipranges/cloud.json":
+                '{"prefixes": [{"ipv4Prefix": "198.51.100.0/25"}]}',
+        }
+        with patch.object(network, "_http_get", side_effect=payloads.__getitem__):
+            self.assertEqual(network._google_ranges(), ["192.0.2.0/24", "198.51.100.128/25"])
+
+    def test_registry_names_match_fetchers(self):
+        self.assertEqual(set(network._RANGE_FETCHERS),
+                         {"cloudflare", "fastly", "github", "cloudfront", "google"})
+
+
+class TestLoadCdnRanges(unittest.TestCase):
+    """The per-provider degradation chain: fresh cache → fetch(+save) →
+    stale cache → skipped provider."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self._patches = [
+            patch.object(network, "cdn_ranges_cache_path", lambda p: tmp / f"{p}.txt"),
+            patch.object(network, "_RANGE_FETCHERS", {"good": lambda: ["192.0.2.0/24"],
+                                                      "bad": self._raise}),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        network._set_provider_blocks({})
+        self.tmpdir.cleanup()
+
+    @staticmethod
+    def _raise():
+        raise OSError("fetch refused")
+
+    def test_fetch_populates_and_saves(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            network._load_cdn_ranges()
+        self.assertEqual(network._provider_blocks["good"], ["192.0.2.0/24"])
+        self.assertEqual(network._read_cached_ranges("good"), ["192.0.2.0/24"])
+
+    def test_fresh_cache_skips_fetch(self):
+        network._save_cached_ranges("good", ["198.51.100.0/24"])
+        fetchers = {"good": MagicMock()}
+        with patch.object(network, "_RANGE_FETCHERS", fetchers):
+            network._load_cdn_ranges()
+        fetchers["good"].assert_not_called()
+        self.assertEqual(network._provider_blocks["good"], ["198.51.100.0/24"])
+
+    def test_failed_fetch_falls_back_to_stale_cache(self):
+        network._save_cached_ranges("bad", ["203.0.113.0/24"])
+        with patch.object(network, "is_file_recent", return_value=False), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            network._load_cdn_ranges()
+        self.assertEqual(network._provider_blocks["bad"], ["203.0.113.0/24"])
+        self.assertIn("stale", err.getvalue())
+
+    def test_failed_fetch_without_cache_skips_provider_only(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            network._load_cdn_ranges()
+        self.assertNotIn("bad", network._provider_blocks)
+        self.assertIn("good", network._provider_blocks)   # one dead provider can't sink the rest
+        self.assertIn("no ranges for bad", err.getvalue())
+
+
+class _SeededProvidersMixin(unittest.TestCase):
+    """Install the stand-in provider table around each widening-policy test."""
+
+    def setUp(self):
+        network._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
+        network._seen_cdn_ranges.clear()
+
+    def tearDown(self):
+        network._set_provider_blocks({})
+        network._seen_cdn_ranges.clear()
+
+
+class TestCdnProviderRanges(_SeededProvidersMixin):
     def test_cloudflare_ip_detected_with_containing_block(self):
         provider, ranges = _cdn_provider_ranges([_CLOUDFLARE_IP])
         self.assertEqual(provider, "cloudflare")
@@ -112,36 +295,34 @@ class TestCdnProviderRanges(unittest.TestCase):
         self.assertEqual(_cdn_provider_ranges(["not-an-ip", ""]), (None, []))
 
 
-class TestTokensFor(unittest.TestCase):
-    """_tokens_for encodes the widening policy: CDN blocks for default-port
-    entries, pinned IPs otherwise, one block emission per launch."""
-
-    def setUp(self):
-        network._seen_cdn_ranges.clear()
-
-    def tearDown(self):
-        network._seen_cdn_ranges.clear()
+class TestTokensFor(_SeededProvidersMixin):
+    """_tokens_for encodes the widening policy: containing CDN blocks for
+    plain default-port entries, ALL provider blocks for wildcards, pinned IPs
+    otherwise, one block emission per launch."""
 
     def test_non_cdn_ips_pin_exactly(self):
-        tokens, provider = _tokens_for("foo.com", [_NON_CDN_IP], "")
+        tokens, provider, gap = _tokens_for("foo.com", [_NON_CDN_IP], "")
         self.assertEqual(tokens, [_NON_CDN_IP])
         self.assertIsNone(provider)
+        self.assertFalse(gap)
 
     def test_port_entry_pins_even_on_cdn(self):
         # Opening a whole provider block on a custom port would be a broader
         # grant than the entry asked for — port entries keep pinned IPs.
-        tokens, provider = _tokens_for("foo.com", [_CLOUDFLARE_IP], "8443")
+        tokens, provider, gap = _tokens_for("foo.com", [_CLOUDFLARE_IP], "8443")
         self.assertEqual(tokens, [f"{_CLOUDFLARE_IP}:8443"])
         self.assertIsNone(provider)
+        self.assertFalse(gap)
 
     def test_cdn_default_port_widens_to_block(self):
-        tokens, provider = _tokens_for("foo.com", [_CLOUDFLARE_IP], "")
+        tokens, provider, gap = _tokens_for("foo.com", [_CLOUDFLARE_IP], "")
         self.assertEqual(tokens, ["104.16.0.0/13"])
         self.assertEqual(provider, "cloudflare")
+        self.assertFalse(gap)
 
     def test_block_emitted_once_across_hosts(self):
-        first, _ = _tokens_for("a.com", [_CLOUDFLARE_IP], "")
-        second, provider = _tokens_for("b.com", ["104.17.5.5"], "")   # same 104.16.0.0/13 block
+        first, _, _ = _tokens_for("a.com", [_CLOUDFLARE_IP], "")
+        second, provider, _ = _tokens_for("b.com", ["104.17.5.5"], "")   # same 104.16.0.0/13 block
         self.assertEqual(first, ["104.16.0.0/13"])
         self.assertEqual(second, [])                 # block already open; covered IP needs no rule
         self.assertEqual(provider, "cloudflare")     # still annotated as CDN-widened
@@ -149,15 +330,45 @@ class TestTokensFor(unittest.TestCase):
     def test_uncovered_ips_still_pinned_alongside_block(self):
         # Mixed A records: one CF edge + one origin outside any block — the
         # origin IP keeps its pinned rule.
-        tokens, _ = _tokens_for("foo.com", [_CLOUDFLARE_IP, _NON_CDN_IP], "")
+        tokens, _, _ = _tokens_for("foo.com", [_CLOUDFLARE_IP, _NON_CDN_IP], "")
         self.assertEqual(tokens, ["104.16.0.0/13", _NON_CDN_IP])
 
     def test_distinct_providers_both_widen(self):
-        t1, p1 = _tokens_for("a.com", [_CLOUDFLARE_IP], "")
-        t2, p2 = _tokens_for("b.com", [_FASTLY_IP], "")
+        t1, p1, _ = _tokens_for("a.com", [_CLOUDFLARE_IP], "")
+        t2, p2, _ = _tokens_for("b.com", [_FASTLY_IP], "")
         self.assertEqual(t1, ["104.16.0.0/13"])
         self.assertEqual(t2, ["151.101.0.0/16"])
         self.assertEqual((p1, p2), ("cloudflare", "fastly"))
+
+    def test_wildcard_on_cdn_opens_every_provider_block(self):
+        # Subdomains can't be enumerated via DNS, so the wildcard grant is
+        # the provider's whole published edge — every block, not just the
+        # containing one.
+        tokens, provider, gap = _tokens_for("foo.com", [_MULTI_IP], "", wildcard=True)
+        self.assertEqual(tokens, _TEST_PROVIDER_BLOCKS["multi"])
+        self.assertEqual(provider, "multi")
+        self.assertFalse(gap)
+
+    def test_wildcard_with_port_narrows_blocks_to_that_port(self):
+        # A wildcard without widening would be meaningless, so an explicit
+        # :port narrows the block tokens instead of downgrading to pinning.
+        tokens, provider, _ = _tokens_for("foo.com", [_FASTLY_IP], "8443", wildcard=True)
+        self.assertEqual(tokens, [f"{c}:8443" for c in _TEST_PROVIDER_BLOCKS["fastly"]])
+        self.assertEqual(provider, "fastly")
+
+    def test_wildcard_off_cdn_pins_base_and_reports_gap(self):
+        tokens, provider, gap = _tokens_for("foo.com", [_NON_CDN_IP], "", wildcard=True)
+        self.assertEqual(tokens, [_NON_CDN_IP])
+        self.assertIsNone(provider)
+        self.assertTrue(gap)
+
+    def test_wildcard_blocks_shared_with_plain_widening(self):
+        # A plain host already widened the containing block; the wildcard
+        # re-emits only the provider's OTHER blocks.
+        plain, _, _ = _tokens_for("a.com", [_CLOUDFLARE_IP], "")
+        wild, _, _ = _tokens_for("b.com", [_CLOUDFLARE_IP], "", wildcard=True)
+        self.assertEqual(plain, ["104.16.0.0/13"])
+        self.assertEqual(set(wild), set(_TEST_PROVIDER_BLOCKS["cloudflare"]) - {"104.16.0.0/13"})
 
 
 class TestIndexByHost(unittest.TestCase):
@@ -168,8 +379,8 @@ class TestIndexByHost(unittest.TestCase):
             HostnameEntry("bar.com", "bar.com", ""),
         ]
         self.assertEqual(_index_by_host(entries), {
-            "foo.com": [("foo.com", ""), ("foo.com:8443", "8443")],
-            "bar.com": [("bar.com", "")],
+            "foo.com": [entries[0], entries[1]],
+            "bar.com": [entries[2]],
         })
 
 
@@ -240,11 +451,14 @@ class TestResolutionCacheRoundtrip(unittest.TestCase):
         self._patch = patch.object(network, "RESOLVED_DOMAINS_CACHE_FILE", self.cache_file)
         self._patch.start()
         self._saved_cache = dict(network._resolution_cache)
+        network._resolution_cache.clear()
+        network._fresh_resolutions.clear()
 
     def tearDown(self):
         self._patch.stop()
         network._resolution_cache.clear()
         network._resolution_cache.update(self._saved_cache)
+        network._fresh_resolutions.clear()
         self.tmpdir.cleanup()
 
     def test_roundtrip(self):
@@ -268,23 +482,62 @@ class TestResolutionCacheRoundtrip(unittest.TestCase):
         network._load_resolution_cache()
         self.assertEqual(network._resolution_cache, {})
 
-    def test_cached_host_short_circuits_resolver(self):
-        network._resolution_cache["hit.com"] = ["9.9.9.9"]
-        with patch.object(network, "shell_capture") as cap:
-            ips = network._resolve_a_records("hit.com", timeout=1)
-        cap.assert_not_called()
-        self.assertEqual(ips, ["9.9.9.9"])
 
+class TestResolveARecords(unittest.TestCase):
+    """Fresh DNS is mandatory (stale pins were the whole disease); the
+    cross-launch cache only unions in and rescues outright failures."""
 
-class TestResolveARecordsValidation(unittest.TestCase):
+    def setUp(self):
+        self._saved_cache = dict(network._resolution_cache)
+        network._resolution_cache.clear()
+        network._fresh_resolutions.clear()
+
+    def tearDown(self):
+        network._resolution_cache.clear()
+        network._resolution_cache.update(self._saved_cache)
+        network._fresh_resolutions.clear()
+
+    def _fake(self, stdout, returncode=0):
+        return SimpleNamespace(returncode=returncode, stdout=stdout)
+
     def test_malformed_resolver_tokens_dropped(self):
         # Resolver output is the one externally-influenced string in the
         # pipeline — anything not shaped like a plain IPv4 must not survive
         # (it would otherwise reach the batched `sh -c` script).
-        fake = SimpleNamespace(returncode=0, stdout="1.2.3.4 STREAM x\nevil; rm -rf / STREAM x\n5.6.7.8 DGRAM x\n")
+        fake = self._fake("1.2.3.4 STREAM x\nevil; rm -rf / STREAM x\n5.6.7.8 DGRAM x\n")
         with patch.object(network, "shell_capture", return_value=fake):
             ips = network._resolve_a_records("x.com", timeout=1)
         self.assertEqual(ips, ["1.2.3.4", "5.6.7.8"])
+
+    def test_cached_host_still_queries_dns_and_unions(self):
+        # A cached answer must never suppress the live lookup — the fresh IP
+        # joins the cached one so both resolver views stay reachable.
+        network._resolution_cache["hit.com"] = ["9.9.9.9"]
+        with patch.object(network, "shell_capture",
+                          return_value=self._fake("1.1.1.1 STREAM x\n")) as cap:
+            ips = network._resolve_a_records("hit.com", timeout=1)
+        cap.assert_called_once()
+        self.assertEqual(ips, ["1.1.1.1", "9.9.9.9"])
+
+    def test_dns_failure_falls_back_to_cache(self):
+        network._resolution_cache["flaky.com"] = ["9.9.9.9"]
+        with patch.object(network, "shell_capture", return_value=self._fake("", returncode=2)):
+            ips = network._resolve_a_records("flaky.com", timeout=1)
+        self.assertEqual(ips, ["9.9.9.9"])
+
+    def test_dns_failure_without_cache_is_empty(self):
+        with patch.object(network, "shell_capture", return_value=self._fake("", returncode=2)):
+            self.assertEqual(network._resolve_a_records("dead.com", timeout=1), [])
+
+    def test_only_fresh_answers_recorded_for_cache_save(self):
+        # The persisted cache must hold live DNS results only — unioned
+        # carryover would re-save itself forever (mtime refresh = rolling
+        # TTL) and immortalize dead IPs.
+        network._resolution_cache["hit.com"] = ["9.9.9.9"]
+        with patch.object(network, "shell_capture",
+                          return_value=self._fake("1.1.1.1 STREAM x\n")):
+            network._resolve_a_records("hit.com", timeout=1)
+        self.assertEqual(network._fresh_resolutions, {"hit.com": ["1.1.1.1"]})
 
 
 class TestIptablesRulesFor(unittest.TestCase):
@@ -360,7 +613,8 @@ class TestFlushRules(unittest.TestCase):
 
 class TestUpdaterWorkerBatching(unittest.TestCase):
     """_updater_worker drains everything already queued into one flush —
-    the pacing fix: one docker exec per resolution burst, not per rule."""
+    the pacing fix: one docker exec per resolution burst, not per rule —
+    then hands off to the refresher daemon when the stream ends."""
 
     def _run_worker(self, tokens):
         q = queue.Queue()
@@ -374,28 +628,40 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with patch.object(network, "_phase2_queue", q), \
+             patch.object(network, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=True), \
              patch("launch.docker_config.docker_exec_root_subprocess", side_effect=fake_exec):
             network._updater_worker("claude-code_test")
-        return exec_calls
+        return exec_calls, start_refresher
 
     def test_prequeued_burst_flushes_in_one_exec(self):
         # 20 tokens → 40 rules → a single exec (vs 40 under the old per-rule scheme).
-        exec_calls = self._run_worker([f"1.2.3.{i}" for i in range(20)])
+        exec_calls, _ = self._run_worker([f"1.2.3.{i}" for i in range(20)])
         self.assertEqual(len(exec_calls), 1)
         self.assertEqual(exec_calls[0].count("iptables -I"), 40)
 
     def test_sentinel_only_queue_execs_nothing(self):
-        self.assertEqual(self._run_worker([]), [])
+        exec_calls, _ = self._run_worker([])
+        self.assertEqual(exec_calls, [])
+
+    def test_stream_end_hands_off_to_refresher(self):
+        # Both sentinel paths (bare sentinel / sentinel scooped mid-drain)
+        # must start the drift-heal daemon exactly once.
+        for tokens in ([], ["1.2.3.4"]):
+            with self.subTest(tokens=tokens):
+                _, start_refresher = self._run_worker(tokens)
+                start_refresher.assert_called_once_with("claude-code_test")
 
     def test_container_never_up_skips_all_work(self):
         q = queue.Queue()
         q.put("1.2.3.4")
         with patch.object(network, "_phase2_queue", q), \
+             patch.object(network, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=False), \
              patch("launch.docker_config.docker_exec_root_subprocess") as ex:
             network._updater_worker("claude-code_test")
         ex.assert_not_called()
+        start_refresher.assert_not_called()
 
 
 class TestWhitelistResolutionStatus(unittest.TestCase):
@@ -454,15 +720,150 @@ class TestWhitelistResolutionStatus(unittest.TestCase):
     def test_init_wipes_previous_run(self):
         self.status.set_pending({"a.com"})
         self.status.mark_resolved("a.com", ["1.1.1.1"], cdn="fastly")
+        self.status.mark_skipped([("2a00::", "v6")])
+        self.status.mark_wildcard_gap("w.com")
         self.status.init(self.state_dir)
-        self.assertEqual((self.status.resolved, self.status.failed, self.status.cdn), ({}, {}, {}))
+        self.assertEqual(
+            (self.status.resolved, self.status.failed, self.status.cdn,
+             self.status.skipped, self.status.wildcard_gaps),
+            ({}, {}, {}, {}, []),
+        )
         self.assertIn("status: resolving", self._file_text())
 
-    def test_resolved_snapshot_is_a_copy(self):
-        self.status.mark_resolved("a.com", ["1.1.1.1"])
-        snap = self.status.resolved_snapshot()
-        snap["b.com"] = ["2.2.2.2"]
-        self.assertNotIn("b.com", self.status.resolved)
+    def test_skipped_entries_rendered_with_reason(self):
+        self.status.mark_skipped([("2a04:4e42::/32", network._SKIPPED_IPV6_REASON)])
+        text = self._file_text()
+        self.assertIn("skipped:", text)
+        self.assertIn(f"2a04:4e42::/32: {network._SKIPPED_IPV6_REASON}", text)
+
+    def test_wildcard_gap_rendered_once(self):
+        self.status.mark_wildcard_gap("foo.com")
+        self.status.mark_wildcard_gap("foo.com")
+        text = self._file_text()
+        self.assertIn("wildcard_gaps:", text)
+        self.assertEqual(text.count("- foo.com"), 1)
+
+    def test_late_resolution_heals_a_failed_host(self):
+        # A refresher pass can resolve a host that was dead at launch — the
+        # failed: section must not keep contradicting the resolved: map.
+        self.status.set_pending({"flaky.com"})
+        self.status.mark_failed("flaky.com", "DNS resolution failed after all cascade stages")
+        self.status.mark_resolved("flaky.com", ["1.1.1.1"])
+        self.assertNotIn("flaky.com", self.status.failed)
+        self.assertIn("flaky.com", self.status.resolved)
+
+
+class _EmitterStateMixin(unittest.TestCase):
+    """Shared seeding/restore for suites that drive _emit_tokens_for_host —
+    directly or via _refresh_pass. Gives each test a fresh status singleton,
+    empty emission ledgers, and a hand-built _all_entries_by_host."""
+
+    def setUp(self):
+        network._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
+        network._seen_cdn_ranges.clear()
+        network._emitted_tokens.clear()
+        network._fresh_resolutions.clear()
+        self._saved_entries = dict(network._all_entries_by_host)
+        network._all_entries_by_host.clear()
+        self._status_patch = patch.object(network, "_status", network._WhitelistResolutionStatus())
+        self.status = self._status_patch.start()
+
+    def tearDown(self):
+        self._status_patch.stop()
+        network._set_provider_blocks({})
+        network._seen_cdn_ranges.clear()
+        network._emitted_tokens.clear()
+        network._fresh_resolutions.clear()
+        network._all_entries_by_host.clear()
+        network._all_entries_by_host.update(self._saved_entries)
+
+    @staticmethod
+    def _entries(*specs):
+        """Populate _all_entries_by_host from (host, port, wildcard) triples."""
+        for host, port, wildcard in specs:
+            entry = ("*." if wildcard else "") + host + (f":{port}" if port else "")
+            network._all_entries_by_host.setdefault(host, []).append(
+                HostnameEntry(entry, host, port, wildcard))
+
+
+class TestEmitTokensForHost(_EmitterStateMixin):
+    """The single funnel phase 1 / phase 2 / refresher share: per-entry
+    token policy, cross-emitter dedupe, status annotations."""
+
+    def test_multiple_entries_of_one_host_all_emit(self):
+        self._entries(("foo.com", "", False), ("foo.com", "8443", False))
+        tokens, label = network._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
+        self.assertEqual(tokens, [_NON_CDN_IP, f"{_NON_CDN_IP}:8443"])
+        self.assertIsNone(label)
+
+    def test_already_emitted_tokens_are_suppressed(self):
+        self._entries(("foo.com", "", False))
+        first, _ = network._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
+        second, _ = network._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
+        self.assertEqual(first, [_NON_CDN_IP])
+        self.assertEqual(second, [])   # the refresher's steady-state no-op
+
+    def test_wildcard_annotation_and_gap_filing(self):
+        self._entries(("edge.com", "", True), ("plain.com", "", True))
+        _, label = network._emit_tokens_for_host("edge.com", [_MULTI_IP])
+        self.assertEqual(label, "multi (all blocks — wildcard)")
+        network._emit_tokens_for_host("plain.com", [_NON_CDN_IP])
+        self.assertEqual(self.status.wildcard_gaps, ["plain.com"])
+
+
+class TestRefreshPass(_EmitterStateMixin):
+    """_refresh_pass is the mid-session drift heal: fresh-resolve everything,
+    flush only the genuinely new addresses, never demote, write only on
+    change."""
+
+    def _run(self, resolutions):
+        """Drive one pass with a scripted resolver; returns (flushed token
+        batches, cache-save count)."""
+        flushed, saves = [], []
+        with patch.object(network, "_resolve_a_records",
+                          side_effect=lambda h, timeout: resolutions.get(h, [])), \
+             patch.object(network, "_flush_rules",
+                          side_effect=lambda c, tokens: flushed.append(tokens)), \
+             patch.object(network, "_save_resolution_cache",
+                          side_effect=lambda m: saves.append(m)):
+            network._refresh_pass("claude-code_test")
+        return flushed, saves
+
+    def test_new_address_is_flushed_and_cache_saved(self):
+        self._entries(("foo.com", "", False))
+        network._emitted_tokens.add("1.1.1.1")   # what launch already opened
+        flushed, saves = self._run({"foo.com": ["1.1.1.1", "2.2.2.2"]})
+        self.assertEqual(flushed, [["2.2.2.2"]])
+        self.assertEqual(len(saves), 1)
+
+    def test_unchanged_answers_touch_nothing(self):
+        # Steady state must be write-free: no exec, no cache rewrite, no
+        # status churn.
+        self._entries(("foo.com", "", False))
+        network._emitted_tokens.add("1.1.1.1")
+        flushed, saves = self._run({"foo.com": ["1.1.1.1"]})
+        self.assertEqual((flushed, saves), ([], []))
+        self.assertEqual(self.status.resolved, {})
+
+    def test_resolution_failure_never_demotes(self):
+        # A host that misses one cycle keeps its rules and isn't marked
+        # failed — the next cycle simply retries.
+        self._entries(("foo.com", "", False))
+        flushed, _ = self._run({"foo.com": []})
+        self.assertEqual(flushed, [])
+        self.assertEqual(self.status.failed, {})
+
+    def test_host_moving_onto_a_cdn_widens_late(self):
+        # DNS steering can move a host onto a known provider mid-session —
+        # the pass picks up the block grant just like launch would have.
+        self._entries(("foo.com", "", False))
+        flushed, _ = self._run({"foo.com": [_CLOUDFLARE_IP]})
+        self.assertEqual(flushed, [["104.16.0.0/13"]])
+        self.assertEqual(self.status.cdn, {"foo.com": "cloudflare"})
+
+    def test_empty_whitelist_is_a_noop(self):
+        flushed, saves = self._run({})
+        self.assertEqual((flushed, saves), ([], []))
 
 
 if __name__ == "__main__":

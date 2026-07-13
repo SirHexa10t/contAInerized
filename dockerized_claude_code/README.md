@@ -48,9 +48,16 @@ isolated Docker container with persistent per-instance state.
   language docs, cloud docs, dev-tooling sites, web standards, ML / data /
   databases). Drop extra entries, one per line, into
   `~/.claude-agents/user_extras/firewall_whitelist.txt` — domains, raw IPv4
-  addresses, or CIDR ranges (`10.0.0.0/8`) are all accepted. The firewall
-  resolves entries in parallel at container start, then self-tests and
-  refuses to launch the agent if enforcement isn't actually working.
+  addresses, CIDR ranges (`10.0.0.0/8`), and `*.wildcards` (honored via
+  known-CDN-provider ranges — Cloudflare / Fastly / GitHub / CloudFront /
+  Google — fetched live from each provider's published list and cached for
+  a few days; no address space is baked into the source) are all accepted.
+  The launcher resolves entries on the host at launch, keeps re-resolving
+  them every few minutes for the container's lifetime (so VPN-exit swaps
+  and CDN rotation heal without a relaunch), and the in-container firewall
+  self-tests and refuses to launch the agent if enforcement isn't actually
+  working. IPv6 egress is denied outright — the whitelist pipeline is
+  IPv4-only.
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.
 - **Project-wide key bindings** — `settings/keybindings.json` is mounted into
@@ -214,10 +221,10 @@ then drops you into Claude Code:
   Building code → claude-agents:code...
   Building auto → claude-agents:code.auto...
 [docker compose build output]
-init-firewall.sh: resolving whitelist of 137 domains (up to 64 in parallel, 8s timeout each)...
-init-firewall.sh: resolved all 137 domains.
 init-firewall.sh: testing enforcement...
 [Claude Code starts; status line shows: ● Researcher - Myproject ( /path/to/workspace )]
+[meanwhile the launcher streams the rest of the whitelist into iptables as
+ hosts resolve, then keeps re-resolving every few minutes for the session]
 ```
 
 Lines for tags, modes, optional creds, and whitelist are conditional — they

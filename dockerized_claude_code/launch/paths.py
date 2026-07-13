@@ -50,14 +50,20 @@ AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
 AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # {instance_id: [mode, ...]}; only entries for instances with modes
 CACHE_ROOT = AGENTS_STATE / "cache"
 
-# {auto}-mode firewall: cross-launch DNS cache. Hosts already in this file
-# (when it's fresh — the TTL gate lives with the cache logic in network.py)
-# short-circuit DNS resolution: the launcher reuses the cached IPs directly.
-# Rewritten at end of every {auto} launch with the full resolved set, so
-# successive launches keep accumulating coverage while they stay within the
-# TTL. The per-instance "still resolving / failed" status file is built by
+# {auto}-mode firewall: cross-launch DNS cache. While fresh (the TTL gate
+# lives with the cache logic in network.py), a host's cached IPs are unioned
+# into its fresh resolution and rescue an outright DNS failure — never a
+# substitute for the live lookup. Rewritten with each launch's fresh answers.
+# The per-instance "still resolving / failed" status file is built by
 # state_domain_resolve_status_path further down.
 RESOLVED_DOMAINS_CACHE_FILE = AGENTS_STATE / "resolved_domains.txt"
+
+# {auto}-mode firewall: cached CDN-provider IPv4 ranges, one file per provider
+# (per-file mtime = per-provider freshness; the builder lambda lives in the
+# Path-builders section below). network.py fetches each provider's published
+# range list when its cache goes stale and falls back to a stale file when
+# the fetch fails — no range data is baked into the source.
+CDN_RANGES_CACHE_DIR = AGENTS_STATE / "cdn_ranges"
 
 # Everything under user_extras/ is for the user to populate with
 # non-project-specific configuration: extra firewall whitelist entries,
@@ -322,6 +328,11 @@ state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: sta
 # uses its mtime as the "last launched" signal; audit's `no_history` check
 # treats absence as "instance never started".
 state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / "history.jsonl"
+
+# Per-provider CDN-range cache file under CDN_RANGES_CACHE_DIR (see the
+# constant's comment further up) — provider names come from network.py's
+# fetcher registry.
+cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: CDN_RANGES_CACHE_DIR / f"{provider}.txt"
 
 # JSONLs Claude Code writes for the /workspace project — sits at the only
 # subdir Claude Code ever creates under projects/ inside this launcher

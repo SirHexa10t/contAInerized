@@ -85,6 +85,32 @@ done
 iptables -A OUTPUT  -j REJECT --reject-with icmp-port-unreachable
 iptables -A FORWARD -j REJECT --reject-with icmp-port-unreachable
 
+# --- IPv6: deny everything --------------------------------------------------
+# The whitelist pipeline is IPv4-only end to end (host-side `getent ahostsv4`
+# → v4 iptables rules), so IPv6 can't be selectively opened — and docker
+# networks only carry v6 when the daemon opts in. If this container DOES have
+# a v6 stack, leaving ip6tables untouched would let any v6-capable host
+# bypass the entire whitelist. Slam v6 shut: loopback only, established
+# inbound-reply traffic, REJECT the rest. If ip6tables can't apply (kernel
+# without v6 netfilter) that's only fatal when a v6 route actually exists —
+# a v4-only container has nothing to leak.
+if ip6tables -L >/dev/null 2>&1; then
+    ip6tables -F
+    ip6tables -X
+    ip6tables -P INPUT  ACCEPT
+    ip6tables -P FORWARD DROP
+    ip6tables -P OUTPUT DROP
+    ip6tables -A INPUT  -i lo -j ACCEPT
+    ip6tables -A OUTPUT -o lo -j ACCEPT
+    ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A OUTPUT  -j REJECT
+    ip6tables -A FORWARD -j REJECT
+elif ip -6 route show default 2>/dev/null | grep -q .; then
+    echo "init-firewall.sh: ERROR: container has an IPv6 default route but ip6tables is" >&2
+    echo "  unusable — outbound IPv6 would bypass the IPv4 whitelist entirely. Aborting." >&2
+    exit 1
+fi
+
 # --- Self-test --------------------------------------------------------------
 # Without this, a backend mismatch (rules written but not honored) would
 # silently leave the unattended agent free to reach anywhere. Fail loudly so

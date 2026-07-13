@@ -54,9 +54,11 @@ FIREWALL_NOTICE = Addendum(
     "Firewall",
     f"""You are currently running in `{InstanceModifiers.MODE_WARN_AUTO.label}` mode, a fact the user is aware of. A firewall is in place — blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
 
-**Before bothering the user about a block, check `{state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)}` first.** Brief retries are appropriate for hosts listed under `pending:` (DNS may resolve within seconds). Hosts under `failed:` won't resolve this session — surface those as whitelist offers; a re-launch may succeed if the cause was transient.
+**Before bothering the user about a block, check `{state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)}` first.** Brief retries are appropriate for hosts listed under `pending:` (DNS may resolve within seconds). Hosts under `failed:` were unresolvable at launch but are re-attempted every few minutes — retry once more before surfacing them as whitelist offers. Entries under `skipped:` can never work as written (the reason column says why — e.g. IPv6 on a v4-only network); relay the corrective form to the user. Hosts under `wildcard_gaps:` come from `*.` entries only honored for their base host (unknown CDN provider), so a refused subdomain there is expected — surface it to the user.
 
-**If a host you'd expect to reach (not in `pending:` or `failed:`) still gives `ConnectionRefused`**, inform the user that you may access it if the appropriate domain-name or IP/CIDR (tell the user how to discover all appropriate CDN addresses) were added to the host-side file: `{FIREWALL_WHITELIST_FILE}`
+**If a whitelisted host worked earlier and now refuses**, its DNS answer likely changed (VPN exit swap, CDN rotation). The launcher re-resolves every whitelisted hostname every ~5 minutes and opens newly-reported addresses automatically — retry shortly before escalating.
+
+**If a host you'd expect to reach (not in any section above) still gives `ConnectionRefused`**, inform the user that you may access it if the appropriate domain-name, `*.` wildcard (covers rotating subdomains on known CDNs), or IP/CIDR (tell the user how to discover all appropriate CDN addresses) were added to the host-side file: `{FIREWALL_WHITELIST_FILE}`
 
 **Surface every legitimate block as a whitelist offer** (treat this as `feedback`-type guidance per your auto-memory taxonomy — the user has asked for it directly), even when a separate obstacle exists (JS-rendered SPA, login wall, etc.) and even when an alternative source is available. Mention secondary obstacles and alternatives separately — never as a reason to skip the whitelist offer.""",
 )
