@@ -35,7 +35,8 @@ from .compose_env import (
 from .network import is_critical_pending, start_firewall_updater, wait_for_critical_addresses
 from .paths import (
     CLAUDE_CONFIG_IN_CONTAINER, COMPOSE_FILE_PATH, DEFAULT_WORKSPACE,
-    DOCKER_BASE_MOUNTS, INSTALL_FAILURES_LOG_IN_CONTAINER, compose_layer_path,
+    DOCKER_BASE_MOUNTS, FIREWALL_DONE_IN_CONTAINER,
+    INSTALL_FAILURES_LOG_IN_CONTAINER, compose_layer_path,
 )
 from .structs import InstanceIdentity
 from .template_code.docker_prompts import (
@@ -208,6 +209,36 @@ def wait_for_container_running(container_name: str, timeout_seconds: float = 10)
     while time.monotonic() < deadline and not (running := docker_check_running_subprocess(container_name)):
         time.sleep(0.1)
     return running
+
+
+def wait_for_firewall_applied(container_name: str, timeout_seconds: float = 90) -> bool:
+    """Gate for the phase-2 firewall updater: True when it's sensible to
+    start inserting rules, False when there's nothing left to update.
+
+    Polls for init-firewall.sh's completion marker
+    (paths.FIREWALL_DONE_IN_CONTAINER). Marker present → True. Container
+    stopped without it → False (init-firewall failed its self-test and took
+    the container down). Deadline passed with the container still up → True
+    anyway, best-effort: the script's runtime is curl-bounded to seconds, so
+    a live container without a marker after this long means the marker
+    mechanism itself broke — and late rules beat no rules.
+
+    The gate exists because "container is running" is NOT "firewall is
+    ready": the entrypoint runs init-firewall.sh as its first act, so an
+    updater that starts inserting rules on mere running-ness races the
+    script — inserts landing before its `iptables -F` were silently wiped,
+    and inserts landing mid-self-test could open provider blocks that made
+    the enforcement probe's target reachable, killing perfectly healthy
+    launches. Used by network._updater_worker between
+    wait_for_container_running and the first rule flush."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if docker_exec_root_subprocess(container_name, "test", "-e", str(FIREWALL_DONE_IN_CONTAINER)).returncode == 0:
+            return True
+        if not docker_check_running_subprocess(container_name):
+            return False
+        time.sleep(0.3)
+    return docker_check_running_subprocess(container_name)
 
 
 def docker_exec_root_subprocess(container_name: str, *cmd: str) -> subprocess.CompletedProcess:

@@ -1154,13 +1154,23 @@ def _updater_worker(container_name: str) -> None:
     resolution burst (~cascade pass), not one per rule. When the end-of-
     stream sentinel arrives, launch-time work is done — hand off to the
     refresher daemon (_start_refresher), which owns drift healing for the
-    rest of the session. Lazy import of wait_for_container_running breaks
-    the docker_config↔network import cycle (see module-top docstring)."""
-    from .docker_config import wait_for_container_running
+    rest of the session. Lazy imports break the docker_config↔network
+    import cycle (see module-top docstring)."""
+    from .docker_config import wait_for_container_running, wait_for_firewall_applied
 
     if not wait_for_container_running(container_name):
         # Container never came up; nothing to update. Caller's docker compose
         # run will already have surfaced the underlying error.
+        return
+
+    # "Running" only means the entrypoint started — init-firewall.sh is still
+    # writing the base ruleset. Inserting now would race it: rules landing
+    # before its flush get wiped, rules landing mid-self-test can open
+    # provider blocks that break the enforcement probe. Wait for its
+    # completion marker; if the container died instead (self-test failure,
+    # already loud on the user's terminal), there's nothing to update and
+    # exec-ing at the corpse would only add "container is not running" noise.
+    if not wait_for_firewall_applied(container_name):
         return
 
     # Updater is spawned only from start_firewall_updater, which guards on

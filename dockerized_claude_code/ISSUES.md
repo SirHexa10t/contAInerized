@@ -10,7 +10,8 @@ Check-stack state:
 - At audit time: 381 tests passing, `ruff check .` clean, `mypy launch/ run.py` clean.
 - After the first fix pass (B1–B9 minus B4, plus the "small ones"): 441 tests passing, ruff clean, mypy clean.
 - After the second pass (structure S1–S9, index relocation, modify-flow UX, network/CDN overhaul, coverage + doc bundles — see §12): **526 tests passing**, ruff clean, mypy clean.
-- After the third pass (firewall coverage overhaul: wildcards, live-fetched provider ranges, drift-heal refresher, IPv6 handling — see §13): **563 tests passing**, ruff clean, mypy clean.
+- After the third pass (firewall coverage overhaul: wildcards, live-fetched provider ranges, drift-heal refresher, IPv6 handling — see §13): 563 tests passing, ruff clean, mypy clean.
+- After the third-pass launch-flakiness fix (self-test probe + updater/init race — see §13 "Post-release fix"): **570 tests passing**, ruff clean, mypy clean.
 
 ---
 
@@ -422,6 +423,42 @@ burning the full DNS cascade into `failed:` noise.
   tests seed a stand-in provider table via `_set_provider_blocks` — no
   network anywhere in the suite. `benchmark/bench_firewall_updater.py`
   unaffected.
+
+### Post-release fix — launch failures ("firewall not enforcing", ~19/20 launches dying)
+
+Two defects from this pass compounded into a mostly-failing launch:
+
+1. **The enforcement self-test's negative probe target went stale.** It
+   asserted `example.com` must be unreachable — but example.com moved onto a
+   major CDN (post-Edgio-shutdown it resolves into Cloudflare's ranges), the
+   same provider dozens of whitelisted hosts legitimately widen to. Once any
+   Cloudflare block was open, the probe saw example.com reachable and killed
+   the container as "not enforcing". Under provider widening NO real site can
+   be a negative probe — any public host may share edge space with a
+   whitelisted one. **Fixed:** the probe now targets reserved documentation
+   space (`192.0.2.1`, RFC 5737 TEST-NET-1 — never emitted by the pipeline,
+   routed nowhere) and discriminates by curl exit code: 7 = instantly refused
+   by our REJECT = enforcing; 28 (timeout = packet escaped and black-holed) or
+   anything else = not enforcing.
+2. **The phase-2 updater raced init-firewall.sh.** "Container is running"
+   only means the entrypoint *started* — the updater began `iptables -I`
+   injections while the script was still flushing/writing/self-testing.
+   Inserts landing before the flush were silently wiped; inserts landing
+   mid-self-test opened widened provider blocks that made the (old) probe's
+   target reachable — so surviving a launch was literally a race between the
+   first Cloudflare burst and a 3-second curl. On failure, the dead container
+   then drew "batched iptables insert failed … container is not running"
+   warnings from the still-flushing updater. **Fixed:** init-firewall.sh
+   touches `/var/run/init-firewall.done` after its self-test passes
+   (mirrored as `paths.FIREWALL_DONE_IN_CONTAINER`, sync guarded by test);
+   the updater gates on `docker_config.wait_for_firewall_applied` — marker
+   present → proceed; container died without it → bail silently (no corpse
+   exec spam, no refresher); timed out with a live container → proceed
+   best-effort (late rules beat no rules).
+
+Tests: 570 (was 563) — gate polling/death/timeout semantics, updater
+gate-respect + bail path, and a drift guard asserting the shell script and
+the Python constant agree on the marker path.
 
 Companion utility: `tips/evaluate_addresses.sh` (source it and call
 `evaluate_addresses "${domains[@]}"`, or execute it with domains as args)

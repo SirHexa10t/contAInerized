@@ -118,10 +118,24 @@ fi
 # non-functional firewall.
 echo "init-firewall.sh: testing enforcement..."
 
-# Negative test: example.com is NOT in the whitelist; should be unreachable.
-if curl --connect-timeout 3 -s -o /dev/null -I https://example.com; then
-    echo "init-firewall.sh: ERROR: firewall not enforcing — https://example.com is reachable" >&2
-    echo "  despite a default-deny policy and a final REJECT rule." >&2
+# Negative test: 192.0.2.1 (TEST-NET-1, RFC 5737 documentation space) can never
+# be legitimately whitelisted — the launcher only emits resolved public IPs and
+# provider blocks. A REAL site is unusable as the probe here: CDN widening
+# legitimately opens whole provider ranges, and any public host may share edge
+# space with a whitelisted one (example.com moved onto a major CDN and started
+# failing this test on perfectly healthy firewalls). With the firewall
+# enforcing, our REJECT answers instantly and curl exits 7 ("couldn't
+# connect"). Anything else means packets are LEAVING: documentation space is
+# unrouted, so a non-enforcing firewall shows up as a timeout (exit 28) — or,
+# should something actually answer, a success.
+probe_rc=0
+curl --connect-timeout 3 -s -o /dev/null https://192.0.2.1 || probe_rc=$?
+if [ "$probe_rc" -ne 7 ]; then
+    echo "init-firewall.sh: ERROR: firewall not enforcing — the probe to reserved address" >&2
+    echo "  192.0.2.1 exited $probe_rc, expected 7 (= immediate refusal by our REJECT rule)." >&2
+    echo "  Exit 28 (timeout) means the packet escaped the container and died upstream;" >&2
+    echo "  exit 0 means something answered — either way outbound traffic is NOT being" >&2
+    echo "  filtered despite a default-deny policy and a final REJECT rule." >&2
     echo "" >&2
     echo "  Most likely an iptables backend mismatch. Diagnose inside the container:" >&2
     echo "    iptables -L OUTPUT -n -v   # rules visible to iptables-legacy view" >&2
@@ -144,3 +158,13 @@ if ! curl --connect-timeout 5 -s -o /dev/null -I https://api.anthropic.com; then
     echo "  to refresh, or add the tenant explicitly to the user whitelist." >&2
     exit 1
 fi
+
+# --- Completion marker --------------------------------------------------------
+# Signals the host-side launcher that the base firewall is fully applied AND
+# verified. The phase-2 updater (network._updater_worker) polls for this file
+# before its first `iptables -I` — without the gate, its rules raced this
+# script: inserts landing before the flush above were silently wiped, and
+# inserts landing mid-self-test could open provider blocks that made the old
+# negative probe's target reachable, failing perfectly healthy launches.
+# Mirror of paths.FIREWALL_DONE_IN_CONTAINER — keep in sync.
+touch /var/run/init-firewall.done

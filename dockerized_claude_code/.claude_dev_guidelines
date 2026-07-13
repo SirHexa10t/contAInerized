@@ -25,7 +25,7 @@ Grouped by layer, top of the dependency graph last.
 ### Small services — depend on disk + identity
 
 - `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
-- `launch/network.py` — `{auto}`-mode firewall: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater, and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift.
+- `launch/network.py` — `{auto}`-mode firewall: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift.
 
 ### Orchestration — depend on services
 

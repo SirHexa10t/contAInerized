@@ -153,6 +153,7 @@ RO_MOUNT_OPTION = "ro"
 # future external use (currently none).
 
 LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # container target dir for the {auto} scripts
+FIREWALL_DONE_IN_CONTAINER = Path("/var/run/init-firewall.done")   # marker init-firewall.sh touches after its rules + self-test succeed; docker_config.wait_for_firewall_applied polls it so the phase-2 updater never injects rules into a half-built firewall. Mirror of the literal in docker/init-firewall.sh — test_docker_config guards the sync
 
 DOCKER_AUTO_MOUNTS = {
     (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"{LOCAL_BIN_IN_CONTAINER}/init-firewall.sh:{RO_MOUNT_OPTION}",

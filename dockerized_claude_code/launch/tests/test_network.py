@@ -630,6 +630,7 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
         with patch.object(network, "_phase2_queue", q), \
              patch.object(network, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=True), \
+             patch("launch.docker_config.wait_for_firewall_applied", return_value=True), \
              patch("launch.docker_config.docker_exec_root_subprocess", side_effect=fake_exec):
             network._updater_worker("claude-code_test")
         return exec_calls, start_refresher
@@ -658,6 +659,23 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
         with patch.object(network, "_phase2_queue", q), \
              patch.object(network, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=False), \
+             patch("launch.docker_config.wait_for_firewall_applied") as gate, \
+             patch("launch.docker_config.docker_exec_root_subprocess") as ex:
+            network._updater_worker("claude-code_test")
+        ex.assert_not_called()
+        gate.assert_not_called()
+        start_refresher.assert_not_called()
+
+    def test_failed_firewall_gate_skips_all_work(self):
+        # init-firewall failed its self-test and the container is gone:
+        # no rule flushes (they'd just spam "container is not running"),
+        # no refresher.
+        q = queue.Queue()
+        q.put("1.2.3.4")
+        with patch.object(network, "_phase2_queue", q), \
+             patch.object(network, "_start_refresher") as start_refresher, \
+             patch("launch.docker_config.wait_for_container_running", return_value=True), \
+             patch("launch.docker_config.wait_for_firewall_applied", return_value=False), \
              patch("launch.docker_config.docker_exec_root_subprocess") as ex:
             network._updater_worker("claude-code_test")
         ex.assert_not_called()
