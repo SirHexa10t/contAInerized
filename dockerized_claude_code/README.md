@@ -98,7 +98,8 @@ Host requirements:
 - **Python 3.10+** (the launcher uses walrus expressions and structural
   unpacking)
 - Three Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
-  (`.conf` parsing), **`rich`** (markdown rendering for agent previews)
+  (`.conf` parsing), **`rich`** (markdown rendering for agent previews) —
+  the canonical list lives in `pyproject.toml`'s `[project]` table
 
 Inside the container, the runtime image is built incrementally as a chain
 of layers. `docker/Dockerfile` (the **base** stage) installs Claude Code +
@@ -142,7 +143,7 @@ download URL so you can install it manually, then re-run to set up Python.
 Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop)
 and [Python 3.10+](https://www.python.org/downloads/) from their official
 sites, then `pip install prompt_toolkit python-dotenv rich`
-in your shell of choice.
+(mirrors `pyproject.toml`'s `[project]` dependencies) in your shell of choice.
 
 Or — recommended — install Docker Desktop on the Windows host and run the
 launcher from inside WSL2; once you're at a WSL2 bash prompt, the Linux

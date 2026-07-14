@@ -12,7 +12,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -76,9 +76,9 @@ def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
         'name(thinker)[code]' both parse the same way.
 
     Raises ValueError on a malformed stem — missing name, unclosed bracket,
-    empty `[]` / `()` group, or stray text between groups. Silently dropping
-    the malformed parts (the old behavior) meant a typo like `poet[code.md`
-    launched the agent without its [code] toolchain and nobody was told.
+    empty `[]` / `()` group, or stray text between groups. Raising beats
+    silently dropping the bad parts: a typo like `poet[code.md` would
+    otherwise launch the agent without its [code] toolchain, unnoticed.
 
     Examples:
         'name'                → ('name', [], None)
@@ -134,7 +134,7 @@ def shell_returncode(*cmd: str, env: dict[str, str] | None = None) -> int:
 
 # === Exits ===
 
-def call_or_exit(func: Callable[..., T], *args, exceptions=Exception, prefix: str = "  ", **kwargs) -> T:
+def call_or_exit(func: Callable[..., T], *args: Any, exceptions: type[BaseException] | tuple[type[BaseException], ...] = Exception, prefix: str = "  ", **kwargs: Any) -> T:
     """Call `func(*args, **kwargs)`; if it raises one of `exceptions`, print
     the exception message (prefixed with `prefix`) and `sys.exit`. Returns
     `func`'s return value on success. `exceptions` defaults to `Exception`
@@ -147,7 +147,7 @@ def call_or_exit(func: Callable[..., T], *args, exceptions=Exception, prefix: st
         sys.exit(f"{prefix}{e}")
 
 
-def exit_if_missing(value, exit_message: str = "") -> None:
+def exit_if_missing(value: Any, exit_message: str = "") -> None:
     """Exit with `exit_message` if `value` is falsy (None / empty collection /
     empty string / 0). Sister to `call_or_exit` — guards a precondition at a
     boundary rather than wrapping a call that may raise."""

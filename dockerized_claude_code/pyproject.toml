@@ -1,3 +1,19 @@
+# Single source of truth for the launcher's Python dependency list —
+# install_dependencies.sh installs from this table (`uv pip install -r
+# pyproject.toml`); README's manual-install lines mirror it. The project
+# isn't published or pip-installed as a package — run.py runs from the repo —
+# so no [build-system] table is needed.
+[project]
+name = "claude-code-agents"
+version = "1.0.0"
+description = "Launcher for pre-made Claude Code agents — Dockerized personas, each with its own model, memory, and toolchain."
+requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3.0",
+    "python-dotenv>=1.0",
+    "rich>=13",
+]
+
 [tool.ruff]
 # Generous line length — the project intentionally allows long lines for
 # multi-name imports, descriptive picker fragments, etc. /test-project no
@@ -20,6 +36,17 @@ skip-magic-trailing-comma = true
 ignore = ["E731"]
 
 [tool.mypy]
+# Every def in source modules must carry full annotations — the annotation
+# sweep landed, so this locks it in for new code.
+disallow_untyped_defs = true
+
+# Tests are exempt from the annotation requirement: annotating hundreds of
+# `def test_*(self)` bodies adds noise without safety — mypy still checks
+# their bodies against the annotated source API.
+[[tool.mypy.overrides]]
+module = "launch.tests.*"
+disallow_untyped_defs = false
+
 # Third-party deps without bundled type stubs — ignore at the import boundary
 # so mypy only flags issues in our own code.
 [[tool.mypy.overrides]]

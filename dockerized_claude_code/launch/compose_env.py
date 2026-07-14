@@ -75,7 +75,7 @@ class ComposeEnvKey(str, Enum):
     # unique so Python's enum metaclass doesn't alias same-flag members.
 
     @staticmethod
-    def _generate_next_value_(name, start, count, last_values):
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[Any]) -> str:
         # Called by the enum metaclass for each `auto()` in member declarations.
         # Returning the name makes the resolved tuple element equal to the
         # member's own name, so __new__ below can pass it to str.__new__ and

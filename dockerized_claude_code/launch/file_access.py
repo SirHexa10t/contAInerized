@@ -54,7 +54,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values  # pip install python-dotenv
+from dotenv import dotenv_values  # package: python-dotenv — declared in pyproject.toml [project]
 
 from .paths import (
     ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
@@ -152,9 +152,9 @@ def write_text(path: Path, content: str) -> None:
     """Write `content` to `path` as text (overwriting if present) — atomically:
     content lands in a same-directory temp file first, then `os.replace`s over
     `path`. A Ctrl+C / crash mid-write can therefore never truncate existing
-    state (the old torn-write path corrupted the JSON maps), and concurrent
-    readers — including the in-container view of a bind-mounted state dir —
-    only ever observe the old or the new content, never a partial file.
+    state, and concurrent readers — including the in-container view of a
+    bind-mounted state dir — only ever observe the old or the new content,
+    never a partial file.
     (The temp file lives next to `path` so the rename stays on one filesystem;
     the pid suffix keeps two launcher processes from colliding.)
     Auto-creates the parent directory tree if missing, so callers don't need a
@@ -443,9 +443,7 @@ def _cached_load_json_map(path: Path) -> dict[str, Any]:
     cached dict by reference (so callers' in-place mutations before save_*_map
     are visible to other loaders too — see section comment above).
 
-    A corrupted file exits with a clean repair hint instead of a traceback —
-    before this guard, one bad byte in agent_workspace_map.json crashed every
-    subsequent launch until the user diagnosed the stack trace themselves.
+    A corrupted file exits with a clean repair hint instead of a traceback.
     (audit.py parses these files independently so it can report the same
     corruption non-fatally.)"""
     if path not in _json_map_cache:

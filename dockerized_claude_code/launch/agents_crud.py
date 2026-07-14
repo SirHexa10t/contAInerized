@@ -174,7 +174,7 @@ def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity
 # anything. Tag/mode position comes from InstanceModifiers (in structs);
 # ORDERED_MODEL_FAMILIES is picker-only so it lives here as a local constant.
 
-ORDERED_MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last)
+ORDERED_MODEL_FAMILIES = ["fable", "mythos", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last). mythos = fable's same-tier Project-Glasswing sibling, pre-added so a future mythos conf can't repeat the fable-sorted-last bug
 _FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
 
 
@@ -190,7 +190,7 @@ def parse_model_id(model: str) -> tuple[str, int, int] | None:
 
 
 def agent_sort_key(item: tuple[str, Path]) -> tuple[int, tuple[int, int], str]:
-    """Sort by family (ORDERED_MODEL_FAMILIES order — opus first, haiku last),
+    """Sort by family (ORDERED_MODEL_FAMILIES order — fable first, haiku last),
     then version desc, then name asc. Agents whose .conf has no recognisable
     model sink past all known families via the sentinel index."""
     name, path = item

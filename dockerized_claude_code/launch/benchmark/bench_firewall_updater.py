@@ -26,6 +26,7 @@ Run from the project root:
 
 import queue
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,7 +37,7 @@ EXEC_LATENCY_S = 0.05   # simulated docker-exec round-trip (real: ~0.05-0.15s)
 BURST_COUNT = 4         # resolution bursts feeding the updater (≈ cascade passes that produced results)
 
 
-def _fake_exec_factory(counter: list[int]):
+def _fake_exec_factory(counter: list[int]) -> Callable[..., SimpleNamespace]:
     def fake_exec(container: str, *cmd: str) -> SimpleNamespace:
         counter[0] += 1
         time.sleep(EXEC_LATENCY_S)

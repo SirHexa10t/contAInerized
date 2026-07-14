@@ -30,7 +30,7 @@ def build_status_line(inst_id: InstanceIdentity) -> str:
     prefix drops out when .claude.json is missing or lacks a recognisable
     email field."""
     CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
-    def cap(name):
+    def cap(name: str) -> str:
         return name.replace('-', ' ').replace('_', ' ').title()
 
     email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")

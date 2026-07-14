@@ -64,7 +64,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit import Application                                     # pip install prompt_toolkit
+from prompt_toolkit import Application                                     # dep — declared in pyproject.toml [project]
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
@@ -74,7 +74,7 @@ from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
-from rich.console import Console                                           # pip install rich
+from rich.console import Console                                           # dep — declared in pyproject.toml [project]
 from rich.markdown import Markdown
 from rich.theme import Theme
 
@@ -457,14 +457,14 @@ def _modifier_display(modifiers: Iterable[InstanceModifiers]) -> tuple[list[tupl
     return fragments, visible
 
 
-def _normalize(display) -> list[tuple[str, str]]:
+def _normalize(display: str | Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     """Coerce any accepted display form into a list of (style, text) tuples."""
     if isinstance(display, str):
         return [("", display)]
     return list(display)
 
 
-def _plain(display) -> str:
+def _plain(display: str | Iterable[tuple[str, str]]) -> str:
     """Plain-text view of a display, used for filter matching."""
     return "".join(text for _, text in _normalize(display))
 

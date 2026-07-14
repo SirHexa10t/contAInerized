@@ -58,11 +58,17 @@ class TestParseModelId(unittest.TestCase):
         # "unknown family" and sank below haiku in the picker.
         self.assertEqual(parse_model_id("claude-fable-5"), ("fable", 5, 0))
 
+    def test_mythos_family_recognised(self):
+        # Pre-added insurance: mythos is fable's same-tier sibling
+        # (Project Glasswing); recognising it now means a future mythos conf
+        # can't repeat the fable-sorted-last bug.
+        self.assertEqual(parse_model_id("claude-mythos-5"), ("mythos", 5, 0))
+
 
 class TestOrderedModelFamilies(unittest.TestCase):
     def test_priority_order(self):
         # Most capable family first, haiku last — affects agent_sort_key.
-        self.assertEqual(ORDERED_MODEL_FAMILIES, ["fable", "opus", "sonnet", "haiku"])
+        self.assertEqual(ORDERED_MODEL_FAMILIES, ["fable", "mythos", "opus", "sonnet", "haiku"])
 
     def test_every_shipped_conf_family_is_known(self):
         # The picker sorts unknown families past the end — silently, which is

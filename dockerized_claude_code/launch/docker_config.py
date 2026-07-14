@@ -42,7 +42,7 @@ from .structs import InstanceIdentity
 from .template_code.docker_prompts import (
     AUTO_FIREWALL_WAITING, BUILDING_STEP, INSTALL_FAILURES_BODY, INSTALL_FAILURES_HEADER,
 )
-from .utils import exit_if_missing, prompt_keypress, shell_capture, shell_returncode
+from .utils import call_or_exit, exit_if_missing, prompt_keypress, shell_capture, shell_returncode
 
 
 # ============================================================
@@ -51,8 +51,7 @@ from .utils import exit_if_missing, prompt_keypress, shell_capture, shell_return
 # Every bind-mount for `docker compose run` flows through this dict. set_container_mounts
 # stages the always-on set (paths.DOCKER_BASE_MOUNTS + the per-instance workspace/state dirs);
 # agent_modifiers_handler's tag/mode handlers stage chain-step contributions ([code] caches);
-# user_additions stages skills + optional creds. run_compose flattens the dict into
-# `-v src:tgt[:ro]` flags appended to the docker compose command. Mirror of
+# user_additions stages skills + optional creds. Mirror of
 # compose_env's `_compose_env` / stage_compose_env pattern — declarations flow
 # one way, emission stays in this module. compose.auto.yml's two
 # ${...}-substituted mounts are the only bind-mounts that still travel via
@@ -361,6 +360,26 @@ def prompt_install_failures(chain: list[str], instance: str) -> None:
     )
 
 
+def effort_args(conf: dict[str, str], claude_args: list[str]) -> list[str]:
+    """CLI args pinning the session's effort to the conf's
+    CLAUDE_CODE_EFFORT_LEVEL (e.g. ["--effort", "max"]), or [] when the conf
+    doesn't set a level or the user passed their own --effort through
+    (theirs wins — both the `--effort max` and `--effort=max` forms count).
+
+    Why a CLI flag when the same value already ships as a -e env var: on
+    newly-launched models (Opus 4.7/4.8, Fable 5) Claude Code pins a fresh
+    interactive session's effort to the model's launch default ("high") and
+    treats CLAUDE_CODE_EFFORT_LEVEL as a session-only override it neither
+    persists nor reflects in the /model UI — its pin logic explicitly checks
+    argv for --effort as the user's confirmation. Passing the documented
+    flag is the supported way to declare the level so the session both runs
+    at it and reports it."""
+    effort = conf.get("CLAUDE_CODE_EFFORT_LEVEL")
+    if not effort or any(a == "--effort" or a.startswith("--effort=") for a in claude_args):
+        return []
+    return ["--effort", effort]
+
+
 def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_flag: list[str], conf: dict[str, str]) -> None:
     """Set TARGET_IMAGE so compose's `image:` substitutes to the chain output,
     set the terminal title, then exec `docker compose run`. By the time we
@@ -373,7 +392,9 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
     run.py:launch before this).
 
     {auto}-mode firewall coordination: block on Phase 1 (critical Anthropic
-    DNS) to get the initial WHITELIST_ADDRESSES, then spawn the firewall
+    DNS) to get the initial WHITELIST_ADDRESSES — exiting with the worker's
+    one-line message if a critical domain terminally failed to resolve —
+    then spawn the firewall
     updater daemon thread BEFORE `docker_compose_subprocess` so it can drain Phase 2
     results into the running container's iptables via `docker exec` while
     Claude Code starts up. `--name` is set explicitly to a deterministic
@@ -384,17 +405,18 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
     compose_args = chain_compose_files(chain)
     set_terminal_title(instance)
     # Phase 1 await: block for critical Anthropic addresses, stage them as the
-    # initial WHITELIST_ADDRESSES. Phase 2 (rest of the whitelist) is still
-    # resolving in the background; the updater thread (spawned below) handles
-    # it via `docker exec` once the container is up.
+    # initial WHITELIST_ADDRESSES. Phase 2 (rest of the whitelist) drains via
+    # the updater thread spawned below.
     if is_critical_pending():
         print(AUTO_FIREWALL_WAITING, flush=True)
-    if (addresses := wait_for_critical_addresses()) is not None:
+    # A terminally-failed critical resolve surfaces as the phase-1 worker's
+    # RuntimeError — exit with its message, not a raw traceback.
+    addresses = call_or_exit(wait_for_critical_addresses, exceptions=RuntimeError)
+    if addresses is not None:
         stage_compose_env(ComposeEnvKey.WHITELIST_ADDRESSES, " ".join(addresses))
     container_name = f"{CONTAINER_NAME_PREFIX}{instance}"
-    # Spawn the updater BEFORE docker_compose_subprocess (which blocks for the container's
-    # lifetime) — the daemon thread will see the container come up shortly and
-    # start draining Phase 2 results onto iptables. No-op for non-{auto} launches.
+    # Spawn the updater BEFORE docker_compose_subprocess (which blocks for the
+    # container's lifetime). No-op for non-{auto} launches.
     start_firewall_updater(container_name)
     args = (
         compose_args + ["run", "--rm", "-it", "--name", container_name]
@@ -402,6 +424,7 @@ def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_
         + container_env_args()    # per-key -e flags from CONTAINER_ENV_FORWARDS
         + conf_env_args(conf)     # -e flags setting each per-agent conf key=value in the container
         + ["claude-code"]
+        + effort_args(conf, claude_args)  # explicit --effort from the conf — see effort_args for why the env var isn't enough
         + resume_flag             # present if a resumed session
         + claude_args             # leftover argv (unrecognised flags + unresolved positional) → claude
     )

@@ -6,7 +6,7 @@
 # ---------------
 #   • uv               — Python toolchain manager (Astral's installer if missing)
 #   • ~/pydev          — uv-managed venv with Python 3.14 + the launcher's pip
-#                        deps: prompt_toolkit, python-dotenv, rich
+#                        deps (read from pyproject.toml's [project] table)
 #   • Docker engine    — Linux: official convenience script (bundles Compose v2)
 #                        macOS: Docker Desktop (via Homebrew if available;
 #                                otherwise prints a manual-install hint)
@@ -27,6 +27,10 @@ set -euo pipefail
 
 err() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "→ $*"; }
+
+# Repo root (where pyproject.toml lives) — resolved from this script's own
+# location so the install works no matter which directory it's invoked from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Sanity checks -----------------------------------------------------------------
 
@@ -61,10 +65,10 @@ else
     log "Creating Python venv at ~/pydev (uv will auto-download Python 3.14 if needed)..."
     uv venv "$HOME/pydev" --python 3.14
 fi
-log "Installing/updating launcher deps in ~/pydev (prompt_toolkit, python-dotenv, rich)..."
+log "Installing/updating launcher deps in ~/pydev (from pyproject.toml's [project] table)..."
 # shellcheck disable=SC1091
 source "$HOME/pydev/bin/activate"
-uv pip install prompt_toolkit python-dotenv rich
+uv pip install -r "$SCRIPT_DIR/pyproject.toml"
 
 # 3. Docker (OS-specific) ------------------------------------------------------
 

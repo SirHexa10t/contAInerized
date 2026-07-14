@@ -9,7 +9,64 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from launch import docker_config, paths
-from launch.docker_config import chain_compose_files, chain_image_tag, set_container_mounts
+from launch.docker_config import (
+    chain_compose_files, chain_image_tag, effort_args, set_container_mounts,
+)
+
+
+class TestRunComposeCriticalDnsFailure(unittest.TestCase):
+    """run_compose aborts with the codebase's clean one-liner (sys.exit) when
+    the {auto} phase-1 critical-DNS resolve terminally failed — the worker's
+    RuntimeError must not escape as a raw traceback, and nothing docker-
+    touching may run after the failure."""
+
+    def test_runtime_error_exits_cleanly_without_compose_run(self):
+        boom = RuntimeError(
+            "Critical Anthropic domains failed to resolve: ['api.anthropic.com']. "
+            "Claude Code cannot operate without them; aborting launch.")
+        with patch.object(docker_config, "stage_compose_env"), \
+             patch.object(docker_config, "set_terminal_title"), \
+             patch.object(docker_config, "is_critical_pending", return_value=False), \
+             patch.object(docker_config, "wait_for_critical_addresses", side_effect=boom), \
+             patch.object(docker_config, "start_firewall_updater") as updater, \
+             patch.object(docker_config, "docker_compose_subprocess") as compose:
+            with self.assertRaises(SystemExit) as ctx:
+                docker_config.run_compose(["base"], "poet__x", [], [], {})
+        self.assertIn("Critical Anthropic domains", str(ctx.exception))
+        updater.assert_not_called()
+        compose.assert_not_called()
+
+
+class TestEffortArgs(unittest.TestCase):
+    """effort_args — the explicit --effort CLI flag derived from the conf's
+    CLAUDE_CODE_EFFORT_LEVEL. Pure function: (conf, claude_args) → arg list."""
+
+    def test_conf_effort_becomes_flag_pair(self):
+        self.assertEqual(effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "max"}, []),
+                         ["--effort", "max"])
+
+    def test_conf_without_effort_yields_nothing(self):
+        self.assertEqual(effort_args({"ANTHROPIC_MODEL": "claude-fable-5"}, []), [])
+
+    def test_valueless_conf_key_yields_nothing(self):
+        # dotenv parses a bare `CLAUDE_CODE_EFFORT_LEVEL` line to None — no
+        # flag should be emitted for it.
+        self.assertEqual(effort_args({"CLAUDE_CODE_EFFORT_LEVEL": None}, []), [])
+
+    def test_user_passed_effort_wins(self):
+        # `python3 run.py poet -- --effort low` must reach claude unchallenged —
+        # emitting ours too would either conflict or silently override the user.
+        self.assertEqual(
+            effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "max"}, ["--effort", "low"]), [])
+
+    def test_user_passed_effort_equals_form_wins(self):
+        self.assertEqual(
+            effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "max"}, ["--effort=low"]), [])
+
+    def test_unrelated_claude_args_dont_suppress(self):
+        self.assertEqual(
+            effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "medium"}, ["--print", "hi"]),
+            ["--effort", "medium"])
 
 
 class TestChainImageTag(unittest.TestCase):

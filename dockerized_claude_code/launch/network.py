@@ -18,7 +18,7 @@ Concurrency model (two-phase, streaming):
     before `docker compose run`) drains the queue in bursts and applies each
     burst with ONE `docker exec --user root <container> sh -c 'iptables -I
     OUTPUT 1 ... && ...'` — batching dozens of ACCEPT rules per exec instead
-    of one exec per rule (the old per-rule pace took minutes for the full
+    of one exec per rule (per-rule pacing would take minutes for the full
     list; see benchmark/bench_firewall_updater.py). Rules insert BEFORE the
     catch-all REJECT, so arrival order doesn't matter. The launcher proceeds
     into Claude Code as soon as Phase 1 finishes; Phase 2 + the updater run
@@ -43,8 +43,7 @@ a dead IP ages out after one TTL instead of being immortalized by the
 rolling mtime.
 
 Post-launch drift healing: DNS pins go stale MID-session too (VPN node
-swap, CDN steering change) — the exact failure that used to strand
-github.com minutes after it worked. Once Phase 2 finishes, the updater
+swap, CDN steering change). Once Phase 2 finishes, the updater
 hands off to a refresher daemon (_refresher_worker) that re-resolves the
 whole hostname list every _REFRESH_INTERVAL_SECONDS and batch-inserts
 rules for any address not already emitted. Rules only accumulate (additive
@@ -92,7 +91,7 @@ IPv4 (getent ahostsv4 → iptables), docker networks are v4-only unless the
 daemon opts in, and init-firewall.sh slams v6 egress shut regardless. A
 v6 literal in the whitelist lands in the status file's `skipped:` section
 with the reason, instead of burning the full DNS cascade and polluting
-`failed:` (which is exactly what pasted v6 addresses used to do).
+`failed:`.
 
 Imports nothing heavy: file_access for the whitelist/cache files + atomic
 write helper, paths for the status/cache locations, template_code for the
@@ -192,9 +191,7 @@ class ExpandedWhitelist(NamedTuple):
 _FAILED_RESOLVE_REASON = "DNS resolution failed after all cascade stages"
 
 # Reason string for the status file's `skipped:` section — IPv6 whitelist
-# entries. The pipeline is IPv4-only end to end (getent ahostsv4 → iptables)
-# and init-firewall.sh denies all v6 egress, so a v6 entry can't be honored;
-# the message tells the user what to do instead.
+# entries, which the IPv4-only pipeline can't honor.
 _SKIPPED_IPV6_REASON = "IPv6 entry — the container network and firewall are IPv4-only; whitelist the hostname or its IPv4 range instead"
 
 # Cascade timeouts: a host that fails resolution at pass N is retried at pass
@@ -241,9 +238,8 @@ _fresh_resolutions: dict[str, list[str]] = {}
 
 def _resolve_a_records(host: str, timeout: float) -> list[str]:
     """Resolve `host` to its IPv4 A records via `getent ahostsv4` (the host's
-    resolver chain), ALWAYS querying live DNS — a cached answer can go stale
-    the moment the user's VPN exit or the CDN's steering changes, so the
-    cross-launch cache never substitutes for a lookup. On success, returns
+    resolver chain), ALWAYS querying live DNS — the cross-launch cache never
+    substitutes for a lookup. On success, returns
     the fresh IPs unioned with the cached ones (host resolver and container
     resolver can disagree; rules for both answers keep either path open). On
     timeout / NXDOMAIN / IPv6-only, falls back to the cached IPs — [] only
@@ -405,8 +401,7 @@ _IPV4_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 # When a whitelisted host's resolved IPs sit inside a known CDN provider's
 # published block, whitelist the WHOLE containing block instead of pinning
 # the momentary IPs — POP rotation inside the block then can't strand the
-# host behind a stale pin (the exact failure that kept forcing manual
-# whitelist additions for CDN-fronted sites).
+# host behind a stale pin.
 #
 # The blocks come from each provider's own published range list, fetched over
 # HTTPS on the host and cached per provider under CDN_RANGES_CACHE_DIR
@@ -715,7 +710,7 @@ class _WhitelistResolutionStatus:
         self.skipped: dict[str, str] = {}            # entry → why it was never attempted (e.g. IPv6)
         self.wildcard_gaps: list[str] = []           # `*.` hosts whose subdomains could NOT be covered
 
-    def init(self, state_dir) -> None:
+    def init(self, state_dir: Path) -> None:
         """Reset to a clean 'resolving' state and record where to write — wipes
         any leftover from a previous run on this instance so the agent never
         observes stale content. Called once at the start of every {auto} launch
@@ -732,7 +727,7 @@ class _WhitelistResolutionStatus:
             self.wildcard_gaps = []
             self._write()
 
-    def set_pending(self, hosts) -> None:
+    def set_pending(self, hosts: Iterable[str]) -> None:
         """Replace the pending-host list (called once at start_whitelist_resolution
         after the full whitelist is assembled)."""
         with self._lock:
@@ -877,8 +872,8 @@ _updater_thread: threading.Thread | None = None
 # ends. Re-resolves the whole hostname list forever (every
 # _REFRESH_INTERVAL_SECONDS) and flushes rules for addresses DNS newly
 # reports — the mid-session self-heal for VPN-exit swaps and CDN steering
-# changes that stranded pinned hosts (github.com's rotating Azure edges being
-# the canonical victim). Additive only: rules are never revoked mid-session.
+# changes that strand pinned hosts. Additive only: rules are never revoked
+# mid-session.
 _refresher_thread: threading.Thread | None = None
 
 # Every `addr[:port]` token already opened this launch (initial ruleset +
@@ -896,8 +891,7 @@ _all_entries_by_host: dict[str, list[HostnameEntry]] = {}
 def _is_ipv6_literal(entry: str) -> bool:
     """True when `entry` is an IPv6 address or CIDR. The v4-only pipeline
     skips these (surfaced via the status file's `skipped:` section) instead
-    of feeding them to the DNS cascade as if they were hostnames — which
-    burned the full timeout ladder and landed them in `failed:`."""
+    of feeding them to the DNS cascade as if they were hostnames."""
     try:
         return ipaddress.ip_network(entry, strict=False).version == 6
     except ValueError:
@@ -1002,7 +996,6 @@ def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: lis
             f"Claude Code cannot operate without them; aborting launch."
         )
 
-    # Phase 2 starts now — runs in its own thread, producer side of _phase2_queue.
     global _phase2_thread
     _phase2_thread = threading.Thread(
         target=_phase2_worker, args=(rest_hostnames,),
@@ -1124,8 +1117,8 @@ def start_firewall_updater(container_name: str) -> None:
     `addr[:port]` tokens and applies them to the running container's iptables
     in BATCHES — each burst of queued tokens becomes one `docker exec --user
     root <container> sh -c '<rule> && <rule> && ...'` instead of one exec per
-    rule. At ~50-150ms per docker exec, the old per-rule pace meant the tail
-    of a ~135-domain whitelist landed minutes after launch; batching applies
+    rule. At ~50-150ms per docker exec, per-rule pacing would land the tail
+    of a ~135-domain whitelist minutes after launch; batching applies
     each resolution burst in a handful of execs (see
     benchmark/bench_firewall_updater.py for measured pacing).
 
@@ -1292,7 +1285,7 @@ def _flush_rules(container_name: str, tokens: list[str]) -> None:
     per chunk. `&&`-joined so a mid-chunk failure surfaces as a non-zero
     exit; each failed chunk retries once (duplicate -I inserts from a
     partially-applied first attempt are harmless) then warns and moves on
-    — best-effort, same policy the per-rule updater had. Lazy import of
+    — best-effort. Lazy import of
     docker_exec_root_subprocess breaks the docker_config↔network import
     cycle (see module-top docstring)."""
     from .docker_config import docker_exec_root_subprocess
