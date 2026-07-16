@@ -1,8 +1,9 @@
 """Tests for launch.menu_picker's non-TUI logic: the pure display helpers,
 the Cont-row factory (continuable_instances — sorting, cwd-relation flags,
-modes conversion), and the shared session prompt. The prompt_toolkit
-Application itself (pick_with_preview) is interactive and stays out of unit
-scope."""
+modes conversion), the shared session prompt, and the checkbox form's pure
+parts (option assembly, attached_to ordering, live-warning computation).
+The prompt_toolkit Applications themselves (pick_with_preview,
+checkbox_form) are interactive and stay out of unit scope."""
 
 import tempfile
 import unittest
@@ -11,10 +12,12 @@ from unittest.mock import patch
 
 from launch import menu_picker
 from launch.menu_picker import (
-    _agent_description, _modifier_display, _normalize, _plain,
-    continuable_instances, prompt_session,
+    FormOption, _agent_description, _mode_form_options, _modifier_display,
+    _normalize, _notice_warnings_by_value, _plain, active_warnings,
+    continuable_instances, ordered_form_options, prompt_session,
 )
 from launch.structs import ANSI_TO_PT_STYLE, InstanceModifiers
+from launch.template_code.modifier_prompts import MODIFIER_YN_PROMPTS
 
 
 class TestAgentDescription(unittest.TestCase):
@@ -170,6 +173,98 @@ class TestPromptSession(unittest.TestCase):
 
     def test_rename_to_fresh_name_accepted(self):
         self.assertEqual(self._run(["newname"], existing=["mysess"], current="mysess"), "newname")
+
+
+# ============================================================
+# Checkbox form — pure assembly / ordering / warning logic
+# ============================================================
+
+
+class TestModeFormOptions(unittest.TestCase):
+    """_mode_form_options — the pure assembly behind the mode form: which
+    rows appear (applies_to gating), their order (declaration order), their
+    keys (canonical values), and which arrive pre-checked (current_modes)."""
+
+    def test_tagless_agent_gets_auto_only(self):
+        # DooD / web declare a [code] prerequisite; auto has none.
+        keys = [o.key for o in _mode_form_options(())]
+        self.assertEqual(keys, [InstanceModifiers.MODE_WARN_AUTO.value])
+
+    def test_code_agent_gets_all_modes_in_declaration_order(self):
+        keys = [o.key for o in _mode_form_options((InstanceModifiers.TAG_CODE,))]
+        self.assertEqual(keys, ["auto", "DooD", "web"])
+
+    def test_current_modes_precheck(self):
+        opts = _mode_form_options((InstanceModifiers.TAG_CODE,),
+                                  (InstanceModifiers.MODE_WARN_DOOD,))
+        self.assertEqual({o.key for o in opts if o.checked}, {"DooD"})
+
+    def test_nothing_prechecked_for_new_instance(self):
+        self.assertFalse(any(o.checked for o in _mode_form_options((InstanceModifiers.TAG_CODE,))))
+
+    def test_labels_state_rather_than_ask(self):
+        # The YN-prompt headers are questions; the form drops the trailing '?'.
+        for o in _mode_form_options((InstanceModifiers.TAG_CODE,)):
+            self.assertFalse(_plain(o.label).rstrip().endswith("?"),
+                             f"{o.key} label still reads as a question")
+
+    def test_every_mode_has_prompt_copy(self):
+        # A mode absent from MODIFIER_YN_PROMPTS silently never appears in
+        # the form — guard the pairing, like test_essential_files does for
+        # the _apply_* handlers.
+        self.assertEqual(set(InstanceModifiers.modes()), set(MODIFIER_YN_PROMPTS))
+
+
+class TestOrderedFormOptions(unittest.TestCase):
+    """ordered_form_options — the attached_to proximity layout: attached
+    options tuck directly beneath their anchor; no dependency semantics."""
+
+    @staticmethod
+    def _opt(key: str, attached_to: str | None = None) -> FormOption:
+        return FormOption(key=key, label=key, attached_to=attached_to)
+
+    def test_anchor_order_preserved_without_attachments(self):
+        out = ordered_form_options([self._opt("a"), self._opt("b"), self._opt("c")])
+        self.assertEqual([o.key for o in out], ["a", "b", "c"])
+
+    def test_attached_tucks_directly_after_anchor(self):
+        # The future firewall⇄auto shape: firewall declared last still
+        # renders right beneath auto.
+        out = ordered_form_options([self._opt("auto"), self._opt("dood"),
+                                    self._opt("firewall", attached_to="auto")])
+        self.assertEqual([o.key for o in out], ["auto", "firewall", "dood"])
+
+    def test_multiple_attachments_keep_relative_order(self):
+        out = ordered_form_options([self._opt("auto"),
+                                    self._opt("f1", attached_to="auto"),
+                                    self._opt("f2", attached_to="auto")])
+        self.assertEqual([o.key for o in out], ["auto", "f1", "f2"])
+
+    def test_unknown_anchor_appends_at_end(self):
+        out = ordered_form_options([self._opt("a"), self._opt("x", attached_to="ghost")])
+        self.assertEqual([o.key for o in out], ["a", "x"])
+
+
+class TestActiveWarnings(unittest.TestCase):
+    """active_warnings against the real MODIFIER_NOTICE_PROMPTS copy (re-keyed
+    by value via _notice_warnings_by_value) — the form's live warning zone.
+    Same subset semantics the old post-persist warning gate enforced."""
+
+    def setUp(self):
+        self.warnings = _notice_warnings_by_value()
+
+    def test_auto_plus_dood_fires(self):
+        self.assertEqual(len(active_warnings({"auto", "DooD"}, self.warnings)), 1)
+
+    def test_superset_still_fires(self):
+        self.assertEqual(len(active_warnings({"auto", "DooD", "web"}, self.warnings)), 1)
+
+    def test_singles_dont_fire(self):
+        self.assertEqual(active_warnings({"auto"}, self.warnings), [])
+        self.assertEqual(active_warnings({"DooD"}, self.warnings), [])
+
+    def test_empty_selection_no_warnings(self):
+        self.assertEqual(active_warnings(set(), self.warnings), [])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Tests for launch.agent_modifiers_handler — compose_chain return shape and
-warn_if_dangerous_modes gate.
+handler dispatch. (Mode selection + dangerous-combination warnings live in
+menu_picker's checkbox form — tested in test_menu_picker.)
 
 compose_chain has side effects via _apply_* handlers (filesystem caches,
 DNS resolution, docker GID lookup) — tests patch each handler to verify
@@ -172,35 +173,6 @@ class TestComposeChainValidation(unittest.TestCase):
         # validation block is therefore gone; only tag validation remains.
         with self.assertRaises(ValueError):
             InstanceModifiers("bogus")
-
-
-# ============================================================
-# warn_if_dangerous_modes — no-op unless {auto}+{DooD}
-# ============================================================
-
-
-class TestWarnIfDangerousModes(unittest.TestCase):
-    def test_no_warning_for_empty_modes(self):
-        # No interactive prompt — function returns immediately
-        from launch.agent_modifiers_handler import warn_if_dangerous_modes
-        warn_if_dangerous_modes([])   # would block waiting for keypress if it triggered
-
-    def test_no_warning_for_auto_alone(self):
-        from launch.agent_modifiers_handler import warn_if_dangerous_modes
-        warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO])
-
-    def test_no_warning_for_dood_alone(self):
-        from launch.agent_modifiers_handler import warn_if_dangerous_modes
-        warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_DOOD])
-
-    def test_warning_fires_for_auto_plus_dood(self):
-        # warn_if_dangerous_modes delegates to utils.prompt_keypress for each
-        # matching MODIFIER_NOTICE_PROMPTS entry. We patch prompt_keypress so
-        # we don't depend on tty / termios behaviour and can confirm dispatch.
-        with patch("launch.agent_modifiers_handler.prompt_keypress") as mock_kp:
-            from launch.agent_modifiers_handler import warn_if_dangerous_modes
-            warn_if_dangerous_modes([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD])
-        mock_kp.assert_called_once()
 
 
 if __name__ == "__main__":

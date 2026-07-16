@@ -1,19 +1,22 @@
 """Per-modifier UI copy. Two mappings:
 
-  MODIFIER_YN_PROMPTS    — single-modifier Y/N opt-in prompts (auto / DooD /
-                           web). Keyed by InstanceModifiers member; consumed
-                           by agent_modifiers_handler.prompt_modifier.
+  MODIFIER_YN_PROMPTS    — per-mode opt-in copy (auto / DooD / web): header +
+                           body. Keyed by InstanceModifiers member; consumed
+                           by menu_picker's mode form (_mode_form_options) —
+                           the header becomes the checkbox row's label (sans
+                           the trailing '?'), the body the focused-row
+                           explanation panel.
 
   MODIFIER_NOTICE_PROMPTS — combination warnings. Keyed by a frozenset of
                            modifiers ALL of which must be active; the value's
                            shape mirrors MODIFIER_YN_PROMPTS (header + body).
-                           Consumed by agent_modifiers_handler.warn_if_dangerous_modes,
-                           which prints each matching entry in bright red and
-                           gates on a press-any-key.
+                           Rendered live by the form's warning zone (above
+                           the confirm row, in warning red) while the full
+                           combination is checked.
 
-Pure data, no logic. Adding a new opt-in mode means appending a member to
-InstanceModifiers + a YN entry here. Adding a new dangerous combination
-means appending a NOTICE entry only.
+Pure data, no logic and no styling — consumers apply their own. Adding a
+new opt-in mode means appending a member to InstanceModifiers + a YN entry
+here. Adding a new dangerous combination means appending a NOTICE entry only.
 
 Lives under `launch/template_code/` (alongside memory_addendums.py)
 because it's user-facing copy keyed by modifier — same shape as the
@@ -74,21 +77,16 @@ MODIFIER_YN_PROMPTS: dict[InstanceModifiers, tuple[str, list[str]]] = {
 }
 
 
-# {modifier-combination: (header, body)} — combination warnings fired once
-# the configured set is fully active; rendered by warn_if_dangerous_modes
-# via the generic utils.prompt_keypress. The bright-red ANSI (`\033[1;31m`)
-# is baked into the header and reset (`\033[0m`) at the tail of the last
-# body line, so prompt_keypress itself stays generic and the next prompt
-# (press-any-key) lands on default styling. Adding a new combination is one
-# entry here; no code changes needed.
-_WARN = "\033[1;31m"
-_RESET = "\033[0m"
+# {modifier-combination: (header, body)} — combination warnings shown while
+# the full set is checked in the mode form. Plain text — the form's warning
+# zone applies its own (red) styling. Adding a new combination is one entry
+# here; no code changes needed.
 MODIFIER_NOTICE_PROMPTS: dict[frozenset[InstanceModifiers], tuple[str, list[str]]] = {
     frozenset({InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD}): (
-        f"{_WARN}⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_WARN_AUTO.label} AND {InstanceModifiers.MODE_WARN_DOOD.label} - PROCEED WITH CAUTION,",
+        f"⚠ YOU'VE ENABLED BOTH {InstanceModifiers.MODE_WARN_AUTO.label} AND {InstanceModifiers.MODE_WARN_DOOD.label} - PROCEED WITH CAUTION,",
         [
             "THE AI AGENT HAS THE POWER TO DO ANYTHING ON YOUR COMPUTER,",
-            f"AND DOESN'T REQUIRE PERMISSION!{_RESET}",
+            "AND DOESN'T REQUIRE PERMISSION!",
         ],
     ),
 }

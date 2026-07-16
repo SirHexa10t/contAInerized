@@ -304,21 +304,19 @@ New .json file configuration for agents, like .conf
    
     We could find a name for the .conf file settings; maybe "rank" or "tier" would do. Maybe "power", or "ability". It's mostly about the capacity of abilities, the thinking-power, rather than the permission. The name should reflect upon that, like: "resource-budget". "Investment"?
     () - investment (.conf       - pre-defined scope of abilities) ;  examples:   researcher, thinker, breakthrough, golem
-    [] - tag (compose+Dockerfile - pre-defined access to tools) ;     examples:   code, draw, model, doctor (medical file analysis programs, such as CT-scan handler), ue5 (unreal engine 5 dev), 
-    {} - mode (change in the way things are done) ;     examples:   DooD (docker outside of docker), web (playwright testing), auto (work nonstop without asking for permission)
-    <> - policy (things allowed/disallowed) ;           examples:   web-research (don't ask for permission for web searches), read-only, no-sudo, write-outside-project
+    [] - tag (compose+Dockerfile - pre-defined access to tools) ;     examples:   code, draw, model, doctor (medical file analysis programs, such as CT-scan handler), ue5 (unreal engine 5 dev), web (playwright testing)
+    {} - mode (change in the way things are done) ;     examples:   DooD (docker outside of docker), auto (work nonstop without asking for permission)
+    <> - policy (things allowed/disallowed) ;           examples:   web-research (don't ask for permission for web searches), firewall (only allowed access to certain domains), read-only, no-sudo, write-outside-project
 
     TODO - MOVE: shouldn't 'web' be a tag too? And should 'auto' be a policy? 
 
-    another way to look at it:
-        investment: how hard the agent THINKS
-        tag:        capability: what it CAN do
-        mode:       mode: how it RUNS  ? (this part is the most dubious definition)
-        policy:     policy: what's PERMITTED
+    New naming ideas / another way to look at it:
+        () - engine       ; how hard the agent THINKS
+        [] - profession   ; capability: what tools it can USE
+        {} - specialty    ; mode: exceptional ACCESS/RUNNING capabilities (come with their own special policy)
+        <> - policy       ; policy: what's PERMITTED
 
-    is [code] really only about loading tools? We could rename tag into: 'toolset'. Or 'kit'
-         Instead of "tag", maybe some more descriptive name could be used. Maybe "purpose"? 'toolset'? 'kit'?
-    I'm just getting convinced that kit (old: "tag") should be modifiable too, just set with a default like policy 
+    I'm just getting convinced that [] (old: "tag") should be modifiable too, just set with a default like policy 
     We could start calling all of the above "tags", if "tag" gets freed as a term.
 
 

@@ -20,12 +20,22 @@ Public API:
       -> session suffix string
 
   prompt_modes(tags, current_modes=())
-      Run all applicable mode prompts in InstanceModifiers.modes() priority
-      order (auto; DooD / web only for [code] agents); pre-fills defaults from
-      the existing modes list. Header / body copy per modifier lives in
+      Full-screen checkbox form over every applicable mode (auto; DooD / web
+      only for [code] agents) in InstanceModifiers.modes() priority order;
+      pre-checks boxes from the existing modes list. Dangerous-combination
+      warnings (MODIFIER_NOTICE_PROMPTS) render live above the confirm row
+      as boxes are toggled. Header / body copy per modifier lives in
       template_code/modifier_prompts.py. Used by run.py (new instances) and
       select_agent's modify flow.
-      -> list[InstanceModifiers] of newly-selected modes
+      -> list[InstanceModifiers] of selected modes | None on cancel (Esc)
+
+  checkbox_form(title, options, warnings=None)
+      Generic full-screen multi-select form primitive behind prompt_modes.
+      ↑↓ cycles rows (options + the confirm button), Space toggles, Enter
+      confirms, Esc cancels. An option can render attached beneath an anchor
+      option (`attached_to`) with a connector line — visual proximity for
+      related options; no dependency logic.
+      -> list of checked option keys in display order | None on cancel
 
   pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
       Generic full-screen picker primitive used by select_agent.
@@ -78,7 +88,6 @@ from rich.console import Console                                           # dep
 from rich.markdown import Markdown
 from rich.theme import Theme
 
-from .agent_modifiers_handler import prompt_for_modes
 from .agents_crud import (
     agent_sort_key, creatable_agents, delete_instance,
     list_all_instances, mode_sort_key, modify_instance,
@@ -95,6 +104,7 @@ from .paths import (
 from .structs import (
     ANSI_TO_PT_STYLE, AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP,
 )
+from .template_code.modifier_prompts import MODIFIER_NOTICE_PROMPTS, MODIFIER_YN_PROMPTS
 from .utils import plural, relative_time
 
 
@@ -112,6 +122,14 @@ EMPTY_FILTER_MESSAGE = "(no matches)"
 DIVIDER_CHAR         = "│"
 CONFIRM_PROMPT_FMT   = "{message}  [y/N]: "
 CONFIRM_YES_ANSWERS  = ("y", "yes")
+
+# Checkbox form (see checkbox_form below)
+FORM_HINT_TEXT      = "↑↓ navigate  •  Space toggle  •  Enter confirm  •  Esc cancel"
+FORM_CONFIRM_LABEL  = "[ Confirm ]"
+CHECKBOX_ON         = "[x] "
+CHECKBOX_OFF        = "[ ] "
+ATTACHED_CONNECTOR  = "  └─ "        # prefix for options rendered attached beneath their anchor
+TITLE_MODES_FORM    = "Configure instance modes  (Space to toggle):"
 
 # ============================================================
 # Layout
@@ -183,6 +201,7 @@ class PickerClass(Enum):
     CURSOR   = ("picker-cursor",   "reverse")
     PREVIEW  = ("picker-preview",  "")
     NO_MATCH = ("picker-no-match", "italic fg:ansibrightblack")
+    WARNING  = ("picker-warning",  "bold fg:ansibrightred")
 
     def __init__(self, cls_name: str, style: str) -> None:
         self.cls_name = cls_name
@@ -469,6 +488,212 @@ def _plain(display: str | Iterable[tuple[str, str]]) -> str:
     return "".join(text for _, text in _normalize(display))
 
 
+# ============================================================
+# Checkbox form (multi-select) — generic primitive behind prompt_modes
+# ============================================================
+
+@dataclass
+class FormOption:
+    """One checkbox row in `checkbox_form`. `key` is the canonical string the
+    form returns when the box is checked (a modifier `.value` for the modes
+    form); `label` is the row's display (plain string or (style, text)
+    fragments); `body` is the focused-row explanation shown under the list.
+    `attached_to` names another option's key this row renders directly
+    beneath, with a connector line — visual proximity for related options
+    (e.g. a future standalone `firewall` beneath `auto`). Purely layout:
+    no dependency logic — the user can check either, neither, or both."""
+    key: str
+    label: str | list[tuple[str, str]]
+    body: list[str] = field(default_factory=list)
+    checked: bool = False
+    attached_to: str | None = None
+
+
+def ordered_form_options(options: list[FormOption]) -> list[FormOption]:
+    """Display order for form rows: anchor options keep their given order;
+    each attached option is re-inserted directly after its anchor (several
+    attachments to one anchor keep their given relative order). Options
+    attached to an unknown key are appended at the end unattached-style —
+    better a detached row than a vanished one."""
+    anchors = [o for o in options if o.attached_to is None]
+    known = {o.key for o in anchors}
+    out: list[FormOption] = []
+    for anchor in anchors:
+        out.append(anchor)
+        out.extend(o for o in options if o.attached_to == anchor.key)
+    out.extend(o for o in options if o.attached_to is not None and o.attached_to not in known)
+    return out
+
+
+def active_warnings(checked: set[str],
+                    warnings: dict[frozenset[str], tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:
+    """The (header, body) warning entries whose key-combination is fully
+    covered by the checked set. The form's warning zone recomputes this on
+    every toggle, so dangerous combinations surface the moment the last box
+    of the combo is ticked — and disappear when it's unticked."""
+    return [entry for combo, entry in warnings.items() if combo <= checked]
+
+
+def checkbox_form(title: str, options: list[FormOption],
+                  warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None) -> list[str] | None:
+    """Render a full-screen multi-select form; block until confirm or cancel.
+
+    ↑↓ cycle through the rows (options first, then the [ Confirm ] button,
+    wrapping around); Space toggles the focused checkbox (or confirms, on
+    the button); Enter confirms from anywhere; Esc / Ctrl-C cancels. The
+    focused option's `body` renders in an explanation panel under the list;
+    `warnings` entries whose combination is fully checked render live, in
+    warning red, directly above the confirm button.
+
+    Returns the checked options' keys in display order, or None on cancel."""
+    if not options:
+        raise ValueError("options must be non-empty")
+    rows = ordered_form_options(options)
+    warning_map = warnings or {}
+    confirm_index = len(rows)              # the confirm button is the last navigable row
+    row_count = len(rows) + 1
+    state: dict[str, Any] = {"cursor": 0, "confirmed": False}
+
+    def checked_keys() -> set[str]:
+        return {o.key for o in rows if o.checked}
+
+    def option_fragments() -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for i, opt in enumerate(rows):
+            frags: list[tuple[str, str]] = []
+            if opt.attached_to is not None:
+                frags.append((PickerClass.STATUS.css, ATTACHED_CONNECTOR))
+            frags.append(("", CHECKBOX_ON if opt.checked else CHECKBOX_OFF))
+            frags.extend(_normalize(opt.label))
+            if i == state["cursor"]:
+                frags = [(f"{PickerClass.CURSOR.css} {style}".strip(), text)
+                         for style, text in frags]
+            out.extend(frags)
+            out.append(("", "\n"))
+        if out:
+            out.pop()   # trailing newline
+        return out
+
+    def body_fragments() -> list[tuple[str, str]]:
+        if state["cursor"] >= confirm_index:
+            return []
+        lines = rows[state["cursor"]].body
+        return [("", "\n".join(f"  {line}" if line else "" for line in lines))]
+
+    def warning_fragments() -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for header, body in active_warnings(checked_keys(), warning_map):
+            out.append((PickerClass.WARNING.css, f"  {header}\n"))
+            out.extend((PickerClass.WARNING.css, f"  {line}\n") for line in body)
+        if out:
+            out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
+        return out
+
+    def confirm_fragments() -> list[tuple[str, str]]:
+        style = PickerClass.CURSOR.css if state["cursor"] == confirm_index else PickerClass.TITLE.css
+        return [("", "  "), (style, FORM_CONFIRM_LABEL)]
+
+    def title_fragments() -> list[tuple[str, str]]:
+        return [(PickerClass.TITLE.css, title)]
+
+    def hint_fragments() -> list[tuple[str, str]]:
+        return [(PickerClass.STATUS.css, FORM_HINT_TEXT)]
+
+    def cursor_pos() -> Point:
+        return Point(0, min(state["cursor"], len(rows) - 1))
+
+    def move(delta: int) -> None:
+        state["cursor"] = (state["cursor"] + delta) % row_count
+
+    def confirm(event: KeyPressEvent) -> None:
+        state["confirmed"] = True
+        event.app.exit()
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _(event: KeyPressEvent) -> None: move(-1)
+
+    @kb.add("down")
+    def _(event: KeyPressEvent) -> None: move(1)
+
+    @kb.add(" ")
+    def _(event: KeyPressEvent) -> None:
+        if state["cursor"] == confirm_index:
+            confirm(event)
+        else:
+            opt = rows[state["cursor"]]
+            opt.checked = not opt.checked
+
+    @kb.add("enter")
+    def _(event: KeyPressEvent) -> None: confirm(event)
+
+    @kb.add("escape")
+    def _(event: KeyPressEvent) -> None: event.app.exit()
+
+    @kb.add("c-c")
+    def _(event: KeyPressEvent) -> None: event.app.exit()
+
+    body_layout = HSplit([
+        Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
+        Window(height=1, char=" "),
+        Window(FormattedTextControl(option_fragments,
+                                    get_cursor_position=cursor_pos,
+                                    focusable=True,
+                                    show_cursor=False),
+               wrap_lines=False, dont_extend_height=True),
+        Window(height=1, char=" "),
+        Window(FormattedTextControl(body_fragments), wrap_lines=True),   # flexible filler — focused option's explanation
+        Window(FormattedTextControl(warning_fragments), wrap_lines=True, dont_extend_height=True),
+        Window(height=1, char=" "),
+        Window(FormattedTextControl(confirm_fragments), height=1),
+        Window(FormattedTextControl(hint_fragments), height=STATUS_HEIGHT),
+    ])
+
+    Application(
+        layout=Layout(body_layout),
+        key_bindings=kb,
+        style=Style.from_dict(STYLE_DICT),
+        full_screen=True,
+    ).run()
+
+    if not state["confirmed"]:
+        return None
+    return [o.key for o in rows if o.checked]
+
+
+def _mode_form_options(tags: tuple[InstanceModifiers, ...],
+                       current_modes: tuple[InstanceModifiers, ...] = ()) -> list[FormOption]:
+    """FormOption rows for every mode applicable to an agent with `tags`, in
+    InstanceModifiers declaration order (`applies_to` gates DooD / web to
+    [code] agents), pre-checked from `current_modes`. Row label = the mode's
+    warning-aware colored label + its prompt header with the trailing '?'
+    dropped (the form states options; it doesn't ask questions). Keys are
+    the canonical `.value` strings."""
+    active = set(current_modes)
+    tag_set = set(tags)
+    out: list[FormOption] = []
+    for mode in InstanceModifiers.in_order(MODIFIER_YN_PROMPTS):
+        if not mode.applies_to(tag_set):
+            continue
+        header, body = MODIFIER_YN_PROMPTS[mode]
+        label_frags, _ = _modifier_display([mode])   # colored label + built-in trailing space
+        out.append(FormOption(
+            key=mode.value,
+            label=[*label_frags, ("", header.rstrip("?"))],
+            body=body,
+            checked=mode in active,
+        ))
+    return out
+
+
+def _notice_warnings_by_value() -> dict[frozenset[str], tuple[str, list[str]]]:
+    """MODIFIER_NOTICE_PROMPTS re-keyed by modifier `.value` strings — the
+    key shape checkbox_form's warning zone matches against checked keys."""
+    return {frozenset(m.value for m in combo): entry
+            for combo, entry in MODIFIER_NOTICE_PROMPTS.items()}
+
+
 def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
     """Render a full-screen picker; block until the user picks or cancels.
 
@@ -738,13 +963,19 @@ def prompt_session(agent: str, workspace: str, current: str | None = None) -> st
         return suffix
 
 
-def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[InstanceModifiers, ...] = ()) -> list[InstanceModifiers]:
-    """Thin wrapper over `agent_modifiers_handler.prompt_for_modes` — the actual
-    dispatch logic (priority order + per-mode applicability gates + header /
-    body lookup) lives in agent_modifiers_handler. This wrapper preserves the
-    `from launch.menu_picker import prompt_modes` public-API shape that
-    run.py and select_agent's modify flow rely on."""
-    return prompt_for_modes(tags, current_modes)
+def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[InstanceModifiers, ...] = ()) -> list[InstanceModifiers] | None:
+    """Full-screen mode-selection form: one checkbox per applicable mode
+    (assembled by `_mode_form_options` — declaration order, applies_to
+    gating, defaults from `current_modes`), with dangerous-combination
+    warnings rendered live above the confirm button while the combination
+    is checked. Returns the selected modes in declaration order, or None
+    when the user cancels (Esc) — callers abort their create / modify flow
+    on None rather than persisting anything."""
+    options = _mode_form_options(tags, current_modes)
+    keys = checkbox_form(TITLE_MODES_FORM, options, warnings=_notice_warnings_by_value())
+    if keys is None:
+        return None
+    return [InstanceModifiers.from_value(k) for k in keys]
 
 
 def select_agent() -> AgentIdentity | InstanceIdentity | None:
@@ -845,6 +1076,8 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
             new_workspace = ask_for_workspace(old_inst_id.agent, default=old_inst_id.workspace)
             new_session = prompt_session(old_inst_id.agent, new_workspace, current=old_inst_id.session)
             new_modes = prompt_modes(old_inst_id.tags, old_inst_id.modes)
+            if new_modes is None:   # Esc on the mode form — abort the modify, back to the picker
+                continue
             new_inst_id = dataclasses.replace(
                 old_inst_id, session=new_session, workspace=new_workspace, modes=tuple(new_modes)
             )  # is_brand_new stays False via the dataclass replace

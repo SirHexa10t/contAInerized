@@ -120,7 +120,9 @@ def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity
     and pass it through (re-prompting if the map entry was missing). For new,
     `picked` is an AgentIdentity — prompt workspace + session + modes here so
     the returned InstanceIdentity is fully resolved before downstream stages
-    run. is_brand_new=True is stamped on at the same time."""
+    run. is_brand_new=True is stamped on at the same time. Esc on the mode
+    form cancels the whole launch (clean exit — nothing has been persisted
+    at that point)."""
     if isinstance(picked, InstanceIdentity):       # cont — workspace + session + modes + is_brand_new already set
         picked.validate_workspace()
         if not picked.workspace:                   # stale / missing map entry (None or "") — re-prompt
@@ -130,6 +132,8 @@ def resolve_target(picked: AgentIdentity | InstanceIdentity) -> InstanceIdentity
     workspace = ask_for_workspace(picked.agent)
     session = prompt_session(picked.agent, workspace)
     modes = prompt_modes(picked.tags, current_modes=())
+    if modes is None:
+        sys.exit(0)
     return InstanceIdentity(agent=picked.agent, session=session, workspace=workspace,
                             is_brand_new=True, modes=tuple(modes))
 
@@ -199,7 +203,7 @@ def launch() -> None:
     resume_flag = compute_resume_flag(inst_id)
     update_workspace_map(inst_id)
     if inst_id.is_brand_new:
-        set_instance_modes(inst_id)   # warns inside if both auto+DooD are set
+        set_instance_modes(inst_id)
     chain = call_or_exit(compose_chain, inst_id, exceptions=(ValueError, RuntimeError))
     conf, cred_names = setup_state(inst_id, refresh_installs=opts.refresh_installs)
     print_launch_banner(inst_id, cred_names)

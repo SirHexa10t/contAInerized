@@ -161,26 +161,13 @@ def _print_header_and_body(header: str, body: list[str]) -> None:
     """Render a multi-line prompt's preamble: leading blank, the header
     indented two spaces, each body line indented two spaces (empty body
     lines render as blank lines for visual separation), trailing blank.
-    Shared by prompt_yn / prompt_keypress so their visual cadence stays
-    identical regardless of the actual input gate that follows."""
+    Used by prompt_keypress; kept separate so future gates share the
+    same visual cadence."""
     print()
     print(f"  {header}")
     for line in body:
         print(f"  {line}" if line else "")
     print()
-
-
-def prompt_yn(header: str, body: list[str], prompt_label: str, default: bool = False) -> bool:
-    """Generic multi-line Y/N prompt. `header` is the question line, `body` is a
-    list of explanation/caveat lines (empty strings render as blank lines for
-    visual separation), and `prompt_label` is what shows in the actual y/N input
-    (e.g. '{auto}'). Returns bool; Enter alone uses `default`."""
-    _print_header_and_body(header, body)
-    default_marker = "Y/n" if default else "y/N"
-    answer = input(f"  Enable {prompt_label}? [{default_marker}]: ").strip().lower()
-    if not answer:
-        return default
-    return answer in ("y", "yes")
 
 
 def prompt_keypress(header: str, body: list[str]) -> None:

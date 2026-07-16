@@ -4,9 +4,9 @@ agent state, plus the factories that turn raw on-disk state into the identity
 
 Roughly grouped by section in this file:
   - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
-  - update_workspace_map / set_instance_modes — single-entry writers (both
-    persistence paths route the {auto}+{DooD} warning through
-    agent_modifiers_handler.warn_if_dangerous_modes after writing)
+  - update_workspace_map / set_instance_modes — single-entry writers
+    (dangerous-combination warnings surface live in the mode form at
+    selection time — menu_picker.prompt_modes — not here at persist time)
   - install_latest_md / delete_instance / modify_instance — per-instance
     state-dir writers (install_latest_md composes the active-chain addendum
     section onto the source `.md` body and writes the result as CLAUDE.md
@@ -33,7 +33,6 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from .agent_modifiers_handler import warn_if_dangerous_modes
 from .file_access import (
     agent_md_index, force_remove, is_dir, iter_subdirs, load_conf,
     load_modes_map, load_workspace_map, move_path, path_exists, read_text,
@@ -84,14 +83,10 @@ def set_instance_modes(inst_id: InstanceIdentity) -> None:
     """Persist the modes list for an instance, taken off the passed InstanceIdentity
     (which carries both the instance key and its resolved modes). An empty modes
     tuple removes the entry from the map (we don't store empty entries — keeps the
-    file small and the 'no modes' case explicit by absence). Routes through
-    agent_modifiers_handler.warn_if_dangerous_modes for the {auto}+{DooD} warning —
-    the dangerous-combination judgement lives with modifier semantics, this
-    writer just persists state and triggers the post-write check."""
+    file small and the 'no modes' case explicit by absence)."""
     m = load_modes_map()
     _write_modes_entry(m, inst_id)
     save_modes_map(m)
-    warn_if_dangerous_modes(inst_id.modes)
 
 
 # ============================================================
@@ -155,14 +150,12 @@ def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity
     workspace_map[new_inst_id.instance] = new_inst_id.workspace
     save_workspace_map(workspace_map)
     # modes map — single load/save (mirrors set_instance_modes' shape via the
-    # shared helpers so a rename costs one file write instead of two), plus the
-    # same {auto}+{DooD} warning at the end so both persistence paths surface it.
+    # shared helpers so a rename costs one file write instead of two).
     modes_map = load_modes_map()
     if renaming:
         modes_map.pop(old_inst_id.instance, None)
     _write_modes_entry(modes_map, new_inst_id)
     save_modes_map(modes_map)
-    warn_if_dangerous_modes(new_inst_id.modes)
 
 
 # ============================================================

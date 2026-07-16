@@ -174,9 +174,9 @@ class InstanceModifiers(Enum):
 
     def applies_to(self, tags: set["InstanceModifiers"]) -> bool:
         """True iff this modifier's prerequisites (if any) are all present in
-        `tags`. Modifiers with no prereqs always return True. Used by
-        `prompt_for_modes` to gate per-mode prompts on the agent's tag set —
-        {DooD} and {web} only apply to [code] agents."""
+        `tags`. Modifiers with no prereqs always return True. Used by the
+        mode form (menu_picker._mode_form_options) to gate per-mode rows on
+        the agent's tag set — {DooD} and {web} only apply to [code] agents."""
         return InstanceModifiers._prerequisites().get(self, frozenset()) <= tags
 
     @classmethod

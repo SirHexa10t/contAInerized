@@ -1,28 +1,23 @@
 """Agent modifier handling: computes the docker build chain (InstanceModifiers
 in declaration order — BASE always, then user-active tags/modes) and runs each
 active modifier's handler contributions (volume mounts + compose env staging)
-in a single pass via compose_chain. Also owns:
-  - the dangerous-combination warning (warn_if_dangerous_modes) that agents_crud's
-    writers call after persisting a new mode set;
-  - the modifier-prompting dispatch (prompt_for_modes + prompt_modifier) — header
-    / body copy lives in template_code/modifier_prompts.py; this module owns the
-    "which modes to ask, with what applicability gating" logic.
+in a single pass via compose_chain.
 
-The modifier taxonomy itself (InstanceModifiers + tags() / modes() views +
-descriptions) lives in structs.py — both this module and agents_crud consume it
-from there. Sort keys for the picker (agent/mode/tag sort) live in agents_crud —
-they're picker-side concerns and don't belong in the modifier-handling layer.
+Mode *selection* UI lives in menu_picker (prompt_modes' checkbox form, fed by
+template_code/modifier_prompts.py copy — including the dangerous-combination
+warnings rendered live in the form). The modifier taxonomy itself
+(InstanceModifiers + tags() / modes() views + descriptions) lives in structs.py.
+Sort keys for the picker (agent/mode/tag sort) live in agents_crud — they're
+picker-side concerns and don't belong in the modifier-handling layer.
 
 Imports path constants from paths, the file_access primitives needed by
 prune_caches / prepare_caches (ensure_dir, iter_file_stats, path_exists,
 remove_path), env-/mount-staging helpers + docker subprocess wrappers from
-docker_config, the {auto}-mode firewall entry points from network, the
-InstanceModifiers taxonomy from structs, prompt copy from template_code, and
-prompt_yn from utils; agents_crud, menu_picker, and run.py import from here.
+docker_config, the {auto}-mode firewall entry points from network, and the
+InstanceModifiers taxonomy from structs; run.py imports compose_chain from here.
 """
 
 import time
-from collections.abc import Collection, Iterable
 
 from .compose_env import ComposeEnvKey, stage_compose_env
 from .docker_config import (
@@ -36,8 +31,6 @@ from .paths import (
     CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
 )
 from .structs import InstanceIdentity, InstanceModifiers
-from .template_code.modifier_prompts import MODIFIER_NOTICE_PROMPTS, MODIFIER_YN_PROMPTS
-from .utils import prompt_keypress, prompt_yn
 
 # === Modifier taxonomy + chain-composition ordering ===
 # The InstanceModifiers enum (in structs.py) is the canonical ordered taxonomy
@@ -158,63 +151,6 @@ def _apply_auto(inst_id: InstanceIdentity) -> None:
     start_whitelist_resolution(inst_id.state_dir)
     for source, target in DOCKER_AUTO_MOUNTS.items():
         add_docker_mount(source, target)
-
-
-# === Dangerous-combination warning ===
-# Lives here because this module owns modifier-combination semantics: which
-# modes mean what, how they compose, and which combinations need user-visible
-# guardrails. agents_crud calls warn_if_dangerous_modes after persisting a
-# fresh mode set (set_instance_modes / modify_instance) — agents_crud just
-# writes state; the "is this combination dangerous?" judgement is here.
-
-def warn_if_dangerous_modes(modes: Iterable[InstanceModifiers]) -> None:
-    """For each `MODIFIER_NOTICE_PROMPTS` entry whose combination is a subset
-    of `modes`, fire `prompt_keypress` with its (header, body). One warning +
-    press-any-key per matching combo — same dispatch shape as
-    `prompt_for_modes` does for `MODIFIER_YN_PROMPTS` via `prompt_modifier`.
-    No-op when no dangerous combo is present, so callers can fire this
-    unconditionally after any mode-set write."""
-    active = set(modes)
-    for combo, (header, body) in MODIFIER_NOTICE_PROMPTS.items():
-        if combo <= active:
-            prompt_keypress(header=header, body=body)
-
-
-# === Mode-prompt dispatch ===
-# The "which modes to ask, with what applicability gating" logic — header /
-# body copy per modifier lives in template_code/modifier_prompts.py. The
-# picker exposes prompt_for_modes via a thin menu_picker.prompt_modes wrapper
-# so run.py / select_agent's modify flow can call it without importing this
-# module directly.
-
-def prompt_modifier(modifier: InstanceModifiers, current_modifiers: Collection[str]) -> bool:
-    """Y/N prompt for opting into `modifier`. Header + body copy looked up in
-    `MODIFIER_YN_PROMPTS`; prompt label comes from the modifier's `.label`.
-    `current_modifiers` is an iterable of canonical-string modifier names
-    (tags + currently-active modes) used to pre-fill the Y/N default (True
-    iff `modifier.value` is in there)."""
-    header, body = MODIFIER_YN_PROMPTS[modifier]
-    return prompt_yn(
-        header=header,
-        body=body,
-        prompt_label=modifier.label,
-        default=modifier.value in current_modifiers,
-    )
-
-
-def prompt_for_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[InstanceModifiers, ...] = ()) -> list[InstanceModifiers]:
-    """Prompt for each mode whose prerequisites are satisfied by the agent's
-    `tags`, in InstanceModifiers declaration order. `current_modes` pre-fills
-    the Y/N defaults — empty for new instances. Returns the newly-selected
-    modes in declaration order. Exposed to callers via the
-    menu_picker.prompt_modes wrapper."""
-    current_modifiers = [m.value for m in (*tags, *current_modes)]
-    tag_set = set(tags)
-    new_modes: list[InstanceModifiers] = []
-    for mode in InstanceModifiers.in_order(MODIFIER_YN_PROMPTS):
-        if mode.applies_to(tag_set) and prompt_modifier(mode, current_modifiers):
-            new_modes.append(mode)
-    return new_modes
 
 
 # === Chain composition: the build/run image is layered base → modifiers in InstanceModifiers declaration order. ===
