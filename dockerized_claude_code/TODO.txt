@@ -313,7 +313,7 @@ New .json file configuration for agents, like .conf
     New naming ideas / another way to look at it:
         () - engine       ; how hard the agent THINKS
         [] - profession   ; capability: what tools it can USE
-        {} - specialty    ; mode: exceptional ACCESS/RUNNING capabilities (come with their own special policy)
+        {} - specialty    ; mode: exceptional ACCESS/RUNNING conditions (come with their own special policy)
         <> - policy       ; policy: what's PERMITTED
 
     I'm just getting convinced that [] (old: "tag") should be modifiable too, just set with a default like policy 

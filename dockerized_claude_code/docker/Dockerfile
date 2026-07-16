@@ -4,8 +4,12 @@
 #
 # Programming-oriented agents (filename includes [code]) layer the heavier build
 # environment on top via docker/Dockerfile.code (which does `FROM claude-agents:base`).
+#
+# trixie (Debian 13) ships python3.13 — the tags-rewrite code requires ≥3.12
+# in-container, because the dev loop runs the launcher's test suite inside
+# agent containers.
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
