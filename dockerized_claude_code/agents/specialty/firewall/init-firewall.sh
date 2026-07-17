@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# init-firewall.sh — iptables-based outbound whitelist for the {auto} mode.
+# init-firewall.sh — iptables-based outbound whitelist for the {firewall} specialty.
 #
 # All DNS resolution happens on the host, in launch/network.py:
 # resolved_whitelist_domains(). The pre-resolved entries arrive here as a
@@ -7,10 +7,10 @@
 # or `<cidr>[:port]`, ready for iptables -A directly. This script just writes
 # rules: no DNS, no parallelism, no timeouts to babysit.
 #
-# Invoked by docker/auto-entrypoint.sh on container start (via sudo). The
-# sudoers entry installed by Dockerfile.auto restricts claude to ONLY this
-# command, and `Defaults env_keep += "WHITELIST_ADDRESSES"` preserves the env
-# var across the privilege boundary.
+# Invoked by firewall-entrypoint.sh (this tag dir; bind-mounted alongside)
+# on container start, via sudo. The sudoers entry baked into the base image
+# restricts claude to ONLY this command, and `Defaults env_keep +=
+# "WHITELIST_ADDRESSES"` preserves the env var across the privilege boundary.
 #
 # Re-run protection: a marker in /var/run blocks any second invocation, so an
 # attacker can't set their own WHITELIST_ADDRESSES and reapply a permissive
@@ -18,9 +18,9 @@
 # root-owned; the marker is created here (running as root via sudo) and the
 # claude user can't remove it.
 #
-# Image requirements (handled by docker/Dockerfile.auto):
-#   - iptables installed
-#   - container started with CAP_NET_ADMIN (added by docker/compose.auto.yml)
+# Requirements:
+#   - iptables installed (base image)
+#   - container started with CAP_NET_ADMIN (this specialty's tag.docker)
 
 set -euo pipefail
 

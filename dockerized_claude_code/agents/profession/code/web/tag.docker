@@ -1,0 +1,3 @@
+# [web] build mechanics: the weekly cache-buster gating the playwright install.
+[build]
+arg_forward = ["SOFTWARE_STACK_REFRESH"]

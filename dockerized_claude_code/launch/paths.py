@@ -2,7 +2,7 @@
 knows about. Host-side state files and dirs, project layout, container-side
 bind-mount targets, defaults for workspace selection (including the host-shell
 $AI_WORKSPACE override read at startup), and the bind-mount source paths the
-docker compose YAMLs consume via ${...} substitutions.
+docker build/run flags consume at emission time.
 
 True leaf: imports nothing in-project. Pure constants + path-builder lambdas,
 plus a couple of host-environment reads (`$AI_WORKSPACE`, `os.getcwd()`)
@@ -21,7 +21,7 @@ from typing import Callable, Iterator
 # DOCKERIZED_CLAUDE_ROOT anchors every host-side path the launcher knows about.
 # It's the *only* place that uses `.parent` to locate the repo root — every
 # other in-repo path (agents/, docker/, memory/, etc.) hangs off this constant,
-# so a file relocation only needs the traversal count updated here. The compose
+# so a file relocation only needs the traversal count updated here. The docker
 # YAMLs reach this via the ${DOCKERIZED_CLAUDE_ROOT} env-var substitution staged
 # by docker_config.set_container_env.
 
@@ -30,10 +30,10 @@ AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / 
 ENGINE_DIR = AGENTS_DIR / "engine"                                # engine tags — engine/<name>/{tag.info, engine.conf}
 DEFAULT_CONF = ENGINE_DIR / "default" / "engine.conf"             # fallback engine conf when an agent names none
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
+BASE_SETTINGS_FILE = SETTINGS_DIR / "settings.json"                # shared Claude Code settings base — merged with each instance's policy fragments into <state>/settings.json (agents_crud.install_settings); NOT mounted directly
 TEMPLATE_FILES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
 OPTIONAL_CREDS_README_TEMPLATE = TEMPLATE_FILES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
 FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
-DOCKER_DIR = DOCKERIZED_CLAUDE_ROOT / "docker"                    # Dockerfile + compose.yml + per-layer Dockerfile.<x> / compose.<x>.yml
 
 
 # ============================================================
@@ -47,12 +47,10 @@ _HOME = Path.home()
 AGENTS_STATE = _HOME / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"                       # shared OAuth account info
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"             # shared API credentials
-AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"   # legacy (pre-tags) — migrated into instances.json on first launch
-AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # legacy (pre-tags) — {instance_id: [mode, ...]}; migrated into instances.json
-INSTANCES_FILE = AGENTS_STATE / "instances.json"                 # per-instance axis store (tags edition) — folds the two legacy maps: {instance_id: {workspace, engine, professions[], specialties[], policies[]}}
+INSTANCES_FILE = AGENTS_STATE / "instances.toml"                 # per-instance axis store — one table per instance id: {workspace, engine, professions[], specialties[], policies[]} (tags/store.py; retired-format conversions live in tags/migrations.py)
 CACHE_ROOT = AGENTS_STATE / "cache"
 
-# {auto}-mode firewall: cross-launch DNS cache. While fresh (the TTL gate
+# {firewall} cross-launch DNS cache. While fresh (the TTL gate
 # lives with the cache logic in network.py), a host's cached IPs are unioned
 # into its fresh resolution and rescue an outright DNS failure — never a
 # substitute for the live lookup. Rewritten with each launch's fresh answers.
@@ -60,7 +58,7 @@ CACHE_ROOT = AGENTS_STATE / "cache"
 # state_domain_resolve_status_path further down.
 RESOLVED_DOMAINS_CACHE_FILE = AGENTS_STATE / "resolved_domains.txt"
 
-# {auto}-mode firewall: cached CDN-provider IPv4 ranges, one file per provider
+# {firewall} cached CDN-provider IPv4 ranges, one file per provider
 # (per-file mtime = per-provider freshness; the builder lambda lives in the
 # Path-builders section below). network.py fetches each provider's published
 # range list when its cache goes stale and falls back to a stale file when
@@ -101,7 +99,7 @@ DEFAULTING_DIRS = [
 
 # Workspace to suggest when prompting for a new instance. Primary choice is
 # $AI_WORKSPACE (user's host-shell preference; same env-key the launcher writes
-# to compose per launch but opposite direction) or — when launching from a
+# to the container per launch but opposite direction) or — when launching from a
 # DEFAULTING_DIR like $HOME — the /ai_workspace shared sandbox so the launcher
 # never silently bind-mounts something like the user's whole home dir.
 DEFAULT_WORKSPACE = (
@@ -136,45 +134,21 @@ SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
 WORKSPACE_IN_CONTAINER = Path("/workspace")                        # bind-mount target for the picked workspace — the project dir every agent sees
 CLAUDE_SUMMARY_IN_CONTAINER = WORKSPACE_IN_CONTAINER / ".claude_summary"   # project summary file the agent reads on demand (lives at the workspace mount root)
 BASHRC_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".bashrc"         # bind-mount target for settings/bashrc.sh; also the value BASH_ENV points at so non-interactive bash sources it
-INSTALL_FAILURES_LOG_IN_CONTAINER = Path("/var/log/claude-agents/install_failures.log")   # claude-owned log file each INSTALL_<TOOL> RUN in Dockerfile.code appends to on failure; docker_config.prompt_install_failures reads it post-build. Mirror of the literal path used by every Dockerfile.code install block — keep in sync (no compose-arg threading yet)
+INSTALL_FAILURES_LOG_IN_CONTAINER = Path("/var/log/claude-agents/install_failures.log")   # claude-owned log file each INSTALL_<TOOL> RUN in Dockerfile.code appends to on failure; docker_config.prompt_install_failures reads it post-build. Mirror of the literal path used by every Dockerfile.code install block — keep in sync (no build-arg threading yet)
 RO_MOUNT_OPTION = "ro"
 
 
 # ============================================================
-# {auto}-mode bind-mounts
+# {firewall} container landmarks
 # ============================================================
-# Mounts staged when {auto} is in the chain — bind-mount the firewall init
-# script + entrypoint wrapper into well-known paths inside the container.
-# agent_modifiers_handler._apply_auto iterates DOCKER_AUTO_MOUNTS via add_docker_mount;
-# gated by the handler being called, not by a YAML overlay. Mirror of the
-# DOCKER_BASE_MOUNTS pattern below, scoped to the {auto} chain step.
-#
-# Walrus bindings on the keys publish `INIT_FIREWALL_SH` and `AUTO_ENTRYPOINT_SH`
-# as module attributes without a separate top-level statement, so the dict
-# stays the single declaration site while the names remain importable for any
-# future external use (currently none).
+# The firewall specialty's scripts (init-firewall.sh + firewall-entrypoint.sh)
+# live in its tag dir (agents/specialty/firewall/) and are bind-mounted by
+# its tag.docker — no mount dict here anymore. What remains are the
+# container-side landmarks the launcher must agree on with those scripts.
 
-LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # container target dir for the {auto} scripts
-FIREWALL_DONE_IN_CONTAINER = Path("/var/run/init-firewall.done")   # marker init-firewall.sh touches after its rules + self-test succeed; docker_config.wait_for_firewall_applied polls it so the phase-2 updater never injects rules into a half-built firewall. Mirror of the literal in docker/init-firewall.sh — test_docker_config guards the sync
-
-DOCKER_AUTO_MOUNTS = {
-    (INIT_FIREWALL_SH   := DOCKER_DIR / "init-firewall.sh"):   f"{LOCAL_BIN_IN_CONTAINER}/init-firewall.sh:{RO_MOUNT_OPTION}",
-    (AUTO_ENTRYPOINT_SH := DOCKER_DIR / "auto-entrypoint.sh"): f"{LOCAL_BIN_IN_CONTAINER}/auto-entrypoint.sh:{RO_MOUNT_OPTION}",
-}
-
-
-# ============================================================
-# {DooD}-mode bind-mounts
-# ============================================================
-# Bind-mount the host's Docker socket into the container at the same path so
-# the agent's `docker` CLI can drive the host's Docker daemon. Read-write —
-# the socket needs both directions. The matching DOCKER_GID build-arg (staged
-# by agent_modifiers_handler._apply_dood) makes the in-image `docker` group match
-# the host's so claude can read/write this socket. Iterated by _apply_dood.
-
-DOCKER_DOOD_MOUNTS = {
-    Path("/var/run/docker.sock"): "/var/run/docker.sock",
-}
+LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # where tag.docker entrypoint scripts land; docker_config.entrypoint_flags resolves bare names against it
+FIREWALL_DONE_IN_CONTAINER = Path("/var/run/init-firewall.done")   # marker init-firewall.sh touches after its rules + self-test succeed; docker_config.wait_for_firewall_applied polls it so the phase-2 updater never injects rules into a half-built firewall. Mirror of the literal in the script — test_docker_config guards the sync
+INIT_FIREWALL_SH = AGENTS_DIR / "specialty" / "firewall" / "init-firewall.sh"   # host-side source of the marker literal above (the drift-guard test reads it)
 
 
 # ============================================================
@@ -184,8 +158,7 @@ DOCKER_DOOD_MOUNTS = {
 # (`:ro`) baked in. Iterated by docker_config.set_container_mounts, which
 # calls add_docker_mount per entry — same {source: target} shape as the
 # _docker_mounts accumulator the function feeds. These are the static mounts
-# every launch gets — the equivalent of what compose.yml's `volumes:` block
-# held before Python took over mount staging. Per-instance mounts (the picked
+# every launch gets — all mount staging lives in Python. Per-instance mounts (the picked
 # workspace + the picked instance's state dir) stage inline next to this
 # iteration since their host paths are derived from the picked instance, not
 # constants.
@@ -200,7 +173,6 @@ DOCKER_BASE_MOUNTS = {
     SETTINGS_DIR / "statusline.sh":             f"{CLAUDE_CONFIG_IN_CONTAINER}/statusline.sh:{RO_MOUNT_OPTION}",    # shared status-line script
     SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
-    SETTINGS_DIR / "settings.json":             f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}",    # status-line wiring + other shared Claude Code settings
     SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
 }
 
@@ -226,9 +198,9 @@ OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"
 # the rendered section and appends it to CLAUDE.md at write time. No path
 # constants needed here.
 
-# Base compose file (per-layer files follow `compose.<step>.yml`, built by
-# the `compose_layer_path` lambda at the bottom of this file).
-COMPOSE_FILE_PATH = DOCKER_DIR / "compose.yml"
+# Base image Dockerfile — at the repo root (per-layer Dockerfiles live in
+# the agents/ tree: professions' own dirs + specialty-claimed `_<name>` dirs).
+BASE_DOCKERFILE = DOCKERIZED_CLAUDE_ROOT / "Dockerfile"
 
 
 # ============================================================
@@ -266,7 +238,7 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACH
 # corresponding CLI (aws/gcloud/gh/etc.) just works. Read-write — cloud CLIs
 # need to refresh tokens / write cache; presence on host is the opt-in.
 # (The matching INSTALL_<TOOL> build-arg semantics — install_creds_flags
-# in docker_config — are spread into the compose env in set_container_env.)
+# in docker_config — are spread into the container env in set_container_env.)
 #
 # Value tuple: (container_mount_target, cli_name). `cli_name` is the binary
 # name of the CLI installed by Dockerfile.code for this service (e.g. "kubectl"
@@ -309,7 +281,7 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # typed service name, a chain step, etc.) the join is parameterised below as
 # a lambda. Callers do `from .paths import <name>` and call the lambda; they
 # never construct paths via `/` themselves. Fully-static composite paths
-# (`OPTIONAL_CREDS_README_PATH`, `COMPOSE_FILE_PATH`, the DOCKER_*_MOUNTS
+# (`OPTIONAL_CREDS_README_PATH`, `BASE_DOCKERFILE`, the DOCKER_BASE_MOUNTS
 # values, etc.) live with their constituent constants further up the file
 # rather than down here, since they don't need parameters. Net effect: every
 # filesystem path the launcher touches is named in this file, just at the
@@ -325,6 +297,7 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # (still resolving / failed / not listed) — accepts any base dir, including
 # CLAUDE_CONFIG_IN_CONTAINER for the in-container view.
 state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / "CLAUDE.md"
+state_settings_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / "settings.json"   # launcher-generated (base settings + policy fragments); RO-mounted over ~/.claude/settings.json
 state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / "domains_pending_resolve.yml"
 # Per-launch input log Claude Code writes directly under the state dir (sibling
 # of `projects/`, not nested with the session transcripts). `last_history_mtime`
@@ -354,5 +327,3 @@ instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS
 optional_creds_service_path: Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service
 optional_creds_token_path:   Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service / "token"
 
-# Docker compose-layer YAML (step ∈ chain tag names — professions/specialties)
-compose_layer_path:      Callable[[str], Path]         = lambda step: DOCKER_DIR / f"compose.{step.lower()}.yml"

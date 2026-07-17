@@ -1,0 +1,5 @@
+# [code] build mechanics: which launcher-staged build-args this layer's
+# Dockerfile consumes. INSTALL_* expands against the staged env (one flag
+# per optional-cred CLI — the set is derived from user_extras at launch).
+[build]
+arg_forward = ["SOFTWARE_STACK_REFRESH", "FORCE_INSTALLS_REFRESH", "INSTALL_*"]

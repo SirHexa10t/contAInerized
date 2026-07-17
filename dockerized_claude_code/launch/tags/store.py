@@ -1,59 +1,100 @@
-"""`instances.json` — the per-instance store (tags edition).
+"""`instances.toml` — the per-instance axis store, keyed by instance id:
 
-Folds the two legacy maps (`agent_workspace_map.json` + `agent_modes_map.json`)
-into one file keyed by instance id:
+    ["researcher__proj"]
+    workspace = "/home/u/proj"
+    engine = "researcher"
+    professions = ["code"]
+    specialties = ["auto", "firewall"]
+    policies = ["web-research"]
 
-    {"researcher__proj": {"workspace": "/home/u/proj", "engine": "researcher",
-                          "professions": ["code"], "specialties": ["auto"],
-                          "policies": ["web-research"]}}
+TOML like every other launcher-authored config (`.lego`, `tag.info`,
+`tag.docker`, `combos.info`). Entries store tag **names** (strings) —
+display shortnames and tag objects are resolved against the registry at
+read time. Full-replacement semantics: an entry wins over the agent's
+`.lego` defaults wholesale; a missing entry means "fresh — open the form
+on the `.lego` pre-picks". `workspace` / `engine` are simply omitted when
+unset (TOML has no null); readers see the absent key as None.
 
-Entries store tag **names** (strings) — display shortnames and tag objects are
-resolved against the registry at read time. Full-replacement semantics: an
-entry wins over the agent's `.lego` defaults wholesale; a missing entry means
-"fresh — open the form on the `.lego` pre-picks".
+Reading goes through stdlib `tomllib`; writing through the small emitter
+below — the schema is flat and fixed (string + string-list values only),
+so a dependency-free serializer stays ~20 lines. Deliberately cache-free:
+load reads the (small) file each call, so it's trivially testable
+(functions take an explicit `path`) and there's no stale cache across the
+picker's several reads. Callers follow load → mutate → save; `write_text`
+makes the save atomic.
 
-Deliberately cache-free: load reads the (small) file each call, so it's
-trivially testable (functions take an explicit `path`) and there's no stale
-cache across the picker's several reads. Callers follow load → mutate → save,
-same as the launcher's other JSON writers; `write_text` makes the save atomic.
+(One-shot conversions FROM retired on-disk formats live in
+`tags/migrations.py` — this module only speaks the current format.)
 """
 
 from __future__ import annotations
 
 import json
+import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
 from ..file_access import path_exists, read_text, write_text
-from ..paths import (
-    AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR, INSTANCES_FILE,
-)
-from .lego import AgentBuild, load_lego
+from ..paths import INSTANCES_FILE
+from .lego import AgentBuild
 
-# Legacy mode string → (axis, tag-name) for the one-time migration. `web` was a
-# mode but is a profession now; `auto`/`DooD` are specialties (lowercased).
-_MODE_TRANSLATION: dict[str, tuple[str, str]] = {
-    "web":  ("professions", "web"),
-    "auto": ("specialties", "auto"),
-    "DooD": ("specialties", "dood"),
-    "dood": ("specialties", "dood"),
-}
+_FILE_HEADER = (
+    "# Per-instance tag selections — one table per <agent>__<session>.\n"
+    "# Launcher-owned: rewritten on every launch/modify; the picker's F2 form\n"
+    "# is the supported editor. An entry fully replaces the agent's .lego\n"
+    "# defaults; deleting an entry re-opens the form on those defaults.\n"
+)
+
+# TOML bare keys: letters/digits/underscore/dash. Anything else (a future
+# dotted agent name, say) gets basic-string quoting so the file stays valid.
+_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_KEY_RE.match(key) else json.dumps(key)
+
+
+def _toml_str(value: str) -> str:
+    # JSON string escaping is a subset of TOML basic-string escaping
+    # (\" \\ \n \t \uXXXX …), so json.dumps yields a valid TOML string.
+    return json.dumps(value)
+
+
+def dumps(mapping: dict[str, dict[str, Any]]) -> str:
+    """Serialize the store: header comment, then one key-sorted table per
+    instance. Only the shapes this store holds are supported — optional
+    strings (`workspace`, `engine`; omitted when None) and string lists
+    (the three axes)."""
+    blocks = [_FILE_HEADER]
+    for instance_id in sorted(mapping):
+        entry = mapping[instance_id]
+        lines = [f"[{_toml_key(instance_id)}]"]
+        for key in ("workspace", "engine"):
+            if entry.get(key) is not None:
+                lines.append(f"{key} = {_toml_str(entry[key])}")
+        for axis in ("professions", "specialties", "policies"):
+            values = ", ".join(_toml_str(v) for v in entry.get(axis, []))
+            lines.append(f"{axis} = [{values}]")
+        blocks.append("\n".join(lines) + "\n")
+    return "\n".join(blocks)
 
 
 def load(path: Path | None = None) -> dict[str, dict[str, Any]]:
     """The store as `{instance_id: entry}`; `{}` when the file is missing or
     empty. `path` defaults to INSTANCES_FILE at call time (tests patch the
-    module attribute)."""
+    module attribute). A malformed file raises tomllib.TOMLDecodeError —
+    `python -m launch.audit` reports the same corruption non-fatally."""
     path = path or INSTANCES_FILE
     if not path_exists(path):
         return {}
     text = read_text(path).strip()
-    return json.loads(text) if text else {}
+    return tomllib.loads(text) if text else {}
 
 
 def save(mapping: dict[str, dict[str, Any]], path: Path | None = None) -> None:
-    """Persist the store as pretty, key-sorted JSON (atomic via write_text)."""
-    write_text(path or INSTANCES_FILE, json.dumps(mapping, indent=2, sort_keys=True) + "\n")
+    """Persist the store as key-sorted TOML (atomic via write_text)."""
+    write_text(path or INSTANCES_FILE, dumps(mapping))
 
 
 def entry_to_build(entry: dict[str, Any]) -> AgentBuild:
@@ -70,7 +111,8 @@ def entry_to_build(entry: dict[str, Any]) -> AgentBuild:
 
 def build_entry(build: AgentBuild, workspace: str | None) -> dict[str, Any]:
     """The store-entry dict for an instance's build + workspace (inverse of
-    `entry_to_build`)."""
+    `entry_to_build`). None values stay in the dict — `dumps` omits them at
+    the file boundary."""
     return {
         "workspace":   workspace,
         "engine":      build.engine,
@@ -78,62 +120,3 @@ def build_entry(build: AgentBuild, workspace: str | None) -> dict[str, Any]:
         "specialties": list(build.specialties),
         "policies":    list(build.policies),
     }
-
-
-def ensure_migrated() -> None:
-    """One-shot legacy migration, called at launcher startup: if
-    `instances.json` doesn't exist but either legacy map does, fold the two
-    maps into the new store (via `migrate_from_maps`) and rename the legacy
-    files to `*.pre-rewrite.bak`. No-op on every later launch (the store
-    exists) and on fresh installs (nothing to migrate)."""
-    if path_exists(INSTANCES_FILE):
-        return
-    legacy = [p for p in (AGENT_WORKSPACE_MAP_FILE, AGENT_MODES_MAP_FILE) if path_exists(p)]
-    if not legacy:
-        return
-
-    def read_map(path: Path) -> dict[str, Any]:
-        text = read_text(path).strip() if path_exists(path) else ""
-        return json.loads(text) if text else {}
-
-    save(migrate_from_maps(read_map(AGENT_WORKSPACE_MAP_FILE),
-                           read_map(AGENT_MODES_MAP_FILE), AGENTS_DIR))
-    for path in legacy:
-        path.rename(path.with_suffix(path.suffix + ".pre-rewrite.bak"))
-    print(f"  Migrated legacy instance maps into {INSTANCES_FILE.name} "
-          f"({', '.join(p.name for p in legacy)} → *.pre-rewrite.bak)")
-
-
-def migrate_from_maps(workspace_map: dict[str, Any], modes_map: dict[str, list[str]],
-                      agents_dir: Path) -> dict[str, dict[str, Any]]:
-    """Build the `instances.json` mapping from the two legacy maps (run once,
-    at first launch of the tags-era launcher).
-
-    For each instance across both maps: start from its agent's `.lego`
-    defaults (engine + professions + policies), overlay the legacy modes
-    translated onto the right axis (`web` → professions, `auto`/`DooD` →
-    specialties), and attach the stored workspace. The agent is the part of
-    the instance id before `__`. This preserves each instance's effective
-    behavior — a `["auto"]` instance becomes `specialties: ["auto"]` on top
-    of its agent's code/engine defaults."""
-    out: dict[str, dict[str, Any]] = {}
-    for instance_id in sorted(set(workspace_map) | set(modes_map)):
-        agent = instance_id.split("__", 1)[0]
-        build = load_lego(agents_dir / f"{agent}.lego")
-        professions = list(build.professions)
-        specialties: list[str] = []
-        policies = list(build.policies)
-        for mode in modes_map.get(instance_id, []):
-            axis, name = _MODE_TRANSLATION.get(mode, ("", ""))
-            if axis == "professions" and name not in professions:
-                professions.append(name)
-            elif axis == "specialties" and name not in specialties:
-                specialties.append(name)
-        out[instance_id] = {
-            "workspace":   workspace_map.get(instance_id),
-            "engine":      build.engine or agent,
-            "professions": professions,
-            "specialties": specialties,
-            "policies":    policies,
-        }
-    return out

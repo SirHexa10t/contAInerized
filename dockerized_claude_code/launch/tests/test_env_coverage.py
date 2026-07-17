@@ -1,58 +1,74 @@
-"""Verify every env var referenced in compose .yml / Dockerfile files is
-defined in our Python-side env-var taxonomy.
+"""Verify the build-arg / env-var wiring between the launcher's Python
+taxonomy, each layer's `tag.docker`, and the Dockerfiles.
 
-Catches orphan references that would otherwise silently substitute to the
-compose default (e.g. typo in `${TARGT_IMAGE}` becomes empty string at run
-time without an error). Three checks:
+Catches orphan references that would otherwise silently degrade at build
+time (an unforwarded ARG keeps its Dockerfile default; a typo'd forward
+name never matches a staged value). Four checks:
 
-1. `${VAR}` substitution in compose .yml — must be a ComposeEnvKey, an
+1. `${VAR}` references in every Dockerfile — must be a ContainerEnvKey, an
    INSTALL_<TOOL> from install_creds_flags, a token env-var from
-   OPTIONAL_CREDS_TOKEN_ENV_VARS, or in the allowlist (TERM, HOST_UID,
-   etc.) of build-time-default ARGs / shell-inherited passthroughs.
-2. `environment: [- VAR]` passthroughs in compose .yml — same allowed set.
-3. `ARG VAR` in Dockerfile files — each ARG that's passed from a compose
-   `args:` block (i.e. is in the allowed set) is recognised; the rest fall
-   under the build-time-default allowlist."""
+   OPTIONAL_CREDS_TOKEN_ENV_VARS, PARENT_IMAGE (threaded by ensure_image),
+   or in the allowlist of build-time-default ARGs / RUN-local shell vars.
+2. `ARG VAR` declarations — same allowed set.
+3. Each layer's `[build] arg_forward` names must resolve: a plain name is a
+   declared ARG in that layer's Dockerfile AND a launcher-staged var; a glob
+   must match at least one staged var.
+4. Reverse direction: every launcher-staged ARG a Dockerfile declares must
+   be forwarded by its layer's tag.docker — otherwise the staged value
+   silently drops at build time.
+"""
 
+import fnmatch
 import re
 import unittest
 
 from launch import paths
-from launch.compose_env import ComposeEnvKey
+from launch.container_env import ContainerEnvKey, install_creds_flags
+from launch.tags import scan_all
 
-# The four chain tags with a compose layer + Dockerfile (until the
-# plain-docker flip replaces compose layers with tag.docker files).
-CHAIN_TAGS = ["code", "web", "auto", "dood"]
+REGISTRY = scan_all(paths.AGENTS_DIR)
+
+# Build layers: (tag name, dockerfile path, contribution) — professions from
+# their own dirs, dood from its claimed `_dood` layer. The base Dockerfile is
+# checked too but has no tag.docker (its one build-arg is threaded directly
+# by docker_config.ensure_image).
+_dood_layer = REGISTRY.specialties["dood"].layer
+assert _dood_layer is not None   # the shipped tree claims profession/code/_dood
+BUILD_LAYERS = [
+    ("code", REGISTRY.professions["code"].path / "Dockerfile", REGISTRY.professions["code"].docker),
+    ("web",  REGISTRY.professions["web"].path / "Dockerfile",  REGISTRY.professions["web"].docker),
+    ("dood", _dood_layer.path / "Dockerfile", _dood_layer.docker),
+]
 
 
-# Allowlist for vars referenced in compose/Dockerfile files but NOT staged
-# by the launcher's Python code:
-#   TERM         — shell-inherited from the launcher's tty, declared as a
-#                  passthrough in compose.yml's `environment:` list.
+# Allowlist for vars referenced in Dockerfiles but NOT staged by the
+# launcher's Python code:
 #   HOST_UID     — base Dockerfile build-time ARG with a default of 1000.
 #                  Currently not parameterized from the launcher; the default
 #                  applies.
+#   PARENT_IMAGE — threaded explicitly per step by docker_config.ensure_image
+#                  (not staged in the container-env accumulator).
 #   VERSION /
-#   ARCH_SUFFIX  — shell-local variables set inside Dockerfile.code's
+#   ARCH_SUFFIX  — shell-local variables set inside the [code] Dockerfile's
 #                  jira-cli install RUN block (version comes from the
 #                  GitHub API; arch from `dpkg --print-architecture`).
 #                  Not Docker ARGs — they live entirely within one RUN.
-_ALLOWLIST = {"TERM", "HOST_UID", "VERSION", "ARCH_SUFFIX"}
+_ALLOWLIST = {"HOST_UID", "PARENT_IMAGE", "VERSION", "ARCH_SUFFIX"}
 
 
-def _defined_env_vars():
+def _staged_env_vars():
     """Union of every env-var name the launcher actively stages: the static
-    ComposeEnvKey set, the per-service INSTALL_<TOOL> build flags, and the
+    ContainerEnvKey set, the per-service INSTALL_<TOOL> build flags, and the
     optional-cred token vars."""
     return (
-        {m.value for m in ComposeEnvKey}
-        | {f"INSTALL_{svc.upper()}" for svc in paths.OPTIONAL_CREDS_MOUNTS}
+        {m.value for m in ContainerEnvKey}
+        | set(install_creds_flags(set()))   # INSTALL_<TOOL> for cli-backed services only — same filter the launcher stages with
         | set(paths.OPTIONAL_CREDS_TOKEN_ENV_VARS.values())
     )
 
 
 def _allowed_vars():
-    return _defined_env_vars() | _ALLOWLIST
+    return _staged_env_vars() | _ALLOWLIST
 
 
 # Matches ${VAR} and ${VAR:-default} — variable name in group 1.
@@ -61,32 +77,9 @@ _ENV_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-[^}]*)?\}")
 _ARG_RE = re.compile(r"^ARG\s+([A-Z_][A-Z0-9_]*)\b", re.MULTILINE)
 
 
-def _compose_files():
-    """All compose .yml files the launcher uses: the base + every chain-tag
-    layer."""
-    return [paths.COMPOSE_FILE_PATH] + [
-        paths.compose_layer_path(t) for t in CHAIN_TAGS
-    ]
-
-
-def _dockerfile_for(value):
-    """Dockerfile path for a modifier after the tags migration relocated the
-    per-modifier Dockerfiles: code/web/dood moved into the agents/ tree
-    (professions + dood's hidden `_dood` layer); auto's layer is still in
-    docker/ until the plain-docker flip."""
-    tree = {
-        "code": paths.AGENTS_DIR / "profession" / "code" / "Dockerfile",
-        "web":  paths.AGENTS_DIR / "profession" / "code" / "web" / "Dockerfile",
-        "dood": paths.AGENTS_DIR / "profession" / "code" / "_dood" / "Dockerfile",
-    }
-    return tree.get(value.lower(), paths.DOCKER_DIR / f"Dockerfile.{value.lower()}")
-
-
 def _dockerfiles():
-    """The base Dockerfile + every chain tag's Dockerfile (post-relocation)."""
-    return [paths.DOCKER_DIR / "Dockerfile"] + [
-        _dockerfile_for(t) for t in CHAIN_TAGS
-    ]
+    """The base Dockerfile + every build layer's Dockerfile."""
+    return [paths.BASE_DOCKERFILE] + [dockerfile for _, dockerfile, _ in BUILD_LAYERS]
 
 
 def _env_refs_in(path):
@@ -99,76 +92,30 @@ def _arg_decls_in(path):
     return {m.group(1) for m in _ARG_RE.finditer(path.read_text())}
 
 
-def _env_passthroughs_in(text):
-    """Find `- VAR` items under `environment:` blocks in a compose .yml.
-    State machine because regex alone can't distinguish env passthroughs
-    from cap_add items (both render as `- WORD` lines)."""
-    refs = set()
-    in_env = False
-    env_indent = -1
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        indent = len(line) - len(stripped)
-        if not stripped or stripped.startswith("#"):
-            continue
-        # Section opener
-        if stripped.rstrip().endswith("environment:"):
-            in_env = True
-            env_indent = indent
-            continue
-        if not in_env:
-            continue
-        # List item under environment:
-        if stripped.startswith("-") and indent > env_indent:
-            name = stripped[1:].lstrip().split("=")[0].rstrip()
-            if re.match(r"^[A-Z_][A-Z0-9_]*$", name):
-                refs.add(name)
-            continue
-        # Anything else with indent ≤ env_indent terminates the block
-        if indent <= env_indent:
-            in_env = False
-    return refs
+def _expand_forward(forward, staged):
+    """A layer's arg_forward names expanded against the staged-var set —
+    the same glob semantics docker_config.build_arg_flags applies."""
+    out = set()
+    for pattern in forward:
+        if any(ch in pattern for ch in "*?["):
+            out |= set(fnmatch.filter(staged, pattern))
+        else:
+            out.add(pattern)
+    return out
 
 
 # ============================================================
-# compose .yml
-# ============================================================
-
-
-class TestComposeFileEnvRefs(unittest.TestCase):
-    def test_every_ref_is_known(self):
-        allowed = _allowed_vars()
-        for path in _compose_files():
-            with self.subTest(file=path.name):
-                unknown = _env_refs_in(path) - allowed
-                self.assertFalse(
-                    unknown,
-                    f"{path.name} references env vars not in our Python taxonomy: {sorted(unknown)}",
-                )
-
-    def test_every_passthrough_is_known(self):
-        allowed = _allowed_vars()
-        for path in _compose_files():
-            with self.subTest(file=path.name):
-                unknown = _env_passthroughs_in(path.read_text()) - allowed
-                self.assertFalse(
-                    unknown,
-                    f"{path.name} declares passthrough env vars not in our taxonomy: {sorted(unknown)}",
-                )
-
-
-# ============================================================
-# Dockerfile.*
+# Dockerfile references
 # ============================================================
 
 
 class TestDockerfileEnvRefs(unittest.TestCase):
     def test_every_dollar_ref_is_known(self):
         # ${VAR} usages inside Dockerfile bodies (e.g. RUN useradd … -u
-        # ${HOST_UID}). Each should be a known ARG or compose env var.
+        # ${HOST_UID}). Each should be a known staged var or allowlisted.
         allowed = _allowed_vars()
         for path in _dockerfiles():
-            with self.subTest(file=path.name):
+            with self.subTest(file=str(path.relative_to(paths.DOCKERIZED_CLAUDE_ROOT))):
                 unknown = _env_refs_in(path) - allowed
                 self.assertFalse(
                     unknown,
@@ -176,11 +123,11 @@ class TestDockerfileEnvRefs(unittest.TestCase):
                 )
 
     def test_every_arg_is_known(self):
-        # Every `ARG VAR` declaration must be a known env var (Python-staged)
+        # Every `ARG VAR` declaration must be a known staged var, PARENT_IMAGE,
         # or in the allowlist (build-time defaults the launcher doesn't override).
         allowed = _allowed_vars()
         for path in _dockerfiles():
-            with self.subTest(file=path.name):
+            with self.subTest(file=str(path.relative_to(paths.DOCKERIZED_CLAUDE_ROOT))):
                 unknown = _arg_decls_in(path) - allowed
                 self.assertFalse(
                     unknown,
@@ -189,79 +136,84 @@ class TestDockerfileEnvRefs(unittest.TestCase):
 
 
 # ============================================================
-# Consistency between compose args block and Dockerfile ARGs
+# tag.docker ⇄ Dockerfile consistency
 # ============================================================
 
 
-class TestComposeArgsMatchDockerfile(unittest.TestCase):
-    """When a compose layer declares `args: { FOO: ${FOO:-bar} }`, the matching
-    Dockerfile.<step> must declare `ARG FOO` — otherwise the value silently
-    drops on the floor at build time. This is a different invariant from the
-    two above; here we check pairings layer-by-layer."""
+class TestArgForwardsMatchDockerfiles(unittest.TestCase):
+    """A layer's `[build] arg_forward` and its Dockerfile's ARG declarations
+    must agree in both directions — a forward without an ARG silently
+    no-ops (docker warns, value unused); a launcher-staged ARG without a
+    forward silently keeps its Dockerfile default."""
 
-    def _compose_args_keys(self, compose_text):
-        """Parse `args:` block keys via line scanner. Each key is `NAME: ${...}`
-        style under a `args:` heading."""
-        keys = set()
-        in_args = False
-        args_indent = -1
-        for line in compose_text.splitlines():
-            stripped = line.lstrip()
-            indent = len(line) - len(stripped)
-            if not stripped or stripped.startswith("#"):
-                continue
-            if stripped.rstrip().endswith("args:"):
-                in_args = True
-                args_indent = indent
-                continue
-            if not in_args:
-                continue
-            if indent <= args_indent:
-                in_args = False
-                continue
-            # KEY: VALUE form
-            m = re.match(r"^([A-Z_][A-Z0-9_]*)\s*:", stripped)
-            if m:
-                keys.add(m.group(1))
-        return keys
+    def test_every_forward_resolves_to_a_dockerfile_arg(self):
+        staged = _staged_env_vars()
+        for name, dockerfile, contribution in BUILD_LAYERS:
+            forward = contribution.build_arg_forward if contribution else ()
+            declared = _arg_decls_in(dockerfile)
+            with self.subTest(layer=name):
+                expanded = _expand_forward(forward, staged)
+                self.assertTrue(expanded <= declared,
+                                f"{name}'s tag.docker forwards {sorted(expanded - declared)} "
+                                f"but its Dockerfile declares no matching ARG")
 
-    def test_compose_args_keys_have_matching_dockerfile_arg(self):
-        for tag in CHAIN_TAGS:
-            with self.subTest(tag=tag):
-                compose_path = paths.compose_layer_path(tag)
-                dockerfile_path = _dockerfile_for(tag)
-                compose_args = self._compose_args_keys(compose_path.read_text())
-                dockerfile_args = _arg_decls_in(dockerfile_path)
-                missing = compose_args - dockerfile_args
+    def test_every_forward_name_is_staged_or_glob(self):
+        staged = _staged_env_vars()
+        for name, _, contribution in BUILD_LAYERS:
+            forward = contribution.build_arg_forward if contribution else ()
+            for pattern in forward:
+                with self.subTest(layer=name, pattern=pattern):
+                    if any(ch in pattern for ch in "*?["):
+                        self.assertTrue(fnmatch.filter(staged, pattern),
+                                        f"glob {pattern!r} matches no staged var")
+                    else:
+                        self.assertIn(pattern, staged,
+                                      f"{pattern!r} is never staged by the launcher")
+
+    def test_every_staged_dockerfile_arg_is_forwarded(self):
+        # Reverse direction: an ARG the launcher actively stages MUST be in
+        # the layer's arg_forward, otherwise the staged value silently drops
+        # at build time. Allowlisted ARGs (HOST_UID, PARENT_IMAGE) don't
+        # apply — those aren't staged (PARENT_IMAGE threads explicitly).
+        staged = _staged_env_vars()
+        for name, dockerfile, contribution in BUILD_LAYERS:
+            forward = contribution.build_arg_forward if contribution else ()
+            with self.subTest(layer=name):
+                staged_args = _arg_decls_in(dockerfile) & staged
+                missing = staged_args - _expand_forward(forward, staged)
                 self.assertFalse(
                     missing,
-                    f"{compose_path.name} passes args {sorted(missing)} but "
-                    f"{dockerfile_path.name} doesn't declare them as ARG",
+                    f"{dockerfile.name} declares ARGs {sorted(missing)} that the "
+                    f"launcher stages, but {name}'s tag.docker doesn't forward "
+                    f"them — the staged value would silently drop. Add them to "
+                    f"[build] arg_forward.",
                 )
 
-    def test_launcher_staged_args_are_forwarded_by_compose(self):
-        # Reverse direction: an ARG that the launcher actively stages
-        # (defined_env_vars) MUST be in the matching compose layer's `args:`
-        # block, otherwise the staged value silently drops on the floor at
-        # build time. Build-time-default ARGs (HOST_UID, VERSION,
-        # ARCH_SUFFIX from the _ALLOWLIST) don't apply — those aren't
-        # staged by Python, so compose-side passthrough isn't required.
-        staged = _defined_env_vars()
-        for tag in CHAIN_TAGS:
-            with self.subTest(tag=tag):
-                compose_path = paths.compose_layer_path(tag)
-                dockerfile_path = _dockerfile_for(tag)
-                compose_args = self._compose_args_keys(compose_path.read_text())
-                dockerfile_staged_args = _arg_decls_in(dockerfile_path) & staged
-                missing = dockerfile_staged_args - compose_args
-                self.assertFalse(
-                    missing,
-                    f"{dockerfile_path.name} declares ARGs {sorted(missing)} "
-                    f"that the launcher stages, but {compose_path.name} doesn't "
-                    f"forward them via its `args:` block — the build-arg value "
-                    f"would silently drop. Add `<NAME>: ${{<NAME>:-0}}` (or "
-                    f"matching default) under the layer's `args:`.",
-                )
+    def test_base_dockerfile_consumes_the_refresh_arg(self):
+        # The base build's one launcher-staged arg is threaded directly by
+        # ensure_image (no tag.docker for base) — guard the pairing.
+        self.assertIn("SOFTWARE_STACK_REFRESH", _arg_decls_in(paths.BASE_DOCKERFILE))
+
+
+# ============================================================
+# tag.docker env forwards
+# ============================================================
+
+
+class TestEnvForwardsAreStaged(unittest.TestCase):
+    def test_every_env_forward_name_is_a_known_key(self):
+        # A run-side env_forward name must be something the launcher can
+        # stage — a ContainerEnvKey (or dynamic token var). A typo here
+        # would gate on a value that never arrives.
+        known = _staged_env_vars()
+        for kind in (REGISTRY.professions, REGISTRY.specialties, REGISTRY.policies):
+            for tag in kind.values():
+                layer = getattr(tag, "layer", None)
+                contributions = [c for c in (tag.docker, layer.docker if layer else None) if c]
+                for contribution in contributions:
+                    for env_name in contribution.env_forward:
+                        with self.subTest(tag=tag.name, env=env_name):
+                            self.assertIn(env_name, known)
 
 
 if __name__ == "__main__":

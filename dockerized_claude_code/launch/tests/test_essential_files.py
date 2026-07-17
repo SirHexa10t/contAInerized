@@ -3,20 +3,21 @@ exist at the paths it computes. Catches "renamed/moved a file but missed a
 reference" regressions immediately.
 
 For each chain tag with launch-side machinery, this also verifies the
-compose layer and (where one is required) the `_apply_<name>` handler are in
-place — a missing artifact fails here at test time rather than at runtime.
+required `_apply_<name>` handler is in place — a missing artifact fails
+here at test time rather than at runtime.
 The tag tree itself (Dockerfiles, tag.info shapes, `.lego` references) is
 validated by TestTagTreeDiscovery / TestAgentLegoFiles below via scan_all."""
 
 import unittest
 
-from launch import agent_modifiers_handler, paths
+from launch import paths, tag_handlers
 from launch.tags import load_lego, scan_all
 
-# The four chain tags with a compose layer (until the plain-docker flip);
-# the subset with host-side launch behavior must also have an _apply_ handler.
-CHAIN_TAGS = ["code", "web", "auto", "dood"]
-HANDLER_TAGS = ["code", "auto", "dood"]   # web is data-only: its playwright cache rides [code]'s ~/.cache mount
+# Chain tags with host-side launch behavior must have an _apply_ handler;
+# the rest are data-only ({auto} = claude_args + wants; [web]'s playwright
+# cache rides [code]'s ~/.cache mount).
+HANDLER_TAGS = ["code", "dood", "firewall"]
+DATA_ONLY_TAGS = ["web", "auto"]
 
 
 class TestRepoLayout(unittest.TestCase):
@@ -25,9 +26,6 @@ class TestRepoLayout(unittest.TestCase):
 
     def test_agents_dir_exists(self):
         self.assertTrue(paths.AGENTS_DIR.is_dir())
-
-    def test_docker_dir_exists(self):
-        self.assertTrue(paths.DOCKER_DIR.is_dir())
 
     def test_settings_dir_exists(self):
         self.assertTrue(paths.SETTINGS_DIR.is_dir())
@@ -38,39 +36,45 @@ class TestRepoLayout(unittest.TestCase):
 
 class TestBaseDockerArtifacts(unittest.TestCase):
     def test_base_dockerfile_exists(self):
-        self.assertTrue((paths.DOCKER_DIR / "Dockerfile").is_file())
+        self.assertTrue(paths.BASE_DOCKERFILE.is_file())
 
-    def test_base_compose_yml_exists(self):
-        self.assertTrue(paths.COMPOSE_FILE_PATH.is_file())
+    def test_base_dockerfile_carries_firewall_prerequisites(self):
+        # {firewall} has no image layer — iptables + the scoped sudoers entry
+        # ride the base image (inert without the specialty's mounted script).
+        text = paths.BASE_DOCKERFILE.read_text()
+        self.assertIn("iptables", text)
+        self.assertIn("init-firewall.sh", text)   # the sudoers NOPASSWD line
 
 
-class TestChainTagArtifactsPresent(unittest.TestCase):
-    """Every chain tag's compose layer (compose.<name>.yml) must exist, and
-    the tags with host-side launch behavior must keep their `_apply_<name>`
-    handler. (The per-tag Dockerfiles moved into the agents/ tree during the
-    tags migration — the new-location checks live in TestTagTreeDiscovery.)"""
-
-    def test_each_chain_tag_has_compose_layer(self):
-        for tag in CHAIN_TAGS:
-            with self.subTest(tag=tag):
-                layer = paths.compose_layer_path(tag)
-                self.assertTrue(layer.is_file(), f"missing compose layer for {tag}: {layer}")
+class TestTagHandlerArtifacts(unittest.TestCase):
+    """Tags with host-side launch behavior must keep their `_apply_<name>`
+    handler; data-only tags must NOT grow one silently (their behavior is
+    declared in tag.info / tag.docker, and an unexpected handler would mean
+    logic crept out of the data). Dockerfile/tag.docker presence is checked
+    against the discovered tree in TestTagTreeDiscovery."""
 
     def test_handler_tags_have_apply_handler(self):
         for tag in HANDLER_TAGS:
             with self.subTest(tag=tag):
-                handler = getattr(agent_modifiers_handler, f"_apply_{tag}", None)
+                handler = getattr(tag_handlers, f"_apply_{tag}", None)
                 self.assertTrue(callable(handler),
-                                f"agent_modifiers_handler is missing _apply_{tag}()")
+                                f"tag_handlers is missing _apply_{tag}()")
 
-    def test_base_has_no_dockerfile_suffix(self):
-        # base is the un-suffixed base Dockerfile. Defensive: confirm there's no
-        # `Dockerfile.base` (which would shadow the intended base layer).
-        self.assertFalse((paths.DOCKER_DIR / "Dockerfile.base").exists())
+    def test_data_only_tags_have_no_handler(self):
+        for tag in DATA_ONLY_TAGS:
+            with self.subTest(tag=tag):
+                self.assertFalse(hasattr(tag_handlers, f"_apply_{tag}"),
+                                 f"_apply_{tag} exists — {tag} is meant to be data-only")
+
+    def test_root_has_no_layer_dockerfiles(self):
+        # Layer Dockerfiles live in the agents/ tree; a stray root
+        # Dockerfile.<x> would be dead weight (or worse, shadow one).
+        strays = list(paths.DOCKERIZED_CLAUDE_ROOT.glob("Dockerfile.*"))
+        self.assertEqual(strays, [])
 
     def test_base_has_no_apply_handler(self):
         # base has no side effects beyond being the starting image — no handler.
-        self.assertFalse(hasattr(agent_modifiers_handler, "_apply_base"))
+        self.assertFalse(hasattr(tag_handlers, "_apply_base"))
 
 
 class TestUserExtrasTemplates(unittest.TestCase):
@@ -151,17 +155,32 @@ class TestAgentLegoFiles(unittest.TestCase):
                 self.reg.validate_build(load_lego(lego), lego)   # raises on any bad reference
 
 
-class TestAutoModeAuxiliaryScripts(unittest.TestCase):
-    """{auto} mode bind-mounts init-firewall.sh + auto-entrypoint.sh into the
-    container (via DOCKER_AUTO_MOUNTS). Both must exist on disk on the host."""
+class TestFirewallSpecialtyArtifacts(unittest.TestCase):
+    """{firewall} bind-mounts init-firewall.sh + firewall-entrypoint.sh into
+    the container (declared in its tag.docker; sources existence-checked at
+    scan time, but guard the shipped tree explicitly too)."""
 
-    def test_auto_mounts_resolve_to_real_files(self):
-        for host_path in paths.DOCKER_AUTO_MOUNTS:
-            with self.subTest(path=str(host_path)):
-                self.assertTrue(
-                    host_path.is_file(),
-                    f"DOCKER_AUTO_MOUNTS source missing: {host_path}",
-                )
+    def setUp(self):
+        self.fw = scan_all(paths.AGENTS_DIR).specialties["firewall"]
+
+    def test_mount_sources_resolve_to_real_files(self):
+        self.assertTrue(self.fw.docker.mounts)
+        for source, _target in self.fw.docker.mounts:
+            with self.subTest(path=str(source)):
+                self.assertTrue(source.is_file(), f"mount source missing: {source}")
+
+    def test_entrypoint_and_cap_declared(self):
+        self.assertEqual(self.fw.docker.entrypoint, "firewall-entrypoint.sh")
+        self.assertIn("NET_ADMIN", self.fw.docker.cap_add)
+
+    def test_no_image_layer(self):
+        # The firewall is run-time-only — iptables lives in the base image.
+        self.assertIsNone(self.fw.layer)
+
+    def test_auto_wants_firewall(self):
+        auto = scan_all(paths.AGENTS_DIR).specialties["auto"]
+        self.assertIn("firewall", dict(auto.wants))
+        self.assertIn("--dangerously-skip-permissions", auto.claude_args)
 
 
 if __name__ == "__main__":

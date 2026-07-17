@@ -1,20 +1,23 @@
-"""Per-tag launch-side handlers: runs each active tag's host-side
-contributions (volume mounts + compose env staging + background kickoffs) in
-a single pass via compose_chain, which also returns the docker build chain.
+"""Per-tag launch-side handlers: `apply_tags` runs one pass over the
+instance's active tags — staging every declarative `tag.docker` mount, then
+dispatching each chain entry's dynamic handler — and returns the chain.
 
 The tag taxonomy lives in the tags package (tree-discovered members); this
 module holds the *dynamic* side of a tag's launch behavior — the parts that
 can't be declarative data (cache pruning, GID detection, DNS kickoff). The
-docker flip (tag.docker) will absorb the static mounts declared here.
+static side (mounts, cap_add, entrypoint, arg/env forwards) is declared in
+each tag's `tag.docker` and consumed here (mounts) + in docker_config
+(everything else).
 
 Dispatch is by naming convention — `_apply_<tag name>` looked up in this
 module per chain entry; tags without a handler are a no-op (data-only tags
-are legal). run.py imports compose_chain from here.
+like {auto} — claude_args only — are legal). run.py imports apply_tags
+from here.
 """
 
 import time
 
-from .compose_env import ComposeEnvKey, stage_compose_env
+from .container_env import ContainerEnvKey, stage_container_env
 from .docker_config import (
     add_docker_mount, detect_docker_gid, docker_check_any_agent_running_subprocess,
 )
@@ -22,9 +25,7 @@ from .file_access import (
     ensure_dir, iter_file_stats, path_exists, remove_path,
 )
 from .network import start_whitelist_resolution
-from .paths import (
-    CACHE_MOUNTS, CACHE_ROOT, DOCKER_AUTO_MOUNTS, DOCKER_DOOD_MOUNTS,
-)
+from .paths import CACHE_MOUNTS, CACHE_ROOT
 from .tags import Instance
 
 # === [code]-tag cache pruning thresholds — applied to CACHE_MOUNTS by prune_caches below ===
@@ -74,7 +75,7 @@ def _apply_code(inst: Instance) -> None:
         container run (read-write — toolchains write into them).
 
     `inst` is unused here — every `_apply_*` handler shares the same
-    signature so compose_chain can dispatch them uniformly by name."""
+    signature so apply_tags can dispatch them uniformly by name."""
     prepare_caches()
     prune_caches()
     for host, container in CACHE_MOUNTS.items():
@@ -82,12 +83,12 @@ def _apply_code(inst: Instance) -> None:
 
 
 def _apply_dood(inst: Instance) -> None:
-    """{dood} handler: bind-mount the host's /var/run/docker.sock (via
-    DOCKER_DOOD_MOUNTS) so the agent can drive the host's Docker daemon.
-    Looks up the host's docker-group GID via detect_docker_gid and stages it
-    as the DOCKER_GID build-arg so the in-image `docker` group matches the
-    host's. Without a docker group the socket would be unreadable — fail
-    loudly here rather than build an image that won't work."""
+    """{dood} handler — the dynamic half (the docker-socket mount is
+    declarative, in `_dood/tag.docker`): look up the host's docker-group GID
+    via detect_docker_gid and stage it as the DOCKER_GID build-arg so the
+    in-image `docker` group matches the host's. Without a docker group the
+    socket would be unreadable — fail loudly here rather than build an image
+    that won't work."""
     gid = detect_docker_gid()
     if gid is None:
         raise RuntimeError(
@@ -95,42 +96,40 @@ def _apply_dood(inst: Instance) -> None:
             "`sudo usermod -aG docker $USER` (then log out + back in). "
             "If you don't actually need {dood}, modify the instance and untick it."
         )
-    stage_compose_env(ComposeEnvKey.DOCKER_GID, gid)
-    for source, target in DOCKER_DOOD_MOUNTS.items():
-        add_docker_mount(source, target)
+    stage_container_env(ContainerEnvKey.DOCKER_GID, gid)
 
 
-def _apply_auto(inst: Instance) -> None:
-    """{auto} handler: kick off the two-phase firewall whitelist resolve so it
+def _apply_firewall(inst: Instance) -> None:
+    """{firewall} handler — the dynamic half (script/entrypoint mounts,
+    NET_ADMIN, and the WHITELIST_ADDRESSES forward are declarative, in the
+    specialty's tag.docker): kick off the two-phase whitelist resolve so it
     overlaps with the image build (run.py fires ensure_image right after
-    compose_chain returns), then stage the firewall script + entrypoint
-    wrapper bind-mounts from DOCKER_AUTO_MOUNTS. The agent-visible status
-    file (`domains_pending_resolve.yml`) lives in the state dir, already
-    exposed via set_container_mounts' per-instance mount.
-
-    (The firewall machinery still rides {auto} until the docker flip extracts
-    it into the standalone {firewall} specialty.)"""
+    apply_tags returns). The agent-visible status file
+    (`domains_pending_resolve.yml`) lives in the state dir, already exposed
+    via set_container_mounts' per-instance mount."""
     start_whitelist_resolution(inst.state_dir)
-    for source, target in DOCKER_AUTO_MOUNTS.items():
-        add_docker_mount(source, target)
 
 
-# === Chain composition ===
+# === Tag application ===
 
-def compose_chain(inst: Instance) -> list[str]:
-    """Run each active tag's handler and return the docker build chain
+def apply_tags(inst: Instance) -> list[str]:
+    """Apply every active tag's launch-side contribution and return the chain
     (`inst.chain` — base first, professions in requirement order, then
-    specialties). Handlers are side-effect-only: stage env vars/bind-mounts,
-    kick off the {auto} DNS resolve, etc.
+    specialties). Two passes:
+      1. Declarative: stage each tag.docker mount via add_docker_mount
+         (sources were resolved + existence-checked at scan time).
+      2. Dynamic: dispatch each chain entry's `_apply_<tag name>` handler —
+         side-effect-only (cache prep, GID staging, the {firewall} DNS
+         kickoff). Looked up in this module per entry (so tests can patch
+         individual handlers); a tag without a handler is a NO-OP: data-only
+         tags ({auto}'s claude_args, [web]'s playwright cache riding [code]'s
+         ~/.cache mount) are legal and need no code here.
 
-    Dispatch is by naming convention — `_apply_<tag name>` looked up in this
-    module per chain entry (so tests can patch individual handlers). A tag
-    without a handler is a NO-OP: data-only tags ([web]'s playwright cache
-    rides [code]'s ~/.cache mount; policies never join the chain) are legal
-    and need no code here.
-
-    The chain list drives image naming (chain_image_tag) and the compose
-    layer stack (chain_compose_files) in docker_config."""
+    The returned chain drives the addendum composition; image naming/building
+    runs off `inst.build_steps` in docker_config."""
+    for contribution in inst.docker_contributions:
+        for source, target in contribution.mounts:
+            add_docker_mount(source, target)
     chain = inst.chain
     for name in chain:
         handler = globals().get(f"_apply_{name}")

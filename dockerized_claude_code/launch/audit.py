@@ -6,11 +6,11 @@ Reports:
     non-fatally, and per-entry tag validation is skipped)
   - orphan state dirs (instance dir present but no matching agent .md)
   - no_history (state dir has no history.jsonl — the last-used signal we rely on)
-  - ghost store entries (instances.json entry without a corresponding state dir)
+  - ghost store entries (instances.toml entry without a corresponding state dir)
   - badworkspace (entry's workspace points to a non-existent or non-directory path)
   - bad_tags (entry references an engine/profession/specialty/policy that the
     tag tree doesn't define, or puts a name on the wrong axis)
-  - store issues (instances.json not valid JSON; a MISSING file is fine —
+  - store issues (instances.toml not valid TOML; a MISSING file is fine —
     instances then run on their agents' `.lego` defaults)
   - oauth issues (.claude.json / .credentials.json missing, empty, or not valid JSON)
 
@@ -19,6 +19,7 @@ Run from the project root:
 """
 
 import json
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -36,17 +37,16 @@ Issue = tuple[str, str, str]   # (kind, target, message)
 
 
 def _load_store(path: Path) -> tuple[dict[str, Any], list[Issue]]:
-    """Parse instances.json; return (mapping, issues). Missing file → ({}, [])
-    — a fresh install or a defaults-only setup is legitimate, unlike the old
-    per-map audit where a missing file implied lost state. Invalid JSON is
+    """Parse instances.toml; return (mapping, issues). Missing file → ({}, [])
+    — a fresh install or a defaults-only setup is legitimate. Invalid TOML is
     reported non-fatally and degrades to {} so the other checks still run."""
     if not path_exists(path):
         return {}, []
     content = read_text(path).strip()
     try:
-        return (json.loads(content) if content else {}), []
-    except json.JSONDecodeError as e:
-        return {}, [("store", path.name, f"invalid JSON: {e}")]
+        return (tomllib.loads(content) if content else {}), []
+    except tomllib.TOMLDecodeError as e:
+        return {}, [("store", path.name, f"invalid TOML: {e}")]
 
 
 def _check_json_file(path: Path) -> str | None:
@@ -68,7 +68,7 @@ def _check_json_file(path: Path) -> str | None:
 
 def _store_entry_issues(entries: dict[str, Any], actual: set[str],
                         registry: Registry | None) -> list[Issue]:
-    """Per-entry findings for instances.json, as (kind, instance_id, msg)
+    """Per-entry findings for instances.toml, as (kind, instance_id, msg)
     tuples. Extracted so each finding kind has direct unit-test coverage:
       ghost        — entry whose instance has no state dir
       badworkspace — workspace missing/None or not a directory on disk
@@ -79,14 +79,14 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
     out: list[Issue] = []
     for instance_id, entry in entries.items():
         if instance_id not in actual:
-            out.append(("ghost", instance_id, "instances.json entry has no state dir"))
+            out.append(("ghost", instance_id, "instances.toml entry has no state dir"))
             continue
         ws = entry.get("workspace")
         if not ws or not is_dir(ws):
             out.append(("badworkspace", instance_id, f"workspace not a directory: {ws}"))
         if registry is not None:
             try:
-                registry.validate_build(entry_to_build(entry), f"instances.json[{instance_id}]")
+                registry.validate_build(entry_to_build(entry), f"instances.toml[{instance_id}]")
             except TagError as e:
                 out.append(("bad_tags", instance_id, str(e)))
     return out

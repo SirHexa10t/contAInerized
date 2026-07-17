@@ -1,0 +1,12 @@
+# {firewall} container mechanics. No image layer — iptables + the scoped
+# sudoers entry are baked into the base image; everything here is run-time:
+# the entrypoint wrapper applies the firewall before exec'ing claude, and
+# WHITELIST_ADDRESSES carries the launcher-resolved address list in.
+[run]
+cap_add = ["NET_ADMIN"]
+entrypoint = "firewall-entrypoint.sh"
+mounts = [
+    "init-firewall.sh -> /usr/local/bin/init-firewall.sh:ro",
+    "firewall-entrypoint.sh -> /usr/local/bin/firewall-entrypoint.sh:ro",
+]
+env_forward = ["WHITELIST_ADDRESSES"]

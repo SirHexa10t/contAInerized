@@ -4,11 +4,12 @@ import dataclasses
 import sys
 from typing import NamedTuple
 
-from launch.agent_modifiers_handler import compose_chain
-from launch.agents_crud import install_latest_md, persist_instance, resolve_pick
-from launch.compose_env import set_container_env
+from launch.agents_crud import (
+    install_latest_md, install_settings, persist_instance, resolve_pick,
+)
+from launch.container_env import set_container_env
 from launch.docker_config import (
-    ensure_image, prompt_install_failures, require_docker, run_compose,
+    ensure_image, prompt_install_failures, require_docker, run_container,
     set_container_mounts, set_dry_run,
 )
 from launch.file_access import agent_md_index, ensure_shared_oauth_files, is_dir
@@ -16,8 +17,9 @@ from launch.menu_picker import (
     ask_for_workspace, print_launch_banner, prompt_session, prompt_tags, select_agent,
 )
 from launch.paths import AGENTS_DIR, INSTANCES_FILE
+from launch.tag_handlers import apply_tags
 from launch.tags import (
-    Agent, Instance, Registry, TagError, resolve_build, scan_all, store,
+    Agent, Instance, Registry, TagError, migrations, resolve_build, scan_all,
 )
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
@@ -40,8 +42,8 @@ class LaunchOptions(NamedTuple):
                             to a known target. Appended to the container's
                             `claude-code` command so they reach claude inside.
         dry_run           — `--dry-run` flag. launch() runs every stage but the
-                            docker-touching steps no-op (compose invocation
-                            prints; install-failure read skips).
+                            docker-touching steps no-op (build/run invocations
+                            print; install-failure read skips).
         refresh_installs  — `--refresh-installs` flag. Every optional CLI
                             install in the [code] Dockerfile re-runs (cache
                             buster — used to retry previously-failed installs).
@@ -91,8 +93,8 @@ def parse_cli(registry: Registry) -> LaunchOptions:
 
 def gather_input() -> tuple[LaunchOptions, Registry]:
     """Stage 1 — Input. Scan the tag tree (fail loud on a malformed tree —
-    nothing downstream can run without the taxonomy), fold any legacy state
-    maps into instances.json, verify there are agents to pick from, parse CLI
+    nothing downstream can run without the taxonomy), run any pending
+    store-format migration, verify there are agents to pick from, parse CLI
     args, gate on docker being installed, fall back to the interactive picker
     if no target was given on the command line, exit cleanly if the user
     cancels. Returns (LaunchOptions with `picked` guaranteed non-None,
@@ -105,7 +107,7 @@ def gather_input() -> tuple[LaunchOptions, Registry]:
     prompts for a launch that was never going to happen. It fires in dry-run
     too — dry-run is a faithful projection of a real run."""
     registry = call_or_exit(scan_all, AGENTS_DIR, exceptions=TagError)
-    store.ensure_migrated()
+    migrations.ensure_migrated()
     exit_if_missing(agent_md_index(), f"No agents found. Create an .md file in {AGENTS_DIR}/.")
     opts = parse_cli(registry)
     require_docker()
@@ -178,6 +180,8 @@ def setup_state(inst: Instance, refresh_installs: bool = False) -> list[str]:
     refresh-cache-buster ARGs so every optional CLI install retries on the
     upcoming build."""
     install_latest_md(inst)
+    # Policy-conflict TagError → clean exit naming both culprit policies.
+    call_or_exit(install_settings, inst, exceptions=TagError)
     ensure_shared_oauth_files()
     set_container_env(inst, refresh_installs=refresh_installs)
     set_container_mounts(inst)
@@ -195,7 +199,7 @@ def launch() -> None:
     changes. Whether the launch is new vs continuing is carried on the identity
     itself (inst.is_brand_new), not threaded as a separate arg. `--dry-run`
     propagates into docker_config via set_dry_run; the only behavioural
-    differences are that docker_compose_subprocess prints its would-be
+    differences are that docker_subprocess prints its would-be
     invocation instead of running it and prompt_install_failures skips its
     image read (nothing was built, so any log it found would be stale) —
     every other step (mount staging, env staging, firewall coordination,
@@ -210,16 +214,19 @@ def launch() -> None:
     # Persist BOTH new and cont launches — the store entry always reflects the
     # last-launched configuration (idempotent rewrite on unchanged cont).
     persist_instance(inst)
-    chain = call_or_exit(compose_chain, inst, exceptions=(ValueError, RuntimeError))
+    # apply_tags is side-effect-driven (tag.docker mounts, cache prep, GID
+    # staging, the {firewall} DNS kickoff); the chain it returns already
+    # rides the Instance for everything downstream.
+    call_or_exit(apply_tags, inst, exceptions=(ValueError, RuntimeError))
     cred_names = setup_state(inst, refresh_installs=opts.refresh_installs)
     print_launch_banner(inst, cred_names)
-    # Build the chain's images here (not inside run_compose) so the next
+    # Build the image stack here (not inside run_container) so the next
     # step can read the just-built image's failure log before Claude Code's
     # TUI takes over.
-    ensure_image(chain)
-    # Surfaces any failed-install names + retry hint before run_compose execs into Claude Code's TUI.
-    prompt_install_failures(chain, inst.instance)
-    run_compose(chain, inst.instance, opts.claude_args, resume_flag, inst.conf)
+    image = ensure_image(inst)
+    # Surfaces any failed-install names + retry hint before run_container execs into Claude Code's TUI.
+    prompt_install_failures(image, inst.instance)
+    run_container(inst, image, opts.claude_args, resume_flag)
 
 
 if __name__ == "__main__":

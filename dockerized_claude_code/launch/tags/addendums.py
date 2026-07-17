@@ -1,11 +1,9 @@
-"""Per-launch CLAUDE.md addendum text + composer, tag-system edition.
+"""Per-launch CLAUDE.md addendum text + composer.
 
-Replaces `template_code/memory_addendums.py` (which keyed addendums by
-`InstanceModifiers`). Same idea — a `## Launch-time addendums` section, built
-from `### <title>` sub-sections, appended to the agent's source `.md` at
-install time — but keyed by tag **name** and driven by an instance's `chain`
-(`["base", <professions…>, <specialties…>]`). Iterating the chain preserves
-section order (base first).
+A `## Launch-time addendums` section, built from `### <title>` sub-sections,
+appended to the agent's source `.md` at install time — keyed by tag **name**
+and driven by an instance's `chain` (`["base", <professions…>,
+<specialties…>]`). Iterating the chain preserves section order (base first).
 
 Kept as code rather than static `addendum.md` files because the content isn't
 static: the Credentials notice is computed at import from
@@ -14,9 +12,6 @@ Firewall/Privacy interpolate launcher path/label constants. Empty bodies drop
 out; an all-empty result renders nothing (install writes the source `.md`
 byte-for-byte).
 
-Note: while `{auto}` still bundles the firewall (pre-docker-flip), the
-Firewall notice is keyed to `auto`. When firewall extracts into its own
-specialty (#15), move that entry's key to `firewall`.
 """
 
 from typing import NamedTuple
@@ -87,10 +82,10 @@ A future reader of any persisted text should see the same content regardless of 
 # universal notices; a tag's addendums activate when its name is in the chain.
 # Iteration in `compose` follows chain order, so `base` renders first.
 ADDENDUMS_BY_TAG: dict[str, list[Addendum]] = {
-    "base": [SEEK_SUMMARY, MAINTAIN_PRIVACY],
-    "code": [CREDENTIALS_NOTICE],
-    "auto": [FIREWALL_NOTICE],
-    "web":  [WEB_NOTICE],
+    "base":     [SEEK_SUMMARY, MAINTAIN_PRIVACY],
+    "code":     [CREDENTIALS_NOTICE],
+    "firewall": [FIREWALL_NOTICE],
+    "web":      [WEB_NOTICE],
 }
 
 

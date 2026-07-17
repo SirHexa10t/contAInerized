@@ -1,0 +1,4 @@
+# {firewall} — runtime iptables whitelist. The container starts by applying
+# an outbound-deny firewall that only allows launcher-resolved addresses
+# (host-side DNS; the container never resolves whitelist domains itself).
+description = """Outbound network locked to a whitelist. An iptables deny-all firewall is applied at container start; only launcher-resolved addresses (Anthropic endpoints + user_extras/firewall_whitelist.txt) are reachable."""

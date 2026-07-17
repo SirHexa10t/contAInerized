@@ -16,8 +16,8 @@ from tempfile import TemporaryDirectory
 from launch import tags
 from launch.tags import (
     AgentBuild, Engine, Instance, Policy, Profession, Registry, Specialty,
-    TagError, addendums, image_chain, load_lego, merge_fragments, resolve_build,
-    scan_all, store,
+    TagError, addendums, image_chain, load_lego, merge_fragments, migrations,
+    resolve_build, scan_all, store,
 )
 
 
@@ -532,42 +532,72 @@ class TestResolveBuild(TagTreeTestCase):
 
 
 # ============================================================
-# Store — instances.json load/save + legacy-map migration
+# Store — instances.toml load/save + legacy-map migration
 # ============================================================
 
 
 class TestStore(TagTreeTestCase):
     def test_load_missing_is_empty(self):
-        self.assertEqual(store.load(Path("/nonexistent/instances.json")), {})
+        self.assertEqual(store.load(Path("/nonexistent/instances.toml")), {})
 
     def test_save_load_roundtrip(self):
-        p = self.tree({"placeholder": ""}) / "instances.json"
+        p = self.tree({"placeholder": ""}) / "instances.toml"
         m = {"golem__x": {"workspace": "/w", "engine": "golem",
                           "professions": [], "specialties": [], "policies": []}}
         store.save(m, p)
         self.assertEqual(store.load(p), m)
 
+    def test_saved_file_is_toml(self):
+        p = self.tree({"placeholder": ""}) / "instances.toml"
+        store.save({"golem__x": {"workspace": "/w", "professions": ["code"],
+                                 "specialties": [], "policies": []}}, p)
+        text = p.read_text()
+        self.assertIn("[golem__x]", text)
+        self.assertIn('workspace = "/w"', text)
+        self.assertIn('professions = ["code"]', text)
+
+    def test_none_values_omitted_and_read_back_absent(self):
+        # TOML has no null — build_entry keeps None in the dict, dumps drops
+        # it, and load simply doesn't have the key (readers .get() → None).
+        p = self.tree({"placeholder": ""}) / "instances.toml"
+        store.save({"golem__x": {"workspace": None, "engine": None,
+                                 "professions": [], "specialties": [], "policies": []}}, p)
+        entry = store.load(p)["golem__x"]
+        self.assertNotIn("workspace", entry)
+        self.assertNotIn("engine", entry)
+
+    def test_non_bare_instance_id_quoted(self):
+        # A future dotted agent name must not corrupt the file — the emitter
+        # quotes any key that isn't a TOML bare key.
+        p = self.tree({"placeholder": ""}) / "instances.toml"
+        m = {"agent.v2__x": {"workspace": "/w", "professions": [],
+                             "specialties": [], "policies": []}}
+        store.save(m, p)
+        self.assertIn('["agent.v2__x"]', p.read_text())
+        self.assertEqual(store.load(p), m)
+
     def test_migrate_translates_modes_onto_axes(self):
         agents = self.tree({"researcher.lego": 'engine = "researcher"\nprofessions = ["code"]\n'})
-        out = store.migrate_from_maps(
+        out = migrations.migrate_from_maps(
             {"researcher__proj": "/home/u/proj"},
             {"researcher__proj": ["auto", "DooD"]},
             agents,
         )
         self.assertEqual(out["researcher__proj"], {
             "workspace": "/home/u/proj", "engine": "researcher",
-            "professions": ["code"], "specialties": ["auto", "dood"], "policies": [],
+            # Legacy `auto` bundled the firewall → both specialties post-split.
+            "professions": ["code"], "specialties": ["auto", "firewall", "dood"], "policies": [],
         })
 
     def test_migrate_web_mode_becomes_profession(self):
         agents = self.tree({"researcher.lego": 'engine = "researcher"\nprofessions = ["code"]\n'})
-        out = store.migrate_from_maps({}, {"researcher__x": ["web"]}, agents)
+        out = migrations.migrate_from_maps({}, {"researcher__x": ["web"]}, agents)
         self.assertEqual(sorted(out["researcher__x"]["professions"]), ["code", "web"])
         self.assertEqual(out["researcher__x"]["specialties"], [])
 
     def test_migrate_engine_defaults_to_agent_when_lego_absent(self):
         agents = self.tree({"placeholder": ""})   # no .lego for 'poet'
-        out = store.migrate_from_maps({"poet__d": "/w"}, {}, agents)
+        out = migrations.migrate_from_maps({"poet__d": "/w"}, {}, agents)
         self.assertEqual(out["poet__d"]["engine"], "poet")
 
 
@@ -584,8 +614,13 @@ class TestAddendums(unittest.TestCase):
         self.assertIn(addendums.MAINTAIN_PRIVACY.body, out)
         self.assertNotIn(addendums.FIREWALL_NOTICE.body, out)
 
-    def test_auto_adds_firewall_notice(self):
-        self.assertIn(addendums.FIREWALL_NOTICE.body, addendums.compose(["base", "code", "auto"]))
+    def test_firewall_adds_firewall_notice(self):
+        self.assertIn(addendums.FIREWALL_NOTICE.body, addendums.compose(["base", "code", "firewall"]))
+
+    def test_auto_alone_carries_no_firewall_notice(self):
+        # Post-split, {auto} is pure skip-permissions — the firewall notice
+        # belongs to {firewall}, which auto merely *wants*.
+        self.assertNotIn(addendums.FIREWALL_NOTICE.body, addendums.compose(["base", "auto"]))
 
     def test_web_adds_browser_notice(self):
         self.assertIn(addendums.WEB_NOTICE.body, addendums.compose(["base", "code", "web"]))
@@ -594,8 +629,8 @@ class TestAddendums(unittest.TestCase):
         self.assertEqual(addendums.compose([]), "")
 
     def test_section_order_follows_chain(self):
-        # base's summary sub-section precedes auto's firewall sub-section.
-        out = addendums.compose(["base", "auto"])
+        # base's summary sub-section precedes firewall's sub-section.
+        out = addendums.compose(["base", "firewall"])
         self.assertLess(out.index("### Project summary"), out.index("### Firewall"))
 
 

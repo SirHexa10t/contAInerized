@@ -1,5 +1,5 @@
 """Tests for the [code]-tag toolchain cache lifecycle — prepare_caches and
-prune_caches in agent_modifiers_handler.
+prune_caches in tag_handlers.
 
 Caches (one per language toolchain: .cargo, .npm, go module cache, …) are
 shared across [code] agents to avoid re-downloading on every launch. The
@@ -26,7 +26,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from launch import agent_modifiers_handler
+from launch import tag_handlers
 
 
 class _CacheTestBase(unittest.TestCase):
@@ -45,9 +45,9 @@ class _CacheTestBase(unittest.TestCase):
         self.fake_mounts = {self.cache_a: "/in-container/a", self.cache_b: "/in-container/b"}
 
         self._patches = [
-            patch.object(agent_modifiers_handler, "CACHE_MOUNTS", self.fake_mounts),
-            patch.object(agent_modifiers_handler, "CACHE_ROOT", self.host_root),
-            patch.object(agent_modifiers_handler, "docker_check_any_agent_running_subprocess", return_value=False),
+            patch.object(tag_handlers, "CACHE_MOUNTS", self.fake_mounts),
+            patch.object(tag_handlers, "CACHE_ROOT", self.host_root),
+            patch.object(tag_handlers, "docker_check_any_agent_running_subprocess", return_value=False),
             # Silence the "Pruned cache_a: freed X.X GB" status line that
             # prune_caches prints when it actually frees something — irrelevant
             # to assertions, noisy in test output.
@@ -79,7 +79,7 @@ class TestPrepareCaches(_CacheTestBase):
         # Neither cache exists at start.
         self.assertFalse(self.cache_a.exists())
         self.assertFalse(self.cache_b.exists())
-        agent_modifiers_handler.prepare_caches()
+        tag_handlers.prepare_caches()
         self.assertTrue(self.cache_a.is_dir())
         self.assertTrue(self.cache_b.is_dir())
 
@@ -89,7 +89,7 @@ class TestPrepareCaches(_CacheTestBase):
         self.cache_a.mkdir()
         marker = self.cache_a / "marker.txt"
         marker.write_text("preserved")
-        agent_modifiers_handler.prepare_caches()
+        tag_handlers.prepare_caches()
         self.assertEqual(marker.read_text(), "preserved")
         self.assertTrue(self.cache_b.is_dir())   # the missing one still gets created
 
@@ -109,8 +109,8 @@ class TestPruneCaches(_CacheTestBase):
         super().setUp()
         # Use tiny thresholds so we can build the scenarios with KB-scale
         # test files instead of multi-GB ones. Keep the time threshold short.
-        self._threshold_patch = patch.object(agent_modifiers_handler, "CACHE_PRUNE_THRESHOLD_GB", 0.000_001)   # 1KB
-        self._age_patch = patch.object(agent_modifiers_handler, "CACHE_PRUNE_MIN_AGE_DAYS", 7)
+        self._threshold_patch = patch.object(tag_handlers, "CACHE_PRUNE_THRESHOLD_GB", 0.000_001)   # 1KB
+        self._age_patch = patch.object(tag_handlers, "CACHE_PRUNE_MIN_AGE_DAYS", 7)
         self._threshold_patch.start()
         self._age_patch.start()
         self.addCleanup(self._threshold_patch.stop)
@@ -121,24 +121,24 @@ class TestPruneCaches(_CacheTestBase):
         # short-circuits — no file should be touched.
         self._write_file(self.cache_a / "old", size=2000, age_days=30)
         old_mtime = (self.cache_a / "old").stat().st_mtime
-        with patch.object(agent_modifiers_handler, "docker_check_any_agent_running_subprocess", return_value=True):
-            agent_modifiers_handler.prune_caches()
+        with patch.object(tag_handlers, "docker_check_any_agent_running_subprocess", return_value=True):
+            tag_handlers.prune_caches()
         self.assertTrue((self.cache_a / "old").exists())
         # mtime unchanged confirms nothing rewrote / touched it
         self.assertAlmostEqual((self.cache_a / "old").stat().st_mtime, old_mtime, places=2)
 
     def test_under_threshold_not_pruned_even_when_old(self):
         # Set threshold to a value the test cache won't exceed.
-        with patch.object(agent_modifiers_handler, "CACHE_PRUNE_THRESHOLD_GB", 100):   # 100 GB
+        with patch.object(tag_handlers, "CACHE_PRUNE_THRESHOLD_GB", 100):   # 100 GB
             self._write_file(self.cache_a / "ancient", size=1000, age_days=365)
-            agent_modifiers_handler.prune_caches()
+            tag_handlers.prune_caches()
         self.assertTrue((self.cache_a / "ancient").exists())
 
     def test_over_threshold_removes_old_files(self):
         # Build a cache that exceeds the (tiny) threshold AND has aged files.
         self._write_file(self.cache_a / "old1", size=2000, age_days=30)
         self._write_file(self.cache_a / "old2", size=2000, age_days=15)
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prune_caches()
         self.assertFalse((self.cache_a / "old1").exists())
         self.assertFalse((self.cache_a / "old2").exists())
 
@@ -148,7 +148,7 @@ class TestPruneCaches(_CacheTestBase):
         # installations.
         self._write_file(self.cache_a / "ancient", size=2000, age_days=30)
         self._write_file(self.cache_a / "yesterday", size=2000, age_days=1)
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prune_caches()
         self.assertFalse((self.cache_a / "ancient").exists())
         self.assertTrue((self.cache_a / "yesterday").exists())
 
@@ -156,7 +156,7 @@ class TestPruneCaches(_CacheTestBase):
         # A file exactly at CACHE_PRUNE_MIN_AGE_DAYS days old. The check is
         # `mtime < time_cutoff` (strict), so age == threshold is NOT pruned.
         self._write_file(self.cache_a / "borderline", size=2000, age_days=7.0)
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prune_caches()
         # If the boundary leaks one way or the other, the test would be flaky;
         # this asserts the documented semantic: strictly-older gets pruned,
         # equal-age stays. Filesystem mtime precision can drift by sub-second,
@@ -171,7 +171,7 @@ class TestPruneCaches(_CacheTestBase):
         self._write_file(self.cache_a / "old", size=2000, age_days=30)
         self.cache_b.mkdir()
         self._write_file(self.cache_b / "small_recent", size=10, age_days=1)
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prune_caches()
         # cache_a's old file gone
         self.assertFalse((self.cache_a / "old").exists())
         # cache_b's recent file untouched (cache_b's total is under threshold anyway)
@@ -183,7 +183,7 @@ class TestPruneCaches(_CacheTestBase):
         # ordering assumptions.
         self.assertFalse(self.cache_a.exists())
         self.assertFalse(self.cache_b.exists())
-        agent_modifiers_handler.prune_caches()   # would raise if it tried to walk a missing dir
+        tag_handlers.prune_caches()   # would raise if it tried to walk a missing dir
 
 
 # ============================================================
@@ -197,8 +197,8 @@ class TestCacheLifecycleScenario(_CacheTestBase):
 
     def setUp(self):
         super().setUp()
-        self._threshold_patch = patch.object(agent_modifiers_handler, "CACHE_PRUNE_THRESHOLD_GB", 0.000_001)
-        self._age_patch = patch.object(agent_modifiers_handler, "CACHE_PRUNE_MIN_AGE_DAYS", 7)
+        self._threshold_patch = patch.object(tag_handlers, "CACHE_PRUNE_THRESHOLD_GB", 0.000_001)
+        self._age_patch = patch.object(tag_handlers, "CACHE_PRUNE_MIN_AGE_DAYS", 7)
         self._threshold_patch.start()
         self._age_patch.start()
         self.addCleanup(self._threshold_patch.stop)
@@ -206,7 +206,7 @@ class TestCacheLifecycleScenario(_CacheTestBase):
 
     def test_launch_then_prune_then_launch(self):
         # 1. First launch: prepare_caches creates dirs.
-        agent_modifiers_handler.prepare_caches()
+        tag_handlers.prepare_caches()
         self.assertTrue(self.cache_a.is_dir())
 
         # 2. Toolchain writes some files into the cache over time. Simulate
@@ -217,8 +217,8 @@ class TestCacheLifecycleScenario(_CacheTestBase):
         self._write_file(self.cache_a / "fresh_crate.tgz", size=2000, age_days=1)
 
         # 3. Next launch: prepare (idempotent) then prune (cache over threshold).
-        agent_modifiers_handler.prepare_caches()
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prepare_caches()
+        tag_handlers.prune_caches()
 
         # 4. Old crates gone, fresh one stays.
         for i in range(3):
@@ -226,8 +226,8 @@ class TestCacheLifecycleScenario(_CacheTestBase):
         self.assertTrue((self.cache_a / "fresh_crate.tgz").exists())
 
         # 5. Another launch a moment later: same state still, no further pruning.
-        agent_modifiers_handler.prepare_caches()
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prepare_caches()
+        tag_handlers.prune_caches()
         self.assertTrue((self.cache_a / "fresh_crate.tgz").exists())
 
     def test_concurrent_agent_blocks_prune(self):
@@ -235,12 +235,12 @@ class TestCacheLifecycleScenario(_CacheTestBase):
         self._write_file(self.cache_a / "old", size=2000, age_days=30)
 
         # 2. An agent is running — prune is a no-op.
-        with patch.object(agent_modifiers_handler, "docker_check_any_agent_running_subprocess", return_value=True):
-            agent_modifiers_handler.prune_caches()
+        with patch.object(tag_handlers, "docker_check_any_agent_running_subprocess", return_value=True):
+            tag_handlers.prune_caches()
         self.assertTrue((self.cache_a / "old").exists(), "prune ran despite agent container running")
 
         # 3. The other agent finishes — prune now runs and clears the old file.
-        agent_modifiers_handler.prune_caches()
+        tag_handlers.prune_caches()
         self.assertFalse((self.cache_a / "old").exists())
 
 

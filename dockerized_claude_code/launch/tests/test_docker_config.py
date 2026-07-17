@@ -1,40 +1,52 @@
-"""Tests for launch.docker_config — chain naming + compose-file selection +
-set_container_mounts (workspace fallback).
+"""Tests for launch.docker_config — image naming, the tag.docker flag
+emitters (build args / env forwards / entrypoint), the plain-docker build
+loop, and set_container_mounts (workspace fallback).
 
 Env-formatter tests (install_creds_flags, token_env_dict, etc.) live in
-test_compose_env.py since that's where the formatters were moved."""
+test_container_env.py alongside the accumulator they feed."""
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from launch import docker_config, paths
+from launch.container_env import ContainerEnvKey, _container_env, stage_container_env
 from launch.docker_config import (
-    chain_compose_files, chain_image_tag, effort_args, set_container_mounts,
+    build_arg_flags, effort_args, entrypoint_flags, env_forward_flags,
+    image_tag, set_container_mounts,
 )
+from launch.tags import DockerContribution
 
 
-class TestRunComposeCriticalDnsFailure(unittest.TestCase):
-    """run_compose aborts with the codebase's clean one-liner (sys.exit) when
-    the {auto} phase-1 critical-DNS resolve terminally failed — the worker's
-    RuntimeError must not escape as a raw traceback, and nothing docker-
-    touching may run after the failure."""
+def _run_inst(**over):
+    """Duck-typed Instance for run_container tests — only the attrs it reads."""
+    defaults = dict(docker_contributions=[], conf={}, claude_args=[], instance="poet__x")
+    defaults.update(over)
+    return SimpleNamespace(**defaults)
 
-    def test_runtime_error_exits_cleanly_without_compose_run(self):
+
+class TestRunContainerCriticalDnsFailure(unittest.TestCase):
+    """run_container aborts with the codebase's clean one-liner (sys.exit)
+    when the {firewall} phase-1 critical-DNS resolve terminally failed — the
+    worker's RuntimeError must not escape as a raw traceback, and nothing
+    docker-touching may run after the failure."""
+
+    def test_runtime_error_exits_cleanly_without_docker_run(self):
         boom = RuntimeError(
             "Critical Anthropic domains failed to resolve: ['api.anthropic.com']. "
             "Claude Code cannot operate without them; aborting launch.")
-        with patch.object(docker_config, "stage_compose_env"), \
+        with patch.object(docker_config, "stage_container_env"), \
              patch.object(docker_config, "set_terminal_title"), \
              patch.object(docker_config, "is_critical_pending", return_value=False), \
              patch.object(docker_config, "wait_for_critical_addresses", side_effect=boom), \
              patch.object(docker_config, "start_firewall_updater") as updater, \
-             patch.object(docker_config, "docker_compose_subprocess") as compose:
+             patch.object(docker_config, "docker_subprocess") as run:
             with self.assertRaises(SystemExit) as ctx:
-                docker_config.run_compose(["base"], "poet__x", [], [], {})
+                docker_config.run_container(_run_inst(), "claude-agents:base", [], [])
         self.assertIn("Critical Anthropic domains", str(ctx.exception))
         updater.assert_not_called()
-        compose.assert_not_called()
+        run.assert_not_called()
 
 
 class TestEffortArgs(unittest.TestCase):
@@ -69,53 +81,89 @@ class TestEffortArgs(unittest.TestCase):
             ["--effort", "medium"])
 
 
-class TestChainImageTag(unittest.TestCase):
-    def test_base_only(self):
-        self.assertEqual(chain_image_tag(["base"]), "claude-agents:base")
+class TestImageTag(unittest.TestCase):
+    def test_no_layers_is_base(self):
+        self.assertEqual(image_tag([]), "claude-agents:base")
 
     def test_single_layer(self):
-        self.assertEqual(chain_image_tag(["base", "code"]), "claude-agents:code")
+        self.assertEqual(image_tag(["code"]), "claude-agents:code")
 
-    def test_two_layers_joined_with_dot(self):
-        self.assertEqual(chain_image_tag(["base", "code", "auto"]), "claude-agents:code.auto")
-
-    def test_dood_lowercased(self):
-        # DooD's value is mixed-case; the tag form is lowercased to match
-        # compose / Dockerfile filename conventions.
-        self.assertEqual(
-            chain_image_tag(["base", "code", "auto", "DooD"]),
-            "claude-agents:code.auto.dood",
-        )
-
-    def test_just_dood_with_base(self):
-        self.assertEqual(chain_image_tag(["base", "DooD"]), "claude-agents:dood")
+    def test_layers_joined_with_dot(self):
+        self.assertEqual(image_tag(["code", "web", "dood"]), "claude-agents:code.web.dood")
 
 
-class TestChainComposeFiles(unittest.TestCase):
-    def test_base_only_uses_compose_yml(self):
-        result = chain_compose_files(["base"])
-        self.assertEqual(result, ["-f", str(paths.COMPOSE_FILE_PATH)])
+class ContainerEnvFixture(unittest.TestCase):
+    """Snapshot + clear the container-env accumulator around each test."""
 
-    def test_appends_one_layer(self):
-        result = chain_compose_files(["base", "code"])
-        self.assertEqual(result, [
-            "-f", str(paths.COMPOSE_FILE_PATH),
-            "-f", str(paths.compose_layer_path("code")),
-        ])
+    def setUp(self):
+        self._snapshot = dict(_container_env)
+        _container_env.clear()
 
-    def test_appends_multiple_layers_in_order(self):
-        result = chain_compose_files(["base", "code", "auto", "DooD"])
-        self.assertEqual(result, [
-            "-f", str(paths.COMPOSE_FILE_PATH),
-            "-f", str(paths.compose_layer_path("code")),
-            "-f", str(paths.compose_layer_path("auto")),
-            "-f", str(paths.compose_layer_path("DooD")),   # compose_layer_path lowercases internally
-        ])
+    def tearDown(self):
+        _container_env.clear()
+        _container_env.update(self._snapshot)
 
-    def test_dood_layer_uses_lowercased_filename(self):
-        # Spot-check: compose_layer_path("DooD") → compose.dood.yml, not compose.DooD.yml.
-        result = chain_compose_files(["base", "DooD"])
-        self.assertIn(str(paths.DOCKER_DIR / "compose.dood.yml"), result)
+
+class TestBuildArgFlags(ContainerEnvFixture):
+    """build_arg_flags resolves a layer's `[build] arg_forward` names against
+    the staged env — plain names pull their value, globs expand, unstaged
+    names drop silently (the Dockerfile's ARG default then applies)."""
+
+    def test_plain_name_emits_flag_pair(self):
+        stage_container_env(ContainerEnvKey.DOCKER_GID, "988")
+        self.assertEqual(build_arg_flags(("DOCKER_GID",)),
+                         ["--build-arg", "DOCKER_GID=988"])
+
+    def test_unstaged_name_skipped(self):
+        self.assertEqual(build_arg_flags(("DOCKER_GID",)), [])
+
+    def test_glob_expands_against_staged_keys(self):
+        _container_env.update({"INSTALL_GH": "1", "INSTALL_AWS": "0", "OTHER": "x"})
+        flags = build_arg_flags(("INSTALL_*",))
+        self.assertEqual(flags, ["--build-arg", "INSTALL_AWS=0", "--build-arg", "INSTALL_GH=1"])
+
+    def test_glob_with_no_matches_is_empty(self):
+        self.assertEqual(build_arg_flags(("INSTALL_*",)), [])
+
+
+class TestEnvForwardFlags(ContainerEnvFixture):
+    """env_forward_flags emits `-e NAME=VALUE` for the active tags'
+    `[run] env_forward` names — the gating that keeps WHITELIST_ADDRESSES
+    scoped to launches where the resolve actually ran."""
+
+    def _fw(self):
+        return DockerContribution(env_forward=("WHITELIST_ADDRESSES",))
+
+    def test_staged_name_emitted(self):
+        stage_container_env(ContainerEnvKey.WHITELIST_ADDRESSES, "1.2.3.4:443")
+        self.assertEqual(env_forward_flags([self._fw()]),
+                         ["-e", "WHITELIST_ADDRESSES=1.2.3.4:443"])
+
+    def test_unstaged_name_skipped(self):
+        self.assertEqual(env_forward_flags([self._fw()]), [])
+
+    def test_no_contributions_no_flags(self):
+        stage_container_env(ContainerEnvKey.WHITELIST_ADDRESSES, "1.2.3.4:443")
+        self.assertEqual(env_forward_flags([]), [])
+
+
+class TestEntrypointFlags(unittest.TestCase):
+    def test_no_override_uses_image_entrypoint(self):
+        self.assertEqual(entrypoint_flags([DockerContribution()]), [])
+
+    def test_bare_name_resolves_to_local_bin(self):
+        flags = entrypoint_flags([DockerContribution(entrypoint="firewall-entrypoint.sh")])
+        self.assertEqual(flags, ["--entrypoint",
+                                 f"{paths.LOCAL_BIN_IN_CONTAINER}/firewall-entrypoint.sh"])
+
+    def test_path_used_as_is(self):
+        flags = entrypoint_flags([DockerContribution(entrypoint="/opt/custom/entry.sh")])
+        self.assertEqual(flags, ["--entrypoint", "/opt/custom/entry.sh"])
+
+    def test_two_overrides_conflict_loudly(self):
+        with self.assertRaises(RuntimeError):
+            entrypoint_flags([DockerContribution(entrypoint="a.sh"),
+                              DockerContribution(entrypoint="b.sh")])
 
 
 class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
@@ -133,23 +181,32 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         return recorded
 
     def test_workspace_set_uses_provided_path(self):
-        inst_id = SimpleNamespace(workspace="/some/host/path", state_dir="/tmp/state")
+        inst_id = SimpleNamespace(workspace="/some/host/path", state_dir=Path("/tmp/state"))
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], "/some/host/path")
 
     def test_workspace_none_falls_back_to_default(self):
-        inst_id = SimpleNamespace(workspace=None, state_dir="/tmp/state")
+        inst_id = SimpleNamespace(workspace=None, state_dir=Path("/tmp/state"))
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
     def test_workspace_empty_string_falls_back_to_default(self):
         # `or` covers None AND empty string — both treated as "no workspace".
-        inst_id = SimpleNamespace(workspace="", state_dir="/tmp/state")
+        inst_id = SimpleNamespace(workspace="", state_dir=Path("/tmp/state"))
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
+
+    def test_generated_settings_mounted_read_only(self):
+        # The launcher-generated settings file shadows the state-dir's rw
+        # view of ~/.claude/settings.json — the leash the agent can't undo.
+        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"))
+        mounts = self._capture_mounts(inst_id)
+        settings_pair = next(p for p in mounts if "settings.json" in p[1])
+        self.assertEqual(settings_pair[0], "/tmp/state/settings.json")
+        self.assertTrue(settings_pair[1].endswith(":ro"))
 
 
 class TestAddDockerMountCollisions(unittest.TestCase):
@@ -216,13 +273,13 @@ class TestPromptInstallFailuresDryRun(unittest.TestCase):
     def test_dry_run_skips_the_docker_read(self):
         docker_config.set_dry_run(True)
         with patch("launch.docker_config.shell_capture") as mock_capture:
-            docker_config.prompt_install_failures(["base", "code"], "poet__x")
+            docker_config.prompt_install_failures("claude-agents:code", "poet__x")
         mock_capture.assert_not_called()
 
     def test_real_run_reads_the_image_log(self):
         completed = SimpleNamespace(returncode=1, stdout="")   # rc!=0 → no log in image → silent return
         with patch("launch.docker_config.shell_capture", return_value=completed) as mock_capture:
-            docker_config.prompt_install_failures(["base", "code"], "poet__x")
+            docker_config.prompt_install_failures("claude-agents:code", "poet__x")
         mock_capture.assert_called_once()
 
 
@@ -283,11 +340,11 @@ class TestSetDryRun(unittest.TestCase):
         self.assertFalse(docker_config._dry_run)
 
 
-class TestDockerComposeSubprocessDryRun(unittest.TestCase):
-    """docker_compose_subprocess gates its shell_returncode call on the
-    module-level _dry_run flag. Real-run forwards to shell_returncode with
-    the docker-compose prefix + the staged env; dry-run prints the would-be
-    invocation and returns without touching subprocess."""
+class TestDockerSubprocessDryRun(unittest.TestCase):
+    """docker_subprocess gates its shell_returncode call on the module-level
+    _dry_run flag. Real-run forwards to shell_returncode with the `docker`
+    prefix; dry-run prints the would-be invocation and returns without
+    touching subprocess."""
 
     def setUp(self):
         docker_config.set_dry_run(False)
@@ -299,63 +356,80 @@ class TestDockerComposeSubprocessDryRun(unittest.TestCase):
         docker_config.set_dry_run(True)
         with patch("launch.docker_config.shell_returncode") as mock_run, \
              patch("builtins.print"):
-            docker_config.docker_compose_subprocess(["build", "--no-cache"])
+            docker_config.docker_subprocess(["build", "--no-cache"])
         mock_run.assert_not_called()
 
-    def test_real_run_invokes_shell_returncode_with_docker_compose_prefix(self):
+    def test_real_run_invokes_shell_returncode_with_docker_prefix(self):
         with patch("launch.docker_config.shell_returncode", return_value=0) as mock_run:
-            docker_config.docker_compose_subprocess(["build"])
+            docker_config.docker_subprocess(["build"])
         mock_run.assert_called_once()
-        # Positional args are ("docker", "compose", *args); env is a kwarg.
         positional = mock_run.call_args.args
-        self.assertEqual(positional[:2], ("docker", "compose"))
-        self.assertEqual(positional[2:], ("build",))
+        self.assertEqual(positional, ("docker", "build"))
 
     def test_dry_run_prints_would_invoke_line(self):
         docker_config.set_dry_run(True)
         with patch("builtins.print") as mock_print, \
              patch("launch.docker_config.shell_returncode"):
-            docker_config.docker_compose_subprocess(["-f", "x.yml", "build"])
+            docker_config.docker_subprocess(["run", "--rm", "img"])
         mock_print.assert_called_once()
         printed = mock_print.call_args.args[0]
         self.assertIn("dry-run", printed)
-        self.assertIn("docker compose -f x.yml build", printed)
+        self.assertIn("docker run --rm img", printed)
 
 
-class TestEnsureImageRunsOnDryRun(unittest.TestCase):
-    """Before the dry-run refactor, ensure_image was entirely skipped on
-    dry-run — the per-step env staging (TARGET_IMAGE + PARENT_IMAGE) and
-    the per-step build invocation were unreachable. With the gate moved
-    into docker_compose_subprocess, ensure_image now runs its loop in
-    both modes; each iteration stages the env and calls
-    docker_compose_subprocess (which no-ops internally on dry-run)."""
+class TestEnsureImage(unittest.TestCase):
+    """ensure_image drives one `docker build` per step (base + each
+    build_steps entry), threading PARENT_IMAGE explicitly and returning the
+    final tag. docker_subprocess no-ops internally on dry-run, so the loop
+    runs identically in both modes."""
 
-    def setUp(self):
-        docker_config.set_dry_run(True)
+    def _inst(self, steps):
+        from pathlib import Path as P
+        return SimpleNamespace(build_steps=[
+            (name, P(f"/fake/{name}/Dockerfile"), contribution)
+            for name, contribution in steps
+        ])
 
-    def tearDown(self):
-        docker_config.set_dry_run(False)
-
-    def test_calls_compose_subprocess_once_per_chain_step(self):
-        with patch("launch.docker_config.docker_compose_subprocess") as mock_compose, \
-             patch("launch.docker_config.stage_compose_env"), \
+    def test_builds_base_plus_each_step(self):
+        with patch("launch.docker_config.docker_subprocess") as mock_run, \
              patch("builtins.print"):
-            docker_config.ensure_image(["base", "code", "auto"])
-        self.assertEqual(mock_compose.call_count, 3)
+            tag = docker_config.ensure_image(self._inst([("code", None), ("dood", None)]))
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertEqual(tag, "claude-agents:code.dood")
 
-    def test_stages_target_image_for_each_step(self):
-        # First call stages base, second stages code (with PARENT_IMAGE=base),
-        # third stages auto (with PARENT_IMAGE=code). The env-staging is the
-        # core observable side effect — previously hidden behind the dry-run
-        # short-circuit.
-        with patch("launch.docker_config.docker_compose_subprocess"), \
-             patch("launch.docker_config.stage_compose_env") as mock_stage, \
+    def test_bare_agent_builds_base_only(self):
+        with patch("launch.docker_config.docker_subprocess") as mock_run, \
              patch("builtins.print"):
-            docker_config.ensure_image(["base", "code"])
-        # TARGET_IMAGE staged twice (once per step); PARENT_IMAGE once (for the non-base step).
-        staged_keys = [call.args[0].name for call in mock_stage.call_args_list]
-        self.assertEqual(staged_keys.count("TARGET_IMAGE"), 2)
-        self.assertEqual(staged_keys.count("PARENT_IMAGE"), 1)
+            tag = docker_config.ensure_image(self._inst([]))
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(tag, "claude-agents:base")
+
+    def test_parent_image_threads_between_steps(self):
+        with patch("launch.docker_config.docker_subprocess") as mock_run, \
+             patch("builtins.print"):
+            docker_config.ensure_image(self._inst([("code", None), ("dood", None)]))
+        args_code = mock_run.call_args_list[1].args[0]
+        args_dood = mock_run.call_args_list[2].args[0]
+        self.assertIn("PARENT_IMAGE=claude-agents:base", args_code)
+        self.assertIn("PARENT_IMAGE=claude-agents:code", args_dood)
+
+    def test_step_forwards_its_own_build_args(self):
+        from launch.container_env import _container_env
+        snapshot = dict(_container_env)
+        _container_env.clear()
+        _container_env["DOCKER_GID"] = "988"
+        try:
+            contribution = DockerContribution(build_arg_forward=("DOCKER_GID",))
+            with patch("launch.docker_config.docker_subprocess") as mock_run, \
+                 patch("builtins.print"):
+                docker_config.ensure_image(self._inst([("code", None), ("dood", contribution)]))
+            args_code = mock_run.call_args_list[1].args[0]
+            args_dood = mock_run.call_args_list[2].args[0]
+            self.assertNotIn("DOCKER_GID=988", args_code)   # code doesn't forward it
+            self.assertIn("DOCKER_GID=988", args_dood)      # dood's tag.docker does
+        finally:
+            _container_env.clear()
+            _container_env.update(snapshot)
 
 
 if __name__ == "__main__":
@@ -402,7 +476,7 @@ class TestWaitForFirewallApplied(unittest.TestCase):
 
     def test_marker_path_matches_the_shell_script(self):
         # paths.FIREWALL_DONE_IN_CONTAINER mirrors a literal in
-        # docker/init-firewall.sh (shell can't import Python constants) —
+        # the {firewall} specialty's init-firewall.sh (shell can't import Python constants) —
         # this is the drift guard the constant's comment promises.
         script = (paths.INIT_FIREWALL_SH).read_text()
         self.assertIn(f"touch {paths.FIREWALL_DONE_IN_CONTAINER}", script)

@@ -3,9 +3,8 @@
 `scan_all(agents_dir)` runs every kind's scanner (plus hidden-layer and
 combos discovery), assembles a `Registry`, and validates it as a whole before
 returning — so a defective tree aborts at startup with a `TagError` naming
-the fault, never mid-launch. `Registry` is then the read-only source of truth
-every consumer (form, picker, launch stages) will query in later phases; in
-P0 nothing live consumes it yet.
+the fault, never mid-launch. `Registry` is the read-only source of truth
+every consumer (form, picker, launch stages) queries.
 """
 
 from __future__ import annotations
@@ -63,7 +62,7 @@ class Registry:
         """Fail loud if a `.lego` or an instance-store entry names a tag that
         doesn't exist, or puts a tag on the wrong axis (a profession listed
         under `specialties`, etc.). `source` names the file (or the store
-        entry, as a plain string like `instances.json[poet__x]`) in errors."""
+        entry, as a plain string like `instances.toml[poet__x]`) in errors."""
         axis_checks = [
             (build.engine and [build.engine] or [], "engine", "engine"),
             (build.professions, "profession", "professions"),

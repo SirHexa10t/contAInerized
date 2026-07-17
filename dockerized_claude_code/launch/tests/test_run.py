@@ -134,17 +134,18 @@ class TestParseCliFlags(unittest.TestCase):
 class TestLaunchOrchestrator(unittest.TestCase):
     """launch() drives the pipeline of stages. We mock each stage so the test
     is purely about the flow shape. The dry-run gate now lives inside
-    docker_compose_subprocess (set via docker_config.set_dry_run); from
+    docker_subprocess (set via docker_config.set_dry_run); from
     launch()'s perspective every stage fires in both modes — including
     ensure_image and run_compose. (require_docker fires inside gather_input —
     after CLI parsing, before the picker — so it's covered by TestGatherInput
     below, not by these orchestrator-level mocks.)"""
 
-    def _mock_pipeline_through_to_run_compose(self, *, dry_run):
+    def _mock_pipeline(self, *, dry_run):
         """Patch every stage launch() calls. Returns a dict of the active mocks
-        so individual tests can inspect call args."""
+        so individual tests can inspect call args. Each patch is started with
+        its cleanup registered IMMEDIATELY — a mid-fixture failure must not
+        leak started patches into later tests."""
         inst = MagicMock(is_brand_new=False)
-        chain = ["base"]
         opts = run.LaunchOptions(MagicMock(), [], dry_run, False)
 
         mocks = {
@@ -153,15 +154,16 @@ class TestLaunchOrchestrator(unittest.TestCase):
             "resolve_target":   patch.object(run, "resolve_target", return_value=inst),
             "compute_resume_flag": patch.object(run, "compute_resume_flag", return_value=[]),
             "persist_instance": patch.object(run, "persist_instance"),
-            "compose_chain":    patch.object(run, "compose_chain", return_value=chain),
+            "apply_tags":       patch.object(run, "apply_tags", return_value=["base"]),
             "setup_state":      patch.object(run, "setup_state", return_value=[]),
             "print_launch_banner": patch.object(run, "print_launch_banner"),
-            "ensure_image":     patch.object(run, "ensure_image"),
+            "ensure_image":     patch.object(run, "ensure_image", return_value="claude-agents:base"),
             "prompt_install_failures": patch.object(run, "prompt_install_failures", return_value=None),
-            "run_compose":      patch.object(run, "run_compose"),
+            "run_container":    patch.object(run, "run_container"),
         }
-        active = {name: p.start() for name, p in mocks.items()}
-        for p in mocks.values():
+        active = {}
+        for name, p in mocks.items():
+            active[name] = p.start()
             self.addCleanup(p.stop)
         # Suppress any incidental prints so test output stays clean.
         p_print = patch("builtins.print")
@@ -169,65 +171,72 @@ class TestLaunchOrchestrator(unittest.TestCase):
         self.addCleanup(p_print.stop)
         return active
 
-    def test_run_compose_called_in_normal_launch(self):
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=False)
+    def test_run_container_called_in_normal_launch(self):
+        mocks = self._mock_pipeline(dry_run=False)
         run.launch()
-        mocks["run_compose"].assert_called_once()
+        mocks["run_container"].assert_called_once()
 
-    def test_run_compose_called_in_dry_run(self):
-        # run_compose now fires in both modes — its orchestration (mount
+    def test_run_container_called_in_dry_run(self):
+        # run_container fires in both modes — its orchestration (mount
         # flattening, env staging, firewall coordination) gets exercised on
         # dry-run too. The actual docker invocation is gated inside
-        # docker_compose_subprocess by the dry-run flag.
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
+        # docker_subprocess by the dry-run flag.
+        mocks = self._mock_pipeline(dry_run=True)
         run.launch()
-        mocks["run_compose"].assert_called_once()
+        mocks["run_container"].assert_called_once()
+
+    def test_run_container_receives_the_built_image(self):
+        # ensure_image's return value (the final tag) is what run_container
+        # launches — the two stages hand off explicitly, no shared globals.
+        mocks = self._mock_pipeline(dry_run=False)
+        run.launch()
+        self.assertEqual(mocks["run_container"].call_args.args[1], "claude-agents:base")
 
     def test_setup_state_runs_in_dry_run(self):
         # Dry-run still runs all the state-setup stages — that's the whole
         # point (it's the pipeline-up-to-the-final-step that we want to
         # exercise in tests).
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
+        mocks = self._mock_pipeline(dry_run=True)
         run.launch()
         mocks["setup_state"].assert_called_once()
-        mocks["compose_chain"].assert_called_once()
+        mocks["apply_tags"].assert_called_once()
         mocks["persist_instance"].assert_called_once()
 
     def test_persist_fires_for_cont_launches_too(self):
         # The store entry always reflects the last-launched configuration —
         # cont launches rewrite it idempotently rather than gating on
         # is_brand_new (the old two-map model persisted modes only for new).
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=False)
+        mocks = self._mock_pipeline(dry_run=False)
         run.launch()
         mocks["persist_instance"].assert_called_once_with(mocks["resolve_target"].return_value)
 
     def test_banner_prints_in_dry_run(self):
         # The launch banner is part of the "what would happen" output — show it
         # even on dry-run so the user can see the resolved state.
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
+        mocks = self._mock_pipeline(dry_run=True)
         run.launch()
         mocks["print_launch_banner"].assert_called_once()
 
     def test_set_dry_run_called_with_flag_value(self):
         # The dry_run CLI flag propagates into docker_config via set_dry_run
-        # immediately after gather_input. docker_compose_subprocess then
-        # gates its real subprocess.call on that module-level flag.
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
+        # immediately after gather_input. docker_subprocess then gates its
+        # real subprocess.call on that module-level flag.
+        mocks = self._mock_pipeline(dry_run=True)
         run.launch()
         mocks["set_dry_run"].assert_called_once_with(True)
 
     def test_set_dry_run_called_false_on_normal_launch(self):
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=False)
+        mocks = self._mock_pipeline(dry_run=False)
         run.launch()
         mocks["set_dry_run"].assert_called_once_with(False)
 
     def test_ensure_image_and_install_failures_run_in_dry_run(self):
         # Both are still *called* in dry-run — ensure_image's docker
-        # invocations no-op inside docker_compose_subprocess, and
+        # invocations no-op inside docker_subprocess, and
         # prompt_install_failures gates itself internally (it skips the image
         # read entirely on dry-run: nothing was built, so any log it found
         # would be stale — see test_docker_config for that gate).
-        mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
+        mocks = self._mock_pipeline(dry_run=True)
         run.launch()
         mocks["ensure_image"].assert_called_once()
         mocks["prompt_install_failures"].assert_called_once()
@@ -243,7 +252,7 @@ class TestGatherInput(unittest.TestCase):
     def _gather(self, parse_result, **stage_patches):
         patches = {
             "scan_all":       patch.object(run, "scan_all", return_value=REGISTRY),
-            "ensure":         patch("launch.tags.store.ensure_migrated"),
+            "ensure":         patch("launch.tags.migrations.ensure_migrated"),
             "parse_cli":      patch.object(run, "parse_cli", return_value=parse_result),
             **stage_patches,
         }
@@ -314,7 +323,7 @@ class TestGatherInput(unittest.TestCase):
             require_docker=patch.object(run, "require_docker"),
             select_agent=patch.object(run, "select_agent"),
         )
-        with patch("launch.tags.store.ensure_migrated", side_effect=lambda: calls.append("migrate")), \
+        with patch("launch.tags.migrations.ensure_migrated", side_effect=lambda: calls.append("migrate")), \
              patch.object(run, "parse_cli", side_effect=lambda reg: calls.append("parse") or run.LaunchOptions(MagicMock(), [], False, False)):
             run.gather_input()
         self.assertEqual(calls, ["migrate", "parse"])

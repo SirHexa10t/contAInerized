@@ -1,9 +1,10 @@
 # Base image — what every agent needs: bash/git/curl + ripgrep/fd/tree (search) +
 # jq/yq (data) + python3 + uv (Python) + rich-cli (used by /print) + Claude Code
-# itself. Tagged `claude-agents:base` by compose.
+# itself. Tagged `claude-agents:base` by the launcher's `docker build`.
 #
-# Programming-oriented agents (filename includes [code]) layer the heavier build
-# environment on top via docker/Dockerfile.code (which does `FROM claude-agents:base`).
+# Profession layers (agents/profession/**/Dockerfile) build on top via
+# `FROM ${PARENT_IMAGE}`; iptables + the scoped sudoers entry below serve the
+# {firewall} specialty, which is run-time-only (no image layer of its own).
 #
 # trixie (Debian 13) ships python3.13 — the tags-rewrite code requires ≥3.12
 # in-container, because the dev loop runs the launcher's test suite inside
@@ -24,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    iptables \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Debian ships fd's binary as `fdfind` to avoid a name collision with an old
@@ -38,6 +41,20 @@ RUN curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linu
 
 ARG HOST_UID=1000
 RUN useradd -m -s /bin/bash -u ${HOST_UID} claude
+
+# {firewall} sudoers — give claude passwordless sudo for ONLY
+# /usr/local/bin/init-firewall.sh (bind-mounted at run time by the {firewall}
+# specialty's tag.docker; inert when the specialty is off since the script
+# then doesn't exist), and preserve WHITELIST_ADDRESSES across the privilege
+# boundary so the script can read the launcher-supplied whitelist. Other sudo
+# calls (apt, root shell, etc.) are blocked. Re-running with a tampered
+# WHITELIST_ADDRESSES is prevented by the init-once marker inside
+# init-firewall.sh, not by sudoers.
+RUN { \
+      echo 'Defaults env_keep += "WHITELIST_ADDRESSES"'; \
+      echo 'claude ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh'; \
+    } > /etc/sudoers.d/claude-firewall \
+ && chmod 0440 /etc/sudoers.d/claude-firewall
 
 USER claude
 

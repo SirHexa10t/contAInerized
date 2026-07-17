@@ -1,7 +1,6 @@
-"""The tag system — four *kinds* of agent modifier (engine / profession /
-specialty / policy), whose *members* are discovered from the `agents/` file
-tree rather than hard-coded. Replaces the old `InstanceModifiers` enum +
-filename grammar + modes map (see `refactoring-replan.md`).
+"""The tag system — four *kinds* of tag (engine / profession / specialty /
+policy), whose *members* are discovered from the `agents/` file tree rather
+than hard-coded (design: `refactoring-replan.md`).
 
 Public surface:
   - `Tag`, `DockerContribution`, `TagError` — base record + parsed docker
@@ -12,9 +11,9 @@ Public surface:
   - `merge_fragments` — deep-merge of policy settings fragments.
   - `AgentBuild`, `load_lego` — the per-agent `.lego` build file.
   - `Registry`, `scan_all` — discover + validate the whole tree, then query.
-
-P0 status: nothing in the live launcher imports this yet — it is exercised
-only by `tests/test_tags.py` against fixture trees.
+  - `Agent`, `Instance`, `resolve_build` — the identity records launches run on.
+  - `store` / `migrations` — the instances.toml store and one-shot
+    retired-format conversions.
 """
 
 from .base import DockerContribution, Tag, TagError
@@ -27,7 +26,7 @@ from .policy import Policy, merge_fragments
 from .profession import Layer, Profession
 from .registry import Registry, scan_all
 from .specialty import Combo, Specialty, scan_combos
-from . import addendums, store
+from . import addendums, migrations, store
 
 __all__ = [
     "Tag", "DockerContribution", "TagError",
@@ -36,5 +35,5 @@ __all__ = [
     "AgentBuild", "load_lego",
     "Registry", "scan_all",
     "Agent", "Instance", "image_chain", "resolve_build", "agent_md_path",
-    "load_agent", "store", "addendums",
+    "load_agent", "store", "migrations", "addendums",
 ]

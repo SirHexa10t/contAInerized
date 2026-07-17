@@ -12,12 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import json
+
 from launch import paths
 from launch.agents_crud import (
     ORDERED_MODEL_FAMILIES, delete_instance, engine_sort_key,
-    install_latest_md, modify_instance, parse_model_id, persist_instance,
+    install_latest_md, install_settings, modify_instance, parse_model_id,
+    persist_instance,
 )
-from launch.tags import Instance, scan_all, store
+from launch.tags import Instance, TagError, scan_all, store
 from launch.tags.addendums import (
     ADDENDUM_SECTION_TITLE, ADDENDUMS_BY_TAG, SEEK_SUMMARY,
 )
@@ -162,9 +165,13 @@ class TestPersistInstance(StoreWritersTestCase):
         persist_instance(_inst(specialties=()))
         self.assertEqual(store.load()["poet__draft"]["specialties"], [])
 
-    def test_engine_none_stored_as_null(self):
+    def test_engine_none_omitted_from_entry(self):
+        # TOML has no null — an unset engine is simply absent, and readers
+        # (entry_to_build) see the missing key as None.
         persist_instance(_inst())
-        self.assertIsNone(store.load()["poet__draft"]["engine"])
+        entry = store.load()["poet__draft"]
+        self.assertNotIn("engine", entry)
+        self.assertIsNone(store.entry_to_build(entry).engine)
 
     def test_other_entries_untouched(self):
         persist_instance(_inst(session="a"))
@@ -309,6 +316,66 @@ class TestInstallLatestMd(unittest.TestCase):
         with patch.dict(ADDENDUMS_BY_TAG, {}, clear=True):
             install_latest_md(inst)
         self.assertEqual(inst.state_md.read_text(), "just the body\n")
+
+
+class TestInstallSettings(unittest.TestCase):
+    """install_settings — base settings + policy fragments → the per-instance
+    settings.json that gets RO-mounted over ~/.claude/settings.json. Policy
+    fragments come through duck-typed stand-ins (`.name` + `.load_fragment()`
+    are all it reads); the base file is the real shipped one."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmpdir.name) / "state")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _policy(name, fragment):
+        return SimpleNamespace(name=name, load_fragment=lambda: fragment)
+
+    def _written(self, inst):
+        return json.loads((inst.state_dir / "settings.json").read_text())
+
+    def test_no_policies_yields_base_settings(self):
+        inst = _inst()
+        install_settings(inst)
+        base = json.loads(paths.BASE_SETTINGS_FILE.read_text())
+        self.assertEqual(self._written(inst), base)
+
+    def test_policy_fragment_merges_onto_base(self):
+        inst = _inst(policies=(self._policy("web-research",
+                                            {"permissions": {"allow": ["WebSearch"]}}),))
+        install_settings(inst)
+        merged = self._written(inst)
+        self.assertEqual(merged["permissions"], {"allow": ["WebSearch"]})
+        self.assertIn("statusLine", merged)   # base settings preserved
+
+    def test_two_policies_lists_concatenate(self):
+        inst = _inst(policies=(
+            self._policy("a", {"permissions": {"deny": ["Bash(sudo *)"]}}),
+            self._policy("b", {"permissions": {"deny": ["WebFetch"]}}),
+        ))
+        install_settings(inst)
+        self.assertEqual(self._written(inst)["permissions"]["deny"],
+                         ["Bash(sudo *)", "WebFetch"])
+
+    def test_scalar_conflict_aborts_naming_culprits(self):
+        inst = _inst(policies=(
+            self._policy("loose", {"cleanupPeriodDays": 90}),
+            self._policy("tight", {"cleanupPeriodDays": 7}),
+        ))
+        with self.assertRaises(TagError) as ctx:
+            install_settings(inst)
+        self.assertIn("loose", str(ctx.exception))
+        self.assertIn("tight", str(ctx.exception))
+
+    def test_regenerated_each_call(self):
+        inst = _inst(policies=(self._policy("p", {"x": {"a": 1}}),))
+        install_settings(inst)
+        install_settings(_inst())   # same instance id, no policies → base only
+        self.assertNotIn("x", self._written(inst))
 
 
 if __name__ == "__main__":

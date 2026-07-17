@@ -13,17 +13,19 @@ constant's leading comment names the placeholders it accepts."""
 #   {target}  — docker tag the step produces, e.g. "claude-agents:code"
 BUILDING_STEP = "  Building {step} → {target}..."
 
-# {auto}-mode firewall — printed in docker_config.run_compose while blocking
-# on Phase 1 (critical Anthropic addresses).
-AUTO_FIREWALL_WAITING = "  Waiting for critical {auto}-mode firewall addresses..."
+# {firewall} — printed in docker_config.run_container while blocking on
+# Phase 1 (critical Anthropic addresses).
+FIREWALL_WAITING = "  Waiting for critical {firewall} addresses..."
 
 # Install failures — surfaced via prompt_keypress in
-# docker_config.prompt_install_failures, between ensure_image and run_compose.
+# docker_config.prompt_install_failures, between ensure_image and
 # The (header, body) pair matches the shape prompt_keypress / prompt_yn
 # consume; the body is rendered with one indent under the header.
 # Substitutes:
 #   {failures}  — header: comma-separated tool names (e.g. "jira, vercel")
 #   {instance}  — body:   the per-instance id (e.g. "poet__myproject")
+# run_container, and the {step}/{target} names in BUILDING_STEP come from the
+# instance's build_steps (base + layer-bearing tags).
 INSTALL_FAILURES_HEADER = "⚠ Failed installs: {failures}"
 INSTALL_FAILURES_BODY: list[str] = [
     "Could be a networking issue. Perhaps the providers are down, or blocked your IP",

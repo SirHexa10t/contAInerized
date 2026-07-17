@@ -1,89 +1,82 @@
-"""Tests for launch.compose_env — env-var taxonomy, formatters, accumulator."""
+"""Tests for launch.container_env — env-var taxonomy, formatters, accumulator."""
 
-import os
 import unittest
-from unittest.mock import patch
+from pathlib import Path
 
 from launch import paths
-from launch.compose_env import (
-    CONTAINER_ENV_FORWARDS, ComposeEnvKey, _compose_env,
-    conf_env_args, container_env_args, install_creds_flags, stage_compose_env,
-    subprocess_env, token_env_dict,
+from launch.container_env import (
+    CONTAINER_ENV_FORWARDS, ContainerEnvKey, _container_env,
+    conf_env_args, container_env_args, install_creds_flags, stage_container_env,
+    staged_env, token_env_dict,
 )
 
 
 # ============================================================
-# ComposeEnvKey enum
+# ContainerEnvKey enum
 # ============================================================
 
 
-class TestComposeEnvKey(unittest.TestCase):
+class TestContainerEnvKey(unittest.TestCase):
     def test_members_match_value(self):
         # str-subclass: member acts like its value in equality / dict keys
-        self.assertEqual(ComposeEnvKey.TARGET_IMAGE, "TARGET_IMAGE")
-        self.assertEqual(ComposeEnvKey.AGENT_NAME, "AGENT_NAME")
+        self.assertEqual(ContainerEnvKey.DOCKER_GID, "DOCKER_GID")
+        self.assertEqual(ContainerEnvKey.WHITELIST_ADDRESSES, "WHITELIST_ADDRESSES")
 
     def test_str_emits_value_not_enum_repr(self):
-        # Critical for f-string -e KEY=VALUE emission in container_env_args.
-        self.assertEqual(f"{ComposeEnvKey.TARGET_IMAGE}", "TARGET_IMAGE")
+        # Critical for f-string flag emission in container_env_args /
+        # docker_config's build_arg_flags.
+        self.assertEqual(f"{ContainerEnvKey.DOCKER_GID}", "DOCKER_GID")
 
     def test_each_member_str_is_uppercase(self):
-        for m in ComposeEnvKey:
+        for m in ContainerEnvKey:
             with self.subTest(key=m.name):
                 self.assertEqual(str(m), str(m).upper())
                 self.assertEqual(m.value, m.name)   # name == value by design
 
     def test_works_as_dict_key(self):
-        d = {ComposeEnvKey.TARGET_IMAGE: "claude-agents:base"}
+        d = {ContainerEnvKey.DOCKER_GID: "999"}
         # Lookup by enum member AND by raw string — both succeed because of str-subclass.
-        self.assertEqual(d[ComposeEnvKey.TARGET_IMAGE], "claude-agents:base")
-        self.assertEqual(d["TARGET_IMAGE"], "claude-agents:base")
+        self.assertEqual(d[ContainerEnvKey.DOCKER_GID], "999")
+        self.assertEqual(d["DOCKER_GID"], "999")
 
 
 # ============================================================
-# stage_compose_env + subprocess_env (accumulator)
+# stage_container_env + staged_env (accumulator)
 # ============================================================
 
 
-class TestStageComposeEnv(unittest.TestCase):
+class ContainerEnvFixture(unittest.TestCase):
+    """Snapshot + clear the module-level accumulator around each test."""
+
     def setUp(self):
-        # Snapshot + clear; tests mutate this module-level dict.
-        self._snapshot = dict(_compose_env)
-        _compose_env.clear()
+        self._snapshot = dict(_container_env)
+        _container_env.clear()
 
     def tearDown(self):
-        _compose_env.clear()
-        _compose_env.update(self._snapshot)
+        _container_env.clear()
+        _container_env.update(self._snapshot)
 
-    def test_staged_value_visible_in_subprocess_env(self):
-        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, "claude-agents:code")
-        env = subprocess_env()
-        self.assertEqual(env["TARGET_IMAGE"], "claude-agents:code")
 
-    def test_non_string_value_coerced_at_subprocess_boundary(self):
-        # The accumulator can hold Path/int; subprocess_env coerces to str.
-        from pathlib import Path
-        stage_compose_env(ComposeEnvKey.DOCKERIZED_CLAUDE_ROOT, Path("/repo/root"))
-        self.assertEqual(subprocess_env()["DOCKERIZED_CLAUDE_ROOT"], "/repo/root")
+class TestStageContainerEnv(ContainerEnvFixture):
+    def test_staged_value_visible_in_staged_env(self):
+        stage_container_env(ContainerEnvKey.DOCKER_GID, "988")
+        self.assertEqual(staged_env()["DOCKER_GID"], "988")
+
+    def test_non_string_value_coerced_at_boundary(self):
+        # The accumulator can hold Path/int; staged_env coerces to str.
+        stage_container_env(ContainerEnvKey.BASH_ENV, Path("/home/claude/.bashrc"))
+        self.assertEqual(staged_env()["BASH_ENV"], "/home/claude/.bashrc")
 
     def test_overwrite_replaces_prior_value(self):
-        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, "first")
-        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, "second")
-        self.assertEqual(subprocess_env()["TARGET_IMAGE"], "second")
+        stage_container_env(ContainerEnvKey.DOCKER_GID, "first")
+        stage_container_env(ContainerEnvKey.DOCKER_GID, "second")
+        self.assertEqual(staged_env()["DOCKER_GID"], "second")
 
-    def test_subprocess_env_overlays_os_environ(self):
-        # Host env's keys are preserved (anything in os.environ also appears).
-        stage_compose_env(ComposeEnvKey.AGENT_NAME, "poet")
-        env = subprocess_env()
-        self.assertEqual(env["AGENT_NAME"], "poet")
-        # PATH is virtually always set
-        self.assertIn("PATH", env)
-
-    def test_compose_env_keys_win_over_host(self):
-        # If a key is in both os.environ and _compose_env, the staged value wins
-        with patch.dict(os.environ, {"TARGET_IMAGE": "from-host"}):
-            stage_compose_env(ComposeEnvKey.TARGET_IMAGE, "from-launcher")
-            self.assertEqual(subprocess_env()["TARGET_IMAGE"], "from-launcher")
+    def test_staged_env_holds_only_staged_entries(self):
+        # No os.environ overlay — flags are emitted explicitly, so the host
+        # env never leaks into build args / -e values by accident.
+        stage_container_env(ContainerEnvKey.DOCKER_GID, "999")
+        self.assertEqual(set(staged_env()), {"DOCKER_GID"})
 
 
 # ============================================================
@@ -93,37 +86,35 @@ class TestStageComposeEnv(unittest.TestCase):
 
 class TestContainerEnvForwards(unittest.TestCase):
     def test_forwards_contains_agent_status_line(self):
-        self.assertIn(ComposeEnvKey.AGENT_STATUS_LINE, CONTAINER_ENV_FORWARDS)
+        self.assertIn(ContainerEnvKey.AGENT_STATUS_LINE, CONTAINER_ENV_FORWARDS)
 
     def test_forwards_contains_bash_env(self):
-        self.assertIn(ComposeEnvKey.BASH_ENV, CONTAINER_ENV_FORWARDS)
+        self.assertIn(ContainerEnvKey.BASH_ENV, CONTAINER_ENV_FORWARDS)
 
     def test_forwards_contains_each_token_env_var(self):
         for env_var in paths.OPTIONAL_CREDS_TOKEN_ENV_VARS.values():
             with self.subTest(env_var=env_var):
                 self.assertIn(env_var, CONTAINER_ENV_FORWARDS)
 
+    def test_whitelist_addresses_not_always_forwarded(self):
+        # WHITELIST_ADDRESSES travels via {firewall}'s [run] env_forward —
+        # unconditional emission would leak the address list into every
+        # launch that happened to stage it.
+        self.assertNotIn(ContainerEnvKey.WHITELIST_ADDRESSES, CONTAINER_ENV_FORWARDS)
+
     def test_container_emits_returns_only_flagged_members(self):
-        for member in ComposeEnvKey.container_emits():
+        for member in ContainerEnvKey.container_emits():
             with self.subTest(member=member.name):
                 self.assertTrue(member.container_emit)
-        for member in ComposeEnvKey:
+        for member in ContainerEnvKey:
             if not member.container_emit:
                 with self.subTest(member=member.name):
-                    self.assertNotIn(member, ComposeEnvKey.container_emits())
+                    self.assertNotIn(member, ContainerEnvKey.container_emits())
 
 
-class TestContainerEnvArgs(unittest.TestCase):
-    def setUp(self):
-        self._snapshot = dict(_compose_env)
-        _compose_env.clear()
-
-    def tearDown(self):
-        _compose_env.clear()
-        _compose_env.update(self._snapshot)
-
+class TestContainerEnvArgs(ContainerEnvFixture):
     def test_forwarded_value_emitted_when_staged(self):
-        stage_compose_env(ComposeEnvKey.AGENT_STATUS_LINE, "STATUS")
+        stage_container_env(ContainerEnvKey.AGENT_STATUS_LINE, "STATUS")
         args = container_env_args()
         self.assertTrue(any(a == "AGENT_STATUS_LINE=STATUS" for a in args))
 
@@ -137,6 +128,8 @@ class TestContainerEnvArgs(unittest.TestCase):
 
     def test_args_alternate_flag_and_value(self):
         # Each entry is two adjacent strings: "-e" then "KEY=VALUE".
+        stage_container_env(ContainerEnvKey.AGENT_STATUS_LINE, "S")
+        stage_container_env(ContainerEnvKey.BASH_ENV, "/b")
         args = container_env_args()
         for i in range(0, len(args), 2):
             self.assertEqual(args[i], "-e")
@@ -144,15 +137,15 @@ class TestContainerEnvArgs(unittest.TestCase):
 
 
 # ============================================================
-# install_creds_flags / token_env_dict (moved from test_docker_config.py)
+# install_creds_flags / token_env_dict
 # ============================================================
 
 
 class TestInstallCredsFlags(unittest.TestCase):
     """install_creds_flags(present_services) → {INSTALL_<TOOL>: '1'|'0'} build-args.
     One entry per OPTIONAL_CREDS_MOUNTS service that has a cli_name (i.e. an
-    actual install target in Dockerfile.code). Config-only entries (npmrc,
-    pypirc) and contents-mount entries (`home/`) get no flag — Dockerfile.code
+    actual install target in the [code] Dockerfile). Config-only entries (npmrc,
+    pypirc) and contents-mount entries (`home/`) get no flag — the Dockerfile
     doesn't declare a matching ARG for them. '1' when in `present_services`."""
 
     def _installable_services(self):

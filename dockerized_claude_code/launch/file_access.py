@@ -7,10 +7,10 @@ from the domain logic).
 
 Grouped by section in this file:
   - Agent file lookup (agent_md_index [cached]) — the name → md-path index
-    (stem = agent name; the old filename grammar is retired — axes live in
-    `<name>.lego`, parsed by the tags package).
+    (stem = agent name; an agent's axes live in `<name>.lego`, parsed by
+    the tags package).
   - Per-instance state-dir queries (has_continuable_jsonl, last_history_mtime)
-    — feed Instance properties. (The per-instance axis store — instances.json
+    — feed Instance properties. (The per-instance axis store — instances.toml
     — lives in tags.store, built on this module's read/write primitives.)
   - Optional credentials (present_optional_cred_services [cached],
     optional_cred_tokens)
@@ -25,10 +25,10 @@ Caching strategy:
     `user_firewall_whitelist_lines` are LRU-cached for the launcher process
     lifetime (each `python3 run.py` invocation is a fresh process).
 
-No build/composition logic (that's agent_modifiers_handler), no identity dataclasses
+No build/composition logic (that's tag_handlers), no identity dataclasses
 (that's tags/identity.py), no arg formatting for docker (that's docker_config).
 Imports paths + utils only — kept leaf-shaped so the tags package can depend on
-it without pulling in heavier modules. agent_modifiers_handler, agents_crud,
+it without pulling in heavier modules. tag_handlers, agents_crud,
 audit, the tags package, user_additions, and run.py all import from here.
 """
 
@@ -254,7 +254,7 @@ def file_mtime(path: Path | str) -> float | None:
 
 def iter_file_stats(parent: Path) -> Iterator[tuple[Path, int, float]]:
     """Yield `(path, size, mtime)` for every regular file under `parent`.
-    Used by agent_modifiers_handler.prune_caches for the size+age cache walk —
+    Used by tag_handlers.prune_caches for the size+age cache walk —
     bundling the rglob + is_file filter + stat call so the caller doesn't
     juggle three filesystem operations."""
     for f in parent.rglob("*"):
@@ -266,7 +266,7 @@ def iter_file_stats(parent: Path) -> Iterator[tuple[Path, int, float]]:
 def is_file_recent(path: Path | str, max_age_seconds: float) -> bool:
     """True iff `path` exists and its mtime is within the last `max_age_seconds`.
     Missing / unreadable / stale all → False, so callers can use this as a
-    single truthy 'use this cache?' gate. Backs the {auto}-mode resolved-domains
+    single truthy 'use this cache?' gate. Backs the {firewall} resolved-domains
     cache TTL gate in network.py."""
     mtime = file_mtime(path)
     return mtime is not None and time.time() - mtime <= max_age_seconds
@@ -337,9 +337,8 @@ def read_json_field(path: Path | str, *keys: str) -> Any:
 
 
 def _agent_md_index(agents_dir: Path) -> dict[str, Path]:
-    """Build the {agent name: md path} index for `agents_dir`. Post-rewrite
-    the stem IS the agent name (the `[tag](parent)` filename grammar is
-    retired — axes live in `<name>.lego`), so this is a plain sorted glob."""
+    """Build the {agent name: md path} index for `agents_dir` — a plain
+    sorted glob; the stem IS the agent name (axes live in `<name>.lego`)."""
     return {p.stem: p for p in sorted(agents_dir.glob("*.md"))}
 
 
@@ -394,7 +393,7 @@ def last_history_mtime(state_dir: Path) -> float | None:
     """Mtime of `<state_dir>/history.jsonl` (the per-launch input log), or
     None if it doesn't exist yet. `state_history_path` encodes the layout
     fact that this file has a single deterministic location — no walk
-    needed. InstanceIdentity.last_used_mtime is a thin wrapper around this
+    needed. Instance.last_used_mtime is a thin wrapper around this
     (same reason as above)."""
     history = state_history_path(state_dir)
     return history.stat().st_mtime if history.is_file() else None

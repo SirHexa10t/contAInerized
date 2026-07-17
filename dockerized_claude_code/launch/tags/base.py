@@ -100,7 +100,7 @@ class Tag:
       nutshell    — one-line gloss of the KIND (form section header, legend).
 
     Member-level:
-      name        — folder name; the canonical string stored in instances.json,
+      name        — folder name; the canonical string stored in instances.toml,
                     used as an image-tag component and a form key.
       shortname   — what shows inside the parentheses (defaults to name).
       description — full prose; first line is the member nutshell.

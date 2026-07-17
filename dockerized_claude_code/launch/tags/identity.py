@@ -1,5 +1,4 @@
-"""Per-launch instance identity, tag-system edition — replaces the old
-`AgentIdentity` / `InstanceIdentity` / `InstanceModifiers` trio.
+"""Per-launch instance identity.
 
 An `Instance` is a fully-resolved launch: an agent (its `.md` persona) plus
 the four axis selections as concrete `Tag` objects (engine + professions +
@@ -8,13 +7,11 @@ selections come from the agent's `.lego` defaults (a fresh create) or the
 per-instance store (a continue), with the create-form editing them in
 between.
 
-`image_chain` computes the docker build chain the way the old
-`InstanceIdentity.chain` did — `["base", <professions…>, <specialties…>]`
-using the same lowercase tag-value strings — so the existing compose layer
-files keep matching until the plain-docker flip. Professions are ordered so
-a required profession precedes its dependents (code before web); specialties
-follow all professions (their `requires` reference professions, satisfied by
-the whole profession group being ahead).
+`image_chain` computes the active-tag chain — `["base", <professions…>,
+<specialties…>]`. Professions are ordered so a required profession precedes
+its dependents (code before web); specialties follow all professions (their
+`requires` reference professions, satisfied by the whole profession group
+being ahead).
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ from pathlib import Path
 
 from ..file_access import agent_md_index, has_continuable_jsonl, last_history_mtime
 from ..paths import instance_state_dir_path, state_md_path
+from .base import DockerContribution
 from .engine import Engine
 from .lego import AgentBuild
 from .policy import Policy
@@ -56,11 +54,12 @@ def _topo_professions(professions: tuple[Profession, ...]) -> list[Profession]:
 
 def image_chain(professions: tuple[Profession, ...],
                 specialties: tuple[Specialty, ...]) -> list[str]:
-    """The docker build chain: `["base", <profession values…>,
-    <specialty values…>]`. Professions topologically ordered (requirements
-    first); specialties alphabetical after all professions. Drives image tags
-    (lowercased values joined by dots) and the compose/`tag.docker` layer
-    stack — the same contract the old chain honored."""
+    """The active-tag chain: `["base", <professions…>, <specialties…>]`.
+    Professions topologically ordered (requirements first); specialties
+    alphabetical after all professions. Drives handler dispatch and the
+    addendum composition. (Image naming/building uses `Instance.build_steps`
+    — the layer-bearing subset — since run-only specialties like {firewall}
+    contribute container config but no image content.)"""
     profs = _topo_professions(professions)
     specs = sorted(specialties, key=lambda s: s.name)
     return ["base", *(p.name for p in profs), *(s.name for s in specs)]
@@ -79,9 +78,9 @@ class Agent:
 @dataclass(frozen=True)
 class Instance:
     """A fully-resolved launch. Frozen; all fields hashable (tag objects are
-    frozen, selections are tuples). Mirrors the old InstanceIdentity surface
-    (`instance`, `state_dir`, `chain`, history probes) so the swap is a
-    consumer-by-consumer rename rather than a semantics change."""
+    frozen, selections are tuples). Identity (`instance`, `state_dir`) and
+    launch-shape (`chain`, `build_steps`, `conf`, history probes) hang off
+    the one record, so every stage reads the same source of truth."""
     agent: str
     md_path: Path
     session: str
@@ -108,6 +107,49 @@ class Instance:
     @property
     def chain(self) -> list[str]:
         return image_chain(self.professions, self.specialties)
+
+    @property
+    def build_steps(self) -> list[tuple[str, Path, DockerContribution | None]]:
+        """(name, dockerfile, contribution) per image layer in chain order:
+        professions (requirement order), then layer-bearing specialties
+        (alphabetical — dood's `_dood` dir). The contribution supplies the
+        layer's `[build] arg_forward`. Run-only specialties (auto, firewall)
+        don't appear: they contribute container config, not image content.
+        Empty for a bare agent (base image only)."""
+        out: list[tuple[str, Path, DockerContribution | None]] = [
+            (p.name, p.path / "Dockerfile", p.docker)
+            for p in _topo_professions(self.professions)
+        ]
+        out += [(s.name, s.layer.path / "Dockerfile", s.layer.docker)
+                for s in sorted(self.specialties, key=lambda s: s.name) if s.layer]
+        return out
+
+    @property
+    def docker_contributions(self) -> list[DockerContribution]:
+        """Active tags' `tag.docker` records in chain order — professions
+        first, then each specialty's own record + (if any) its claimed
+        layer's. docker_config folds these into build/run flags."""
+        out = [p.docker for p in _topo_professions(self.professions) if p.docker]
+        for s in sorted(self.specialties, key=lambda s: s.name):
+            if s.docker:
+                out.append(s.docker)
+            if s.layer and s.layer.docker:
+                out.append(s.layer.docker)
+        return out
+
+    @property
+    def unmet_wants(self) -> list[tuple[str, str, str]]:
+        """(wanter, wanted, message) for every active tag whose `[wants]`
+        names a tag that is NOT active — e.g. {auto} without {firewall}.
+        The form renders these live in its warning zone; run.py prints them
+        as a launch warning (a want never blocks — it's a request, not a
+        requirement)."""
+        active_tags = (*self.professions, *self.specialties, *self.policies)
+        active = {t.name for t in active_tags}
+        return [(t.name, wanted, message)
+                for t in active_tags
+                for wanted, message in t.wants
+                if wanted not in active]
 
     @property
     def conf(self) -> dict[str, str]:

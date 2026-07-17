@@ -1,0 +1,7 @@
+# {dood} container mechanics (lives with the layer's Dockerfile): the host
+# docker-group GID build-arg, and the docker-socket bind-mount that lets the
+# agent drive the host's Docker daemon.
+[build]
+arg_forward = ["DOCKER_GID"]
+[run]
+mounts = ["/var/run/docker.sock -> /var/run/docker.sock"]

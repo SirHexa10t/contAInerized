@@ -39,14 +39,13 @@ def plant_user_extras(inst: Instance) -> None:
     so users discovering the directories know what to put in them:
       - optional_creds_readme.txt — always; refreshed when the template moves
         on (the file describes launcher behaviour and shouldn't drift behind).
-      - firewall_whitelist.txt — only when the firewall machinery is active
-        (the {auto} specialty, until the docker flip extracts {firewall}).
-        Created on first launch and left alone afterward — it holds the
-        user's actual whitelist entries, so their edits are preserved.
+      - firewall_whitelist.txt — only when the {firewall} specialty is
+        active. Created on first launch and left alone afterward — it holds
+        the user's actual whitelist entries, so their edits are preserved.
 
     Called by run.py:setup_state once the instance is resolved."""
     copy_file(OPTIONAL_CREDS_README_TEMPLATE, OPTIONAL_CREDS_README_PATH, overwrite_if_changed=True)
-    if any(s.name == "auto" for s in inst.specialties):
+    if any(s.name == "firewall" for s in inst.specialties):
         copy_file(FIREWALL_WHITELIST_TEMPLATE, FIREWALL_WHITELIST_FILE)
 
 

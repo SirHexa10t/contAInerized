@@ -16,7 +16,7 @@ display concerns that happen to be staged from the host.
 
 Leaf-shaped: imports paths (ACCOUNT_FILE) and file_access (read_json_field)
 only. docker_config calls into here from set_container_env (status line) and
-run_compose (terminal title); nothing else does."""
+run_container (terminal title); nothing else does."""
 
 from .file_access import read_json_field
 from .paths import ACCOUNT_FILE
@@ -63,6 +63,6 @@ def build_status_line(inst: Instance) -> str:
 def set_terminal_title(name: str) -> None:
     """Send an OSC 0 escape so the terminal emulator's window/tab title
     becomes `Claude Code — <name>`. Helps the user tell concurrent agent
-    tabs apart. Called by docker_config.run_compose just before exec'ing
+    tabs apart. Called by docker_config.run_container just before exec'ing
     the container."""
     print(f"\033]0;Claude Code — {name}\007", end="", flush=True)

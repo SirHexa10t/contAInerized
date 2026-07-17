@@ -42,8 +42,8 @@ class TestRepoDerivedConstants(unittest.TestCase):
     def test_agents_dir(self):
         self.assertEqual(paths.AGENTS_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "agents")
 
-    def test_docker_dir(self):
-        self.assertEqual(paths.DOCKER_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "docker")
+    def test_base_dockerfile_at_root(self):
+        self.assertEqual(paths.BASE_DOCKERFILE, paths.DOCKERIZED_CLAUDE_ROOT / "Dockerfile")
 
     def test_settings_dir(self):
         self.assertEqual(paths.SETTINGS_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "settings")
@@ -170,21 +170,6 @@ class TestPathBuilderLambdas(unittest.TestCase):
             paths.optional_creds_service_path("aws"),
             paths.OPTIONAL_CREDS_DIR / "aws",
         )
-
-    def test_compose_layer_path_lowercases(self):
-        # DooD mode → compose.dood.yml (lowercased)
-        self.assertEqual(
-            paths.compose_layer_path("DooD"),
-            paths.DOCKER_DIR / "compose.dood.yml",
-        )
-
-    def test_compose_layer_path_already_lowercase(self):
-        self.assertEqual(
-            paths.compose_layer_path("code"),
-            paths.DOCKER_DIR / "compose.code.yml",
-        )
-
-
 
 if __name__ == "__main__":
     unittest.main()

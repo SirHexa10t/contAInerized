@@ -4,7 +4,7 @@ the identity shapes the picker and run.py consume.
 
 Sections:
   - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
-  - persist_instance / delete_instance / modify_instance — instances.json
+  - persist_instance / delete_instance / modify_instance — instances.toml
     writers (load → mutate → save over tags.store) + state-dir lifecycle
   - install_latest_md — source `.md` + chain-keyed addendum section →
     state-dir CLAUDE.md in one overwrite (tags.addendums supplies the text)
@@ -19,15 +19,20 @@ package; this module wires them to the filesystem lifecycle. menu_picker and
 run.py import from here; nothing here imports them back.
 """
 
+import json
 import re
 
 from .file_access import force_remove, is_dir, iter_subdirs, move_path, path_exists, read_text, write_text
-from .paths import AGENTS_DIR, AGENTS_STATE, instance_state_dir_path
+from .paths import (
+    AGENTS_DIR, AGENTS_STATE, BASE_SETTINGS_FILE, instance_state_dir_path,
+    state_settings_path,
+)
 from .tags import (
     Agent, AgentBuild, Instance, Registry, addendums, load_agent, resolve_build,
     store,
 )
 from .tags.identity import SESSION_SEP
+from .tags.policy import merge_fragments
 from .utils import ordering_index_or_end, prompt_keypress
 
 
@@ -40,7 +45,7 @@ def list_all_instances() -> list[str]:
 
 
 # ============================================================
-# instances.json writers (load → mutate → save over tags.store)
+# instances.toml writers (load → mutate → save over tags.store)
 # ============================================================
 
 def _build_of(inst: Instance) -> AgentBuild:
@@ -72,7 +77,7 @@ def delete_instance(inst: Instance) -> None:
     if not force_remove(inst.state_dir, name=inst.instance):
         prompt_keypress(
             header=f"Could not remove '{inst.instance}' — see the messages above.",
-            body=["Its instances.json entry was left in place;",
+            body=["Its instances.toml entry was left in place;",
                   "remove the directory manually, then delete the instance again."],
         )
         return
@@ -96,8 +101,22 @@ def modify_instance(old: Instance, new: Instance) -> None:
 
 
 # ============================================================
-# Per-instance state-dir writer
+# Per-instance state-dir writers
 # ============================================================
+
+def install_settings(inst: Instance) -> None:
+    """Merge the shared base settings (settings/settings.json) with the
+    instance's policy fragments into `<state>/settings.json`, refreshed each
+    launch. docker_config.set_container_mounts RO-mounts the result over
+    `~/.claude/settings.json` in-container, so the agent reads its policies
+    but can't relax them (the mount shadows the state-dir's rw view of the
+    same path). Policy-vs-policy or policy-vs-base scalar conflicts abort
+    the launch via merge_fragments' TagError, naming both culprits."""
+    fragments = [(BASE_SETTINGS_FILE.name + " (base)", json.loads(read_text(BASE_SETTINGS_FILE)))]
+    fragments += [(p.name, p.load_fragment()) for p in inst.policies]
+    merged = merge_fragments(fragments)
+    write_text(state_settings_path(inst.state_dir), json.dumps(merged, indent=2, sort_keys=True) + "\n")
+
 
 def install_latest_md(inst: Instance) -> None:
     """Write the agent's source `.md` plus the active-chain addendum section
@@ -164,7 +183,7 @@ def instance_from_store(instance_id: str, registry: Registry) -> Instance | None
         return None
     entry = store.load().get(instance_id)
     build = store.entry_to_build(entry) if entry else agent.build
-    registry.validate_build(build, f"instances.json[{instance_id}]")
+    registry.validate_build(build, f"instances.toml[{instance_id}]")
     return Instance(
         agent=agent_name,
         md_path=agent.md_path,

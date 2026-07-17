@@ -1,26 +1,35 @@
 """Docker-side launcher orchestration — everything between "we picked an agent"
-and `docker compose run`. The image-build chain (ensure_image), the bind-mount
+and `docker run`. The image-build chain (ensure_image), the bind-mount
 accumulator that flattens into `-v` flags (set_container_mounts +
 add_docker_mount + mount_target_is_staged), small `docker` CLI wrappers
 (require_docker, detect_docker_gid, docker_check_running_subprocess,
 wait_for_container_running, docker_exec_root_subprocess,
-docker_check_any_agent_running_subprocess, docker_compose_subprocess),
-the image-chain naming helpers (chain_image_tag, chain_compose_files), the
-post-build install-failure surfacing (prompt_install_failures), and the
-compose invocation itself (run_compose).
+docker_check_any_agent_running_subprocess, docker_subprocess), the
+image-naming helper (image_tag), the tag.docker flag emitters
+(build_arg_flags / env_forward_flags / entrypoint_flags), the post-build
+install-failure surfacing (prompt_install_failures), and the container
+invocation itself (run_container).
 
-Sister accumulator lives in compose_env: `_compose_env` for env-var staging.
-This module holds:
+Plain `docker build` / `docker run` throughout — the compose layer is retired.
+Static per-tag container config (build-arg names, cap_add, entrypoint, mounts,
+env forwards) is declared in each tag's `tag.docker` and arrives here as the
+Instance's DockerContribution records; dynamic values (resolved firewall
+addresses, detected DOCKER_GID) are staged into container_env by the
+tag handlers and pulled by name at flag-emission time.
+
+Sister accumulator lives in container_env: `_container_env` for env-var
+staging. This module holds:
   - _docker_mounts: {source: "target[:ro]"} — staged via add_docker_mount,
-    flattened inline by run_compose into `-v` flags.
+    flattened inline by run_container into `-v` flags.
 
 Imports from paths (filesystem constants), claude_code_config (terminal title),
-compose_env (env staging + container_env_args + conf_env_args + subprocess_env),
-and network (the {auto}-mode firewall coordination hooks). agent_modifiers_handler
-imports add_docker_mount + docker_check_any_agent_running_subprocess +
-detect_docker_gid from here; run.py is the top-level consumer.
+container_env (env staging + flag formatters), and network (the {firewall}
+coordination hooks). tag_handlers imports add_docker_mount +
+docker_check_any_agent_running_subprocess + detect_docker_gid from here;
+run.py is the top-level consumer.
 """
 
+import fnmatch
 import shutil
 import subprocess
 import sys
@@ -28,19 +37,20 @@ import time
 from pathlib import Path
 
 from .claude_code_config import set_terminal_title
-from .compose_env import (
-    ComposeEnvKey, conf_env_args, container_env_args, stage_compose_env,
-    subprocess_env,
+from .container_env import (
+    ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
+    staged_env,
 )
 from .network import is_critical_pending, start_firewall_updater, wait_for_critical_addresses
 from .paths import (
-    CLAUDE_CONFIG_IN_CONTAINER, COMPOSE_FILE_PATH, DEFAULT_WORKSPACE,
-    DOCKER_BASE_MOUNTS, FIREWALL_DONE_IN_CONTAINER,
-    INSTALL_FAILURES_LOG_IN_CONTAINER, compose_layer_path,
+    BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, DEFAULT_WORKSPACE,
+    DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT, FIREWALL_DONE_IN_CONTAINER,
+    INSTALL_FAILURES_LOG_IN_CONTAINER, LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION,
+    state_settings_path,
 )
-from .tags import Instance
+from .tags import DockerContribution, Instance
 from .template_code.docker_prompts import (
-    AUTO_FIREWALL_WAITING, BUILDING_STEP, INSTALL_FAILURES_BODY, INSTALL_FAILURES_HEADER,
+    BUILDING_STEP, FIREWALL_WAITING, INSTALL_FAILURES_BODY, INSTALL_FAILURES_HEADER,
 )
 from .utils import call_or_exit, exit_if_missing, prompt_keypress, shell_capture, shell_returncode
 
@@ -48,20 +58,19 @@ from .utils import call_or_exit, exit_if_missing, prompt_keypress, shell_capture
 # ============================================================
 # Docker volume accumulator
 # ============================================================
-# Every bind-mount for `docker compose run` flows through this dict. set_container_mounts
-# stages the always-on set (paths.DOCKER_BASE_MOUNTS + the per-instance workspace/state dirs);
-# agent_modifiers_handler's tag/mode handlers stage chain-step contributions ([code] caches);
-# user_additions stages skills + optional creds. Mirror of
-# compose_env's `_compose_env` / stage_compose_env pattern — declarations flow
-# one way, emission stays in this module. compose.auto.yml's two
-# ${...}-substituted mounts are the only bind-mounts that still travel via
-# YAML (their ComposeEnvKey constants live in compose_env).
+# Every bind-mount for `docker run` flows through this dict. set_container_mounts
+# stages the always-on set (paths.DOCKER_BASE_MOUNTS + the per-instance
+# workspace/state dirs); tag_handlers stages each active tag's declarative
+# `tag.docker` mounts plus the [code] cache mounts; user_additions stages
+# skills + optional creds. Mirror of container_env's `_container_env` /
+# stage_container_env pattern — declarations flow one way, emission stays in
+# this module.
 
 _docker_mounts: dict[str, str] = {}   # {source_path_str: "target_path[:ro]"} — source uniquely identifies a mount across our callers
 
 
 def add_docker_mount(source: Path | str, target: Path | str) -> None:
-    """Stage a bind-mount for the upcoming `docker compose run` invocation. Any
+    """Stage a bind-mount for the upcoming `docker run` invocation. Any
     docker access-mode suffix (`:ro`, also `:z`/`:Z`, `:cached`/`:delegated`,
     propagation modes) is the caller's responsibility — bake it into target
     when needed. Both args coerce to str at this boundary so callers can pass
@@ -95,25 +104,16 @@ def mount_target_is_staged(target: Path | str) -> bool:
 
 
 # ============================================================
-# Image-chain naming
+# Image naming
 # ============================================================
 
-def chain_image_tag(chain: list[str]) -> str:
-    """The docker image tag for a chain. ['base'] → 'claude-agents:base'.
-    ['base', 'code', 'auto'] → 'claude-agents:code.auto' (lowercase to match
-    the lowercase compose/Dockerfile filenames)."""
-    if len(chain) == 1:
+def image_tag(layer_names: list[str]) -> str:
+    """The docker image tag for a build-layer sequence. [] → 'claude-agents:base'.
+    ['code', 'dood'] → 'claude-agents:code.dood'. Layer names are already
+    lowercase (tag names are folder names)."""
+    if not layer_names:
         return "claude-agents:base"
-    return "claude-agents:" + ".".join(step.lower() for step in chain[1:])
-
-
-def chain_compose_files(chain: list[str]) -> list[str]:
-    """The compose `-f <path>` arg list for a chain. Always includes compose.yml;
-    adds compose.<step>.yml (lowercased) for each non-base step in order."""
-    args = ["-f", str(COMPOSE_FILE_PATH)]
-    for step in chain[1:]:
-        args += ["-f", str(compose_layer_path(step))]
-    return args
+    return "claude-agents:" + ".".join(layer_names)
 
 
 # ============================================================
@@ -124,35 +124,35 @@ def chain_compose_files(chain: list[str]) -> list[str]:
 # coordination + cache pruning (detect_docker_gid,
 # docker_check_running_subprocess, wait_for_container_running,
 # docker_exec_root_subprocess, docker_check_any_agent_running_subprocess),
-# and the `docker compose` invocation wrapper (docker_compose_subprocess)
-# used by ensure_image / run_compose below in the orchestration section.
+# and the `docker` invocation wrapper (docker_subprocess) used by
+# ensure_image / run_container below in the orchestration section.
 # CONTAINER_NAME_PREFIX is the one place the per-launch container name format
-# is defined — run_compose builds container names from it, and
+# is defined — run_container builds container names from it, and
 # docker_check_any_agent_running_subprocess filters `docker ps` by the same
 # prefix; keeping them consistent is a one-line change here.
 
-CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_compose) and the filter used to detect a running agent (docker_check_any_agent_running_subprocess)
+CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_container) and the filter used to detect a running agent (docker_check_any_agent_running_subprocess)
 
 
 # ============================================================
 # Dry-run flag
 # ============================================================
-# Module-level toggle gating docker_compose_subprocess's actual subprocess
-# invocation. Set once at startup from run.py:launch via set_dry_run(); the
-# default False means "real run" so callers that import this module without
-# going through launch() (tests, audit) behave normally. The flag lives here
-# rather than threaded through every function because the only operation it
-# affects is the docker compose call itself — every other orchestration step
-# (mount staging, env staging, firewall coordination, banner printing)
-# happens identically in both modes, which is what makes --dry-run a
-# faithful projection of a real run.
+# Module-level toggle gating docker_subprocess's actual subprocess invocation.
+# Set once at startup from run.py:launch via set_dry_run(); the default False
+# means "real run" so callers that import this module without going through
+# launch() (tests, audit) behave normally. The flag lives here rather than
+# threaded through every function because the only operation it affects is
+# the docker call itself — every other orchestration step (mount staging,
+# env staging, firewall coordination, banner printing) happens identically
+# in both modes, which is what makes --dry-run a faithful projection of a
+# real run.
 
 _dry_run = False
 
 
 def set_dry_run(value: bool) -> None:
     """Set the module-level dry-run flag. Called from run.py:launch after CLI
-    parsing. docker_compose_subprocess checks this to gate its underlying
+    parsing. docker_subprocess checks this to gate its underlying
     subprocess.call — every surrounding step still runs so the user sees an
     accurate projection of what a real run would do."""
     global _dry_run
@@ -162,15 +162,15 @@ def set_dry_run(value: bool) -> None:
 def require_docker() -> None:
     """Exit early with a clean message if `docker` isn't on PATH. Run.py calls this
     at startup so a missing daemon surfaces as a one-liner instead of a deeper-down
-    docker-compose traceback later."""
+    docker traceback later."""
     exit_if_missing(shutil.which("docker"), "docker is required but was not found in PATH.")
 
 
 def detect_docker_gid() -> str | None:
     """Return the host's docker group GID as a string, or None if no docker
     group exists (or `getent` is unavailable — e.g. non-Linux hosts). Used by
-    agent_modifiers_handler._apply_dood to stage DOCKER_GID for Dockerfile.dood, so
-    claude can read/write the bind-mounted /var/run/docker.sock."""
+    tag_handlers._apply_dood to stage DOCKER_GID for the `_dood` layer's
+    Dockerfile, so claude can read/write the bind-mounted /var/run/docker.sock."""
     try:
         result = shell_capture("getent", "group", "docker")
     except FileNotFoundError:
@@ -194,10 +194,10 @@ def docker_check_running_subprocess(container_name: str) -> bool:
 def wait_for_container_running(container_name: str, timeout_seconds: float = 10) -> bool:
     """Poll `docker_check_running_subprocess` until it returns True, or
     `timeout_seconds` passes. Returns True if the container came up in time,
-    False on timeout. `docker compose run` creates the container almost
-    immediately but `docker inspect` returns 'not found' for a small window
-    after — hence the poll. Used by the {auto}-mode firewall updater (in
-    network._updater_worker) before it starts issuing `docker exec` calls.
+    False on timeout. `docker run` creates the container almost immediately
+    but `docker inspect` returns 'not found' for a small window after —
+    hence the poll. Used by the {firewall} updater (in network._updater_worker)
+    before it starts issuing `docker exec` calls.
 
     The walrus in the while-condition reads as "while within deadline and not
     yet running, sleep". `running = False` is initialized to keep the name
@@ -248,30 +248,28 @@ def docker_exec_root_subprocess(container_name: str, *cmd: str) -> subprocess.Co
     The `--user root` flag is the privileged-operation pattern: it grants
     root inside the container *from outside the container's namespace*,
     bypassing whatever sudoers restrictions are in place for the in-container
-    user. Used by the {auto}-mode firewall updater (in network._insert_iptables_accept)
+    user. Used by the {firewall} updater (in network._insert_iptables_accept)
     to inject iptables ACCEPT rules into the running container as Phase 2 DNS
     resolutions complete. Centralised here so privileged docker-exec calls
     have a single audit point."""
     return shell_capture("docker", "exec", "--user", "root", container_name, *cmd)
 
 
-def docker_compose_subprocess(args: list[str]) -> None:
-    """Run `docker compose <args>` with `subprocess_env()` overlaid; sys.exit
-    with the return code on non-zero, return silently on success. On dry-run
-    (set via set_dry_run), print what would have been invoked and return
-    without touching subprocess — every surrounding orchestration step still
-    runs, so dry-run projects accurately.
+def docker_subprocess(args: list[str]) -> None:
+    """Run `docker <args>`; sys.exit with the return code on non-zero, return
+    silently on success. On dry-run (set via set_dry_run), print what would
+    have been invoked and return without touching subprocess — every
+    surrounding orchestration step still runs, so dry-run projects accurately.
 
     Both real-run callers want the exit-on-failure shape: ensure_image needs
     to continue to the next chain step on success but die if any build fails;
-    run_compose is the program's terminal — on success the unwind through
+    run_container is the program's terminal — on success the unwind through
     launch() → __main__ exits the process with 0 naturally, equivalent to an
-    explicit sys.exit(0). The "docker compose" prefix + the staged env are
-    this codebase's universal compose-invocation pattern."""
+    explicit sys.exit(0)."""
     if _dry_run:
-        print(f"  (dry-run: would invoke `docker compose {' '.join(args)}`)")
+        print(f"  (dry-run: would invoke `docker {' '.join(args)}`)")
         return
-    if (ret := shell_returncode("docker", "compose", *args, env=subprocess_env())) != 0:
+    if (ret := shell_returncode("docker", *args)) != 0:
         sys.exit(ret)
 
 
@@ -279,12 +277,60 @@ def docker_check_any_agent_running_subprocess() -> bool:
     """True if any container whose name starts with CONTAINER_NAME_PREFIX is
     currently running, OR if `docker ps` failed (conservative — treat the
     unknown state as 'might be running' so caller skips its cleanup). Used
-    by agent_modifiers_handler.prune_caches as the 'is it safe to delete cache
-    files' guard. Uses `bool(stdout.strip())` rather than `== "true"` because
+    by tag_handlers.prune_caches as the 'is it safe to delete cache files'
+    guard. Uses `bool(stdout.strip())` rather than `== "true"` because
     `--format={{.Names}}` outputs container names (one per line) — any
     non-empty output means matching containers exist."""
     r = shell_capture("docker", "ps", "--filter", f"name={CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}")
     return r.returncode != 0 or bool(r.stdout.strip())
+
+
+# ============================================================
+# tag.docker flag emitters
+# ============================================================
+
+def build_arg_flags(forward: tuple[str, ...]) -> list[str]:
+    """`--build-arg NAME=VALUE` flags for a layer's `[build] arg_forward`
+    list, values pulled from the staged container env. Glob patterns expand
+    against the staged keys (`INSTALL_*` → every staged INSTALL_<TOOL>);
+    a plain name that isn't staged is silently skipped — the Dockerfile's
+    own ARG default then applies (that's how DOCKER_GID keeps its 999
+    fallback when detection is bypassed)."""
+    staged = staged_env()
+    out: list[str] = []
+    for pattern in forward:
+        if any(ch in pattern for ch in "*?["):
+            keys = sorted(fnmatch.filter(staged, pattern))
+        else:
+            keys = [pattern] if pattern in staged else []
+        out += [arg for k in keys for arg in ("--build-arg", f"{k}={staged[k]}")]
+    return out
+
+
+def env_forward_flags(contributions: list[DockerContribution]) -> list[str]:
+    """`-e NAME=VALUE` flags for every `[run] env_forward` name across the
+    active tags' contributions, values pulled from the staged container env.
+    Unstaged names are silently skipped — that's the gating: {firewall}'s
+    WHITELIST_ADDRESSES is only staged when the resolve actually ran."""
+    staged = staged_env()
+    names = [n for c in contributions for n in c.env_forward]
+    return [arg for n in names if n in staged for arg in ("-e", f"{n}={staged[n]}")]
+
+
+def entrypoint_flags(contributions: list[DockerContribution]) -> list[str]:
+    """The `--entrypoint <path>` flag if exactly one active tag overrides the
+    entrypoint; [] when none does (the image's own ENTRYPOINT — claude —
+    applies). A bare script name resolves to LOCAL_BIN_IN_CONTAINER (where
+    the owning tag's mounts put it); a path is used as-is. Two tags both
+    claiming the entrypoint can't compose — fail loud."""
+    entrypoints = [c.entrypoint for c in contributions if c.entrypoint]
+    if not entrypoints:
+        return []
+    if len(entrypoints) > 1:
+        raise RuntimeError(f"multiple active tags override the container entrypoint: {entrypoints}")
+    ep = entrypoints[0]
+    resolved = ep if "/" in ep else f"{LOCAL_BIN_IN_CONTAINER}/{ep}"
+    return ["--entrypoint", resolved]
 
 
 # ============================================================
@@ -298,46 +344,68 @@ def set_container_mounts(inst_id: Instance) -> None:
     derived from inst_id, plus the always-on DOCKER_BASE_MOUNTS from paths.py
     (whose target strings already carry any `:ro` suffix).
 
-    Workspace fallback: if `inst_id.workspace` is None (stale map entry that
+    The launcher-generated settings file (base settings + policy fragments,
+    written by agents_crud.install_settings) mounts READ-ONLY over
+    `~/.claude/settings.json` — the file mount shadows the state-dir's rw
+    view of the same path, so the agent can't relax its own policies.
+
+    Workspace fallback: if `inst_id.workspace` is None (stale store entry that
     survived all the upstream prompts, or a session constructed without a
     workspace), default to DEFAULT_WORKSPACE so the bind-mount still resolves
-    to a real host directory rather than crashing the compose invocation."""
+    to a real host directory rather than crashing the docker invocation."""
     add_docker_mount(inst_id.workspace or DEFAULT_WORKSPACE, "/workspace")
     add_docker_mount(inst_id.state_dir, CLAUDE_CONFIG_IN_CONTAINER)
+    add_docker_mount(state_settings_path(inst_id.state_dir),
+                     f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}")
     for source, target in DOCKER_BASE_MOUNTS.items():
         add_docker_mount(source, target)
 
 
-def ensure_image(chain: list[str]) -> None:
-    """Build each step in the chain sequentially. Each step's image is tagged
-    according to chain_image_tag(chain[:i+1]); PARENT_IMAGE for non-base steps
-    points to the prior step's tag so each Dockerfile's `FROM ${PARENT_IMAGE}`
-    resolves to a freshly-built parent. Each build invocation uses only
-    compose.yml + the step's own compose file (intermediates aren't included
-    so their build-args don't surface in unrelated Dockerfile builds)."""
-    prev_tag = None
-    for i, step in enumerate(chain):
-        target = chain_image_tag(chain[:i + 1])
-        compose_files = chain_compose_files(["base"] if step == "base" else ["base", step])
-        stage_compose_env(ComposeEnvKey.TARGET_IMAGE, target)
-        if prev_tag:
-            stage_compose_env(ComposeEnvKey.PARENT_IMAGE, prev_tag)
-        print(BUILDING_STEP.format(step=step, target=target))
-        docker_compose_subprocess(compose_files + ["build"])
-        prev_tag = target
+def ensure_image(inst: Instance) -> str:
+    """Build the instance's image stack bottom-up with plain `docker build`
+    and return the final image tag. The base image builds from
+    paths.BASE_DOCKERFILE; each subsequent step comes from the instance's
+    build_steps (profession Dockerfiles + layer-bearing specialties), with
+    PARENT_IMAGE pointing at the prior step's tag so each Dockerfile's
+    `FROM ${PARENT_IMAGE}` resolves to a freshly-built parent. Each step
+    forwards only the build-args its own `tag.docker` names (values from the
+    staged container env), so one layer's args never surface in another's
+    build. `--network=host` because BuildKit's own bridge has had DNS
+    failures resolving curl/apt repo hosts on some setups. The build context
+    is always the repo root."""
+    tag = image_tag([])
+    print(BUILDING_STEP.format(step="base", target=tag))
+    docker_subprocess([
+        "build", "--network=host", "-f", str(BASE_DOCKERFILE), "-t", tag,
+        *build_arg_flags((str(ContainerEnvKey.SOFTWARE_STACK_REFRESH),)),
+        str(DOCKERIZED_CLAUDE_ROOT),
+    ])
+    names: list[str] = []
+    for name, dockerfile, contribution in inst.build_steps:
+        parent = tag
+        names.append(name)
+        tag = image_tag(names)
+        print(BUILDING_STEP.format(step=name, target=tag))
+        docker_subprocess([
+            "build", "--network=host", "-f", str(dockerfile), "-t", tag,
+            "--build-arg", f"PARENT_IMAGE={parent}",
+            *build_arg_flags(contribution.build_arg_forward if contribution else ()),
+            str(DOCKERIZED_CLAUDE_ROOT),
+        ])
+    return tag
 
 
-def prompt_install_failures(chain: list[str], instance: str) -> None:
-    """Read INSTALL_FAILURES_LOG_IN_CONTAINER from the final chain image; if
-    it's non-empty, surface the failed tool names as a press-any-key prompt
-    (so Claude Code's TUI takeover doesn't immediately clobber the warning).
-    No-op when the file is missing (no [code] step in the chain) or empty
+def prompt_install_failures(image: str, instance: str) -> None:
+    """Read INSTALL_FAILURES_LOG_IN_CONTAINER from the final image; if it's
+    non-empty, surface the failed tool names as a press-any-key prompt (so
+    Claude Code's TUI takeover doesn't immediately clobber the warning).
+    No-op when the file is missing (no [code] step in the stack) or empty
     (all installs succeeded). Self-contained: the prompt copy lives in
     template_code/docker_prompts and the rendering goes through prompt_keypress;
     nothing flows back to the caller. Uses `docker run --rm --entrypoint cat`
     for the one-shot read — one extra subprocess per launch (~few hundred ms
     after a warm image cache). Called by run.py between ensure_image and
-    run_compose so the list reflects the build that just finished.
+    run_container so the list reflects the build that just finished.
 
     No-op on dry-run: ensure_image built nothing, so the only readable log
     would be a stale one from a previous real build — spinning up a real
@@ -347,7 +415,7 @@ def prompt_install_failures(chain: list[str], instance: str) -> None:
         return
     result = shell_capture(
         "docker", "run", "--rm", "--entrypoint", "cat",
-        chain_image_tag(chain), str(INSTALL_FAILURES_LOG_IN_CONTAINER),
+        image, str(INSTALL_FAILURES_LOG_IN_CONTAINER),
     )
     if result.returncode != 0:
         return
@@ -380,52 +448,57 @@ def effort_args(conf: dict[str, str], claude_args: list[str]) -> list[str]:
     return ["--effort", effort]
 
 
-def run_compose(chain: list[str], instance: str, claude_args: list[str], resume_flag: list[str], conf: dict[str, str]) -> None:
-    """Set TARGET_IMAGE so compose's `image:` substitutes to the chain output,
-    set the terminal title, then exec `docker compose run`. By the time we
-    get here every bind-mount has been staged via add_docker_mount (base
-    set, per-instance workspace/state, [code] caches, skills, optional
-    creds) — flatten _docker_mounts into `-v` flags inline. On a non-zero
-    container return, docker_compose_subprocess sys.exits with that code;
-    on zero, returns normally and the __main__ unwind exits 0. The chain
-    images themselves are built upstream by ensure_image (called from
-    run.py:launch before this).
+def run_container(inst: Instance, image: str, claude_args: list[str], resume_flag: list[str]) -> None:
+    """Assemble and exec the final `docker run`. By the time we get here
+    every bind-mount has been staged via add_docker_mount (base set,
+    per-instance workspace/state, tag.docker mounts, [code] caches, skills,
+    optional creds) — flatten _docker_mounts into `-v` flags inline. The
+    active tags' contributions supply cap_add / entrypoint / env forwards;
+    the engine conf and specialty claude_args ride the Instance. On a
+    non-zero container return, docker_subprocess sys.exits with that code;
+    on zero, returns normally and the __main__ unwind exits 0. The image
+    itself is built upstream by ensure_image (called from run.py:launch
+    before this).
 
-    {auto}-mode firewall coordination: block on Phase 1 (critical Anthropic
-    DNS) to get the initial WHITELIST_ADDRESSES — exiting with the worker's
-    one-line message if a critical domain terminally failed to resolve —
-    then spawn the firewall
-    updater daemon thread BEFORE `docker_compose_subprocess` so it can drain Phase 2
-    results into the running container's iptables via `docker exec` while
-    Claude Code starts up. `--name` is set explicitly to a deterministic
-    string so the updater knows where to point — `docker compose run` would
-    otherwise generate a random suffix and we'd have no way to find it from
-    outside without polling `docker compose ps`."""
-    stage_compose_env(ComposeEnvKey.TARGET_IMAGE, chain_image_tag(chain))
-    compose_args = chain_compose_files(chain)
-    set_terminal_title(instance)
+    {firewall} coordination: block on Phase 1 (critical Anthropic DNS) to
+    get the initial WHITELIST_ADDRESSES — exiting with the worker's one-line
+    message if a critical domain terminally failed to resolve — then spawn
+    the firewall updater daemon thread BEFORE `docker run` so it can drain
+    Phase 2 results into the running container's iptables via `docker exec`
+    while Claude Code starts up. Both steps no-op when {firewall} is off
+    (no resolution was started). `--name` is set explicitly to a
+    deterministic string so the updater knows where to point.
+
+    `-e TERM` is passed bare — docker forwards the value from the launcher's
+    own terminal environment."""
+    contributions = inst.docker_contributions
+    set_terminal_title(inst.instance)
     # Phase 1 await: block for critical Anthropic addresses, stage them as the
     # initial WHITELIST_ADDRESSES. Phase 2 (rest of the whitelist) drains via
     # the updater thread spawned below.
     if is_critical_pending():
-        print(AUTO_FIREWALL_WAITING, flush=True)
+        print(FIREWALL_WAITING, flush=True)
     # A terminally-failed critical resolve surfaces as the phase-1 worker's
     # RuntimeError — exit with its message, not a raw traceback.
     addresses = call_or_exit(wait_for_critical_addresses, exceptions=RuntimeError)
     if addresses is not None:
-        stage_compose_env(ComposeEnvKey.WHITELIST_ADDRESSES, " ".join(addresses))
-    container_name = f"{CONTAINER_NAME_PREFIX}{instance}"
-    # Spawn the updater BEFORE docker_compose_subprocess (which blocks for the
-    # container's lifetime). No-op for non-{auto} launches.
+        stage_container_env(ContainerEnvKey.WHITELIST_ADDRESSES, " ".join(addresses))
+    container_name = f"{CONTAINER_NAME_PREFIX}{inst.instance}"
+    # Spawn the updater BEFORE docker_subprocess (which blocks for the
+    # container's lifetime). No-op for non-{firewall} launches.
     start_firewall_updater(container_name)
     args = (
-        compose_args + ["run", "--rm", "-it", "--name", container_name]
+        ["run", "--rm", "-it", "--name", container_name, "-e", "TERM"]
+        + [f"--cap-add={cap}" for c in contributions for cap in c.cap_add]
+        + entrypoint_flags(contributions)
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
-        + container_env_args()    # per-key -e flags from CONTAINER_ENV_FORWARDS
-        + conf_env_args(conf)     # -e flags setting each per-agent conf key=value in the container
-        + ["claude-code"]
-        + effort_args(conf, claude_args)  # explicit --effort from the conf — see effort_args for why the env var isn't enough
-        + resume_flag             # present if a resumed session
-        + claude_args             # leftover argv (unrecognised flags + unresolved positional) → claude
+        + container_env_args()             # always-on -e flags (status line, BASH_ENV, cred tokens)
+        + conf_env_args(inst.conf)         # -e flags setting each engine-conf key=value in the container
+        + env_forward_flags(contributions)  # tag-conditional -e flags (WHITELIST_ADDRESSES)
+        + [image]
+        + effort_args(inst.conf, claude_args)  # explicit --effort from the conf — see effort_args for why the env var isn't enough
+        + resume_flag                      # present if a resumed session
+        + list(inst.claude_args)           # specialty-contributed flags ({auto}'s --dangerously-skip-permissions)
+        + claude_args                      # leftover argv (unrecognised flags + unresolved positional) → claude
     )
-    docker_compose_subprocess(args)
+    docker_subprocess(args)

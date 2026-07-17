@@ -2,3 +2,8 @@ description = "autonomous; doesn't need permission to perform actions. Comes wit
 shortname   = "auto"
 warn        = true
 claude_args = ["--dangerously-skip-permissions"]
+
+[wants]
+firewall = """{auto} skips ALL permission prompts - without {firewall},
+the agent has UNRESTRICTED network access. Keep {firewall} checked
+unless you have a very good reason not to."""

@@ -81,8 +81,7 @@ def shell_returncode(*cmd: str, env: dict[str, str] | None = None) -> int:
     output streams to the user's terminal. Returns the subprocess return code
     so callers decide how to react (sys.exit with it, retry, ignore). `env`
     optionally overlays the subprocess environment (default: inherit caller's
-    full env); pass `subprocess_env()` from compose_env when the launcher's
-    staged compose vars need to reach the child."""
+    full env); pass an overlay when the child needs vars beyond the caller's."""
     return subprocess.run(cmd, env=env).returncode
 
 

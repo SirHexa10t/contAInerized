@@ -534,6 +534,19 @@ def active_warnings(checked: set[str],
     return [entry for combo, entry in warnings.items() if combo <= checked]
 
 
+def wants_warnings(checked: set[str],
+                   wants: dict[str, tuple[tuple[str, str], ...]]) -> list[tuple[str, list[str]]]:
+    """(header, body) warning entries for every checked tag whose `[wants]`
+    names an UNchecked tag — e.g. {auto} ticked without {firewall}. Rendered
+    in the same red zone as combo warnings, live per toggle. A want never
+    blocks confirmation — it's a request with a message, not a requirement."""
+    return [
+        (f"'{wanter}' wants '{wanted}':", message.splitlines())
+        for wanter, entries in wants.items() if wanter in checked
+        for wanted, message in entries if wanted not in checked
+    ]
+
+
 def requires_closure(key: str, requires: dict[str, frozenset[str]]) -> set[str]:
     """Transitive prerequisite set for `key`, excluding `key` itself — what
     must also be checked when `key` is checked. Drives checkbox_form's
@@ -552,7 +565,8 @@ def requires_closure(key: str, requires: dict[str, frozenset[str]]) -> set[str]:
 
 def checkbox_form(title: str, options: list[FormOption],
                   warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None,
-                  requires: dict[str, frozenset[str]] | None = None) -> list[str] | None:
+                  requires: dict[str, frozenset[str]] | None = None,
+                  wants: dict[str, tuple[tuple[str, str], ...]] | None = None) -> list[str] | None:
     """Render a full-screen multi-select form; block until confirm or cancel.
 
     ↑↓ cycle through the rows (options first, then the [ Confirm ] button,
@@ -568,12 +582,17 @@ def checkbox_form(title: str, options: list[FormOption],
     dependents. No disabling or indentation — every row stays freely
     toggleable, the cascade just keeps the set consistent.
 
+    `wants` maps option keys to their (wanted-key, message) requests —
+    rendered in the warning zone while the wanter is checked and the wanted
+    key isn't (see wants_warnings). Purely advisory.
+
     Returns the checked options' keys in display order, or None on cancel."""
     if not options:
         raise ValueError("options must be non-empty")
     rows = ordered_form_options(options)
     warning_map = warnings or {}
     req_map = requires or {}
+    wants_map = wants or {}
     by_key = {o.key: o for o in rows}
     confirm_index = len(rows)              # the confirm button is the last navigable row
     row_count = len(rows) + 1
@@ -618,7 +637,9 @@ def checkbox_form(title: str, options: list[FormOption],
 
     def warning_fragments() -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
-        for header, body in active_warnings(checked_keys(), warning_map):
+        checked = checked_keys()
+        entries = active_warnings(checked, warning_map) + wants_warnings(checked, wants_map)
+        for header, body in entries:
             out.append((PickerClass.WARNING.css, f"  {header}\n"))
             out.extend((PickerClass.WARNING.css, f"  {line}\n") for line in body)
         if out:
@@ -705,7 +726,7 @@ def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOptio
     lists. Row label = the tag's warn-aware colored kind-punctuated label,
     its description's first line, and — when the tag has prerequisites — a
     dim `(requires: …)` parenthetical. Body = the full description. Keys are
-    the tags' full names (what `.lego` / instances.json store)."""
+    the tags' full names (what `.lego` / instances.toml store)."""
     checked = {*current.professions, *current.specialties, *current.policies}
     out: list[FormOption] = []
     for tag in (*registry.professions.values(), *registry.specialties.values(),
@@ -743,6 +764,18 @@ def _form_requires(registry: Registry) -> dict[str, frozenset[str]]:
         for tag in (*registry.professions.values(), *registry.specialties.values(),
                     *registry.policies.values())
         if tag.requires
+    }
+
+
+def _form_wants(registry: Registry) -> dict[str, tuple[tuple[str, str], ...]]:
+    """{tag name: its (wanted, message) requests} across the three form kinds
+    — the shape checkbox_form's wants zone consumes. Tags without wants are
+    omitted."""
+    return {
+        tag.name: tag.wants
+        for tag in (*registry.professions.values(), *registry.specialties.values(),
+                    *registry.policies.values())
+        if tag.wants
     }
 
 
@@ -1038,7 +1071,8 @@ def prompt_tags(registry: Registry, current: AgentBuild) -> AgentBuild | None:
     options = _tag_form_options(registry, current)
     keys = checkbox_form(TITLE_TAGS_FORM, options,
                          warnings=_combo_warnings(registry),
-                         requires=_form_requires(registry))
+                         requires=_form_requires(registry),
+                         wants=_form_wants(registry))
     if keys is None:
         return None
     picked = set(keys)
@@ -1205,8 +1239,8 @@ def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
     creds counts when applicable. Each line is conditional on having
     something to show (no empty 'Professions: ' if there are none). The
     user-whitelist line counts user_firewall_whitelist_lines() inline —
-    only when {auto} is active, so other launches don't touch the file at
-    all. Takes the launch's Instance and pulls everything off it directly;
+    only when {firewall} is active, so other launches don't touch the file
+    at all. Takes the launch's Instance and pulls everything off it directly;
     kind punctuation comes from each tag's `.label`."""
     print(f"  Agent definition: {inst.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
     if inst.engine:
@@ -1219,7 +1253,16 @@ def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
         print(f"  Policies:         {' '.join(p.label for p in inst.policies)}")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
-    if any(s.name == "auto" for s in inst.specialties):
+    if any(s.name == "firewall" for s in inst.specialties):
         whitelist_count = len(user_firewall_whitelist_lines())
         display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))
         print(f"  User whitelist:   {whitelist_count} domain{plural(whitelist_count)} (from {display_path})")
+    # Unmet wants — advisory, never blocking: an active tag requested a
+    # companion that isn't active (e.g. {auto} without {firewall}). The form
+    # shows the same message live; repeating it here catches CLI-named and
+    # store-migrated launches that never pass through the form.
+    RED, RESET = "\033[01;91m", "\033[0m"
+    for wanter, wanted, message in inst.unmet_wants:
+        print(f"  {RED}⚠ '{wanter}' wants '{wanted}' (not active):{RESET}")
+        for line in message.splitlines():
+            print(f"      {RED}{line}{RESET}")

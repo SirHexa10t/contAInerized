@@ -2,7 +2,7 @@
 
 Three pure helpers cover the audit's per-data-source logic:
   `_check_json_file`     — classifies a JSON state file's status
-  `_load_store`          — parses instances.json, degrading corruption to an issue
+  `_load_store`          — parses instances.toml, degrading corruption to an issue
   `_store_entry_issues`  — validates store entries (ghost/badworkspace/bad_tags)
 All are easily-testable in isolation. `main()` is the I/O orchestrator that
 loads the store and walks state dirs — left out of unit tests since it
@@ -102,7 +102,7 @@ class TestStoreEntryIssues(unittest.TestCase):
 
     def test_ghost_when_instance_missing(self):
         result = _store_entry_issues({"a__gone": _entry(self.ws)}, set(), REGISTRY)
-        self.assertEqual(result, [("ghost", "a__gone", "instances.json entry has no state dir")])
+        self.assertEqual(result, [("ghost", "a__gone", "instances.toml entry has no state dir")])
 
     def test_ghost_precludes_other_checks(self):
         # A ghost entry is only reported once — workspace/tag checks apply
@@ -165,19 +165,19 @@ class TestStoreEntryIssues(unittest.TestCase):
 
 
 class TestLoadStore(unittest.TestCase):
-    """_load_store parses instances.json directly — corruption degrades to a
+    """_load_store parses instances.toml directly — corruption degrades to a
     reported issue (the audit keeps checking), and a MISSING file is clean:
     instances then run on their agents' `.lego` defaults."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmpdir.name) / "instances.json"
+        self.path = Path(self.tmpdir.name) / "instances.toml"
 
     def tearDown(self):
         self.tmpdir.cleanup()
 
     def test_valid_store_loads_with_no_issues(self):
-        self.path.write_text(json.dumps({"a__b": {"workspace": "/ws"}}))
+        self.path.write_text('[a__b]\nworkspace = "/ws"\n')
         mapping, issues = _load_store(self.path)
         self.assertEqual(mapping, {"a__b": {"workspace": "/ws"}})
         self.assertEqual(issues, [])
@@ -187,13 +187,13 @@ class TestLoadStore(unittest.TestCase):
         self.assertEqual(mapping, {})
         self.assertEqual(issues, [])
 
-    def test_corrupt_json_degrades_to_single_issue_not_exit(self):
-        self.path.write_text('{"a": 1,,,')
+    def test_corrupt_toml_degrades_to_single_issue_not_exit(self):
+        self.path.write_text('[a__b\nworkspace ===')
         mapping, issues = _load_store(self.path)
         self.assertEqual(mapping, {})
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0][0], "store")
-        self.assertIn("invalid JSON", issues[0][2])
+        self.assertIn("invalid TOML", issues[0][2])
 
     def test_empty_file_is_empty_map_with_no_issues(self):
         # Matches the launcher's own semantics: zero-byte store == no entries.

@@ -8,9 +8,9 @@ Concurrency model (two-phase, streaming):
   - Phase 1 (critical): api.anthropic.com + console.anthropic.com resolve
     synchronously (from the caller's perspective) — these MUST be in the
     container's initial iptables ruleset, so the launcher blocks until
-    they're known. agent_modifiers_handler._apply_auto fires the whole thing via
-    start_whitelist_resolution(state_dir) during compose_chain;
-    docker_config.run_compose awaits via wait_for_critical_addresses()
+    they're known. tag_handlers._apply_firewall fires the whole thing via
+    start_whitelist_resolution(state_dir) during apply_tags;
+    docker_config.run_container awaits via wait_for_critical_addresses()
     before staging WHITELIST_ADDRESSES and firing `docker compose run`.
   - Phase 2 (rest): every other whitelist entry resolves in a background
     thread that streams ready-to-open `addr[:port]` tokens onto an internal
@@ -50,7 +50,7 @@ rules for any address not already emitted. Rules only accumulate (additive
 ACCEPTs before the REJECT); nothing is ever revoked mid-session, so a
 transient DNS failure can't cut off a working host.
 
-Module boundary vs agent_modifiers_handler: the resolution policy + curated domain
+Module boundary vs tag_handlers: the resolution policy + curated domain
 list are network-layer policy + DNS plumbing, not chain composition / handler
 dispatch — different concerns, different module. Future network-shaped logic
 (port scans, host reachability checks, etc.) co-locates here.
@@ -96,8 +96,8 @@ with the reason, instead of burning the full DNS cascade and polluting
 Imports nothing heavy: file_access for the whitelist/cache files + atomic
 write helper, paths for the status/cache locations, template_code for the
 curated domain list, stdlib for subprocess + threading + ipaddress +
-urllib. agent_modifiers_handler._apply_auto is the entry point caller (calls
-start_whitelist_resolution during compose_chain); docker_config.run_compose
+urllib. tag_handlers._apply_firewall is the entry point caller (calls
+start_whitelist_resolution during apply_tags); docker_config.run_container
 pairs the await + updater-spawn.
 
 Cycle note: docker_config imports this module (for is_critical_pending /
@@ -1087,7 +1087,7 @@ def start_whitelist_resolution(state_dir: Path) -> None:
 
 def is_critical_pending() -> bool:
     """True iff Phase 1 (critical Anthropic resolve) is in flight but not yet
-    finished. docker_config.run_compose uses this to print a 'still resolving'
+    finished. docker_config.run_container uses this to print a 'still resolving'
     indicator before the blocking await — so the user doesn't see a silent
     stall and think the launcher hung."""
     return _phase1_future is not None and not _phase1_future.done()
