@@ -91,7 +91,7 @@ from .tag_form import (
     tag_style,
 )
 from .tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
-from .tags.engine import engine_sort_key
+from .tags.engine import engine_sort_key, sorted_engines
 from .tags.identity import SESSION_SEP
 from .utils import ordering_index_or_end, plural, relative_time
 
@@ -354,7 +354,7 @@ def _build_composition_legend(registry: Registry) -> str:
     buf = io.StringIO()
     console = Console(file=buf, force_terminal=True, color_system="truecolor", width=80)
     sections: list[tuple[str, str, str, Iterable[Tag]]] = [
-        ("Engines",     "Engine",     "How hard the agent thinks — a model/effort budget.", registry.engines.values()),
+        ("Engines",     "Engine",     "How hard the agent thinks — a model/effort budget (most advanced first).", sorted_engines(registry.engines.values())),
         ("Professions", "Profession", "Tools it can use — each is a docker image layer.", registry.professions.values()),
         ("Specialties", "Specialty",  "Exceptional access or running conditions.", registry.specialties.values()),
         # Policies sort by shortname WITH its symbol (`!` < `+` < `-`), so

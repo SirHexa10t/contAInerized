@@ -52,6 +52,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
 from .tags import AgentBuild, Engine, Policy, PolicyStance, Profession, Registry, Specialty, Tag
+from .tags.engine import sorted_engines
 
 # ============================================================
 # UI strings + layout
@@ -492,7 +493,7 @@ def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOptio
 
     out: list[FormOption] = [header(Engine)]
     out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
-            for tag in registry.engines.values()]
+            for tag in sorted_engines(registry.engines.values())]
     for kind_cls, members in ((Profession, list(registry.professions.values())),
                               (Specialty, list(registry.specialties.values())),
                               (Policy, sorted(registry.policies.values(),

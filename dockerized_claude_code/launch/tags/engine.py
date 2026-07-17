@@ -19,6 +19,7 @@ Engines are single-select (radio) in the form, so nesting contributes NO
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -39,6 +40,13 @@ CONF_FILE = "engine.conf"
 
 ORDERED_MODEL_FAMILIES = ["fable", "mythos", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last). mythos = fable's same-tier Project-Glasswing sibling, pre-added so a future mythos conf can't repeat the fable-sorted-last bug
 _FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
+
+# Claude Code's default output-token cap when CLAUDE_CODE_MAX_OUTPUT_TOKENS is
+# unset (docs.claude.com env-vars: default 32000, max 64000 — also the number
+# in Claude Code's own "response exceeded the 32000 output token maximum"
+# error). Used as the stand-in when an engine's conf doesn't set the key, so
+# the capability sort still ranks it.
+DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 
 
 def parse_model_id(model: str) -> tuple[str, int, int] | None:
@@ -103,3 +111,33 @@ class Engine(Tag):
             fields.pop("_info")
             out.append(cls(**fields, conf=tuple(sorted(merged.items()))))
         return out
+
+
+def _max_output_tokens(engine: Engine) -> int:
+    """The engine's CLAUDE_CODE_MAX_OUTPUT_TOKENS as an int, or
+    DEFAULT_MAX_OUTPUT_TOKENS when unset. Tolerates the digit-separator /
+    scientific-notation spellings Claude Code accepts (`64_000`, `1e6`) —
+    `int(float(...))` parses all three; an unparseable value falls back to
+    the default rather than crashing the sort."""
+    raw = engine.conf_map.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    if raw is None:
+        return DEFAULT_MAX_OUTPUT_TOKENS
+    try:
+        return int(float(raw))
+    except ValueError:
+        return DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def sorted_engines(engines: Iterable[Engine]) -> list[Engine]:
+    """Engines ordered by model capability — family (fable → haiku), then
+    model version descending, then CLAUDE_CODE_MAX_OUTPUT_TOKENS descending
+    (a bigger output budget ranks higher among engines on the same model),
+    then name as a stable final tiebreak. The form's radio group and the F8
+    legend both display in this order; the family/version half is the same
+    `engine_sort_key` the picker sorts agents by, applied to the engines
+    themselves rather than to an agent's chosen one."""
+    return sorted(engines, key=lambda e: (
+        engine_sort_key(e.conf_map.get("ANTHROPIC_MODEL", "")),
+        -_max_output_tokens(e),
+        e.name,
+    ))
