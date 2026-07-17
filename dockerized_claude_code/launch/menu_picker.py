@@ -4,11 +4,11 @@ builders and state lookups from agents_crud; has no agent-domain logic.
 
 Public API:
 
-  select_agent()
+  select_agent(registry)
       Run the agent/session picker (main menu + nested deletion submenu) until the
       user picks something or cancels. Discovers agents/instances and handles
       deletions internally.
-      -> AgentIdentity (new) | InstanceIdentity (cont) | None on cancel/empty
+      -> Agent (new) | Instance (cont) | None on cancel/empty
 
   ask_for_workspace(agent, default=None)
       Line prompt for a workspace path; tab-completes against the host filesystem.
@@ -19,22 +19,25 @@ Public API:
       instances (except `current` — the modify flow's keep-the-name case).
       -> session suffix string
 
-  prompt_modes(tags, current_modes=())
-      Full-screen checkbox form over every applicable mode (auto; DooD / web
-      only for [code] agents) in InstanceModifiers.modes() priority order;
-      pre-checks boxes from the existing modes list. Dangerous-combination
-      warnings (MODIFIER_NOTICE_PROMPTS) render live above the confirm row
-      as boxes are toggled. Header / body copy per modifier lives in
-      template_code/modifier_prompts.py. Used by run.py (new instances) and
-      select_agent's modify flow.
-      -> list[InstanceModifiers] of selected modes | None on cancel (Esc)
+  prompt_tags(registry, current)
+      Full-screen checkbox form over every discovered profession, specialty,
+      and policy (registry order), pre-checked from `current` (an AgentBuild —
+      `.lego` defaults for creates, the store entry for modifies). Labels
+      carry each tag's kind punctuation + warn coloring + a `(requires: …)`
+      parenthetical; checking a tag auto-checks its requirements and
+      unchecking a requirement unchecks its dependents (live, in-form).
+      combos.info warnings render live above the confirm row while their
+      full tag set is checked. The engine axis isn't in the form (it stays
+      whatever `current.engine` says — engine switching is a `.lego` edit).
+      -> AgentBuild | None on cancel (Esc)
 
-  checkbox_form(title, options, warnings=None)
-      Generic full-screen multi-select form primitive behind prompt_modes.
+  checkbox_form(title, options, warnings=None, requires=None)
+      Generic full-screen multi-select form primitive behind prompt_tags.
       ↑↓ cycles rows (options + the confirm button), Space toggles, Enter
       confirms, Esc cancels. An option can render attached beneath an anchor
       option (`attached_to`) with a connector line — visual proximity for
-      related options; no dependency logic.
+      related options. `requires` maps option keys to prerequisite keys and
+      drives the live check-cascade (see requires_closure).
       -> list of checked option keys in display order | None on cancel
 
   pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
@@ -46,13 +49,12 @@ Public API:
       Inline [y/N] prompt.
       -> bool
 
-  print_launch_banner(inst_id, cred_names)
-      Print the multi-line "about to launch" summary (agent definition, conf,
-      tags, modes, skills, creds, user whitelist count) before docker compose
-      builds the image. Conditional lines for tags/modes/skills/creds/whitelist
-      — only shown when applicable. md_path / conf_path / tags / modes all come
-      off the InstanceIdentity. The user-whitelist line counts
-      user_firewall_whitelist_lines() on demand only when {auto} is in modes.
+  print_launch_banner(inst, cred_names)
+      Print the multi-line "about to launch" summary (agent definition, engine,
+      per-axis tag lines, creds, user whitelist count) before docker builds
+      the image. Conditional lines — only shown when applicable; everything
+      comes off the Instance. The user-whitelist line counts
+      user_firewall_whitelist_lines() on demand only when {auto} is active.
 
 Generic-picker entry shape (pick_with_preview):
     {
@@ -66,7 +68,6 @@ Generic-picker entry shape (pick_with_preview):
 
 import dataclasses
 import io
-import re
 import readline
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -89,23 +90,23 @@ from rich.markdown import Markdown
 from rich.theme import Theme
 
 from .agents_crud import (
-    agent_sort_key, creatable_agents, delete_instance,
-    list_all_instances, mode_sort_key, modify_instance,
+    creatable_agents, delete_instance, engine_sort_key, instance_from_store,
+    list_all_instances, modify_instance,
 )
 from .file_access import (
-    agent_md_index, expand_user_path, home_dir, is_dir, load_modes_map,
-    load_workspace_map, path_exists, read_text, resolved_cwd, resolved_path,
+    expand_user_path, home_dir, is_dir,
+    path_exists, read_text, resolved_cwd, resolved_path,
     tab_complete_paths, user_firewall_whitelist_lines,
 )
 from .paths import (
     DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
-    FIREWALL_WHITELIST_FILE,
+    FIREWALL_WHITELIST_FILE, instance_state_dir_path,
 )
-from .structs import (
-    ANSI_TO_PT_STYLE, AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP,
+from .tags import (
+    Agent, AgentBuild, Instance, Registry, Tag, resolve_build,
 )
-from .template_code.modifier_prompts import MODIFIER_NOTICE_PROMPTS, MODIFIER_YN_PROMPTS
-from .utils import plural, relative_time
+from .tags.identity import SESSION_SEP
+from .utils import ordering_index_or_end, plural, relative_time
 
 
 # ============================================================
@@ -129,7 +130,7 @@ FORM_CONFIRM_LABEL  = "[ Confirm ]"
 CHECKBOX_ON         = "[x] "
 CHECKBOX_OFF        = "[ ] "
 ATTACHED_CONNECTOR  = "  └─ "        # prefix for options rendered attached beneath their anchor
-TITLE_MODES_FORM    = "Configure instance modes  (Space to toggle):"
+TITLE_TAGS_FORM     = "Configure instance tags  (Space to toggle):"
 
 # ============================================================
 # Layout
@@ -169,11 +170,18 @@ CONFIRM_DELETE_FMT = "Delete '{name}'?"
 STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
-# Tag / mode coloring is per-member — InstanceModifiers.colored_label decides
-# (green for safe, bold red for `_WARN_`-prefixed members). No central
-# STYLE_TAG / STYLE_MODE_WARNING constant exists here: the color lives with
-# the modifier so adding a new dangerous mode doesn't require touching the
-# picker.
+# Tag coloring is warn-driven: a warn-flagged specialty renders bold bright
+# red, everything else bright green (`_tag_style`). The warn flag lives on
+# the tag itself (specialty tag.info), so adding a new dangerous specialty
+# doesn't require touching the picker.
+STYLE_TAG_WARN = "bold fg:ansibrightred"
+STYLE_TAG_SAFE = "fg:ansibrightgreen"
+
+
+def _tag_style(tag: Tag) -> str:
+    """The picker style for one tag's label — red when the tag carries a
+    truthy `warn` (specialties only; other kinds have no such field)."""
+    return STYLE_TAG_WARN if getattr(tag, "warn", False) else STYLE_TAG_SAFE
 
 
 class PickerAction(Enum):
@@ -268,7 +276,7 @@ class PickerCwdHint(Enum):
         return (self.style, self.label)
 
 
-NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's workspace map entry is missing or stale
+NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's store entry is missing or stale
 
 
 @dataclass(frozen=True)
@@ -279,8 +287,8 @@ class ContEntry:
     column / hint area; the is_*_dir booleans drive the
     CURRENT/DEFAULT/INVALID workspace tags (only one can be True per row —
     invalid implies ws_resolved is None, which makes the other two False)."""
-    identity: InstanceIdentity
-    modes_display: str
+    identity: Instance
+    tags_display: str
     workspace_display: str
     is_current_dir: bool
     is_default_dir: bool
@@ -292,16 +300,17 @@ class ContEntry:
         """Cont-row preview markdown rendered to ANSI. Italic lead-in,
         horizontal rule, then a YAML-fenced metadata block (rich syntax-colors
         keys/values)."""
-        inst_id = self.identity
+        inst = self.identity
         return _render_md(
-            f"*Continue session `{inst_id.instance}`.*\n\n"
+            f"*Continue session `{inst.instance}`.*\n\n"
             f"---\n\n"
             f"```yaml\n"
-            f"Agent:     {inst_id.agent}\n"
-            f"Session:   {inst_id.session}\n"
+            f"Agent:     {inst.agent}\n"
+            f"Session:   {inst.session}\n"
             f"Workspace: {self.workspace_display}\n"
-            f"Modes:     {self.modes_display}\n"
-            f"State:     {inst_id.state_dir}\n"
+            f"Engine:    {inst.engine.name if inst.engine else '(default)'}\n"
+            f"Tags:      {self.tags_display}\n"
+            f"State:     {inst.state_dir}\n"
             f"Last used: {self.last_used_display}\n"
             f"```\n"
         )
@@ -312,7 +321,7 @@ class PickerEntry:
     """One row in `pick_with_preview`. `display` is the prompt_toolkit
     FormattedText fragment list (list of (style, text) tuples), `preview` is
     the right-pane markdown rendered to ANSI, `value` is what the picker
-    hands back on selection (AgentIdentity for Create rows, InstanceIdentity
+    hands back on selection (Agent for Create rows, Instance
     for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
     for Back rows). `deletable` / `modifiable` default True; the producer
     sets them False to disable Del / F2 on the row (Create / Back / opener).
@@ -332,52 +341,57 @@ class PickerEntry:
 _OPEN_DELMENU = object()
 
 
-def continuable_instances() -> list[ContEntry]:
+def continuable_instances(registry: Registry) -> list[ContEntry]:
     """ContEntry list for the picker's Cont/DELETE rows. Orphans (missing .md)
-    skipped. Sorted first by mode set (mode-less first, then groups ordered by
-    each mode's position in InstanceModifiers.modes()); within each mode group,
-    sorted by (agent rank, session) as before. Marks instances whose workspace
-    resolves to the current working directory (for the picker's CURRENT DIR
-    hint). The contained InstanceIdentity is what the picker hands back on
-    selection — stored workspace + modes are baked in so the modify flow's
-    pre-fill can read them straight off the identity."""
+    skipped — instance_from_store returns None for those. Sorted by active
+    tag set (tag-less first, then registry order: specialties dominate,
+    professions next), then engine capability, then agent/session. Marks
+    instances whose workspace resolves to the current working directory (for
+    the picker's CURRENT DIR hint). The contained Instance is what the picker
+    hands back on selection — stored workspace + resolved tag objects baked
+    in so the modify flow's pre-fill reads straight off the identity.
+    A store entry naming an unknown tag fails fast here (validate_build
+    raises) — `python -m launch.audit` reports the same defect non-fatally
+    when the picker is the wrong place to crash on a typo."""
     # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
     # when one symlinks to the other. Subdirs deliberately don't count — being in a
     # project under $HOME doesn't make /ai_workspace your "default" workspace.
     cwd = resolved_cwd()
     defaulting_dir_active = cwd in {resolved_path(d) for d in DEFAULTING_DIRS}
     default_workspace_resolved = resolved_path(DEFAULT_WORKSPACE)
-    workspace_map = load_workspace_map()
-    modes_map = load_modes_map()
 
     out = []
     for dir_name in list_all_instances():
-        agent, _, session = dir_name.partition(SESSION_SEP)
-        if agent not in agent_md_index():
+        inst = instance_from_store(dir_name, registry)
+        if inst is None:
             continue
-        # Convert JSON string values → typed enum members at this boundary.
-        # `from_value` raises ValueError on unknowns (defective modes-map
-        # entries fail fast here — use `python -m launch.audit` to find them
-        # non-fatally if the picker is the wrong place to crash on a typo).
-        modes = tuple(InstanceModifiers.from_value(s) for s in modes_map.get(dir_name, []))
-        ws = workspace_map.get(dir_name)
+        ws = inst.workspace
         ws_resolved = resolved_path(ws) if ws and is_dir(ws) else None
-        inst_id = InstanceIdentity(agent=agent, session=session, workspace=ws, is_brand_new=False, modes=modes)
-        last_mtime = inst_id.last_used_mtime
+        last_mtime = inst.last_used_mtime
+        active = (*inst.professions, *inst.specialties, *inst.policies)
         out.append(ContEntry(
-            identity=inst_id,
-            modes_display=", ".join(m.value for m in modes) or "(none)",
-            workspace_display=ws if ws else NO_WORKSPACE_DISPLAY,                                    # show stored value even when invalid; `?` sentinel only when no map entry at all
+            identity=inst,
+            tags_display=", ".join(t.name for t in active) or "(none)",
+            workspace_display=ws if ws else NO_WORKSPACE_DISPLAY,                                    # show stored value even when invalid; `?` sentinel only when no entry at all
             is_current_dir=ws_resolved == cwd,
             is_default_dir=defaulting_dir_active and ws_resolved == default_workspace_resolved,      # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)`
             is_invalid_dir=bool(ws) and ws_resolved is None,                                         # ws set but path doesn't exist / isn't a directory — tagged `(INVALID DIR)`
             last_used_display=relative_time(last_mtime) if last_mtime is not None else "(never)",
         ))
-    out.sort(key=lambda e: (
-        mode_sort_key(e.identity.modes),                                # mode-less sinks to top; rest follow InstanceModifiers.modes() positions
-        agent_sort_key((e.identity.agent, e.identity.md_path)),         # within each mode group: family/version/name
-        e.identity.session,                                             # then session for tiebreak between instances of the same agent
-    ))
+
+    spec_order, prof_order = list(registry.specialties), list(registry.professions)
+
+    def cont_sort_key(e: ContEntry) -> tuple[Any, ...]:
+        i = e.identity
+        return (
+            tuple(sorted(ordering_index_or_end(s.name, spec_order) for s in i.specialties)),
+            tuple(sorted(ordering_index_or_end(p.name, prof_order) for p in i.professions)),
+            engine_sort_key(i.conf.get("ANTHROPIC_MODEL", "")),
+            i.agent,
+            i.session,
+        )
+
+    out.sort(key=cont_sort_key)
     return out
 
 
@@ -394,39 +408,36 @@ def _render_md(text: str, *, theme: dict[str, str] | None = None) -> str:
     return buf.getvalue()
 
 
-def _build_composition_legend() -> str:
-    """Build the F8 'composition legend' shown over the preview pane.
-    Tags + modes render as markdown tables for layout consistency with the
-    Create-row previews. Per-row coloring comes from each modifier's
-    `colored_label()` — warning-aware ANSI inlined into the markdown table
-    source. The `markdown.code: none` override stops rich's default code
-    styling from overlaying — letting the injected ANSI colors win."""
-    rows_tags = "\n".join(
-        f"| {m.colored_label()} | {m.description} |"
-        for m in InstanceModifiers.tags()
-    )
-    rows_modes = "\n".join(
-        f"| {m.colored_label()} | {m.description} |"
-        for m in InstanceModifiers.modes()
-    )
-    tags_md = (
-        "# Tags\n\n"
-        "Agent core-affinities; dictate requirements and tools.\n\n"
-        "| Tag | Description |\n"
-        "|-----|-------------|\n"
-        f"{rows_tags}\n"
-    )
-    modes_md = (
-        "# Modes\n\n"
-        "Special approach/capability activation.\n\n"
-        "| Mode | Description |\n"
-        "|------|-------------|\n"
-        f"{rows_modes}\n"
-    )
-    return _render_md(tags_md + modes_md, theme={"markdown.code": "none"})
+def _build_composition_legend(registry: Registry) -> str:
+    """Build the F8 'composition legend' shown over the preview pane — one
+    markdown table per tag kind (engines, professions, specialties, policies),
+    header = the kind's nutshell, rows = each discovered member's label +
+    description first line. Warn-flagged specialties get their red inline via
+    `_ANSI_BY_STYLE`; the `markdown.code: none` override stops rich's default
+    code styling from overlaying the injected colors."""
+    ANSI_BY_STYLE = {STYLE_TAG_WARN: "\033[01;91m", STYLE_TAG_SAFE: "\033[22;92m"}
 
+    def colored(tag: Tag) -> str:
+        return f"{ANSI_BY_STYLE[_tag_style(tag)]}{tag.label}\033[0m"
 
-LEGEND_TEXT = _build_composition_legend()   # module-level so the picker doesn't rebuild on every keypress
+    def table(title: str, nutshell: str, members: Iterable[Tag]) -> str:
+        rows = "\n".join(
+            f"| {colored(t)} | {t.description.splitlines()[0] if t.description else ''} |"
+            for t in members
+        )
+        return (
+            f"# {title}\n\n{nutshell}\n\n"
+            f"| {title[:-1]} | Description |\n|-----|-------------|\n{rows}\n\n"
+        )
+
+    # Engines stay out of the legend for now — the picker never renders engine
+    # labels (engine choice lives in `.lego`, not the tag column or the form).
+    md = (
+        table("Professions", "Tools it can use — each is a docker image layer.", registry.professions.values())
+        + table("Specialties", "Exceptional access or running conditions.", registry.specialties.values())
+        + table("Policies",    "What it's permitted to do — pure settings fragments.", registry.policies.values())
+    )
+    return _render_md(md, theme={"markdown.code": "none"})
 
 
 def _agent_description(md_text: str) -> str:
@@ -436,41 +447,30 @@ def _agent_description(md_text: str) -> str:
     return next(iter(md_text.splitlines()), "").lstrip("# ").strip()
 
 
-def _create_preview(agent: AgentIdentity) -> str:
-    """Build the Create-row preview markdown from a creatable_agents AgentIdentity
+def _create_preview(agent: Agent) -> str:
+    """Build the Create-row preview markdown from a creatable_agents Agent
     and render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
     return _render_md(
-        f"*Create a new instance of `{agent.agent}` — `agents/{agent.md_path.name}`*\n\n"
+        f"*Create a new instance of `{agent.name}` — `agents/{agent.md_path.name}`*\n\n"
         f"---\n\n"
         f"{read_text(agent.md_path)}"
     )
 
 
-# Splitter for colored_chain output — captures each ANSI key in the
-# ANSI_TO_PT_STYLE mapping. With the capture group, `re.split` returns
-# [text-before-first-key, key, text, key, text, ...]: walking
-# (parts[1::2], parts[2::2]) as (key, text) pairs gives one tuple per
-# styled run.
-_KEYS_PATTERN = re.compile("(" + "|".join(re.escape(k) for k in ANSI_TO_PT_STYLE) + ")")
-
-
-def _modifier_display(modifiers: Iterable[InstanceModifiers]) -> tuple[list[tuple[str, str]], int]:
-    """Render a modifier set for cont-row / Create-row display: parse
-    `InstanceModifiers.colored_chain`'s ANSI output into prompt_toolkit
-    `(style, text)` fragments via the `ANSI_TO_PT_STYLE` mapping. Returns
-    (fragments, visible width). Empty input → ([], 0). A trailing space
-    fragment is appended to non-empty output so the widest row in the column
-    gets a built-in separator before its right neighbor (the agent /
-    instance name)."""
-    chain = InstanceModifiers.colored_chain(modifiers)
-    if not chain:
+def _tags_column(tags: Iterable[Tag]) -> tuple[list[tuple[str, str]], int]:
+    """Render a tag set for cont-row / Create-row display as prompt_toolkit
+    `(style, text)` fragments — each tag's kind-punctuated label in its
+    warn-aware color, space-separated. Returns (fragments, visible width).
+    Empty input → ([], 0). A trailing space fragment is appended to non-empty
+    output so the widest row in the column gets a built-in separator before
+    its right neighbor (the agent / instance name)."""
+    fragments: list[tuple[str, str]] = []
+    for tag in tags:
+        if fragments:
+            fragments.append(("", " "))
+        fragments.append((_tag_style(tag), tag.label))
+    if not fragments:
         return [], 0
-    parts = _KEYS_PATTERN.split(chain)
-    fragments: list[tuple[str, str]] = [
-        (ANSI_TO_PT_STYLE[key], text)
-        for key, text in zip(parts[1::2], parts[2::2])
-        if text
-    ]
     fragments.append(("", " "))   # trailing separator — bakes into the column width
     visible = sum(len(text) for _, text in fragments)
     return fragments, visible
@@ -489,7 +489,7 @@ def _plain(display: str | Iterable[tuple[str, str]]) -> str:
 
 
 # ============================================================
-# Checkbox form (multi-select) — generic primitive behind prompt_modes
+# Checkbox form (multi-select) — generic primitive behind prompt_tags
 # ============================================================
 
 @dataclass
@@ -534,8 +534,25 @@ def active_warnings(checked: set[str],
     return [entry for combo, entry in warnings.items() if combo <= checked]
 
 
+def requires_closure(key: str, requires: dict[str, frozenset[str]]) -> set[str]:
+    """Transitive prerequisite set for `key`, excluding `key` itself — what
+    must also be checked when `key` is checked. Drives checkbox_form's
+    check-cascade in both directions: checking a key checks its closure;
+    unchecking a key unchecks every checked option whose closure contains it.
+    Keys absent from `requires` (or with no prerequisites) yield set()."""
+    seen: set[str] = set()
+    stack = [key]
+    while stack:
+        for dep in requires.get(stack.pop(), ()):
+            if dep not in seen:
+                seen.add(dep)
+                stack.append(dep)
+    return seen
+
+
 def checkbox_form(title: str, options: list[FormOption],
-                  warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None) -> list[str] | None:
+                  warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None,
+                  requires: dict[str, frozenset[str]] | None = None) -> list[str] | None:
     """Render a full-screen multi-select form; block until confirm or cancel.
 
     ↑↓ cycle through the rows (options first, then the [ Confirm ] button,
@@ -545,14 +562,33 @@ def checkbox_form(title: str, options: list[FormOption],
     `warnings` entries whose combination is fully checked render live, in
     warning red, directly above the confirm button.
 
+    `requires` maps option keys to prerequisite option keys and drives the
+    live check-cascade: checking a box also checks its transitive
+    prerequisites; unchecking a box that others depend on unchecks those
+    dependents. No disabling or indentation — every row stays freely
+    toggleable, the cascade just keeps the set consistent.
+
     Returns the checked options' keys in display order, or None on cancel."""
     if not options:
         raise ValueError("options must be non-empty")
     rows = ordered_form_options(options)
     warning_map = warnings or {}
+    req_map = requires or {}
+    by_key = {o.key: o for o in rows}
     confirm_index = len(rows)              # the confirm button is the last navigable row
     row_count = len(rows) + 1
     state: dict[str, Any] = {"cursor": 0, "confirmed": False}
+
+    def cascade(toggled: FormOption) -> None:
+        """Keep the checked set requires-consistent after `toggled` flips."""
+        if toggled.checked:
+            for key in requires_closure(toggled.key, req_map):
+                if key in by_key:
+                    by_key[key].checked = True
+        else:
+            for opt in rows:
+                if opt.checked and toggled.key in requires_closure(opt.key, req_map):
+                    opt.checked = False
 
     def checked_keys() -> set[str]:
         return {o.key for o in rows if o.checked}
@@ -624,6 +660,7 @@ def checkbox_form(title: str, options: list[FormOption],
         else:
             opt = rows[state["cursor"]]
             opt.checked = not opt.checked
+            cascade(opt)
 
     @kb.add("enter")
     def _(event: KeyPressEvent) -> None: confirm(event)
@@ -662,36 +699,51 @@ def checkbox_form(title: str, options: list[FormOption],
     return [o.key for o in rows if o.checked]
 
 
-def _mode_form_options(tags: tuple[InstanceModifiers, ...],
-                       current_modes: tuple[InstanceModifiers, ...] = ()) -> list[FormOption]:
-    """FormOption rows for every mode applicable to an agent with `tags`, in
-    InstanceModifiers declaration order (`applies_to` gates DooD / web to
-    [code] agents), pre-checked from `current_modes`. Row label = the mode's
-    warning-aware colored label + its prompt header with the trailing '?'
-    dropped (the form states options; it doesn't ask questions). Keys are
-    the canonical `.value` strings."""
-    active = set(current_modes)
-    tag_set = set(tags)
+def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOption]:
+    """FormOption rows for every discovered profession, specialty, and policy
+    (registry order within each kind), pre-checked from `current`'s axis
+    lists. Row label = the tag's warn-aware colored kind-punctuated label,
+    its description's first line, and — when the tag has prerequisites — a
+    dim `(requires: …)` parenthetical. Body = the full description. Keys are
+    the tags' full names (what `.lego` / instances.json store)."""
+    checked = {*current.professions, *current.specialties, *current.policies}
     out: list[FormOption] = []
-    for mode in InstanceModifiers.in_order(MODIFIER_YN_PROMPTS):
-        if not mode.applies_to(tag_set):
-            continue
-        header, body = MODIFIER_YN_PROMPTS[mode]
-        label_frags, _ = _modifier_display([mode])   # colored label + built-in trailing space
+    for tag in (*registry.professions.values(), *registry.specialties.values(),
+                *registry.policies.values()):
+        label: list[tuple[str, str]] = [(_tag_style(tag), tag.label), ("", " ")]
+        first_line = tag.description.splitlines()[0] if tag.description else ""
+        label.append(("", first_line))
+        if tag.requires:
+            label.append((PickerClass.STATUS.css, f"  (requires: {', '.join(sorted(tag.requires))})"))
         out.append(FormOption(
-            key=mode.value,
-            label=[*label_frags, ("", header.rstrip("?"))],
-            body=body,
-            checked=mode in active,
+            key=tag.name,
+            label=label,
+            body=tag.description.splitlines(),
+            checked=tag.name in checked,
         ))
     return out
 
 
-def _notice_warnings_by_value() -> dict[frozenset[str], tuple[str, list[str]]]:
-    """MODIFIER_NOTICE_PROMPTS re-keyed by modifier `.value` strings — the
-    key shape checkbox_form's warning zone matches against checked keys."""
-    return {frozenset(m.value for m in combo): entry
-            for combo, entry in MODIFIER_NOTICE_PROMPTS.items()}
+def _combo_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[str]]]:
+    """specialty/combos.info entries re-shaped for checkbox_form's warning
+    zone: {tag-name set: (first message line, remaining lines)}."""
+    out: dict[frozenset[str], tuple[str, list[str]]] = {}
+    for combo in registry.combos:
+        first, *rest = combo.message.splitlines() or [""]
+        out[combo.tags] = (first, rest)
+    return out
+
+
+def _form_requires(registry: Registry) -> dict[str, frozenset[str]]:
+    """{tag name: prerequisite tag names} across the three form kinds — the
+    shape checkbox_form's check-cascade consumes. Tags without prerequisites
+    are omitted (requires_closure treats absent keys as empty)."""
+    return {
+        tag.name: frozenset(tag.requires)
+        for tag in (*registry.professions.values(), *registry.specialties.values(),
+                    *registry.policies.values())
+        if tag.requires
+    }
 
 
 def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
@@ -861,14 +913,14 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     def accent_style() -> str:
         """Colour the preview's left-edge accent bar based on the selected row's kind:
-        green for Create rows (AgentIdentity), yellow for Cont rows
-        (InstanceIdentity), dim default for menu/back rows."""
+        green for Create rows (Agent), yellow for Cont rows (Instance), dim
+        default for menu/back rows."""
         if not state["shown"]:
             return PickerClass.DIVIDER.css
         value = entries[state["cursor"]].value
-        if isinstance(value, InstanceIdentity):     # cont row — checked before AgentIdentity since InstanceIdentity isa AgentIdentity
+        if isinstance(value, Instance):             # cont row
             return PickerRowMarker.CONT.style       # fg:ansiyellow
-        if isinstance(value, AgentIdentity):        # new row — plain AgentIdentity only
+        if isinstance(value, Agent):                # new row
             return PickerRowMarker.NEW.style        # fg:ansigreen
         return PickerClass.DIVIDER.css
 
@@ -957,67 +1009,91 @@ def prompt_session(agent: str, workspace: str, current: str | None = None) -> st
         if not suffix:
             print("Session suffix cannot be empty.")
             continue
-        if suffix != current and path_exists(InstanceIdentity.state_dir_for(agent, suffix)):
-            print(f"Instance '{InstanceIdentity.instance_name(agent, suffix)}' already exists. Pick another name.")
+        candidate = f"{agent}{SESSION_SEP}{suffix}"
+        if suffix != current and path_exists(instance_state_dir_path(candidate)):
+            print(f"Instance '{candidate}' already exists. Pick another name.")
             continue
         return suffix
 
 
-def prompt_modes(tags: tuple[InstanceModifiers, ...], current_modes: tuple[InstanceModifiers, ...] = ()) -> list[InstanceModifiers] | None:
-    """Full-screen mode-selection form: one checkbox per applicable mode
-    (assembled by `_mode_form_options` — declaration order, applies_to
-    gating, defaults from `current_modes`), with dangerous-combination
-    warnings rendered live above the confirm button while the combination
-    is checked. Returns the selected modes in declaration order, or None
-    when the user cancels (Esc) — callers abort their create / modify flow
-    on None rather than persisting anything."""
-    options = _mode_form_options(tags, current_modes)
-    keys = checkbox_form(TITLE_MODES_FORM, options, warnings=_notice_warnings_by_value())
+def build_of(inst: Instance) -> AgentBuild:
+    """The instance's current axis selections as name strings — the form's
+    pre-check shape (and what resolve_build turns back into tag objects)."""
+    return AgentBuild(
+        engine=inst.engine.name if inst.engine else None,
+        professions=tuple(p.name for p in inst.professions),
+        specialties=tuple(s.name for s in inst.specialties),
+        policies=tuple(p.name for p in inst.policies),
+    )
+
+
+def prompt_tags(registry: Registry, current: AgentBuild) -> AgentBuild | None:
+    """Full-screen tag-selection form: one checkbox per discovered profession /
+    specialty / policy (assembled by `_tag_form_options`, defaults from
+    `current`), requires-cascade live in the form, combos.info warnings
+    rendered above the confirm button while their combination is checked.
+    Returns a new AgentBuild carrying `current.engine` plus the selection
+    split back into its axes, or None when the user cancels (Esc) — callers
+    abort their create / modify flow on None rather than persisting anything."""
+    options = _tag_form_options(registry, current)
+    keys = checkbox_form(TITLE_TAGS_FORM, options,
+                         warnings=_combo_warnings(registry),
+                         requires=_form_requires(registry))
     if keys is None:
         return None
-    return [InstanceModifiers.from_value(k) for k in keys]
+    picked = set(keys)
+    return AgentBuild(
+        engine=current.engine,
+        professions=tuple(n for n in registry.professions if n in picked),
+        specialties=tuple(n for n in registry.specialties if n in picked),
+        policies=tuple(n for n in registry.policies if n in picked),
+    )
 
 
-def select_agent() -> AgentIdentity | InstanceIdentity | None:
+def select_agent(registry: Registry) -> Agent | Instance | None:
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
     Caller must ensure at least one agent .md exists before invoking."""
+    legend_text = _build_composition_legend(registry)   # built once per call — the loop below only re-scans instances
     while True:
-        agents = creatable_agents()
-        instances = continuable_instances()
+        agents = creatable_agents(registry)
+        instances = continuable_instances(registry)
 
         instances_by_agent: dict[str, list[ContEntry]] = {}
         for inst in instances:
             instances_by_agent.setdefault(inst.identity.agent, []).append(inst)
 
-        agent_name_width = max(len(a.agent) for a in agents)
+        agent_name_width = max(len(a.name) for a in agents)
         instance_name_width = max((len(i.identity.instance) for i in instances), default=0)
 
-        # Tag column (Create rows) and mode column (Cont rows) are sized
+        # Tag column (Create rows) and tag column (Cont rows) are sized
         # INDEPENDENTLY — each scoped to its own population so a row's
-        # agent / instance name sits tight against its modifiers. Tying the
+        # agent / instance name sits tight against its tags. Tying the
         # two together (a shared max) pushed Create-row agent names way out
-        # to align with the widest mode set, even though the columns don't
-        # share a row.
+        # to align with the widest cont-row tag set, even though the columns
+        # don't share a row.
         #
-        # Per-member coloring: each tag/mode renders via `_modifier_display`,
-        # which routes through `InstanceModifiers.colored_chain` and parses
-        # the ANSI output back into pt-fragments via the `ANSI_TO_PT_STYLE`
-        # mapping in structs. Adding a new color or shape tweaks structs, not
-        # the picker.
-        tag_by_agent = {a.agent: _modifier_display(a.tags) for a in agents}
-        mode_by_inst = {i.identity.instance: _modifier_display(i.identity.modes) for i in instances}
-        tag_col_width  = max((w for _, w in tag_by_agent.values()),  default=0)
-        mode_col_width = max((w for _, w in mode_by_inst.values()), default=0)
+        # Create rows show the `.lego` default professions/specialties (the
+        # names resolve through the registry for warn-aware coloring); Cont
+        # rows show the instance's actual resolved tag objects.
+        def build_tags(build: AgentBuild) -> list[Tag]:
+            names = (*build.professions, *build.specialties, *build.policies)
+            return [t for n in names if (t := registry.get(n)) is not None]
+
+        tag_by_agent = {a.name: _tags_column(build_tags(a.build)) for a in agents}
+        tag_by_inst = {i.identity.instance: _tags_column((*i.identity.professions, *i.identity.specialties, *i.identity.policies))
+                       for i in instances}
+        tag_col_width  = max((w for _, w in tag_by_agent.values()), default=0)
+        cont_col_width = max((w for _, w in tag_by_inst.values()), default=0)
 
         entries: list[PickerEntry] = []
         for agent in agents:
-            tag_frags, tag_len = tag_by_agent[agent.agent]
+            tag_frags, tag_len = tag_by_agent[agent.name]
             entries.append(PickerEntry(
                 display=[
                     PickerRowMarker.NEW.fragment("  "),
                     *tag_frags,
                     ("", " " * (tag_col_width - tag_len)),
-                    (STYLE_AGENT_NAME, f"{agent.agent:<{agent_name_width}}"),
+                    (STYLE_AGENT_NAME, f"{agent.name:<{agent_name_width}}"),
                     ("", f" — {_agent_description(read_text(agent.md_path))}"),
                 ],
                 preview=_create_preview(agent),
@@ -1025,14 +1101,14 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
                 deletable=False,
                 modifiable=False,
             ))
-            for inst in instances_by_agent.get(agent.agent, []):
-                inst_id = inst.identity
-                mode_frags, mode_len = mode_by_inst[inst_id.instance]
+            for inst in instances_by_agent.get(agent.name, []):
+                identity = inst.identity
+                cont_frags, cont_len = tag_by_inst[identity.instance]
                 cont_display = [
                     PickerRowMarker.CONT.fragment("      "),
-                    *mode_frags,
-                    ("", " " * (mode_col_width - mode_len)),
-                    (STYLE_AGENT_NAME, f"{inst_id.instance:<{instance_name_width}}"),
+                    *cont_frags,
+                    ("", " " * (cont_col_width - cont_len)),
+                    (STYLE_AGENT_NAME, f"{identity.instance:<{instance_name_width}}"),
                     ("", "    "),
                 ]
                 if inst.is_current_dir:
@@ -1045,7 +1121,7 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
                 entries.append(PickerEntry(
                     display=cont_display,
                     preview=inst.preview,
-                    value=inst_id,
+                    value=identity,
                 ))
 
         entries.append(PickerEntry(
@@ -1059,54 +1135,55 @@ def select_agent() -> AgentIdentity | InstanceIdentity | None:
             modifiable=False,
         ))
 
-        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True, legend_text=LEGEND_TEXT)
+        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True, legend_text=legend_text)
         if action is None:
             return None
 
-        if action == PickerAction.DELETE:  # picker enforces deletability — only cont rows (InstanceIdentity) reach here
+        if action == PickerAction.DELETE:  # picker enforces deletability — only cont rows (Instance) reach here
             if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
                 delete_instance(value)
             continue
 
         if action == PickerAction.MODIFY:  # picker enforces modifiability — only cont rows reach here
-            old_inst_id = value
+            old_inst = value
             # Same prompt order as creation (resolve_target): workspace →
-            # session → modes. The session prompt is the shared one — with
+            # session → tags. The session prompt is the shared one — with
             # current= it accepts keeping the existing name.
-            new_workspace = ask_for_workspace(old_inst_id.agent, default=old_inst_id.workspace)
-            new_session = prompt_session(old_inst_id.agent, new_workspace, current=old_inst_id.session)
-            new_modes = prompt_modes(old_inst_id.tags, old_inst_id.modes)
-            if new_modes is None:   # Esc on the mode form — abort the modify, back to the picker
+            new_workspace = ask_for_workspace(old_inst.agent, default=old_inst.workspace)
+            new_session = prompt_session(old_inst.agent, new_workspace, current=old_inst.session)
+            new_build = prompt_tags(registry, build_of(old_inst))
+            if new_build is None:   # Esc on the tag form — abort the modify, back to the picker
                 continue
-            new_inst_id = dataclasses.replace(
-                old_inst_id, session=new_session, workspace=new_workspace, modes=tuple(new_modes)
+            new_inst = dataclasses.replace(
+                old_inst, session=new_session, workspace=new_workspace,
+                **resolve_build(new_build, old_inst.agent, registry),
             )  # is_brand_new stays False via the dataclass replace
-            modify_instance(old_inst_id, new_inst_id)
+            modify_instance(old_inst, new_inst)
             continue
 
         if value is _OPEN_DELMENU:
-            _delete_submenu()
+            _delete_submenu(registry, legend_text)
             continue
 
-        return value  # AgentIdentity (new) | InstanceIdentity (cont)
+        return value  # Agent (new) | Instance (cont)
 
 
-def _delete_submenu() -> None:
+def _delete_submenu(registry: Registry, legend_text: str) -> None:
     """Flat deletion submenu — every row red. Loops until Esc / Back."""
     while True:
-        instances = continuable_instances()
+        instances = continuable_instances(registry)
         if not instances:
             return
         entries: list[PickerEntry] = []
         for inst in instances:
-            inst_id = inst.identity
+            identity = inst.identity
             entries.append(PickerEntry(
                 display=[
                     PickerRowMarker.DLET.fragment("  "),
-                    (STYLE_DEL_NAME, inst_id.instance),
+                    (STYLE_DEL_NAME, identity.instance),
                 ],
                 preview=inst.preview,
-                value=inst_id,
+                value=identity,
             ))
         entries.append(PickerEntry(
             display=[PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],
@@ -1115,33 +1192,34 @@ def _delete_submenu() -> None:
             deletable=False,
         ))
 
-        action, value = pick_with_preview(TITLE_DELETE_MENU, entries, allow_delete=True, legend_text=LEGEND_TEXT)
+        action, value = pick_with_preview(TITLE_DELETE_MENU, entries, allow_delete=True, legend_text=legend_text)
         if action is None or value is None:
             return
         if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
             delete_instance(value)
 
 
-def print_launch_banner(inst_id: InstanceIdentity, cred_names: list[str]) -> None:
-    """Print the multi-line summary that appears before docker compose builds the
-    image — agent definition path, conf path, active tags + modes, and skills/creds
-    counts when applicable. Each line is conditional on having something to show
-    (no empty 'Tags: ' if there are none). The user-whitelist line counts
-    user_firewall_whitelist_lines() inline — only when {auto} is in modes, so
-    non-{auto} launches don't touch the file at all. Takes the launch's
-    InstanceIdentity and pulls md_path / conf_path / tags / modes off it directly."""
-    print(f"  Agent definition: {inst_id.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
-    print(f"  Configuration:    {inst_id.conf_path.relative_to(DOCKERIZED_CLAUDE_ROOT) if inst_id.conf_path else '(none — using defaults)'}")
-    # Both tags and modes are typed enum members → `.label` directly. The
-    # [..]/{..} wrapping comes from each member's `.label` property (single
-    # source of truth in structs.InstanceModifiers).
-    if inst_id.tags:
-        print(f"  Tags:             {' '.join(t.label for t in inst_id.tags)}")
-    if inst_id.modes:
-        print(f"  Modes:            {' '.join(m.label for m in inst_id.modes)}")
+def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
+    """Print the multi-line summary that appears before docker builds the
+    image — agent definition path, engine, one line per active tag axis, and
+    creds counts when applicable. Each line is conditional on having
+    something to show (no empty 'Professions: ' if there are none). The
+    user-whitelist line counts user_firewall_whitelist_lines() inline —
+    only when {auto} is active, so other launches don't touch the file at
+    all. Takes the launch's Instance and pulls everything off it directly;
+    kind punctuation comes from each tag's `.label`."""
+    print(f"  Agent definition: {inst.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    if inst.engine:
+        print(f"  Engine:           {inst.engine.label} — {inst.engine.path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    if inst.professions:
+        print(f"  Professions:      {' '.join(p.label for p in inst.professions)}")
+    if inst.specialties:
+        print(f"  Specialties:      {' '.join(s.label for s in inst.specialties)}")
+    if inst.policies:
+        print(f"  Policies:         {' '.join(p.label for p in inst.policies)}")
     if cred_names:
         print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
-    if InstanceModifiers.MODE_WARN_AUTO in inst_id.modes:
+    if any(s.name == "auto" for s in inst.specialties):
         whitelist_count = len(user_firewall_whitelist_lines())
         display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))
         print(f"  User whitelist:   {whitelist_count} domain{plural(whitelist_count)} (from {display_path})")

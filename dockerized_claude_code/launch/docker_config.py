@@ -38,7 +38,7 @@ from .paths import (
     DOCKER_BASE_MOUNTS, FIREWALL_DONE_IN_CONTAINER,
     INSTALL_FAILURES_LOG_IN_CONTAINER, compose_layer_path,
 )
-from .structs import InstanceIdentity
+from .tags import Instance
 from .template_code.docker_prompts import (
     AUTO_FIREWALL_WAITING, BUILDING_STEP, INSTALL_FAILURES_BODY, INSTALL_FAILURES_HEADER,
 )
@@ -291,7 +291,7 @@ def docker_check_any_agent_running_subprocess() -> bool:
 # Orchestration
 # ============================================================
 
-def set_container_mounts(inst_id: InstanceIdentity) -> None:
+def set_container_mounts(inst_id: Instance) -> None:
     """Stage per-launch bind-mounts via add_docker_mount. Sister to set_container_env
     (bind-mounts vs env vars); both run sequentially in setup_state. Two layers:
     the per-instance pair (workspace → /workspace, state dir → /home/claude/.claude)

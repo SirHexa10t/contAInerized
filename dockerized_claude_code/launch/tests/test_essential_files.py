@@ -2,15 +2,21 @@
 exist at the paths it computes. Catches "renamed/moved a file but missed a
 reference" regressions immediately.
 
-For each InstanceModifier modifier (except BASE), this also verifies the
-modifier's Dockerfile, compose layer, and `_apply_<value>` handler are all
-in place — so adding a new modifier requires all three to land at once
-(otherwise the build will fail at runtime; here it fails at test time)."""
+For each chain tag with launch-side machinery, this also verifies the
+compose layer and (where one is required) the `_apply_<name>` handler are in
+place — a missing artifact fails here at test time rather than at runtime.
+The tag tree itself (Dockerfiles, tag.info shapes, `.lego` references) is
+validated by TestTagTreeDiscovery / TestAgentLegoFiles below via scan_all."""
 
 import unittest
 
 from launch import agent_modifiers_handler, paths
-from launch.structs import InstanceModifiers
+from launch.tags import load_lego, scan_all
+
+# The four chain tags with a compose layer (until the plain-docker flip);
+# the subset with host-side launch behavior must also have an _apply_ handler.
+CHAIN_TAGS = ["code", "web", "auto", "dood"]
+HANDLER_TAGS = ["code", "auto", "dood"]   # web is data-only: its playwright cache rides [code]'s ~/.cache mount
 
 
 class TestRepoLayout(unittest.TestCase):
@@ -38,47 +44,32 @@ class TestBaseDockerArtifacts(unittest.TestCase):
         self.assertTrue(paths.COMPOSE_FILE_PATH.is_file())
 
 
-class TestModifierArtifactsPresent(unittest.TestCase):
-    """For every non-BASE modifier, the three files that compose its image
-    layer must all exist: Dockerfile.<value>, compose.<value>.yml, and an
-    `_apply_<value>` callable in agent_modifiers_handler — all lowercased
-    (matters for {DooD}, whose canonical value preserves the mixed case)."""
+class TestChainTagArtifactsPresent(unittest.TestCase):
+    """Every chain tag's compose layer (compose.<name>.yml) must exist, and
+    the tags with host-side launch behavior must keep their `_apply_<name>`
+    handler. (The per-tag Dockerfiles moved into the agents/ tree during the
+    tags migration — the new-location checks live in TestTagTreeDiscovery.)"""
 
-    def _non_base_modifiers(self):
-        return [m for m in InstanceModifiers if m is not InstanceModifiers.BASE]
+    def test_each_chain_tag_has_compose_layer(self):
+        for tag in CHAIN_TAGS:
+            with self.subTest(tag=tag):
+                layer = paths.compose_layer_path(tag)
+                self.assertTrue(layer.is_file(), f"missing compose layer for {tag}: {layer}")
 
-    def test_each_modifier_has_dockerfile(self):
-        for m in self._non_base_modifiers():
-            with self.subTest(modifier=m.value):
-                df = paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
-                self.assertTrue(df.is_file(), f"missing Dockerfile for {m.value}: {df}")
-
-    def test_each_modifier_has_compose_layer(self):
-        for m in self._non_base_modifiers():
-            with self.subTest(modifier=m.value):
-                layer = paths.compose_layer_path(m.value)
-                self.assertTrue(layer.is_file(), f"missing compose layer for {m.value}: {layer}")
-
-    def test_each_modifier_has_apply_handler(self):
-        for m in self._non_base_modifiers():
-            with self.subTest(modifier=m.value):
-                handler_name = f"_apply_{m.value.lower()}"
-                self.assertTrue(
-                    hasattr(agent_modifiers_handler, handler_name),
-                    f"agent_modifiers_handler is missing {handler_name}() for {m.value}",
-                )
-                self.assertTrue(
-                    callable(getattr(agent_modifiers_handler, handler_name)),
-                    f"agent_modifiers_handler.{handler_name} is not callable",
-                )
+    def test_handler_tags_have_apply_handler(self):
+        for tag in HANDLER_TAGS:
+            with self.subTest(tag=tag):
+                handler = getattr(agent_modifiers_handler, f"_apply_{tag}", None)
+                self.assertTrue(callable(handler),
+                                f"agent_modifiers_handler is missing _apply_{tag}()")
 
     def test_base_has_no_dockerfile_suffix(self):
-        # BASE is the un-suffixed base Dockerfile. Defensive: confirm there's no
+        # base is the un-suffixed base Dockerfile. Defensive: confirm there's no
         # `Dockerfile.base` (which would shadow the intended base layer).
         self.assertFalse((paths.DOCKER_DIR / "Dockerfile.base").exists())
 
     def test_base_has_no_apply_handler(self):
-        # BASE has no side effects beyond being the starting image — no handler.
+        # base has no side effects beyond being the starting image — no handler.
         self.assertFalse(hasattr(agent_modifiers_handler, "_apply_base"))
 
 
@@ -96,6 +87,68 @@ class TestUserExtrasTemplates(unittest.TestCase):
 class TestDefaultAgentConf(unittest.TestCase):
     def test_default_conf_exists(self):
         self.assertTrue(paths.DEFAULT_CONF.is_file())
+
+
+class TestTagTreeDiscovery(unittest.TestCase):
+    """Integration checkpoint (tags rewrite): the real agents/ tree is
+    discovered + validated by the tags package. Guards every migration step —
+    a mis-shaped tag dir (missing tag.info, stray dir, orphan _layer, dangling
+    reference) fails scan_all here rather than at launch. Kinds whose subtrees
+    aren't migrated yet are simply absent (empty), which scan_all allows."""
+
+    def setUp(self):
+        self.reg = scan_all(paths.AGENTS_DIR)
+
+    def test_engines_discovered(self):
+        self.assertLessEqual(
+            {"default", "golem", "poet", "thinker", "researcher", "breakthrough"},
+            set(self.reg.engines),
+        )
+
+    def test_engine_conf_resolves_through_new_tree(self):
+        self.assertIn("haiku", self.reg.engines["golem"].conf_map.get("ANTHROPIC_MODEL", ""))
+        self.assertTrue(self.reg.engines["breakthrough"].conf_map.get("ANTHROPIC_MODEL"))
+
+    def test_professions_discovered_with_nesting_requires(self):
+        self.assertLessEqual({"code", "web"}, set(self.reg.professions))
+        self.assertEqual(self.reg.professions["web"].requires, frozenset({"code"}))
+
+    def test_specialties_discovered_with_layer_requires(self):
+        self.assertLessEqual({"auto", "dood"}, set(self.reg.specialties))
+        self.assertEqual(self.reg.specialties["dood"].requires, frozenset({"code"}))  # via _dood layer
+        self.assertTrue(self.reg.specialties["auto"].warn)
+
+    def test_professions_have_dockerfile(self):
+        for name in ("code", "web"):
+            self.assertTrue((self.reg.professions[name].path / "Dockerfile").is_file())
+
+    def test_policies_discovered(self):
+        self.assertLessEqual({"web-research", "no-sudo"}, set(self.reg.policies))
+        self.assertEqual(self.reg.policies["web-research"].label, "<+query>")
+
+
+class TestAgentLegoFiles(unittest.TestCase):
+    """Every agent has a `.lego`, and each references only real tags on the
+    right axes. Validated against the discovered registry — a typo'd
+    engine/profession name, or a tag listed on the wrong axis, fails here
+    rather than at launch."""
+
+    def setUp(self):
+        self.reg = scan_all(paths.AGENTS_DIR)
+
+    def test_every_agent_has_a_lego(self):
+        for md in paths.AGENTS_DIR.glob("*.md"):
+            name = md.stem
+            with self.subTest(agent=name):
+                self.assertTrue((paths.AGENTS_DIR / f"{name}.lego").is_file(),
+                                f"agent {name!r} ({md.name}) has no {name}.lego")
+
+    def test_every_lego_validates_against_registry(self):
+        legos = sorted(paths.AGENTS_DIR.glob("*.lego"))
+        self.assertTrue(legos, "no .lego files found")
+        for lego in legos:
+            with self.subTest(lego=lego.name):
+                self.reg.validate_build(load_lego(lego), lego)   # raises on any bad reference
 
 
 class TestAutoModeAuxiliaryScripts(unittest.TestCase):

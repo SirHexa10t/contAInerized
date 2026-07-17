@@ -44,7 +44,7 @@ from .paths import (
     BASHRC_IN_CONTAINER, DOCKERIZED_CLAUDE_ROOT, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS,
 )
-from .structs import InstanceIdentity
+from .tags import Instance
 
 
 # ============================================================
@@ -215,7 +215,7 @@ def token_env_dict(tokens: dict[str, str]) -> dict[str, str]:
 
 
 def conf_env_args(conf: dict[str, str]) -> list[str]:
-    """Convert a per-agent `.conf` dict (from file_access.load_conf) into
+    """Convert an engine conf dict (from Instance.conf) into
     a list of `-e KEY=VALUE` args for `docker compose run`. Each conf entry
     becomes a runtime env var inside the container."""
     return [item for k, v in conf.items() for item in ("-e", f"{k}={v}")]
@@ -237,11 +237,11 @@ def container_env_args() -> list[str]:
 # Per-launch orchestration
 # ============================================================
 
-def set_container_env(inst_id: InstanceIdentity, refresh_installs: bool = False) -> None:
+def set_container_env(inst_id: Instance, refresh_installs: bool = False) -> None:
     """Stage per-launch compose env vars in one bulk dict-update — called by
     run.py before docker compose build/run. Sister to docker_config's
     set_container_mounts (env vars vs bind-mounts); both run sequentially
-    in setup_state. Accepts any InstanceIdentity (or subclass); reads
+    in setup_state. Accepts the launch's Instance; reads
     .agent for the container name, plus whatever the status-line builder
     consumes.
 

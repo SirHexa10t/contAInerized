@@ -1,13 +1,9 @@
-"""Tests for launch.file_access — the JSON-map caching layer, the OAuth
-file ensure step, and the small helpers in this module. `parse_stem` lives
-in launch.utils now, so its grammar tests are over in test_utils.
+"""Tests for launch.file_access — the agent-md index, the OAuth file
+ensure step, and the small helpers in this module.
 
 Filesystem-touching tests use tmpdir + targeted patches so they don't depend
 on the host's actual launcher state."""
 
-import contextlib
-import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,123 +13,31 @@ from launch import file_access
 
 
 # ============================================================
-# JSON-map cache (_cached_load_json_map / _cached_save_json_map)
-# ============================================================
-
-
-class TestJsonMapCache(unittest.TestCase):
-    """The cache survives multiple loads and is refreshed on save. Tests use
-    a tmp file as the cache key so they don't collide with the real workspace
-    or modes maps."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmpdir.name) / "map.json"
-        self.path.write_text(json.dumps({"a": 1}))
-        # Ensure no stale entry from a prior test
-        file_access._json_map_cache.pop(self.path, None)
-
-    def tearDown(self):
-        file_access._json_map_cache.pop(self.path, None)
-        self.tmpdir.cleanup()
-
-    def test_first_load_reads_from_disk(self):
-        loaded = file_access._cached_load_json_map(self.path)
-        self.assertEqual(loaded, {"a": 1})
-
-    def test_second_load_returns_same_object(self):
-        first = file_access._cached_load_json_map(self.path)
-        second = file_access._cached_load_json_map(self.path)
-        self.assertIs(first, second)   # same dict reference, not just equal
-
-    def test_disk_change_not_seen_when_cached(self):
-        # External edit after first load is invisible — no file-locking, by design.
-        first = file_access._cached_load_json_map(self.path)
-        self.path.write_text(json.dumps({"b": 2}))
-        second = file_access._cached_load_json_map(self.path)
-        self.assertEqual(second, {"a": 1})
-        self.assertIs(first, second)
-
-    def test_save_refreshes_cache(self):
-        file_access._cached_load_json_map(self.path)   # prime
-        file_access._cached_save_json_map(self.path, {"c": 3})
-        loaded = file_access._cached_load_json_map(self.path)
-        self.assertEqual(loaded, {"c": 3})
-
-    def test_save_persists_to_disk(self):
-        file_access._cached_save_json_map(self.path, {"persisted": True})
-        on_disk = json.loads(self.path.read_text())
-        self.assertEqual(on_disk, {"persisted": True})
-
-    def test_mutation_visible_across_loads(self):
-        # The "load-mutate-save" pattern relies on this: load returns a reference,
-        # mutating it is visible to subsequent loads even before save.
-        m = file_access._cached_load_json_map(self.path)
-        m["new_key"] = "added"
-        again = file_access._cached_load_json_map(self.path)
-        self.assertEqual(again["new_key"], "added")
-
-    def test_empty_file_loads_as_empty_map(self):
-        # A zero-byte map file (e.g. created by an interrupted first write
-        # before writes were atomic) is valid "no entries" state, not an error.
-        self.path.write_text("")
-        self.assertEqual(file_access._cached_load_json_map(self.path), {})
-
-    def test_corrupt_json_exits_with_repair_hint(self):
-        # A torn/hand-mangled map must NOT surface as a raw JSONDecodeError
-        # traceback on every launch — it exits cleanly, naming the file and
-        # pointing at the audit tool. (audit.py parses these files itself
-        # precisely so it can report the same corruption non-fatally.)
-        self.path.write_text('{"a": 1,,,')
-        with self.assertRaises(SystemExit) as ctx:
-            file_access._cached_load_json_map(self.path)
-        message = str(ctx.exception)
-        self.assertIn(self.path.name, message)
-        self.assertIn("launch.audit", message)
-
-    def test_corrupt_json_does_not_poison_cache(self):
-        # After the clean exit, a repaired file must load normally — the
-        # failed parse must not have cached anything.
-        self.path.write_text("{bad")
-        with self.assertRaises(SystemExit):
-            file_access._cached_load_json_map(self.path)
-        self.path.write_text(json.dumps({"fixed": True}))
-        self.assertEqual(file_access._cached_load_json_map(self.path), {"fixed": True})
-
-
-# ============================================================
 # agent_md_index — agents/ name → md-path index
 # ============================================================
 
 
 class TestAgentMdIndex(unittest.TestCase):
-    """_agent_md_index skips malformed filenames with a stderr warning naming
-    the file — one typo'd agent must neither crash every launch nor (the old
-    behavior) be indexed with its tags silently dropped."""
+    """Post-rewrite the stem IS the agent name — the index is a plain sorted
+    glob (the `[tag](parent)` filename grammar is retired; axes live in the
+    agent's `.lego`)."""
 
     def _index(self, filenames):
         with tempfile.TemporaryDirectory() as d:
             for fn in filenames:
                 (Path(d) / fn).write_text("# stub\n")
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                index = file_access._agent_md_index(Path(d))
-            return index, err.getvalue()
+            return file_access._agent_md_index(Path(d))
 
-    def test_wellformed_files_indexed_by_clean_name(self):
-        index, err = self._index(["golem.md", "researcher[code].md", "kid(parent).md"])
+    def test_stems_index_verbatim(self):
+        index = self._index(["golem.md", "researcher.md", "kid.md"])
         self.assertEqual(set(index), {"golem", "researcher", "kid"})
-        self.assertEqual(err, "")
 
-    def test_malformed_file_skipped_with_warning(self):
-        index, err = self._index(["good.md", "broken[code.md"])
-        self.assertEqual(set(index), {"good"})
-        self.assertIn("broken[code.md", err)
-        self.assertIn("warning", err)
+    def test_non_md_files_ignored(self):
+        index = self._index(["golem.md", "golem.lego", "notes.txt"])
+        self.assertEqual(set(index), {"golem"})
 
-    def test_all_malformed_yields_empty_index(self):
-        index, err = self._index(["oops[.md", "[lead].md"])
-        self.assertEqual(index, {})
-        self.assertEqual(err.count("warning"), 2)
+    def test_empty_dir_yields_empty_index(self):
+        self.assertEqual(self._index([]), {})
 
     def test_cached_accessor_returns_same_object(self):
         # agent_md_index is lru_cached — repeated calls share one dict (and

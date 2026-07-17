@@ -1,23 +1,26 @@
-"""Tests for launch.agents_crud — sort keys + model parsing + the
-install_latest_md integration round-trip.
+"""Tests for launch.agents_crud — model parsing + engine sort key, the
+instances.json writers (persist / delete / modify against a temp store), and
+the install_latest_md integration round-trip.
 
-delete_instance, modify_instance, and the picker-entry factories touch disk +
-the cached JSON maps + sometimes print/prompt — covered by file_access tests
-for the cache layer plus manually for the integration path."""
+resolve_pick / creatable_agents / instance_from_store lean on the real
+agents/ tree + the md index — their discovery halves are covered by
+test_essential_files against the shipped tree."""
 
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from launch import paths
 from launch.agents_crud import (
-    ORDERED_MODEL_FAMILIES, _write_modes_entry, agent_sort_key,
-    install_latest_md, mode_sort_key, parse_model_id, tag_sort_key,
+    ORDERED_MODEL_FAMILIES, delete_instance, engine_sort_key,
+    install_latest_md, modify_instance, parse_model_id, persist_instance,
 )
-from launch.template_code.memory_addendums import (
-    ADDENDUM_SECTION_TITLE, MODIFIER_ADDENDUMS, SEEK_SUMMARY,
+from launch.tags import Instance, scan_all, store
+from launch.tags.addendums import (
+    ADDENDUM_SECTION_TITLE, ADDENDUMS_BY_TAG, SEEK_SUMMARY,
 )
-from launch.structs import InstanceModifiers, InstanceIdentity
 
 
 # ============================================================
@@ -67,150 +70,174 @@ class TestParseModelId(unittest.TestCase):
 
 class TestOrderedModelFamilies(unittest.TestCase):
     def test_priority_order(self):
-        # Most capable family first, haiku last — affects agent_sort_key.
+        # Most capable family first, haiku last — affects engine_sort_key.
         self.assertEqual(ORDERED_MODEL_FAMILIES, ["fable", "mythos", "opus", "sonnet", "haiku"])
 
-    def test_every_shipped_conf_family_is_known(self):
+    def test_every_shipped_engine_family_is_known(self):
         # The picker sorts unknown families past the end — silently, which is
         # how the fable gap went unnoticed. Guard: every ANTHROPIC_MODEL in
-        # the repo's shipped confs must parse to a known family.
-        from launch.file_access import agent_md_index, load_conf
-        for name, md_path in agent_md_index().items():
-            _, conf = load_conf(md_path)
-            model = conf.get("ANTHROPIC_MODEL", "")
+        # the repo's shipped engine confs must parse to a known family.
+        registry = scan_all(paths.AGENTS_DIR)
+        for name, engine in registry.engines.items():
+            model = engine.conf_map.get("ANTHROPIC_MODEL", "")
             if not model:
                 continue
-            with self.subTest(agent=name, model=model):
+            with self.subTest(engine=name, model=model):
                 self.assertIsNotNone(
                     parse_model_id(model),
-                    f"{name}'s model {model!r} has no recognised family — "
-                    f"add it to ORDERED_MODEL_FAMILIES or the agent sorts last",
+                    f"engine '{name}' model {model!r} has no recognised family — "
+                    f"add it to ORDERED_MODEL_FAMILIES or its agents sort last",
                 )
 
 
-class TestAgentSortKeyFamilies(unittest.TestCase):
-    """agent_sort_key orders by family capability (fable → opus → sonnet →
-    haiku), version descending inside a family, then name; agents with an
-    unrecognised or missing model sink past every known family."""
-
-    def _key_for(self, name: str, model: str):
-        with patch("launch.agents_crud.load_conf",
-                   return_value=(None, {"ANTHROPIC_MODEL": model} if model else {})):
-            return agent_sort_key((name, Path(f"/fake/{name}.md")))
+class TestEngineSortKey(unittest.TestCase):
+    """engine_sort_key orders by family capability (fable → opus → sonnet →
+    haiku), version descending inside a family; engines with an unrecognised
+    or missing model sink past every known family."""
 
     def test_fable_sorts_before_opus_and_haiku(self):
         keys = {
-            "f": self._key_for("f", "claude-fable-5"),
-            "o": self._key_for("o", "claude-opus-4-8"),
-            "s": self._key_for("s", "claude-sonnet-4-6"),
-            "h": self._key_for("h", "claude-haiku-4-5"),
+            "f": engine_sort_key("claude-fable-5"),
+            "o": engine_sort_key("claude-opus-4-8"),
+            "s": engine_sort_key("claude-sonnet-4-6"),
+            "h": engine_sort_key("claude-haiku-4-5"),
         }
         self.assertEqual(sorted(keys, key=keys.get), ["f", "o", "s", "h"])
 
     def test_unknown_family_sinks_last(self):
-        known = self._key_for("k", "claude-haiku-4-5")
-        unknown = self._key_for("u", "claude-mystery-9")
-        self.assertLess(known, unknown)
+        self.assertLess(engine_sort_key("claude-haiku-4-5"), engine_sort_key("claude-mystery-9"))
+
+    def test_missing_model_sinks_last(self):
+        self.assertLess(engine_sort_key("claude-haiku-4-5"), engine_sort_key(""))
 
     def test_higher_version_first_within_family(self):
-        newer = self._key_for("n", "claude-opus-4-8")
-        older = self._key_for("o", "claude-opus-4-7")
-        self.assertLess(newer, older)
+        self.assertLess(engine_sort_key("claude-opus-4-8"), engine_sort_key("claude-opus-4-7"))
 
 
 # ============================================================
-# Sort keys
+# instances.json writers — persist / delete / modify over a temp store
 # ============================================================
 
 
-class TestTagSortKey(unittest.TestCase):
-    def test_empty_tags(self):
-        self.assertEqual(tag_sort_key([]), ())
-
-    def test_known_tag(self):
-        # TAG_CODE is at index 0 of InstanceModifiers.tag_values()
-        self.assertEqual(tag_sort_key([InstanceModifiers.TAG_CODE]), (0,))
-
-    def test_sorted_internally(self):
-        # tag_sort_key sorts its members so the key is order-stable regardless
-        # of input order. With only one known tag the result is a 1-tuple
-        # whichever way it's passed.
-        self.assertEqual(
-            tag_sort_key([InstanceModifiers.TAG_CODE]),
-            tag_sort_key([InstanceModifiers.TAG_CODE]),
-        )
-
-    def test_untagged_sorts_before_tagged(self):
-        # Empty tuple < any non-empty tuple lexicographically
-        self.assertLess(tag_sort_key([]), tag_sort_key([InstanceModifiers.TAG_CODE]))
+def _tag(name):
+    """Duck-typed tag stand-in — the writers only read `.name` off each
+    selection member (via _build_of), so a SimpleNamespace suffices."""
+    return SimpleNamespace(name=name)
 
 
-class TestModeSortKey(unittest.TestCase):
-    def test_empty_modes(self):
-        self.assertEqual(mode_sort_key([]), ())
-
-    def test_auto_only(self):
-        # mode_values() == ("auto", "DooD", "web") → MODE_WARN_AUTO is index 0
-        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_AUTO]), (0,))
-
-    def test_dood_only(self):
-        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_DOOD]), (1,))
-
-    def test_both_sorted_by_declaration_order(self):
-        # Input order doesn't matter — output sorts by InstanceModifiers position.
-        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]), (0, 1))
-        self.assertEqual(mode_sort_key([InstanceModifiers.MODE_WARN_DOOD, InstanceModifiers.MODE_WARN_AUTO]), (0, 1))
-
-    def test_modeless_sorts_before_any(self):
-        self.assertLess(mode_sort_key([]), mode_sort_key([InstanceModifiers.MODE_WARN_AUTO]))
+def _inst(agent="poet", session="draft", workspace="/tmp", *,
+          engine=None, professions=(), specialties=(), policies=(), md=Path("/fake/poet.md")):
+    return Instance(agent=agent, md_path=md, session=session, workspace=workspace,
+                    is_brand_new=False, engine=engine, professions=professions,
+                    specialties=specialties, policies=policies)
 
 
-# ============================================================
-# _write_modes_entry — dict mutation, pop on empty
-# ============================================================
+class StoreWritersTestCase(unittest.TestCase):
+    """Shared fixture: temp AGENTS_STATE (state dirs) + temp INSTANCES_FILE
+    (the store), both patched for the duration of each test."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        root = Path(self.tmpdir.name)
+        self.addCleanup(self.tmpdir.cleanup)
+        for patcher in (
+            patch.object(paths, "AGENTS_STATE", root / "state"),
+            patch.object(store, "INSTANCES_FILE", root / "instances.json"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
-class _StubSess:
-    """Minimal sess-id stand-in for _write_modes_entry tests — just needs
-    .instance and .modes attributes."""
-    def __init__(self, instance, modes):
-        self.instance = instance
-        self.modes = tuple(modes)
+class TestPersistInstance(StoreWritersTestCase):
+    def test_writes_full_entry(self):
+        persist_instance(_inst(engine=_tag("poet"), professions=(_tag("code"),),
+                               specialties=(_tag("auto"),), policies=(_tag("no-sudo"),)))
+        self.assertEqual(store.load()["poet__draft"], {
+            "workspace": "/tmp", "engine": "poet", "professions": ["code"],
+            "specialties": ["auto"], "policies": ["no-sudo"],
+        })
 
+    def test_replaces_existing_entry(self):
+        persist_instance(_inst(specialties=(_tag("auto"),)))
+        persist_instance(_inst(specialties=()))
+        self.assertEqual(store.load()["poet__draft"]["specialties"], [])
 
-class TestWriteModesEntry(unittest.TestCase):
-    def test_sets_when_modes_present(self):
-        m = {}
-        _write_modes_entry(m, _StubSess("poet__draft", [InstanceModifiers.MODE_WARN_AUTO]))
-        self.assertEqual(m, {"poet__draft": ["auto"]})
-
-    def test_replaces_existing(self):
-        m = {"poet__draft": ["DooD"]}
-        _write_modes_entry(m, _StubSess("poet__draft", [InstanceModifiers.MODE_WARN_AUTO]))
-        self.assertEqual(m, {"poet__draft": ["auto"]})
-
-    def test_pops_when_empty(self):
-        m = {"poet__draft": ["auto"]}
-        _write_modes_entry(m, _StubSess("poet__draft", []))
-        self.assertEqual(m, {})
-
-    def test_pop_on_empty_when_absent_is_safe(self):
-        # No prior entry + empty modes → no-op (no KeyError)
-        m = {}
-        _write_modes_entry(m, _StubSess("poet__draft", []))
-        self.assertEqual(m, {})
+    def test_engine_none_stored_as_null(self):
+        persist_instance(_inst())
+        self.assertIsNone(store.load()["poet__draft"]["engine"])
 
     def test_other_entries_untouched(self):
-        m = {"a__1": ["auto"], "b__1": ["DooD"]}
-        _write_modes_entry(m, _StubSess("a__1", []))
-        self.assertEqual(m, {"b__1": ["DooD"]})
+        persist_instance(_inst(session="a"))
+        persist_instance(_inst(session="b"))
+        self.assertEqual(set(store.load()), {"poet__a", "poet__b"})
 
-    def test_writes_canonical_value_string_per_member(self):
-        # Modes serialize as their `.value` (the JSON-friendly canonical form),
-        # preserving the in-memory tuple's declaration order.
-        m = {}
-        _write_modes_entry(m, _StubSess("agent__sess", [InstanceModifiers.MODE_WARN_AUTO, InstanceModifiers.MODE_WARN_DOOD]))
-        self.assertEqual(m["agent__sess"], ["auto", "DooD"])
+
+class TestDeleteInstance(StoreWritersTestCase):
+    def setUp(self):
+        super().setUp()
+        # delete_instance logs each removal via force_remove — keep test output clean.
+        patcher = patch("builtins.print")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_removes_state_dir_and_entry(self):
+        inst = _inst()
+        inst.state_dir.mkdir(parents=True)
+        persist_instance(inst)
+        delete_instance(inst)
+        self.assertFalse(inst.state_dir.exists())
+        self.assertNotIn("poet__draft", store.load())
+
+    def test_missing_state_dir_still_cleans_entry(self):
+        # force_remove treats "already absent" as success, so the stale store
+        # entry is still swept.
+        inst = _inst()
+        persist_instance(inst)
+        delete_instance(inst)
+        self.assertNotIn("poet__draft", store.load())
+
+    def test_failed_removal_keeps_entry_and_gates(self):
+        inst = _inst()
+        persist_instance(inst)
+        with patch("launch.agents_crud.force_remove", return_value=False), \
+             patch("launch.agents_crud.prompt_keypress") as gate:
+            delete_instance(inst)
+        gate.assert_called_once()
+        self.assertIn("poet__draft", store.load())
+
+
+class TestModifyInstance(StoreWritersTestCase):
+    def test_rename_moves_dir_and_entry(self):
+        old = _inst(session="a")
+        old.state_dir.mkdir(parents=True)
+        persist_instance(old)
+        new = _inst(session="b")
+        modify_instance(old, new)
+        self.assertFalse(old.state_dir.exists())
+        self.assertTrue(new.state_dir.exists())
+        self.assertEqual(set(store.load()), {"poet__b"})
+
+    def test_same_id_rewrites_entry_without_move(self):
+        old = _inst(specialties=(_tag("auto"),))
+        old.state_dir.mkdir(parents=True)
+        persist_instance(old)
+        modify_instance(old, _inst(specialties=()))
+        self.assertTrue(old.state_dir.exists())
+        self.assertEqual(store.load()["poet__draft"]["specialties"], [])
+
+    def test_rename_onto_existing_instance_raises(self):
+        old, blocker = _inst(session="a"), _inst(session="b")
+        old.state_dir.mkdir(parents=True)
+        blocker.state_dir.mkdir(parents=True)
+        with self.assertRaises(ValueError):
+            modify_instance(old, _inst(session="b"))
+
+    def test_workspace_change_persisted(self):
+        old = _inst(workspace="/tmp")
+        old.state_dir.mkdir(parents=True)
+        persist_instance(old)
+        modify_instance(old, _inst(workspace="/opt"))
+        self.assertEqual(store.load()["poet__draft"]["workspace"], "/opt")
 
 
 # ============================================================
@@ -218,103 +245,70 @@ class TestWriteModesEntry(unittest.TestCase):
 # ============================================================
 
 
-class _FakeInst(InstanceIdentity):
-    """InstanceIdentity subclass overriding `md_path`, `state_dir`, and `tags`
-    so install_latest_md can be exercised against temp paths without a real
-    agent .md on disk. Frozen dataclass blocks normal __setattr__, so the
-    overrides come through object.__setattr__ on attributes the subclass
-    properties read from."""
-
-    @property
-    def md_path(self):
-        return self._md_path_override
-
-    @property
-    def state_dir(self):
-        return self._state_dir_override
-
-    @property
-    def tags(self):
-        return self._tags_override
-
-    @classmethod
-    def make(cls, md_path, state_dir, *, tags=(), modes=(), agent="x", session="s"):
-        s = cls(agent=agent, session=session, workspace="/tmp",
-                is_brand_new=False, modes=tuple(modes))
-        object.__setattr__(s, "_md_path_override", md_path)
-        object.__setattr__(s, "_state_dir_override", state_dir)
-        object.__setattr__(s, "_tags_override", tuple(tags))
-        return s
-
-
 class TestInstallLatestMd(unittest.TestCase):
     """End-to-end check that install_latest_md writes the source body plus the
-    composed-addendum section to the state-dir CLAUDE.md in a single overwrite.
-    Uses real (production) MODIFIER_ADDENDUMS for the BASE-substring assertion
-    so a regression in the addendum-composition path surfaces here, not just
-    in the memory_addendums unit tests."""
+    chain-keyed addendum section to the state-dir CLAUDE.md in a single
+    overwrite. Uses real (production) ADDENDUMS_BY_TAG for the base-substring
+    assertion so a regression in the composition path surfaces here, not just
+    in the tags addendum unit tests. A bare Instance (no professions) has
+    chain ["base"], so the base addendums apply."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
         root = Path(self.tmpdir.name)
         self.md_path = root / "agent.md"
-        self.state_dir = root / "state"
+        patcher = patch.object(paths, "AGENTS_STATE", root / "state")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def tearDown(self):
-        self.tmpdir.cleanup()
-
-    def _sess(self, body, *, tags=(), modes=()):
+    def _inst(self, body):
         self.md_path.write_text(body)
-        return _FakeInst.make(self.md_path, self.state_dir, tags=tags, modes=modes)
+        return _inst(md=self.md_path)
 
     def test_source_body_is_at_top_of_resulting_md(self):
-        sess = self._sess("Source line 1\nSource line 2\n")
-        install_latest_md(sess)
-        result = sess.state_md.read_text()
-        self.assertTrue(result.startswith("Source line 1\nSource line 2\n"))
+        inst = self._inst("Source line 1\nSource line 2\n")
+        install_latest_md(inst)
+        self.assertTrue(inst.state_md.read_text().startswith("Source line 1\nSource line 2\n"))
 
     def test_base_addendum_body_is_present_in_resulting_md(self):
-        # The integration assertion the user asked for: a string that's part of
-        # BASE (SEEK_SUMMARY's body, which sits under BASE) is entirely included
-        # in the file install_latest_md writes.
-        sess = self._sess("agent body\n")
-        install_latest_md(sess)
-        self.assertIn(SEEK_SUMMARY.body, sess.state_md.read_text())
+        inst = self._inst("agent body\n")
+        install_latest_md(inst)
+        self.assertIn(SEEK_SUMMARY.body, inst.state_md.read_text())
 
     def test_section_heading_is_present_in_resulting_md(self):
-        sess = self._sess("agent body\n")
-        install_latest_md(sess)
-        self.assertIn(f"## {ADDENDUM_SECTION_TITLE}", sess.state_md.read_text())
+        inst = self._inst("agent body\n")
+        install_latest_md(inst)
+        self.assertIn(f"## {ADDENDUM_SECTION_TITLE}", inst.state_md.read_text())
 
     def test_separator_between_source_body_and_addendum(self):
         # Source body ends with '\n', addendum is prefixed with '\n\n' — so the
         # transition is `body\n\n\n## Launch-time...` (one blank line gap).
-        sess = self._sess("agent body\n")
-        install_latest_md(sess)
+        inst = self._inst("agent body\n")
+        install_latest_md(inst)
         self.assertIn(f"agent body\n\n\n## {ADDENDUM_SECTION_TITLE}",
-                      sess.state_md.read_text())
+                      inst.state_md.read_text())
 
     def test_overwrite_replaces_previous_content(self):
-        # First launch with one source body.
-        sess1 = self._sess("body v1\n")
-        install_latest_md(sess1)
+        inst = self._inst("body v1\n")
+        install_latest_md(inst)
         # Re-write source `.md`, reinstall — state-dir CLAUDE.md must reflect v2.
         self.md_path.write_text("body v2\n")
-        install_latest_md(sess1)
-        result = sess1.state_md.read_text()
+        install_latest_md(inst)
+        result = inst.state_md.read_text()
         self.assertIn("body v2", result)
         self.assertNotIn("body v1", result)
         # Addendum still there post-overwrite.
         self.assertIn(SEEK_SUMMARY.body, result)
 
     def test_empty_addendum_yields_source_only(self):
-        # Patch MODIFIER_ADDENDUMS to empty so composed_addendum returns ''.
+        # Patch ADDENDUMS_BY_TAG to empty so compose() returns ''.
         # install_latest_md must skip the separator+addendum append, yielding
         # the source body byte-for-byte.
-        sess = self._sess("just the body\n")
-        with patch.dict(MODIFIER_ADDENDUMS, {}, clear=True):
-            install_latest_md(sess)
-        self.assertEqual(sess.state_md.read_text(), "just the body\n")
+        inst = self._inst("just the body\n")
+        with patch.dict(ADDENDUMS_BY_TAG, {}, clear=True):
+            install_latest_md(inst)
+        self.assertEqual(inst.state_md.read_text(), "just the body\n")
 
 
 if __name__ == "__main__":

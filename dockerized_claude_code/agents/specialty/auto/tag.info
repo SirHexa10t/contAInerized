@@ -1,0 +1,4 @@
+description = "autonomous; doesn't need permission to perform actions. Comes with a firewall for a slight security increase. Danger: hard to control!"
+shortname   = "auto"
+warn        = true
+claude_args = ["--dangerously-skip-permissions"]

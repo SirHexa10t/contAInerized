@@ -27,26 +27,26 @@ from .paths import (
     OPTIONAL_CREDS_README_PATH, OPTIONAL_CREDS_README_TEMPLATE,
     optional_creds_service_path,
 )
-from .structs import InstanceModifiers
+from .tags import Instance
 
 
 # ============================================================
 # First-launch template files (~/.claude-agents/user_extras/...)
 # ============================================================
 
-def plant_user_extras(modes: tuple[InstanceModifiers, ...]) -> None:
+def plant_user_extras(inst: Instance) -> None:
     """Drop the user-facing helper files into ~/.claude-agents/user_extras/
     so users discovering the directories know what to put in them:
       - optional_creds_readme.txt — always; refreshed when the template moves
         on (the file describes launcher behaviour and shouldn't drift behind).
-      - firewall_whitelist.txt — only when {auto} is in `modes`. Outside
-        {auto} the file would just sit unused. Created on first launch and
-        left alone afterward — this file holds the user's actual whitelist
-        entries, so their edits are preserved.
+      - firewall_whitelist.txt — only when the firewall machinery is active
+        (the {auto} specialty, until the docker flip extracts {firewall}).
+        Created on first launch and left alone afterward — it holds the
+        user's actual whitelist entries, so their edits are preserved.
 
-    Called by run.py:setup_state once modes are resolved."""
+    Called by run.py:setup_state once the instance is resolved."""
     copy_file(OPTIONAL_CREDS_README_TEMPLATE, OPTIONAL_CREDS_README_PATH, overwrite_if_changed=True)
-    if InstanceModifiers.MODE_WARN_AUTO in modes:
+    if any(s.name == "auto" for s in inst.specialties):
         copy_file(FIREWALL_WHITELIST_TEMPLATE, FIREWALL_WHITELIST_FILE)
 
 

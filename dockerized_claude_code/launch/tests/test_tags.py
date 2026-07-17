@@ -15,8 +15,9 @@ from tempfile import TemporaryDirectory
 
 from launch import tags
 from launch.tags import (
-    AgentBuild, Engine, Policy, Profession, Registry, Specialty, TagError,
-    load_lego, merge_fragments, scan_all,
+    AgentBuild, Engine, Instance, Policy, Profession, Registry, Specialty,
+    TagError, addendums, image_chain, load_lego, merge_fragments, resolve_build,
+    scan_all, store,
 )
 
 
@@ -458,6 +459,144 @@ class TestRegistryValidation(TagTreeTestCase):
     def test_empty_tree_is_valid(self):
         reg = scan_all(self.tree({"placeholder.md": "x\n"}))
         self.assertEqual(reg.all_names(), set())
+
+
+# ============================================================
+# Identity — image chain + Instance + resolve_build
+# ============================================================
+
+
+class TestImageChain(TagTreeTestCase):
+    def setUp(self):
+        self.reg = scan_all(self.full_tree())
+
+    def test_base_only(self):
+        self.assertEqual(image_chain((), ()), ["base"])
+
+    def test_requirement_ordered_before_dependent(self):
+        code, web = self.reg.professions["code"], self.reg.professions["web"]
+        self.assertEqual(image_chain((web, code), ()), ["base", "code", "web"])   # code first despite input order
+
+    def test_specialties_follow_professions(self):
+        code, auto = self.reg.professions["code"], self.reg.specialties["auto"]
+        self.assertEqual(image_chain((code,), (auto,)), ["base", "code", "auto"])
+
+    def test_specialties_sorted_by_name(self):
+        auto, dood = self.reg.specialties["auto"], self.reg.specialties["dood"]
+        self.assertEqual(image_chain((), (dood, auto)), ["base", "auto", "dood"])
+
+
+class TestInstance(TagTreeTestCase):
+    def setUp(self):
+        self.reg = scan_all(self.full_tree())
+
+    def _inst(self, **kw) -> Instance:
+        base = dict(agent="researcher", md_path=Path("/x/researcher.md"),
+                    session="proj", workspace="/tmp/ws", is_brand_new=True,
+                    engine=self.reg.engines["default"])
+        base.update(kw)
+        return Instance(**base)
+
+    def test_instance_id_and_paths(self):
+        i = self._inst()
+        self.assertEqual(i.instance, "researcher__proj")
+        self.assertTrue(str(i.state_dir).endswith("researcher__proj"))
+        self.assertEqual(i.state_md.name, "CLAUDE.md")
+
+    def test_chain_and_conf(self):
+        i = self._inst(professions=(self.reg.professions["code"],),
+                       specialties=(self.reg.specialties["auto"],))
+        self.assertEqual(i.chain, ["base", "code", "auto"])
+        self.assertIn("CLAUDE_CODE_EFFORT_LEVEL", i.conf)
+
+    def test_claude_args_from_specialties(self):
+        i = self._inst(specialties=(self.reg.specialties["auto"],))
+        self.assertIn("--dangerously-skip-permissions", i.claude_args)
+
+
+class TestResolveBuild(TagTreeTestCase):
+    def setUp(self):
+        self.reg = scan_all(self.full_tree())
+
+    def test_names_resolve_to_objects(self):
+        kw = resolve_build(AgentBuild(engine="default", professions=("code",),
+                                      specialties=("auto",)), "x", self.reg)
+        self.assertIs(kw["engine"], self.reg.engines["default"])
+        self.assertEqual(kw["professions"], (self.reg.professions["code"],))
+        self.assertEqual(kw["specialties"], (self.reg.specialties["auto"],))
+
+    def test_engine_falls_back_to_default(self):
+        # no engine named, agent name isn't an engine either → default
+        kw = resolve_build(AgentBuild(), "poet", self.reg)
+        self.assertIs(kw["engine"], self.reg.engines["default"])
+
+
+# ============================================================
+# Store — instances.json load/save + legacy-map migration
+# ============================================================
+
+
+class TestStore(TagTreeTestCase):
+    def test_load_missing_is_empty(self):
+        self.assertEqual(store.load(Path("/nonexistent/instances.json")), {})
+
+    def test_save_load_roundtrip(self):
+        p = self.tree({"placeholder": ""}) / "instances.json"
+        m = {"golem__x": {"workspace": "/w", "engine": "golem",
+                          "professions": [], "specialties": [], "policies": []}}
+        store.save(m, p)
+        self.assertEqual(store.load(p), m)
+
+    def test_migrate_translates_modes_onto_axes(self):
+        agents = self.tree({"researcher.lego": 'engine = "researcher"\nprofessions = ["code"]\n'})
+        out = store.migrate_from_maps(
+            {"researcher__proj": "/home/u/proj"},
+            {"researcher__proj": ["auto", "DooD"]},
+            agents,
+        )
+        self.assertEqual(out["researcher__proj"], {
+            "workspace": "/home/u/proj", "engine": "researcher",
+            "professions": ["code"], "specialties": ["auto", "dood"], "policies": [],
+        })
+
+    def test_migrate_web_mode_becomes_profession(self):
+        agents = self.tree({"researcher.lego": 'engine = "researcher"\nprofessions = ["code"]\n'})
+        out = store.migrate_from_maps({}, {"researcher__x": ["web"]}, agents)
+        self.assertEqual(sorted(out["researcher__x"]["professions"]), ["code", "web"])
+        self.assertEqual(out["researcher__x"]["specialties"], [])
+
+    def test_migrate_engine_defaults_to_agent_when_lego_absent(self):
+        agents = self.tree({"placeholder": ""})   # no .lego for 'poet'
+        out = store.migrate_from_maps({"poet__d": "/w"}, {}, agents)
+        self.assertEqual(out["poet__d"]["engine"], "poet")
+
+
+# ============================================================
+# Addendums — chain-keyed CLAUDE.md section composer
+# ============================================================
+
+
+class TestAddendums(unittest.TestCase):
+    def test_base_carries_universal_notices(self):
+        out = addendums.compose(["base"])
+        self.assertIn(f"## {addendums.ADDENDUM_SECTION_TITLE}", out)
+        self.assertIn(addendums.SEEK_SUMMARY.body, out)
+        self.assertIn(addendums.MAINTAIN_PRIVACY.body, out)
+        self.assertNotIn(addendums.FIREWALL_NOTICE.body, out)
+
+    def test_auto_adds_firewall_notice(self):
+        self.assertIn(addendums.FIREWALL_NOTICE.body, addendums.compose(["base", "code", "auto"]))
+
+    def test_web_adds_browser_notice(self):
+        self.assertIn(addendums.WEB_NOTICE.body, addendums.compose(["base", "code", "web"]))
+
+    def test_empty_chain_renders_nothing(self):
+        self.assertEqual(addendums.compose([]), "")
+
+    def test_section_order_follows_chain(self):
+        # base's summary sub-section precedes auto's firewall sub-section.
+        out = addendums.compose(["base", "auto"])
+        self.assertLess(out.index("### Project summary"), out.index("### Firewall"))
 
 
 if __name__ == "__main__":

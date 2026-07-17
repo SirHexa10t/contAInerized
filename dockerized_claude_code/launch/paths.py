@@ -26,8 +26,9 @@ from typing import Callable, Iterator
 # by docker_config.set_container_env.
 
 DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root — one above launch/
-AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .conf definitions
-DEFAULT_CONF = AGENTS_DIR / "default.conf"
+AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .lego + kind subtrees (engine/ profession/ specialty/ policy/)
+ENGINE_DIR = AGENTS_DIR / "engine"                                # engine tags — engine/<name>/{tag.info, engine.conf}
+DEFAULT_CONF = ENGINE_DIR / "default" / "engine.conf"             # fallback engine conf when an agent names none
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
 TEMPLATE_FILES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
 OPTIONAL_CREDS_README_TEMPLATE = TEMPLATE_FILES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
@@ -46,8 +47,9 @@ _HOME = Path.home()
 AGENTS_STATE = _HOME / ".claude-agents"
 ACCOUNT_FILE = AGENTS_STATE / ".claude.json"                       # shared OAuth account info
 CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"             # shared API credentials
-AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
-AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # {instance_id: [mode, ...]}; only entries for instances with modes
+AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"   # legacy (pre-tags) — migrated into instances.json on first launch
+AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"      # legacy (pre-tags) — {instance_id: [mode, ...]}; migrated into instances.json
+INSTANCES_FILE = AGENTS_STATE / "instances.json"                 # per-instance axis store (tags edition) — folds the two legacy maps: {instance_id: {workspace, engine, professions[], specialties[], policies[]}}
 CACHE_ROOT = AGENTS_STATE / "cache"
 
 # {auto}-mode firewall: cross-launch DNS cache. While fresh (the TTL gate
@@ -212,14 +214,14 @@ DOCKER_BASE_MOUNTS = {
 # rather than scattered as magic strings.
 
 # The name → md-path index for agents/ lives in file_access.agent_md_index —
-# a directory *listing* is file-access work, not a path constant. agents/
-# pairs each `<agent>.md` with a matching `<agent or parent>.conf` (see
-# `agent_conf_path` at the bottom of this file).
+# a directory *listing* is file-access work, not a path constant. Each
+# `<agent>.md` pairs with a `<agent>.lego` build file, read by the tags
+# package (engine conf resolution lives there too, via the engine/ tree).
 
 # Full host path the optional_creds README is planted at on first launch.
 OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"
 
-# Addendum text + composition lives in memory_addendums.py rather than as
+# Addendum text + composition lives in tags/addendums.py rather than as
 # `<modifier>-addendum.md` files; agents_crud.install_latest_md asks it for
 # the rendered section and appends it to CLAUDE.md at write time. No path
 # constants needed here.
@@ -352,7 +354,5 @@ instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS
 optional_creds_service_path: Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service
 optional_creds_token_path:   Callable[[str], Path]     = lambda service: OPTIONAL_CREDS_DIR / service / "token"
 
-agent_conf_path:         Callable[[str], Path]         = lambda name: AGENTS_DIR / f"{name}.conf"
-
-# Docker compose-layer YAML (step ∈ InstanceModifiers value strings, lowercased)
+# Docker compose-layer YAML (step ∈ chain tag names — professions/specialties)
 compose_layer_path:      Callable[[str], Path]         = lambda step: DOCKER_DIR / f"compose.{step.lower()}.yml"

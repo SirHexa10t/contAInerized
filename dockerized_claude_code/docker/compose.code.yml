@@ -12,7 +12,7 @@ services:
   claude-code:
     image: ${TARGET_IMAGE:-claude-agents:code}
     build:
-      dockerfile: docker/Dockerfile.code
+      dockerfile: agents/profession/code/Dockerfile
       args:
         PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:base}
         # Weekly-rotating cache-buster — same value applied to several Dockerfile

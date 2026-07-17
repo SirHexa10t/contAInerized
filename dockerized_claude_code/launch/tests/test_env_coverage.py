@@ -19,7 +19,10 @@ import unittest
 
 from launch import paths
 from launch.compose_env import ComposeEnvKey
-from launch.structs import InstanceModifiers
+
+# The four chain tags with a compose layer + Dockerfile (until the
+# plain-docker flip replaces compose layers with tag.docker files).
+CHAIN_TAGS = ["code", "web", "auto", "dood"]
 
 
 # Allowlist for vars referenced in compose/Dockerfile files but NOT staged
@@ -59,21 +62,30 @@ _ARG_RE = re.compile(r"^ARG\s+([A-Z_][A-Z0-9_]*)\b", re.MULTILINE)
 
 
 def _compose_files():
-    """All compose .yml files the launcher uses: the base + every modifier
-    layer (non-BASE)."""
+    """All compose .yml files the launcher uses: the base + every chain-tag
+    layer."""
     return [paths.COMPOSE_FILE_PATH] + [
-        paths.compose_layer_path(m.value.lower())
-        for m in InstanceModifiers
-        if m is not InstanceModifiers.BASE
+        paths.compose_layer_path(t) for t in CHAIN_TAGS
     ]
 
 
+def _dockerfile_for(value):
+    """Dockerfile path for a modifier after the tags migration relocated the
+    per-modifier Dockerfiles: code/web/dood moved into the agents/ tree
+    (professions + dood's hidden `_dood` layer); auto's layer is still in
+    docker/ until the plain-docker flip."""
+    tree = {
+        "code": paths.AGENTS_DIR / "profession" / "code" / "Dockerfile",
+        "web":  paths.AGENTS_DIR / "profession" / "code" / "web" / "Dockerfile",
+        "dood": paths.AGENTS_DIR / "profession" / "code" / "_dood" / "Dockerfile",
+    }
+    return tree.get(value.lower(), paths.DOCKER_DIR / f"Dockerfile.{value.lower()}")
+
+
 def _dockerfiles():
-    """The base Dockerfile + every modifier's Dockerfile."""
+    """The base Dockerfile + every chain tag's Dockerfile (post-relocation)."""
     return [paths.DOCKER_DIR / "Dockerfile"] + [
-        paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
-        for m in InstanceModifiers
-        if m is not InstanceModifiers.BASE
+        _dockerfile_for(t) for t in CHAIN_TAGS
     ]
 
 
@@ -214,12 +226,10 @@ class TestComposeArgsMatchDockerfile(unittest.TestCase):
         return keys
 
     def test_compose_args_keys_have_matching_dockerfile_arg(self):
-        for m in InstanceModifiers:
-            if m is InstanceModifiers.BASE:
-                continue
-            with self.subTest(modifier=m.value):
-                compose_path = paths.compose_layer_path(m.value.lower())
-                dockerfile_path = paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
+        for tag in CHAIN_TAGS:
+            with self.subTest(tag=tag):
+                compose_path = paths.compose_layer_path(tag)
+                dockerfile_path = _dockerfile_for(tag)
                 compose_args = self._compose_args_keys(compose_path.read_text())
                 dockerfile_args = _arg_decls_in(dockerfile_path)
                 missing = compose_args - dockerfile_args
@@ -237,12 +247,10 @@ class TestComposeArgsMatchDockerfile(unittest.TestCase):
         # ARCH_SUFFIX from the _ALLOWLIST) don't apply — those aren't
         # staged by Python, so compose-side passthrough isn't required.
         staged = _defined_env_vars()
-        for m in InstanceModifiers:
-            if m is InstanceModifiers.BASE:
-                continue
-            with self.subTest(modifier=m.value):
-                compose_path = paths.compose_layer_path(m.value.lower())
-                dockerfile_path = paths.DOCKER_DIR / f"Dockerfile.{m.value.lower()}"
+        for tag in CHAIN_TAGS:
+            with self.subTest(tag=tag):
+                compose_path = paths.compose_layer_path(tag)
+                dockerfile_path = _dockerfile_for(tag)
                 compose_args = self._compose_args_keys(compose_path.read_text())
                 dockerfile_staged_args = _arg_decls_in(dockerfile_path) & staged
                 missing = dockerfile_staged_args - compose_args

@@ -1,0 +1,1 @@
+description = "headless browser automation (playwright + chromium baked in); for web-scraping / browser-testing / dynamic-page extraction. Built on [code]; no display server needed."

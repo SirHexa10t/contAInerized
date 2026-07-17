@@ -6,64 +6,50 @@ state-dir lifecycle in agents_crud, where the file ops are inseparable
 from the domain logic).
 
 Grouped by section in this file:
-  - Agent file lookup (agent_md_index [cached], conf_path_for, load_conf) —
-    the name → md-path index plus md_path → .conf resolution. Filename-stem
-    parsing (parse_stem / parse_agent_name) lives in `utils`.
-  - JSON state maps load/save with cache (load/save_workspace_map,
-    load/save_modes_map) — agent_workspace_map.json + agent_modes_map.json
+  - Agent file lookup (agent_md_index [cached]) — the name → md-path index
+    (stem = agent name; the old filename grammar is retired — axes live in
+    `<name>.lego`, parsed by the tags package).
   - Per-instance state-dir queries (has_continuable_jsonl, last_history_mtime)
-    — feed InstanceIdentity properties
+    — feed Instance properties. (The per-instance axis store — instances.json
+    — lives in tags.store, built on this module's read/write primitives.)
   - Optional credentials (present_optional_cred_services [cached],
     optional_cred_tokens)
   - User firewall whitelist (user_firewall_whitelist_lines [cached, self-plants
-    from FIREWALL_WHITELIST_TEMPLATE on first read]). The {auto}-mode first-
-    launch plant of firewall_whitelist.txt + the always-on plant of
-    optional_creds_readme.txt live in user_additions.plant_user_extras so
-    they happen at the right point in run.py's launch flow.
+    from FIREWALL_WHITELIST_TEMPLATE on first read]). The first-launch plant
+    of firewall_whitelist.txt + the always-on plant of optional_creds_readme.txt
+    live in user_additions.plant_user_extras so they happen at the right point
+    in run.py's launch flow.
 
 Caching strategy:
-  - `load_conf` is LRU-cached for the launcher process lifetime — the
-    creatable/continuable sort comparators would otherwise re-dotenv-parse
-    per pairwise comparison. With caching, each unique (md_path) conf read
-    fires exactly once per process.
-  - `load_workspace_map` / `load_modes_map` cache the JSON map dicts and
-    refresh the cache on every `save_*_map`. The picker's modify/delete
-    flows otherwise re-read each map ~5× per launch.
-  - `present_optional_cred_services` LRU-caches the present-services set
-    so its two consumers (user_additions.optional_creds_mounts +
-    docker_config.set_container_env's install_creds_flags / token_env_dict
-    spread) don't redo the stat sweep.
-  - Same-process lifetime is the cache window across all of the above —
-    each `python3 run.py` invocation is a fresh process.
+  - `agent_md_index` / `present_optional_cred_services` /
+    `user_firewall_whitelist_lines` are LRU-cached for the launcher process
+    lifetime (each `python3 run.py` invocation is a fresh process).
 
 No build/composition logic (that's agent_modifiers_handler), no identity dataclasses
-(that's structs), no arg formatting for docker compose (that's docker_config).
-Imports paths + utils only — kept leaf-shaped so structs.py can depend on it
-without pulling in heavier modules. agent_modifiers_handler, agents_crud, audit,
-structs, user_additions, and run.py all import from here.
+(that's tags/identity.py), no arg formatting for docker (that's docker_config).
+Imports paths + utils only — kept leaf-shaped so the tags package can depend on
+it without pulling in heavier modules. agent_modifiers_handler, agents_crud,
+audit, the tags package, user_additions, and run.py all import from here.
 """
 
 import glob
 import json
 import os
 import shutil
-import sys
 import time
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values  # package: python-dotenv — declared in pyproject.toml [project]
-
 from .paths import (
-    ACCOUNT_FILE, AGENT_MODES_MAP_FILE, AGENT_WORKSPACE_MAP_FILE, AGENTS_DIR,
-    CREDENTIALS_FILE, DEFAULT_CONF, FIREWALL_WHITELIST_FILE,
+    ACCOUNT_FILE, AGENTS_DIR,
+    CREDENTIALS_FILE, FIREWALL_WHITELIST_FILE,
     FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
-    OPTIONAL_CREDS_TOKEN_ENV_VARS, agent_conf_path, optional_creds_service_path,
+    OPTIONAL_CREDS_TOKEN_ENV_VARS, optional_creds_service_path,
     optional_creds_token_path, state_history_path, state_workspace_jsonls,
 )
-from .utils import parse_agent_name, parse_stem, shell_returncode
+from .utils import shell_returncode
 
 # ============================================================
 # Filesystem primitives — every disk-touching syscall flows through this file
@@ -351,133 +337,21 @@ def read_json_field(path: Path | str, *keys: str) -> Any:
 
 
 def _agent_md_index(agents_dir: Path) -> dict[str, Path]:
-    """Build the {clean agent name: md path} index for `agents_dir`, skipping
-    files whose stem violates the filename grammar (parse_agent_name raises
-    ValueError) with a stderr warning naming the file. Skipping keeps one
-    typo'd filename from crashing every launch, while the warning keeps the
-    typo from hiding — the malformed agent simply doesn't appear in the
-    picker until its name is fixed. Sorted glob so duplicate clean names
-    resolve deterministically (last one wins)."""
-    index: dict[str, Path] = {}
-    for p in sorted(agents_dir.glob("*.md")):
-        try:
-            index[parse_agent_name(p.stem)] = p
-        except ValueError as e:
-            print(f"  warning: ignoring agent file {p.name}: {e}", file=sys.stderr)
-    return index
+    """Build the {agent name: md path} index for `agents_dir`. Post-rewrite
+    the stem IS the agent name (the `[tag](parent)` filename grammar is
+    retired — axes live in `<name>.lego`), so this is a plain sorted glob."""
+    return {p.stem: p for p in sorted(agents_dir.glob("*.md"))}
 
 
 @lru_cache(maxsize=None)
 def agent_md_index() -> dict[str, Path]:
-    """Snapshot of every agent .md in AGENTS_DIR, indexed by clean agent name
-    (filename grammar: `<name>[tag](parent).md`). Cached for the launcher
-    process lifetime — agents/ is hand-populated and stable across a single
-    `run.py` invocation, and the lazy read keeps module import free of disk
-    I/O. Iterate `.values()` for the path list, membership-check `.keys()`
-    for the name set; AgentIdentity.md_path looks an entry up by name. The
-    returned dict is SHARED across callers and must not be mutated."""
+    """Snapshot of every agent .md in AGENTS_DIR, indexed by agent name
+    (= filename stem). Cached for the launcher process lifetime — agents/ is
+    hand-populated and stable across a single `run.py` invocation, and the
+    lazy read keeps module import free of disk I/O. Iterate `.values()` for
+    the path list, membership-check `.keys()` for the name set. The returned
+    dict is SHARED across callers and must not be mutated."""
     return _agent_md_index(AGENTS_DIR)
-
-
-def conf_path_for(md_path: Path) -> Path | None:
-    """Locate an agent's .conf path. A '(parent)' suffix in the filename aliases
-    to '<parent>.conf'; otherwise '<name>.conf'; falls back to DEFAULT_CONF, or
-    None if even that's absent. Tags are ignored here. Cheap — no file body
-    is read, only existence-checked — so AgentIdentity.conf_path can call it
-    on every access."""
-    name, _, parent = parse_stem(md_path.stem)
-    specific = agent_conf_path(parent or name)
-    return specific if specific.exists() else (DEFAULT_CONF if DEFAULT_CONF.exists() else None)
-
-
-@lru_cache(maxsize=None)
-def load_conf(md_path: Path) -> tuple[Path | None, dict[str, str]]:
-    """Locate and load an agent's .conf. Returns (path_or_None, values_dict).
-    Path resolution lives in conf_path_for above; this wrapper adds the dotenv
-    parse for the values dict. Valueless keys (a bare `KEY` line with no `=`,
-    which dotenv reads as None) are dropped — forwarding them to the container
-    as `-e KEY=None` was never meaningful.
-
-    Cached for the launcher process's lifetime — agent_sort_key calls this
-    per pairwise sort comparison in the picker (which is O(N log N) reads of
-    the same set of .conf files without caching). The returned dict is SHARED
-    across all callers and must not be mutated; current consumers
-    (agent_sort_key, run.py's setup_state → conf_env_args) only read."""
-    path = conf_path_for(md_path)
-    values = {k: v for k, v in dotenv_values(path).items() if v is not None} if path else {}
-    return path, values
-
-
-# ============================================================
-# JSON state maps (workspace + modes) — cached load + save
-# ============================================================
-# The two JSON map files (agent_workspace_map.json, agent_modes_map.json) get
-# touched in load-mutate-save patterns by every state-mutating writer in
-# agents_crud (update_workspace_map, set_instance_modes, delete_instance,
-# modify_instance) plus the picker-entry factories (resolve_pick,
-# continuable_instances). A naive implementation reads the file on every
-# call — wasteful when the picker rebuilds after a modify/delete loops back
-# through 5+ load calls.
-#
-# Each `load_*_map` first call reads from disk and populates the
-# corresponding cache; subsequent calls return the cached dict directly.
-# Each `save_*_map` writes to disk and refreshes the cache with the same
-# dict that was just persisted, so the cache stays valid across our own
-# writes. External edits to the files mid-launch would lie — but that's
-# not a supported use case (no file-locking; concurrent launchers aren't
-# protected either).
-#
-# Callers follow the load-mutate-save pattern: `m = load_*_map(); m[k] = v;
-# save_*_map(m)`. The mutation happens on the cached dict itself (since
-# load_*_map returns the cached reference); save_*_map then writes the
-# mutated dict and re-points the cache to the same instance. Mutations
-# between load and save are visible to any other load that happens in
-# between — which is fine in single-threaded Python.
-
-_json_map_cache: dict[Path, dict[str, Any]] = {}   # single per-process cache shared by every JSON-map file
-
-
-def _cached_load_json_map(path: Path) -> dict[str, Any]:
-    """Load a JSON map from `path` (top-level JSON object → dict; missing or
-    empty file → {}), caching the result by path. Subsequent calls return the
-    cached dict by reference (so callers' in-place mutations before save_*_map
-    are visible to other loaders too — see section comment above).
-
-    A corrupted file exits with a clean repair hint instead of a traceback.
-    (audit.py parses these files independently so it can report the same
-    corruption non-fatally.)"""
-    if path not in _json_map_cache:
-        if path.exists():
-            content = read_text(path).strip()
-            try:
-                _json_map_cache[path] = json.loads(content) if content else {}
-            except json.JSONDecodeError as e:
-                sys.exit(
-                    f"  {path.name} is corrupted JSON ({e}).\n"
-                    f"  Repair or delete {path}, then relaunch.\n"
-                    f"  (`python -m launch.audit` reports all state issues non-fatally.)"
-                )
-        else:
-            _json_map_cache[path] = {}
-    return _json_map_cache[path]
-
-
-def _cached_save_json_map(path: Path, mapping: dict[str, Any]) -> None:
-    """Write `mapping` to `path` as pretty-printed JSON and refresh the cache
-    entry for that path. AGENTS_STATE is auto-created by write_text via the
-    internal ensure_dir call."""
-    write_text(path, json.dumps(mapping, indent=4, sort_keys=True) + "\n")
-    _json_map_cache[path] = mapping
-
-
-# Concrete shapes: workspace map is `{instance_id: workspace_path_or_None}`,
-# modes map is `{instance_id: [mode, ...]}`. The narrower types help mypy at
-# every call site; the `dict[str, Any]`-returning shared backend tolerates
-# either via Any-compatibility.
-def load_workspace_map() -> dict[str, str | None]: return _cached_load_json_map(AGENT_WORKSPACE_MAP_FILE)
-def load_modes_map() -> dict[str, list[str]]:     return _cached_load_json_map(AGENT_MODES_MAP_FILE)
-def save_workspace_map(mapping: dict[str, str | None]) -> None: _cached_save_json_map(AGENT_WORKSPACE_MAP_FILE, mapping)
-def save_modes_map(mapping: dict[str, list[str]]) -> None:      _cached_save_json_map(AGENT_MODES_MAP_FILE, mapping)
 
 
 # ============================================================
@@ -502,7 +376,7 @@ def ensure_shared_oauth_files() -> None:
 
 
 # ============================================================
-# Per-instance state-dir queries (helpers for InstanceIdentity properties)
+# Per-instance state-dir queries (helpers for Instance properties)
 # ============================================================
 
 def has_continuable_jsonl(state_dir: Path) -> bool:
@@ -510,9 +384,9 @@ def has_continuable_jsonl(state_dir: Path) -> bool:
     something `claude --continue` can load. `state_workspace_jsonls` points
     at `projects/-workspace/`, where only session-UUID JSONLs live —
     `history.jsonl` is a sibling of `projects/` at the state-dir root, so
-    it never shows up in the iteration. InstanceIdentity.has_continuable_history
+    it never shows up in the iteration. Instance.has_continuable_history
     is a thin wrapper — pulling the disk-walk out of the dataclass keeps
-    structs.py a pure data layer."""
+    tags/identity.py a pure data layer."""
     return any(jsonl.stat().st_size > 0 for jsonl in state_workspace_jsonls(state_dir))
 
 
@@ -548,7 +422,7 @@ def installed_cred_clis() -> str:
     a CLI in Dockerfile.code (cli != None in OPTIONAL_CREDS_MOUNTS). Order
     follows the OPTIONAL_CREDS_MOUNTS declaration so the addendum reads in a
     stable order across launches. Used to render the body of
-    memory_addendums.CREDENTIALS_NOTICE — a no-creds environment collapses
+    tags/addendums.py's CREDENTIALS_NOTICE — a no-creds environment collapses
     the body to '' and composed_addendum drops the sub-section entirely."""
     present = present_optional_cred_services()
     return " ".join(

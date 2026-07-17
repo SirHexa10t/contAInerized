@@ -4,7 +4,8 @@ dry-run short-circuit.
 The orchestrator tests mock every individual stage (gather_input, resolve_target,
 compose_chain, setup_state, etc.) so we can verify that the only behavior
 that differs between a normal launch and a dry-run launch is whether
-run_compose gets invoked at the end."""
+run_compose gets invoked at the end. CLI-parsing tests resolve against the
+real agents/ tree registry (scan_all) — the same taxonomy a launch uses."""
 
 import sys
 import tempfile
@@ -21,7 +22,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import run  # noqa: E402  — must come after the sys.path.insert above
-from launch.structs import InstanceIdentity  # noqa: E402  — same reason
+from launch.paths import AGENTS_DIR  # noqa: E402  — same reason
+from launch.tags import Instance, scan_all  # noqa: E402  — same reason
+
+REGISTRY = scan_all(AGENTS_DIR)
 
 
 class TestParseCliFlags(unittest.TestCase):
@@ -29,70 +33,64 @@ class TestParseCliFlags(unittest.TestCase):
     dry_run, refresh_installs); tuple-unpacking keeps working. Both boolean
     flags default False; each is exposed as its own CLI arg."""
 
+    def _parse(self, argv):
+        with patch.object(sys, "argv", argv):
+            return run.parse_cli(REGISTRY)
+
     def test_default_false(self):
-        with patch.object(sys, "argv", ["run.py"]):
-            _, _, dry_run, refresh = run.parse_cli()
+        _, _, dry_run, refresh = self._parse(["run.py"])
         self.assertFalse(dry_run)
         self.assertFalse(refresh)
 
     def test_flag_sets_true(self):
-        with patch.object(sys, "argv", ["run.py", "--dry-run"]):
-            _, _, dry_run, refresh = run.parse_cli()
+        _, _, dry_run, refresh = self._parse(["run.py", "--dry-run"])
         self.assertTrue(dry_run)
         self.assertFalse(refresh)
 
     def test_refresh_installs_sets_true(self):
-        with patch.object(sys, "argv", ["run.py", "--refresh-installs"]):
-            _, _, dry_run, refresh = run.parse_cli()
+        _, _, dry_run, refresh = self._parse(["run.py", "--refresh-installs"])
         self.assertFalse(dry_run)
         self.assertTrue(refresh)
 
     def test_both_flags_independent(self):
-        with patch.object(sys, "argv", ["run.py", "--dry-run", "--refresh-installs"]):
-            _, _, dry_run, refresh = run.parse_cli()
+        _, _, dry_run, refresh = self._parse(["run.py", "--dry-run", "--refresh-installs"])
         self.assertTrue(dry_run)
         self.assertTrue(refresh)
 
     def test_flag_with_unknown_target(self):
         # Unknown target → picked=None, target string flows into claude_args.
-        with patch.object(sys, "argv", ["run.py", "bogus_agent_name", "--dry-run"]):
-            picked, claude_args, dry_run, _ = run.parse_cli()
+        picked, claude_args, dry_run, _ = self._parse(["run.py", "bogus_agent_name", "--dry-run"])
         self.assertIsNone(picked)
         self.assertIn("bogus_agent_name", claude_args)
         self.assertTrue(dry_run)
 
     def test_dry_run_before_target(self):
         # Order shouldn't matter (argparse handles position-independence).
-        with patch.object(sys, "argv", ["run.py", "--dry-run", "bogus"]):
-            _, _, dry_run, _ = run.parse_cli()
+        _, _, dry_run, _ = self._parse(["run.py", "--dry-run", "bogus"])
         self.assertTrue(dry_run)
 
     def test_flag_doesnt_leak_into_claude_args(self):
         # Both flags are OURS; must not appear in the passthrough.
-        with patch.object(sys, "argv", ["run.py", "--dry-run", "--refresh-installs"]):
-            _, claude_args, _, _ = run.parse_cli()
+        _, claude_args, _, _ = self._parse(["run.py", "--dry-run", "--refresh-installs"])
         self.assertNotIn("--dry-run", claude_args)
         self.assertNotIn("--refresh-installs", claude_args)
 
     def test_unknown_flags_still_passthrough(self):
         # Unknown flags (claude's) get passed through as claude_args.
-        with patch.object(sys, "argv", ["run.py", "--print"]):
-            _, claude_args, _, _ = run.parse_cli()
+        _, claude_args, _, _ = self._parse(["run.py", "--print"])
         self.assertIn("--print", claude_args)
 
     def test_known_target_resolves_and_name_doesnt_leak(self):
         # Known agent name → picked is set; the name doesn't reach claude_args
         # (otherwise claude would receive it as a positional duplicate). "golem"
         # exists in agents/ so resolve_pick finds it via agent_md_index().
-        with patch.object(sys, "argv", ["run.py", "golem"]):
-            picked, claude_args, _, _ = run.parse_cli()
+        picked, claude_args, _, _ = self._parse(["run.py", "golem"])
         self.assertIsNotNone(picked)
         self.assertNotIn("golem", claude_args)
 
     def test_known_target_combines_with_dry_run(self):
         # Known target + --dry-run — both register; target doesn't leak.
-        with patch.object(sys, "argv", ["run.py", "golem", "--dry-run"]):
-            picked, claude_args, dry_run, _ = run.parse_cli()
+        picked, claude_args, dry_run, _ = self._parse(["run.py", "golem", "--dry-run"])
         self.assertIsNotNone(picked)
         self.assertTrue(dry_run)
         self.assertNotIn("golem", claude_args)
@@ -101,25 +99,24 @@ class TestParseCliFlags(unittest.TestCase):
         # `python3 run.py golem -- --dry-run` — `--` ends argparse's optional
         # parsing, so --dry-run goes through to claude rather than firing
         # our flag. Important because some claude flags share names with ours.
-        with patch.object(sys, "argv", ["run.py", "golem", "--", "--dry-run"]):
-            _, claude_args, dry_run, _ = run.parse_cli()
+        _, claude_args, dry_run, _ = self._parse(["run.py", "golem", "--", "--dry-run"])
         self.assertFalse(dry_run)
         self.assertIn("--dry-run", claude_args)
 
-    def test_known_instance_resolves_as_instance_identity(self):
-        # A name like 'golem__<session>' with a state dir on disk → InstanceIdentity
-        # (not AgentIdentity). resolve_pick checks the state dir + workspace map +
-        # modes map; we patch those file_access points so the test stays hermetic
-        # (no writes to ~/.claude-agents/). The agent itself ("golem") must be a
-        # real one — resolve_pick's instance branch still requires <agent>.md to
-        # exist in agents/ via agent_md_index().
+    def test_known_instance_resolves_as_instance(self):
+        # A name like 'golem__<session>' with a state dir on disk → Instance
+        # (not Agent). resolve_pick checks the state dir + the instances.json
+        # store; we patch those points so the test stays hermetic (no writes
+        # to ~/.claude-agents/). The agent itself ("golem") must be a real one
+        # — the instance branch still requires <agent>.md via agent_md_index().
         instance_name = "golem__test_fixture"
+        entry = {"workspace": "/tmp/ws", "engine": None,
+                 "professions": [], "specialties": [], "policies": []}
         with patch.object(sys, "argv", ["run.py", instance_name]), \
              patch("launch.agents_crud.is_dir", return_value=True), \
-             patch("launch.agents_crud.load_workspace_map", return_value={instance_name: "/tmp/ws"}), \
-             patch("launch.agents_crud.load_modes_map", return_value={}):
-            picked, claude_args, _, _ = run.parse_cli()
-        self.assertIsInstance(picked, InstanceIdentity)
+             patch("launch.tags.store.load", return_value={instance_name: entry}):
+            picked, claude_args, _, _ = run.parse_cli(REGISTRY)
+        self.assertIsInstance(picked, Instance)
         self.assertEqual(picked.agent, "golem")
         self.assertEqual(picked.session, "test_fixture")
         self.assertEqual(picked.workspace, "/tmp/ws")
@@ -129,8 +126,7 @@ class TestParseCliFlags(unittest.TestCase):
     def test_no_target_doesnt_crash_resolve_pick(self):
         # Bare `run.py` → args.target is None; resolve_pick must accept it and
         # return None without exploding. Regression guard for the None-safe contract.
-        with patch.object(sys, "argv", ["run.py"]):
-            picked, claude_args, _, _ = run.parse_cli()
+        picked, claude_args, _, _ = self._parse(["run.py"])
         self.assertIsNone(picked)
         self.assertEqual(claude_args, [])
 
@@ -147,20 +143,18 @@ class TestLaunchOrchestrator(unittest.TestCase):
     def _mock_pipeline_through_to_run_compose(self, *, dry_run):
         """Patch every stage launch() calls. Returns a dict of the active mocks
         so individual tests can inspect call args."""
-        inst_id = MagicMock(is_brand_new=False)
+        inst = MagicMock(is_brand_new=False)
         chain = ["base"]
-        conf = MagicMock()
-        cred_names = []
+        opts = run.LaunchOptions(MagicMock(), [], dry_run, False)
 
         mocks = {
-            "gather_input":     patch.object(run, "gather_input", return_value=run.LaunchOptions(MagicMock(), [], dry_run, False)),
+            "gather_input":     patch.object(run, "gather_input", return_value=(opts, MagicMock())),
             "set_dry_run":      patch.object(run, "set_dry_run"),
-            "resolve_target":   patch.object(run, "resolve_target", return_value=inst_id),
+            "resolve_target":   patch.object(run, "resolve_target", return_value=inst),
             "compute_resume_flag": patch.object(run, "compute_resume_flag", return_value=[]),
-            "update_workspace_map": patch.object(run, "update_workspace_map"),
-            "set_instance_modes": patch.object(run, "set_instance_modes"),
+            "persist_instance": patch.object(run, "persist_instance"),
             "compose_chain":    patch.object(run, "compose_chain", return_value=chain),
-            "setup_state":      patch.object(run, "setup_state", return_value=(conf, cred_names)),
+            "setup_state":      patch.object(run, "setup_state", return_value=[]),
             "print_launch_banner": patch.object(run, "print_launch_banner"),
             "ensure_image":     patch.object(run, "ensure_image"),
             "prompt_install_failures": patch.object(run, "prompt_install_failures", return_value=None),
@@ -183,7 +177,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
     def test_run_compose_called_in_dry_run(self):
         # run_compose now fires in both modes — its orchestration (mount
         # flattening, env staging, firewall coordination) gets exercised on
-        # dry-run too. The actual docker compose invocation is gated inside
+        # dry-run too. The actual docker invocation is gated inside
         # docker_compose_subprocess by the dry-run flag.
         mocks = self._mock_pipeline_through_to_run_compose(dry_run=True)
         run.launch()
@@ -197,7 +191,15 @@ class TestLaunchOrchestrator(unittest.TestCase):
         run.launch()
         mocks["setup_state"].assert_called_once()
         mocks["compose_chain"].assert_called_once()
-        mocks["update_workspace_map"].assert_called_once()
+        mocks["persist_instance"].assert_called_once()
+
+    def test_persist_fires_for_cont_launches_too(self):
+        # The store entry always reflects the last-launched configuration —
+        # cont launches rewrite it idempotently rather than gating on
+        # is_brand_new (the old two-map model persisted modes only for new).
+        mocks = self._mock_pipeline_through_to_run_compose(dry_run=False)
+        run.launch()
+        mocks["persist_instance"].assert_called_once_with(mocks["resolve_target"].return_value)
 
     def test_banner_prints_in_dry_run(self):
         # The launch banner is part of the "what would happen" output — show it
@@ -220,7 +222,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks["set_dry_run"].assert_called_once_with(False)
 
     def test_ensure_image_and_install_failures_run_in_dry_run(self):
-        # Both are still *called* in dry-run — ensure_image's docker compose
+        # Both are still *called* in dry-run — ensure_image's docker
         # invocations no-op inside docker_compose_subprocess, and
         # prompt_install_failures gates itself internally (it skips the image
         # read entirely on dry-run: nothing was built, so any log it found
@@ -235,27 +237,47 @@ class TestGatherInput(unittest.TestCase):
     """gather_input owns the docker gate: it must fire after parse_cli (so
     `--help` still works on a docker-less machine) but before select_agent
     (so nobody answers the picker + prompts for a launch that was never going
-    to happen — the pre-fix behavior)."""
+    to happen — the pre-fix behavior). It also scans the tag tree first and
+    runs the one-shot legacy-store migration before anything reads the store."""
+
+    def _gather(self, parse_result, **stage_patches):
+        patches = {
+            "scan_all":       patch.object(run, "scan_all", return_value=REGISTRY),
+            "ensure":         patch("launch.tags.store.ensure_migrated"),
+            "parse_cli":      patch.object(run, "parse_cli", return_value=parse_result),
+            **stage_patches,
+        }
+        active = {name: p.start() for name, p in patches.items()}
+        for p in patches.values():
+            self.addCleanup(p.stop)
+        return active
 
     def test_docker_gate_precedes_picker(self):
         calls = []
         picked = MagicMock()
-        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(None, [], False, False)), \
-             patch.object(run, "require_docker", side_effect=lambda: calls.append("require_docker")), \
-             patch.object(run, "select_agent", side_effect=lambda: calls.append("select_agent") or picked):
-            result = run.gather_input()
+        self._gather(
+            run.LaunchOptions(None, [], False, False),
+            require_docker=patch.object(run, "require_docker",
+                                        side_effect=lambda: calls.append("require_docker")),
+            select_agent=patch.object(run, "select_agent",
+                                      side_effect=lambda registry: calls.append("select_agent") or picked),
+        )
+        opts, registry = run.gather_input()
         self.assertEqual(calls, ["require_docker", "select_agent"])
-        self.assertIs(result.picked, picked)
+        self.assertIs(opts.picked, picked)
+        self.assertIs(registry, REGISTRY)
 
     def test_docker_gate_fires_even_with_direct_target(self):
         # A CLI-named target skips the picker but not the docker gate.
         target = MagicMock()
-        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(target, ["--verbose"], True, False)), \
-             patch.object(run, "require_docker") as mock_docker, \
-             patch.object(run, "select_agent") as mock_picker:
-            opts = run.gather_input()
-        mock_docker.assert_called_once()
-        mock_picker.assert_not_called()
+        active = self._gather(
+            run.LaunchOptions(target, ["--verbose"], True, False),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent"),
+        )
+        opts, _ = run.gather_input()
+        active["require_docker"].assert_called_once()
+        active["select_agent"].assert_not_called()
         self.assertIs(opts.picked, target)
         self.assertEqual(opts.claude_args, ["--verbose"])
         self.assertTrue(opts.dry_run)
@@ -263,57 +285,76 @@ class TestGatherInput(unittest.TestCase):
     def test_missing_docker_stops_before_picker(self):
         # require_docker exits via exit_if_missing — the picker must never
         # open after that.
-        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(None, [], False, False)), \
-             patch.object(run, "require_docker", side_effect=SystemExit("docker is required")), \
-             patch.object(run, "select_agent") as mock_picker:
-            with self.assertRaises(SystemExit):
-                run.gather_input()
-        mock_picker.assert_not_called()
+        active = self._gather(
+            run.LaunchOptions(None, [], False, False),
+            require_docker=patch.object(run, "require_docker",
+                                        side_effect=SystemExit("docker is required")),
+            select_agent=patch.object(run, "select_agent"),
+        )
+        with self.assertRaises(SystemExit):
+            run.gather_input()
+        active["select_agent"].assert_not_called()
 
     def test_picker_cancel_exits_zero(self):
-        with patch.object(run, "parse_cli", return_value=run.LaunchOptions(None, [], False, False)), \
-             patch.object(run, "require_docker"), \
-             patch.object(run, "select_agent", return_value=None):
-            with self.assertRaises(SystemExit) as ctx:
-                run.gather_input()
+        self._gather(
+            run.LaunchOptions(None, [], False, False),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent", return_value=None),
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            run.gather_input()
         self.assertEqual(ctx.exception.code, 0)
+
+    def test_migration_runs_before_cli_resolution(self):
+        # ensure_migrated must precede parse_cli — resolve_pick reads the
+        # store, and reading it pre-migration would miss legacy instances.
+        calls = []
+        self._gather(
+            run.LaunchOptions(MagicMock(), [], False, False),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent"),
+        )
+        with patch("launch.tags.store.ensure_migrated", side_effect=lambda: calls.append("migrate")), \
+             patch.object(run, "parse_cli", side_effect=lambda reg: calls.append("parse") or run.LaunchOptions(MagicMock(), [], False, False)):
+            run.gather_input()
+        self.assertEqual(calls, ["migrate", "parse"])
 
 
 class TestResolveTarget(unittest.TestCase):
     """resolve_target re-prompts for cont identities whose stored workspace is
-    missing — which means None (no map entry) AND "" (empty map entry). The
+    missing — which means None (no store entry) AND "" (empty entry). The
     two used to diverge: "" slipped past the `is None` check and silently
     fell back to DEFAULT_WORKSPACE downstream instead of re-prompting."""
 
     def _cont(self, workspace):
-        return InstanceIdentity(agent="golem", session="s", workspace=workspace,
-                                is_brand_new=False, modes=())
+        return Instance(agent="golem", md_path=Path("/fake/golem.md"), session="s",
+                        workspace=workspace, is_brand_new=False, engine=None)
 
     def test_none_workspace_reprompts(self):
         with patch.object(run, "ask_for_workspace", return_value="/tmp") as mock_ask:
-            out = run.resolve_target(self._cont(None))
+            out = run.resolve_target(self._cont(None), REGISTRY)
         mock_ask.assert_called_once()
         self.assertEqual(out.workspace, "/tmp")
         self.assertFalse(out.is_brand_new)   # dataclasses.replace must not disturb the cont flag
 
     def test_empty_string_workspace_reprompts(self):
         with patch.object(run, "ask_for_workspace", return_value="/tmp") as mock_ask:
-            out = run.resolve_target(self._cont(""))
+            out = run.resolve_target(self._cont(""), REGISTRY)
         mock_ask.assert_called_once()
         self.assertEqual(out.workspace, "/tmp")
 
     def test_valid_workspace_passes_through_unprompted(self):
         with tempfile.TemporaryDirectory() as real_dir, \
              patch.object(run, "ask_for_workspace") as mock_ask:
-            out = run.resolve_target(self._cont(real_dir))
+            out = run.resolve_target(self._cont(real_dir), REGISTRY)
         mock_ask.assert_not_called()
         self.assertEqual(out.workspace, real_dir)
 
     def test_invalid_workspace_exits(self):
-        # Set-but-bogus path is a stale map entry — validate_workspace exits
-        # with the fix-the-map message rather than mounting garbage.
+        # Set-but-bogus path is a stale store entry — exit with the
+        # fix-the-entry message rather than mounting garbage.
         with self.assertRaises(SystemExit):
-            run.resolve_target(self._cont("/no/such/dir/for/sure"))
+            run.resolve_target(self._cont("/no/such/dir/for/sure"), REGISTRY)
 
 
 if __name__ == "__main__":

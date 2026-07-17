@@ -7,7 +7,6 @@ Leaf module: imports nothing from sibling launch/ modules — kept pull-able
 from anywhere without circular-import risk.
 """
 
-import re
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -50,7 +49,7 @@ def ordering_index_or_end(value: object, ordering: Sequence[object]) -> int:
     pushes unknowns past the end when used as a sort-key element. Backs the
     picker's tag-set and mode-set sort keys in agents_crud. `object`-typed
     (not a TypeVar) because membership/index only need equality, and one
-    caller legitimately probes with None (agent_sort_key's unknown-family
+    caller legitimately probes with None (engine_sort_key's unknown-family
     sentinel)."""
     return ordering.index(value) if value in ordering else len(ordering)
 
@@ -64,51 +63,6 @@ def split_host_port(entry: str) -> tuple[str, str]:
     a bare host (`foo.com`) all dispatch correctly."""
     host, sep, port = entry.rpartition(":")
     return (host, port) if sep else (entry, "")
-
-
-def parse_stem(stem: str) -> tuple[str, list[str], str | None]:
-    """Parse an agent-filename stem into (name, tags, parent).
-
-    Grammar: <name>(<bracketed-tag>|<parenthesized-parent>)*
-      - `[tag]` accumulates into tags (list, in the order they appear).
-      - `(parent)` is single-valued; if repeated, last wins.
-      - Order between brackets and parens is free: 'name[code](thinker)' and
-        'name(thinker)[code]' both parse the same way.
-
-    Raises ValueError on a malformed stem — missing name, unclosed bracket,
-    empty `[]` / `()` group, or stray text between groups. Raising beats
-    silently dropping the bad parts: a typo like `poet[code.md` would
-    otherwise launch the agent without its [code] toolchain, unnoticed.
-
-    Examples:
-        'name'                → ('name', [], None)
-        'name(thinker)'       → ('name', [], 'thinker')
-        'name[code]'          → ('name', ['code'], None)
-        'name[code](thinker)' → ('name', ['code'], 'thinker')
-        'name[a][b]'          → ('name', ['a', 'b'], None)
-    """
-    m = re.match(r"^([^()\[\]]+)", stem)
-    if not m:
-        raise ValueError(f"agent filename stem {stem!r} must start with a name, before any [tag] / (parent) group")
-    name = m.group(1)
-    rest = stem[len(name):]
-    if not re.fullmatch(r"(?:\([^()]+\)|\[[^\[\]]+\])*", rest):
-        raise ValueError(f"agent filename stem {stem!r} has a malformed [tag] / (parent) suffix after {name!r} (unclosed or empty bracket, or stray text)")
-    tags = []
-    parent = None
-    for paren, bracket in re.findall(r"\(([^()]+)\)|\[([^\[\]]+)\]", rest):
-        if paren:
-            parent = paren
-        else:
-            tags.append(bracket)
-    return (name, tags, parent)
-
-
-def parse_agent_name(stem: str) -> str:
-    """Just the `name` half of `parse_stem` — drops [tag] / (parent) suffixes
-    from a filename stem. Used to build file_access.agent_md_index.
-    Raises ValueError on malformed stems, same contract as parse_stem."""
-    return parse_stem(stem)[0]
 
 
 # === Subprocess ===

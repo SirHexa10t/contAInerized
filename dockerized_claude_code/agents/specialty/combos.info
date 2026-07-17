@@ -1,0 +1,7 @@
+# Multi-tag entanglement warnings — rendered live (red) in the form's warning
+# zone while ALL named tags are selected. One-sided concerns belong in the
+# concerned tag's own [wants] table instead.  (syntax: TOML)
+[warnings]
+"dood + auto" = """YOU'VE ENABLED BOTH {dood} AND {auto} - PROCEED WITH CAUTION:
+THE AI AGENT HAS THE POWER TO DO ANYTHING ON YOUR COMPUTER,
+AND DOESN'T REQUIRE PERMISSION!"""

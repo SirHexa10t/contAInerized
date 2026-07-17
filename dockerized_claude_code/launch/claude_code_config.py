@@ -20,13 +20,30 @@ run_compose (terminal title); nothing else does."""
 
 from .file_access import read_json_field
 from .paths import ACCOUNT_FILE
-from .structs import InstanceIdentity, InstanceModifiers
+from .tags import Instance, Tag
+
+# Warning-aware tag colors for the status line. The two opening codes are
+# 8 bytes each by design — rich's markdown-table column-width detection counts
+# bytes including escapes, so unequal-length codes would shift columns.
+_WARN_ANSI = "\033[01;91m"
+_SAFE_ANSI = "\033[22;92m"
+_RESET_ANSI = "\033[0m"
 
 
-def build_status_line(inst_id: InstanceIdentity) -> str:
+def colored_tag_chain(tags: tuple[Tag, ...]) -> str:
+    """Space-separated ANSI-colored tag labels: bright red for warn-flagged
+    specialties (auto, dood), bright green otherwise. Each label self-resets
+    so consecutive labels don't bleed colour."""
+    return " ".join(
+        f"{_WARN_ANSI if getattr(t, 'warn', False) else _SAFE_ANSI}{t.label}{_RESET_ANSI}"
+        for t in tags
+    )
+
+
+def build_status_line(inst: Instance) -> str:
     """ANSI label for Claude Code's bottom status line — cyan agent + grey
     workspace + green email + blue instance (`<agent>__<session>`), with the
-    modifier chain (warning-aware reds + greens) trailing. The `<email> :`
+    active tag chain (warning-aware reds + greens) trailing. The `<email> :`
     prefix drops out when .claude.json is missing or lacks a recognisable
     email field."""
     CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
@@ -34,12 +51,12 @@ def build_status_line(inst_id: InstanceIdentity) -> str:
         return name.replace('-', ' ').replace('_', ' ').title()
 
     email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
-    chain = InstanceModifiers.colored_chain(inst_id.tags + inst_id.modes)
+    chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
     # Whole prefix (email + separator) drops out when the field is absent —
     # interpolating the raw lookup would render the literal string "None".
     email_part = f"{GREEN}{email}{RESET} : " if email else ""
-    return (f"{CYAN}● {cap(inst_id.agent)} - {cap(inst_id.session)} {GREY}( {inst_id.workspace} ){RESET}"
-            f"\t\t{email_part}{BLUE}{inst_id.instance}{RESET}"
+    return (f"{CYAN}● {cap(inst.agent)} - {cap(inst.session)} {GREY}( {inst.workspace} ){RESET}"
+            f"\t\t{email_part}{BLUE}{inst.instance}{RESET}"
             f"  {chain}")
 
 

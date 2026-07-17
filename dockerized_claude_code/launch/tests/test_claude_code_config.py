@@ -1,20 +1,21 @@
 """Tests for launch.claude_code_config — the host-staged in-container UX
-strings. build_status_line is pure string assembly over an InstanceIdentity
-plus one JSON field read (patched here), so it tests without any launcher
-state."""
+strings. build_status_line is pure string assembly over an Instance plus one
+JSON field read (patched here), so it tests without any launcher state."""
 
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from launch import claude_code_config
-from launch.structs import InstanceIdentity
+from launch.claude_code_config import colored_tag_chain
+from launch.tags import Instance
 
 
-def _inst() -> InstanceIdentity:
-    """A cont-shaped identity for a real repo agent (golem — tagless, so the
-    modifier chain stays empty)."""
-    return InstanceIdentity(agent="golem", session="s1", workspace="/tmp/ws",
-                            is_brand_new=False, modes=())
+def _inst() -> Instance:
+    """A cont-shaped identity — no tags, so the trailing chain stays empty."""
+    return Instance(agent="golem", md_path=Path("/fake/golem.md"), session="s1",
+                    workspace="/tmp/ws", is_brand_new=False, engine=None)
 
 
 class TestBuildStatusLine(unittest.TestCase):
@@ -47,6 +48,28 @@ class TestBuildStatusLine(unittest.TestCase):
 
     def test_workspace_shown(self):
         self.assertIn("/tmp/ws", self._line(None))
+
+
+class TestColoredTagChain(unittest.TestCase):
+    """Warn-aware ANSI coloring: warn-flagged tags bright red, everything
+    else bright green; each label self-resets. Duck-typed stand-ins — the
+    function only reads `.label` and (optionally) `.warn`."""
+
+    def test_empty_chain_is_empty_string(self):
+        self.assertEqual(colored_tag_chain(()), "")
+
+    def test_safe_tag_green(self):
+        chain = colored_tag_chain((SimpleNamespace(label="[code]"),))
+        self.assertIn("\033[22;92m[code]\033[0m", chain)
+
+    def test_warn_tag_red(self):
+        chain = colored_tag_chain((SimpleNamespace(label="{dood}", warn=True),))
+        self.assertIn("\033[01;91m{dood}\033[0m", chain)
+
+    def test_labels_space_separated(self):
+        chain = colored_tag_chain((SimpleNamespace(label="[code]"),
+                                   SimpleNamespace(label="{auto}", warn=True)))
+        self.assertEqual(chain.count(" "), 1)
 
 
 class TestSetTerminalTitle(unittest.TestCase):

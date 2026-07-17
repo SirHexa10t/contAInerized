@@ -1,6 +1,6 @@
 """Docker-side user-facing copy — progress notices + completion prompts.
 Pure strings consumed by docker_config.* sites that print them. Lives under
-`launch/template_code/` alongside modifier_prompts.py and memory_addendums.py
+`launch/template_code/`
 — same convention: data only, no logic. Adding a new docker-side user-facing
 string means adding it here and referencing it from docker_config.
 

@@ -1,0 +1,166 @@
+"""Per-launch instance identity, tag-system edition — replaces the old
+`AgentIdentity` / `InstanceIdentity` / `InstanceModifiers` trio.
+
+An `Instance` is a fully-resolved launch: an agent (its `.md` persona) plus
+the four axis selections as concrete `Tag` objects (engine + professions +
+specialties + policies), plus session / workspace / new-vs-continuing. The
+selections come from the agent's `.lego` defaults (a fresh create) or the
+per-instance store (a continue), with the create-form editing them in
+between.
+
+`image_chain` computes the docker build chain the way the old
+`InstanceIdentity.chain` did — `["base", <professions…>, <specialties…>]`
+using the same lowercase tag-value strings — so the existing compose layer
+files keep matching until the plain-docker flip. Professions are ordered so
+a required profession precedes its dependents (code before web); specialties
+follow all professions (their `requires` reference professions, satisfied by
+the whole profession group being ahead).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..file_access import agent_md_index, has_continuable_jsonl, last_history_mtime
+from ..paths import instance_state_dir_path, state_md_path
+from .engine import Engine
+from .lego import AgentBuild
+from .policy import Policy
+from .profession import Profession
+from .registry import Registry
+from .specialty import Specialty
+
+SESSION_SEP = "__"
+
+
+def _topo_professions(professions: tuple[Profession, ...]) -> list[Profession]:
+    """Order professions so each follows the professions it requires (code
+    before web). Ties broken by name for determinism. A selection with an
+    unmet requirement (prevented by the form, but guarded here) appends the
+    stragglers rather than looping forever."""
+    placed: list[Profession] = []
+    placed_names: set[str] = set()
+    remaining = sorted(professions, key=lambda p: p.name)
+    while remaining:
+        ready = [p for p in remaining if p.requires <= placed_names]
+        if not ready:
+            placed.extend(remaining)   # unsatisfiable requires — shouldn't happen post-validation
+            break
+        for p in ready:
+            placed.append(p)
+            placed_names.add(p.name)
+            remaining.remove(p)
+    return placed
+
+
+def image_chain(professions: tuple[Profession, ...],
+                specialties: tuple[Specialty, ...]) -> list[str]:
+    """The docker build chain: `["base", <profession values…>,
+    <specialty values…>]`. Professions topologically ordered (requirements
+    first); specialties alphabetical after all professions. Drives image tags
+    (lowercased values joined by dots) and the compose/`tag.docker` layer
+    stack — the same contract the old chain honored."""
+    profs = _topo_professions(professions)
+    specs = sorted(specialties, key=lambda s: s.name)
+    return ["base", *(p.name for p in profs), *(s.name for s in specs)]
+
+
+@dataclass(frozen=True)
+class Agent:
+    """A pickable agent (a Create row / a bare-name CLI target): its persona
+    `.md` plus the `.lego` build defaults. Promoted to an `Instance` once
+    workspace + session + the tag form have answered."""
+    name: str
+    md_path: Path
+    build: AgentBuild
+
+
+@dataclass(frozen=True)
+class Instance:
+    """A fully-resolved launch. Frozen; all fields hashable (tag objects are
+    frozen, selections are tuples). Mirrors the old InstanceIdentity surface
+    (`instance`, `state_dir`, `chain`, history probes) so the swap is a
+    consumer-by-consumer rename rather than a semantics change."""
+    agent: str
+    md_path: Path
+    session: str
+    workspace: str | None
+    is_brand_new: bool
+    engine: Engine | None
+    professions: tuple[Profession, ...] = ()
+    specialties: tuple[Specialty, ...] = ()
+    policies: tuple[Policy, ...] = ()
+
+    @property
+    def instance(self) -> str:
+        """Canonical `<agent>__<session>` id — the state-dir name and store key."""
+        return f"{self.agent}{SESSION_SEP}{self.session}"
+
+    @property
+    def state_dir(self) -> Path:
+        return instance_state_dir_path(self.instance)
+
+    @property
+    def state_md(self) -> Path:
+        return state_md_path(self.state_dir)
+
+    @property
+    def chain(self) -> list[str]:
+        return image_chain(self.professions, self.specialties)
+
+    @property
+    def conf(self) -> dict[str, str]:
+        """The engine's effective env conf (`-e KEY=VALUE` source + effort)."""
+        return self.engine.conf_map if self.engine else {}
+
+    @property
+    def claude_args(self) -> list[str]:
+        """CLI args contributed by the selected specialties (e.g. auto's
+        `--dangerously-skip-permissions`), in chain order."""
+        by_name = {s.name: s for s in self.specialties}
+        out: list[str] = []
+        for name in self.chain:
+            if name in by_name:
+                out.extend(by_name[name].claude_args)
+        return out
+
+    @property
+    def has_continuable_history(self) -> bool:
+        return has_continuable_jsonl(self.state_dir)
+
+    @property
+    def last_used_mtime(self) -> float | None:
+        return last_history_mtime(self.state_dir)
+
+
+def resolve_build(build: AgentBuild, agent: str, registry: Registry) -> dict:
+    """Turn an `AgentBuild` (name lists from a `.lego`) into resolved tag
+    objects, as a kwargs dict for `Instance`. Engine falls back
+    `build.engine` → an engine named like the agent → `default`. References
+    are assumed already validated (`Registry.validate_build`); a missing one
+    surfaces as a KeyError, which the caller has validated away upstream."""
+    engine_name = build.engine or (agent if agent in registry.engines else "default")
+    engine = registry.engines.get(engine_name)
+    return {
+        "engine": engine,
+        "professions": tuple(registry.professions[n] for n in build.professions),
+        "specialties": tuple(registry.specialties[n] for n in build.specialties),
+        "policies": tuple(registry.policies[n] for n in build.policies),
+    }
+
+
+def agent_md_path(agent: str) -> Path | None:
+    """The agent's source `.md`, by clean name (reuses the file-access index)."""
+    return agent_md_index().get(agent)
+
+
+def load_agent(name: str, agents_dir: Path) -> Agent | None:
+    """Build an `Agent` from a clean name: its `.md` (via the index) + its
+    `.lego` defaults (missing `.lego` → empty build). None when no such
+    agent `.md` exists."""
+    from .lego import load_lego   # local import — lego imports nothing from here
+    md = agent_md_path(name)
+    if md is None:
+        return None
+    return Agent(name=name, md_path=md, build=load_lego(agents_dir / f"{name}.lego"))

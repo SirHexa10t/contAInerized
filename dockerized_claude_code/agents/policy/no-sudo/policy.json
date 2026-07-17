@@ -1,0 +1,1 @@
+{"permissions": {"deny": ["Bash(sudo *)", "Bash(sudo:*)"]}}

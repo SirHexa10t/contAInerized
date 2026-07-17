@@ -22,7 +22,7 @@ services:
   claude-code:
     image: ${TARGET_IMAGE:-claude-agents:code.dood}
     build:
-      dockerfile: docker/Dockerfile.dood
+      dockerfile: agents/profession/code/_dood/Dockerfile
       args:
         PARENT_IMAGE: ${PARENT_IMAGE:-claude-agents:code}
         DOCKER_GID: ${DOCKER_GID:-999}

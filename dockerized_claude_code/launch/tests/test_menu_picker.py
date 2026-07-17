@@ -1,7 +1,8 @@
 """Tests for launch.menu_picker's non-TUI logic: the pure display helpers,
 the Cont-row factory (continuable_instances — sorting, cwd-relation flags,
-modes conversion), the shared session prompt, and the checkbox form's pure
-parts (option assembly, attached_to ordering, live-warning computation).
+tag display), the shared session prompt, and the checkbox form's pure parts
+(option assembly, attached_to ordering, requires cascade, live-warning
+computation — all against the real shipped agents/ tree).
 The prompt_toolkit Applications themselves (pick_with_preview,
 checkbox_form) are interactive and stay out of unit scope."""
 
@@ -12,12 +13,26 @@ from unittest.mock import patch
 
 from launch import menu_picker
 from launch.menu_picker import (
-    FormOption, _agent_description, _mode_form_options, _modifier_display,
-    _normalize, _notice_warnings_by_value, _plain, active_warnings,
-    continuable_instances, ordered_form_options, prompt_session,
+    FormOption, _agent_description, _combo_warnings, _form_requires,
+    _normalize, _plain, _tag_form_options, _tags_column, active_warnings,
+    build_of, continuable_instances, ordered_form_options, prompt_session,
+    prompt_tags, requires_closure,
 )
-from launch.structs import ANSI_TO_PT_STYLE, InstanceModifiers
-from launch.template_code.modifier_prompts import MODIFIER_YN_PROMPTS
+from launch.paths import AGENTS_DIR
+from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+
+REGISTRY = scan_all(AGENTS_DIR)
+
+
+def make_inst(agent="poet", session="s", workspace="/tmp", *,
+              professions=(), specialties=(), policies=()):
+    """A real Instance resolved against the real registry (engine falls back
+    agent-name → default, exactly like a launch)."""
+    build = AgentBuild(engine=None, professions=tuple(professions),
+                       specialties=tuple(specialties), policies=tuple(policies))
+    return Instance(agent=agent, md_path=Path(f"/fake/{agent}.md"), session=session,
+                    workspace=workspace, is_brand_new=False,
+                    **resolve_build(build, agent, REGISTRY))
 
 
 class TestAgentDescription(unittest.TestCase):
@@ -57,92 +72,107 @@ class TestDisplayCoercion(unittest.TestCase):
         self.assertEqual(_plain("hello"), "hello")
 
 
-class TestModifierDisplay(unittest.TestCase):
-    """_modifier_display parses colored_chain's ANSI output back into
-    prompt_toolkit fragments via ANSI_TO_PT_STYLE — the round-trip that lets
-    one rendering source feed the status line AND the picker."""
+class TestTagsColumn(unittest.TestCase):
+    """_tags_column renders tag labels as warn-aware pt fragments — the one
+    rendering source for both Create-row and Cont-row tag columns."""
 
     def test_empty_input(self):
-        self.assertEqual(_modifier_display([]), ([], 0))
+        self.assertEqual(_tags_column([]), ([], 0))
 
-    def test_code_tag_renders_green_fragment(self):
-        fragments, width = _modifier_display([InstanceModifiers.TAG_CODE])
+    def test_safe_tag_renders_green(self):
+        fragments, width = _tags_column([REGISTRY.professions["code"]])
         styles = {style for style, _ in fragments}
-        self.assertIn("fg:ansibrightgreen", styles)                      # safe modifier → green
+        self.assertIn(menu_picker.STYLE_TAG_SAFE, styles)
         self.assertIn("[code]", "".join(text for _, text in fragments))
-        self.assertEqual(width, len("[code]") + 1)                        # +1 trailing separator space
+        self.assertEqual(width, len("[code]") + 1)   # +1 trailing separator space
 
-    def test_warn_mode_renders_red_fragment(self):
-        fragments, _ = _modifier_display([InstanceModifiers.MODE_WARN_DOOD])
-        self.assertIn("bold fg:ansibrightred", {style for style, _ in fragments})
+    def test_warn_specialty_renders_red(self):
+        fragments, _ = _tags_column([REGISTRY.specialties["dood"]])
+        self.assertIn(menu_picker.STYLE_TAG_WARN, {style for style, _ in fragments})
 
-    def test_every_fragment_style_known_to_mapping(self):
-        fragments, _ = _modifier_display([InstanceModifiers.TAG_CODE, InstanceModifiers.MODE_WARN_AUTO])
-        known = set(ANSI_TO_PT_STYLE.values()) | {""}
-        self.assertTrue(all(style in known for style, _ in fragments))
+    def test_multiple_tags_space_separated(self):
+        fragments, width = _tags_column([REGISTRY.professions["code"],
+                                         REGISTRY.specialties["auto"]])
+        text = "".join(t for _, t in fragments)
+        self.assertEqual(text, "[code] {auto} ")
+        self.assertEqual(width, len(text))
+
+
+class TestBuildOf(unittest.TestCase):
+    def test_round_trips_axis_names(self):
+        inst = make_inst(professions=["code", "web"], specialties=["auto"],
+                         policies=["no-sudo"])
+        build = build_of(inst)
+        self.assertEqual(build.professions, ("code", "web"))
+        self.assertEqual(build.specialties, ("auto",))
+        self.assertEqual(build.policies, ("no-sudo",))
+
+    def test_engine_name_captured(self):
+        self.assertEqual(build_of(make_inst(agent="poet")).engine, "poet")
 
 
 class TestContinuableInstances(unittest.TestCase):
-    """continuable_instances turns raw disk/map state into sorted, flagged
-    Cont rows. Real repo agents (golem — haiku, poet — sonnet) provide the
-    md/conf side; instance listings + maps + cwd are patched."""
+    """continuable_instances turns store-backed Instances into sorted,
+    flagged Cont rows. Real repo tags/engines provide the resolution side
+    (poet — sonnet, golem — haiku); the store factory + listing + cwd are
+    patched."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.ws = Path(self.tmpdir.name)
+        self.addCleanup(self.tmpdir.cleanup)
+        self.ws = self.tmpdir.name
         # No instance has a history.jsonl in these fixtures.
-        self._mtime = patch("launch.structs.last_history_mtime", return_value=None)
-        self._mtime.start()
+        patcher = patch("launch.tags.identity.last_history_mtime", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def tearDown(self):
-        self._mtime.stop()
-        self.tmpdir.cleanup()
-
-    def _entries(self, instances, workspaces, modes, cwd=None):
-        with patch.object(menu_picker, "list_all_instances", return_value=instances), \
-             patch.object(menu_picker, "load_workspace_map", return_value=workspaces), \
-             patch.object(menu_picker, "load_modes_map", return_value=modes), \
+    def _entries(self, insts, cwd=None):
+        by_id = {i.instance: i for i in insts}
+        with patch.object(menu_picker, "list_all_instances", return_value=list(by_id) + ["ghost__x"]), \
+             patch.object(menu_picker, "instance_from_store",
+                          side_effect=lambda name, registry: by_id.get(name)), \
              patch.object(menu_picker, "resolved_cwd", return_value=cwd or Path("/nowhere")):
-            return continuable_instances()
+            return continuable_instances(REGISTRY)
 
     def test_orphan_instances_skipped(self):
-        entries = self._entries(["ghost__x", "golem__a"], {"golem__a": str(self.ws)}, {})
+        # instance_from_store returns None for ghost__x (no .md) — row dropped.
+        entries = self._entries([make_inst("golem", "a", self.ws)])
         self.assertEqual([e.identity.instance for e in entries], ["golem__a"])
 
-    def test_modes_converted_to_typed_members(self):
-        entries = self._entries(["golem__a"], {"golem__a": str(self.ws)}, {"golem__a": ["auto"]})
-        self.assertEqual(entries[0].identity.modes, (InstanceModifiers.MODE_WARN_AUTO,))
-        self.assertEqual(entries[0].modes_display, "auto")
+    def test_tags_display_names(self):
+        entries = self._entries([make_inst("golem", "a", self.ws, specialties=["auto"])])
+        self.assertEqual(entries[0].tags_display, "auto")
 
-    def test_modeless_sorts_before_moded_and_family_orders_within(self):
-        # poet (sonnet) outranks golem (haiku); golem__b carries a mode so it
-        # sinks below both modeless rows regardless of family.
-        entries = self._entries(
-            ["golem__a", "golem__b", "poet__p"],
-            {n: str(self.ws) for n in ("golem__a", "golem__b", "poet__p")},
-            {"golem__b": ["auto"]},
-        )
+    def test_tagless_sorts_before_tagged_and_family_orders_within(self):
+        # poet (sonnet) outranks golem (haiku); golem__b carries a specialty
+        # so it sinks below both tag-less rows regardless of family.
+        entries = self._entries([
+            make_inst("golem", "a", self.ws),
+            make_inst("golem", "b", self.ws, specialties=["auto"]),
+            make_inst("poet", "p", self.ws),
+        ])
         self.assertEqual([e.identity.instance for e in entries],
                          ["poet__p", "golem__a", "golem__b"])
 
     def test_current_dir_flagged(self):
-        entries = self._entries(["golem__a"], {"golem__a": str(self.ws)}, {}, cwd=self.ws.resolve())
+        entries = self._entries([make_inst("golem", "a", self.ws)],
+                                cwd=Path(self.ws).resolve())
         self.assertTrue(entries[0].is_current_dir)
         self.assertFalse(entries[0].is_invalid_dir)
 
     def test_invalid_workspace_flagged_but_shown(self):
-        entries = self._entries(["golem__a"], {"golem__a": "/no/such/dir"}, {})
+        entries = self._entries([make_inst("golem", "a", "/no/such/dir")])
         self.assertTrue(entries[0].is_invalid_dir)
         self.assertFalse(entries[0].is_current_dir)
         self.assertEqual(entries[0].workspace_display, "/no/such/dir")   # stored value still shown
 
-    def test_missing_map_entry_shows_placeholder(self):
-        entries = self._entries(["golem__a"], {}, {})
+    def test_missing_workspace_shows_placeholder(self):
+        entries = self._entries([make_inst("golem", "a", None)])
         self.assertEqual(entries[0].workspace_display, "?")
         self.assertIsNone(entries[0].identity.workspace)
 
     def test_never_used_renders_never(self):
-        entries = self._entries(["golem__a"], {"golem__a": str(self.ws)}, {})
+        entries = self._entries([make_inst("golem", "a", self.ws)])
         self.assertEqual(entries[0].last_used_display, "(never)")
 
 
@@ -176,43 +206,70 @@ class TestPromptSession(unittest.TestCase):
 
 
 # ============================================================
-# Checkbox form — pure assembly / ordering / warning logic
+# Checkbox form — pure assembly / ordering / cascade / warning logic
 # ============================================================
 
 
-class TestModeFormOptions(unittest.TestCase):
-    """_mode_form_options — the pure assembly behind the mode form: which
-    rows appear (applies_to gating), their order (declaration order), their
-    keys (canonical values), and which arrive pre-checked (current_modes)."""
+class TestTagFormOptions(unittest.TestCase):
+    """_tag_form_options — the pure assembly behind the tag form: every
+    discovered profession/specialty/policy appears (keyed by full name),
+    pre-checked from the given build, with requires parentheticals."""
 
-    def test_tagless_agent_gets_auto_only(self):
-        # DooD / web declare a [code] prerequisite; auto has none.
-        keys = [o.key for o in _mode_form_options(())]
-        self.assertEqual(keys, [InstanceModifiers.MODE_WARN_AUTO.value])
+    def test_every_form_kind_member_appears(self):
+        keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild())}
+        expected = (set(REGISTRY.professions) | set(REGISTRY.specialties)
+                    | set(REGISTRY.policies))
+        self.assertEqual(keys, expected)
 
-    def test_code_agent_gets_all_modes_in_declaration_order(self):
-        keys = [o.key for o in _mode_form_options((InstanceModifiers.TAG_CODE,))]
-        self.assertEqual(keys, ["auto", "DooD", "web"])
+    def test_engines_not_in_form(self):
+        keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild())}
+        self.assertFalse(keys & set(REGISTRY.engines))
 
-    def test_current_modes_precheck(self):
-        opts = _mode_form_options((InstanceModifiers.TAG_CODE,),
-                                  (InstanceModifiers.MODE_WARN_DOOD,))
-        self.assertEqual({o.key for o in opts if o.checked}, {"DooD"})
+    def test_build_prechecks_boxes(self):
+        build = AgentBuild(professions=("code",), specialties=("auto",))
+        checked = {o.key for o in _tag_form_options(REGISTRY, build) if o.checked}
+        self.assertEqual(checked, {"code", "auto"})
 
-    def test_nothing_prechecked_for_new_instance(self):
-        self.assertFalse(any(o.checked for o in _mode_form_options((InstanceModifiers.TAG_CODE,))))
+    def test_nothing_prechecked_for_empty_build(self):
+        self.assertFalse(any(o.checked for o in _tag_form_options(REGISTRY, AgentBuild())))
 
-    def test_labels_state_rather_than_ask(self):
-        # The YN-prompt headers are questions; the form drops the trailing '?'.
-        for o in _mode_form_options((InstanceModifiers.TAG_CODE,)):
-            self.assertFalse(_plain(o.label).rstrip().endswith("?"),
-                             f"{o.key} label still reads as a question")
+    def test_requires_parenthetical_present(self):
+        # web's tree position (profession/code/web) makes code a prerequisite;
+        # the label must say so.
+        web = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "web")
+        self.assertIn("(requires: code)", _plain(web.label))
 
-    def test_every_mode_has_prompt_copy(self):
-        # A mode absent from MODIFIER_YN_PROMPTS silently never appears in
-        # the form — guard the pairing, like test_essential_files does for
-        # the _apply_* handlers.
-        self.assertEqual(set(InstanceModifiers.modes()), set(MODIFIER_YN_PROMPTS))
+    def test_no_parenthetical_without_requires(self):
+        code = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "code")
+        self.assertNotIn("requires", _plain(code.label))
+
+    def test_labels_carry_kind_punctuation(self):
+        labels = {o.key: _plain(o.label) for o in _tag_form_options(REGISTRY, AgentBuild())}
+        self.assertIn("[code]", labels["code"])
+        self.assertIn("{auto}", labels["auto"])
+        self.assertIn("<+query>", labels["web-research"])   # policies render their shortname
+
+
+class TestRequiresClosure(unittest.TestCase):
+    def test_no_requires_yields_empty(self):
+        self.assertEqual(requires_closure("code", {}), set())
+
+    def test_direct_requirement(self):
+        self.assertEqual(requires_closure("web", {"web": frozenset({"code"})}), {"code"})
+
+    def test_transitive_requirement(self):
+        req = {"c": frozenset({"b"}), "b": frozenset({"a"})}
+        self.assertEqual(requires_closure("c", req), {"a", "b"})
+
+    def test_self_not_included(self):
+        self.assertNotIn("web", requires_closure("web", {"web": frozenset({"code"})}))
+
+    def test_cycle_terminates(self):
+        req = {"a": frozenset({"b"}), "b": frozenset({"a"})}
+        self.assertEqual(requires_closure("a", req), {"a", "b"})
+
+    def test_real_tree_web_requires_code(self):
+        self.assertEqual(requires_closure("web", _form_requires(REGISTRY)), {"code"})
 
 
 class TestOrderedFormOptions(unittest.TestCase):
@@ -246,25 +303,82 @@ class TestOrderedFormOptions(unittest.TestCase):
 
 
 class TestActiveWarnings(unittest.TestCase):
-    """active_warnings against the real MODIFIER_NOTICE_PROMPTS copy (re-keyed
-    by value via _notice_warnings_by_value) — the form's live warning zone.
-    Same subset semantics the old post-persist warning gate enforced."""
+    """active_warnings against the real combos.info copy (re-keyed by tag
+    name via _combo_warnings) — the form's live warning zone."""
 
     def setUp(self):
-        self.warnings = _notice_warnings_by_value()
+        self.warnings = _combo_warnings(REGISTRY)
+
+    def test_dood_plus_auto_combo_shipped(self):
+        self.assertIn(frozenset({"dood", "auto"}), self.warnings)
 
     def test_auto_plus_dood_fires(self):
-        self.assertEqual(len(active_warnings({"auto", "DooD"}, self.warnings)), 1)
+        self.assertEqual(len(active_warnings({"auto", "dood"}, self.warnings)), 1)
 
     def test_superset_still_fires(self):
-        self.assertEqual(len(active_warnings({"auto", "DooD", "web"}, self.warnings)), 1)
+        self.assertEqual(len(active_warnings({"auto", "dood", "web"}, self.warnings)), 1)
 
     def test_singles_dont_fire(self):
         self.assertEqual(active_warnings({"auto"}, self.warnings), [])
-        self.assertEqual(active_warnings({"DooD"}, self.warnings), [])
+        self.assertEqual(active_warnings({"dood"}, self.warnings), [])
 
     def test_empty_selection_no_warnings(self):
         self.assertEqual(active_warnings(set(), self.warnings), [])
+
+
+class TestPromptTags(unittest.TestCase):
+    """prompt_tags' post-form processing: the flat key list splits back into
+    axes (registry order) and the engine rides through untouched. The form
+    itself is patched — its interactive behavior is out of unit scope."""
+
+    def _run(self, form_result, current=AgentBuild(engine="poet")):
+        with patch.object(menu_picker, "checkbox_form", return_value=form_result):
+            return prompt_tags(REGISTRY, current)
+
+    def test_cancel_propagates_none(self):
+        self.assertIsNone(self._run(None))
+
+    def test_keys_split_into_axes(self):
+        build = self._run(["code", "auto", "no-sudo"])
+        self.assertEqual(build.professions, ("code",))
+        self.assertEqual(build.specialties, ("auto",))
+        self.assertEqual(build.policies, ("no-sudo",))
+
+    def test_engine_preserved_from_current(self):
+        self.assertEqual(self._run([]).engine, "poet")
+
+    def test_empty_selection_yields_bare_build(self):
+        build = self._run([])
+        self.assertEqual((build.professions, build.specialties, build.policies),
+                         ((), (), ()))
+
+
+class TestCascadeInForm(unittest.TestCase):
+    """The check-cascade wiring: simulate what the form's Space handler does
+    (toggle + cascade) using the pure pieces, against the real tree's
+    web→code edge."""
+
+    def test_checking_dependent_checks_requirement(self):
+        req = _form_requires(REGISTRY)
+        checked = {"web"} | requires_closure("web", req)
+        self.assertIn("code", checked)
+
+    def test_unchecking_requirement_identifies_dependents(self):
+        req = _form_requires(REGISTRY)
+        dependents = {k for k in ("web",) if "code" in requires_closure(k, req)}
+        self.assertEqual(dependents, {"web"})
+
+
+class TestFormRequires(unittest.TestCase):
+    def test_only_tags_with_requires_present(self):
+        req = _form_requires(REGISTRY)
+        self.assertIn("web", req)          # tree-nested under code
+        self.assertNotIn("code", req)      # top-level profession — no requires
+
+    def test_dood_layer_requires_code(self):
+        # dood's `_dood` image layer lives under profession/code/ — the
+        # specialty inherits the code requirement from its claimed layer.
+        self.assertEqual(_form_requires(REGISTRY).get("dood"), frozenset({"code"}))
 
 
 if __name__ == "__main__":

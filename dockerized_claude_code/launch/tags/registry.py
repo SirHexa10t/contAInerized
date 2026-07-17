@@ -59,10 +59,11 @@ class Registry:
                 return kind
         return None
 
-    def validate_build(self, build: AgentBuild, source: Path) -> None:
-        """Fail loud if a `.lego` (or, later, an instance-store entry) names a
-        tag that doesn't exist, or puts a tag on the wrong axis (a profession
-        listed under `specialties`, etc.). `source` names the file in errors."""
+    def validate_build(self, build: AgentBuild, source: Path | str) -> None:
+        """Fail loud if a `.lego` or an instance-store entry names a tag that
+        doesn't exist, or puts a tag on the wrong axis (a profession listed
+        under `specialties`, etc.). `source` names the file (or the store
+        entry, as a plain string like `instances.json[poet__x]`) in errors."""
         axis_checks = [
             (build.engine and [build.engine] or [], "engine", "engine"),
             (build.professions, "profession", "professions"),

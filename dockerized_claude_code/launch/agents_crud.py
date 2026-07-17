@@ -1,51 +1,38 @@
-"""Agent state CRUD: every operation that mutates the launcher's persistent
-agent state, plus the factories that turn raw on-disk state into the identity
-/ picker-entry shapes the rest of the launcher consumes.
+"""Agent state CRUD, tags edition: every operation that mutates the launcher's
+persistent per-instance state, plus the factories that turn on-disk state into
+the identity shapes the picker and run.py consume.
 
-Roughly grouped by section in this file:
+Sections:
   - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
-  - update_workspace_map / set_instance_modes — single-entry writers
-    (dangerous-combination warnings surface live in the mode form at
-    selection time — menu_picker.prompt_modes — not here at persist time)
-  - install_latest_md / delete_instance / modify_instance — per-instance
-    state-dir writers (install_latest_md composes the active-chain addendum
-    section onto the source `.md` body and writes the result as CLAUDE.md
-    in one go; memory_addendums.composed_addendum supplies the addendum)
-  - resolve_pick — name-string → identity factory used by run.py's CLI parsing
-  - creatable_agents — picker Create-row factory (returns list[AgentIdentity]).
-    The Cont-row factory lives in menu_picker (its row type is picker-only).
+  - persist_instance / delete_instance / modify_instance — instances.json
+    writers (load → mutate → save over tags.store) + state-dir lifecycle
+  - install_latest_md — source `.md` + chain-keyed addendum section →
+    state-dir CLAUDE.md in one overwrite (tags.addendums supplies the text)
+  - resolve_pick — name string → Agent (create) | Instance (cont) factory
+    used by run.py's CLI parsing
+  - creatable_agents / instance_from_store — picker-entry factories
+  - engine_sort_key — model-family ordering for picker rows (reads the
+    engine's ANTHROPIC_MODEL)
 
-The JSON map load/save primitives (load_workspace_map, save_modes_map, etc.)
-live in file_access with module-level caches that refresh on save — this
-module just imports them and uses the load-mutate-save pattern. structs.py
-owns the dataclasses themselves (plus the InstanceModifiers taxonomy used
-here for the auto+DooD warning and sort-key ordering); this module imports
-those and constructs the dataclasses (resolve_pick + the picker builders).
-Picker-side sort keys (agent_sort_key / mode_sort_key / tag_sort_key) live
-here too — they're picker concerns, not composition concerns, so they sit
-next to the picker-entry factories that consume them. Imports from
-file_access (parse + map I/O + load_conf for the family sort), paths (path
-constants), structs, utils, and stdlib; nothing from agent_modifiers_handler,
-run.py, or menu_picker — all of those import from here.
+Identity types (Agent / Instance) and the store primitives live in the tags
+package; this module wires them to the filesystem lifecycle. menu_picker and
+run.py import from here; nothing here imports them back.
 """
 
 import re
-from collections.abc import Iterable
-from pathlib import Path
 
-from .file_access import (
-    agent_md_index, force_remove, is_dir, iter_subdirs, load_conf,
-    load_modes_map, load_workspace_map, move_path, path_exists, read_text,
-    save_modes_map, save_workspace_map, write_text,
+from .file_access import force_remove, is_dir, iter_subdirs, move_path, path_exists, read_text, write_text
+from .paths import AGENTS_DIR, AGENTS_STATE, instance_state_dir_path
+from .tags import (
+    Agent, AgentBuild, Instance, Registry, addendums, load_agent, resolve_build,
+    store,
 )
-from .template_code.memory_addendums import composed_addendum
-from .paths import AGENTS_STATE, instance_state_dir_path
-from .structs import AgentIdentity, InstanceIdentity, InstanceModifiers, SESSION_SEP
+from .tags.identity import SESSION_SEP
 from .utils import ordering_index_or_end, prompt_keypress
 
 
 def list_all_instances() -> list[str]:
-    """Return every `{agent}__{session}` dir under AGENTS_STATE (filesystem order;
+    """Every `{agent}__{session}` dir under AGENTS_STATE (filesystem order;
     callers that need a specific order sort themselves). Empty list on a fresh
     install — iter_subdirs is None-safe so the missing-AGENTS_STATE case
     folds through naturally."""
@@ -53,119 +40,79 @@ def list_all_instances() -> list[str]:
 
 
 # ============================================================
-# Single-entry writers
+# instances.json writers (load → mutate → save over tags.store)
 # ============================================================
 
-def update_workspace_map(inst_id: InstanceIdentity) -> None:
-    """Persist (inst_id.instance → inst_id.workspace) in agent_workspace_map.json.
-    No-op if the entry is already set to this value — avoids rewriting the file on
-    every cont relaunch when the workspace hasn't changed."""
-    m = load_workspace_map()
-    if m.get(inst_id.instance) != inst_id.workspace:
-        m[inst_id.instance] = inst_id.workspace
-        save_workspace_map(m)
+def _build_of(inst: Instance) -> AgentBuild:
+    """The instance's axis selections as an AgentBuild (names), for storage."""
+    return AgentBuild(
+        engine=inst.engine.name if inst.engine else None,
+        professions=tuple(p.name for p in inst.professions),
+        specialties=tuple(s.name for s in inst.specialties),
+        policies=tuple(p.name for p in inst.policies),
+    )
 
 
-def _write_modes_entry(m: dict[str, list[str]], inst_id: InstanceIdentity) -> None:
-    """Mutate `m` (a modes-map dict) to reflect inst_id's modes for inst_id.instance:
-    set the list when modes are non-empty, pop the entry otherwise. Pure dict
-    mutation — callers bracket with their own load/save so a multi-edit pass
-    can batch into a single disk write (see modify_instance). Modes are
-    serialized as their `.value` strings (JSON-friendly); inst_id.modes is a
-    tuple of typed enum members on the in-memory side."""
-    if inst_id.modes:
-        m[inst_id.instance] = [mode.value for mode in inst_id.modes]
-    else:
-        m.pop(inst_id.instance, None)
+def persist_instance(inst: Instance) -> None:
+    """Write/replace this instance's store entry (workspace + all four axes).
+    Full-replacement semantics: the entry IS the instance's configuration;
+    `.lego` defaults only matter when no entry exists yet."""
+    mapping = store.load()
+    mapping[inst.instance] = store.build_entry(_build_of(inst), inst.workspace)
+    store.save(mapping)
 
 
-def set_instance_modes(inst_id: InstanceIdentity) -> None:
-    """Persist the modes list for an instance, taken off the passed InstanceIdentity
-    (which carries both the instance key and its resolved modes). An empty modes
-    tuple removes the entry from the map (we don't store empty entries — keeps the
-    file small and the 'no modes' case explicit by absence)."""
-    m = load_modes_map()
-    _write_modes_entry(m, inst_id)
-    save_modes_map(m)
-
-
-# ============================================================
-# Per-instance state-dir writers
-# ============================================================
-
-def install_latest_md(inst_id: InstanceIdentity) -> None:
-    """Write the agent's source `.md` plus the active-chain addendum section
-    into the state dir as CLAUDE.md, in a single overwrite. Refreshed each
-    launch so a source-side edit AND any modifier toggle both propagate
-    without a separate splice step. write_text auto-creates the destination's
-    parent directory tree. The result is launcher-owned: a stale wrapper or
-    legacy block from a previous launch is replaced wholesale, no marker-
-    based reconciliation needed."""
-    body = read_text(inst_id.md_path)
-    addendum = composed_addendum(inst_id.chain)
-    write_text(inst_id.state_md, f"{body}\n\n{addendum}" if addendum else body)
-
-
-def delete_instance(inst_id: InstanceIdentity) -> None:
-    """Remove this instance's state dir and its workspace + modes mapping entries.
-    Path removal goes through `force_remove(name=...)` which logs the removal
-    and handles root-owned Docker bind-mount leftovers via sudo. On failure,
-    the map entries are left in place (the instance still exists on disk) and
-    we gate on a keypress so the user reads the printed failure before the
-    picker redraws over it — the interactive pause lives here, not in the
-    file-access layer. Already-gone state dirs are treated as success so the
-    map entries are still cleaned up. Map writes are unconditional (mirrors
-    modify_instance's always-save shape); `dict.pop(key, None)` is idempotent
-    on a missing entry, and the extra file write on a no-op deletion is
-    negligible since this is interactive picker code."""
-    if not force_remove(inst_id.state_dir, name=inst_id.instance):
+def delete_instance(inst: Instance) -> None:
+    """Remove the instance's state dir and its store entry. Path removal goes
+    through `force_remove(name=...)` (logs; sudo fallback for root-owned
+    docker leftovers). On failure the store entry is left in place and we
+    gate on a keypress so the user reads the failure before the picker
+    redraws. Already-gone state dirs count as success so the entry still
+    gets cleaned up."""
+    if not force_remove(inst.state_dir, name=inst.instance):
         prompt_keypress(
-            header=f"Could not remove '{inst_id.instance}' — see the messages above.",
-            body=["Its workspace/modes map entries were left in place;",
+            header=f"Could not remove '{inst.instance}' — see the messages above.",
+            body=["Its instances.json entry was left in place;",
                   "remove the directory manually, then delete the instance again."],
         )
         return
-    workspace_map = load_workspace_map()
-    workspace_map.pop(inst_id.instance, None)
-    save_workspace_map(workspace_map)
-    modes_map = load_modes_map()
-    modes_map.pop(inst_id.instance, None)
-    save_modes_map(modes_map)
+    mapping = store.load()
+    mapping.pop(inst.instance, None)
+    store.save(mapping)
 
 
-def modify_instance(old_inst_id: InstanceIdentity, new_inst_id: InstanceIdentity) -> None:
-    """Move an instance's state dir to its new InstanceIdentity (renaming if the
-    instance id differs) and update both the workspace and modes mappings to
-    match. No-op for the rename if old and new ids match; the maps are always
-    rewritten so callers can change modes/workspace without renaming."""
-    renaming = new_inst_id.instance != old_inst_id.instance
-    if renaming:
-        if path_exists(new_inst_id.state_dir):
-            raise ValueError(f"Instance '{new_inst_id.instance}' already exists.")
-        move_path(old_inst_id.state_dir, new_inst_id.state_dir)
-    # workspace map
-    workspace_map = load_workspace_map()
-    if renaming:
-        workspace_map.pop(old_inst_id.instance, None)
-    workspace_map[new_inst_id.instance] = new_inst_id.workspace
-    save_workspace_map(workspace_map)
-    # modes map — single load/save (mirrors set_instance_modes' shape via the
-    # shared helpers so a rename costs one file write instead of two).
-    modes_map = load_modes_map()
-    if renaming:
-        modes_map.pop(old_inst_id.instance, None)
-    _write_modes_entry(modes_map, new_inst_id)
-    save_modes_map(modes_map)
+def modify_instance(old: Instance, new: Instance) -> None:
+    """Move an instance's state dir to its new identity (renaming when the id
+    differs) and replace its store entry. The entry is always rewritten so
+    callers can change axes/workspace without renaming."""
+    if new.instance != old.instance:
+        if path_exists(new.state_dir):
+            raise ValueError(f"Instance '{new.instance}' already exists.")
+        move_path(old.state_dir, new.state_dir)
+    mapping = store.load()
+    mapping.pop(old.instance, None)
+    mapping[new.instance] = store.build_entry(_build_of(new), new.workspace)
+    store.save(mapping)
 
 
 # ============================================================
-# Picker-entry sort keys
+# Per-instance state-dir writer
 # ============================================================
-# Used by creatable_agents (tag + family/version sort, here) and menu_picker's continuable_instances
-# (mode + family/version/session sort). Kept here rather than in agent_modifiers_handler
-# because they're picker output concerns — composition handlers don't sort
-# anything. Tag/mode position comes from InstanceModifiers (in structs);
-# ORDERED_MODEL_FAMILIES is picker-only so it lives here as a local constant.
+
+def install_latest_md(inst: Instance) -> None:
+    """Write the agent's source `.md` plus the active-chain addendum section
+    into the state dir as CLAUDE.md, in a single overwrite. Refreshed each
+    launch so a source-side edit AND any tag toggle both propagate. The
+    result is launcher-owned: whatever a previous launch wrote is replaced
+    wholesale, no marker-based reconciliation."""
+    body = read_text(inst.md_path)
+    addendum = addendums.compose(inst.chain)
+    write_text(inst.state_md, f"{body}\n\n{addendum}" if addendum else body)
+
+
+# ============================================================
+# Engine-model sort key (picker ordering)
+# ============================================================
 
 ORDERED_MODEL_FAMILIES = ["fable", "mythos", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last). mythos = fable's same-tier Project-Glasswing sibling, pre-added so a future mythos conf can't repeat the fable-sorted-last bug
 _FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
@@ -182,84 +129,72 @@ def parse_model_id(model: str) -> tuple[str, int, int] | None:
     return m.group(1), int(m.group(2)), int(m.group(3) or 0)
 
 
-def agent_sort_key(item: tuple[str, Path]) -> tuple[int, tuple[int, int], str]:
-    """Sort by family (ORDERED_MODEL_FAMILIES order — fable first, haiku last),
-    then version desc, then name asc. Agents whose .conf has no recognisable
-    model sink past all known families via the sentinel index."""
-    name, path = item
-    _, conf = load_conf(path)
-    family, major, minor = parse_model_id(conf.get("ANTHROPIC_MODEL", "")) or (None, 0, 0)
-    return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor), name)
+def engine_sort_key(model: str) -> tuple[int, tuple[int, int]]:
+    """Ordering fragment for an engine's ANTHROPIC_MODEL: family rank
+    (ORDERED_MODEL_FAMILIES — fable first, haiku last, unknown past the end),
+    then version descending. Callers append their own name tiebreak."""
+    family, major, minor = parse_model_id(model) or (None, 0, 0)
+    return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor))
 
 
-def tag_sort_key(tags: Iterable[InstanceModifiers]) -> tuple[int, ...]:
-    """Sort key for agents grouped by tag set, following InstanceModifiers.tags()
-    declaration order. Untagged () → empty tuple, which sorts before any non-
-    empty key. Tags are typed members here; we sort by each member's `.value`
-    position in tag_values() (preserves the InstanceModifiers declaration order)."""
-    return tuple(sorted(ordering_index_or_end(t.value, InstanceModifiers.tag_values()) for t in tags))
-
-
-def mode_sort_key(modes: Iterable[InstanceModifiers]) -> tuple[int, ...]:
-    """Sort key for instances grouped by mode set, following InstanceModifiers.modes()
-    declaration order. Mode-less () → empty tuple, which sorts before any non-empty
-    key. Modes are typed members here; we sort by each member's `.value` position
-    in mode_values() (preserves the InstanceModifiers declaration order)."""
-    return tuple(sorted(ordering_index_or_end(m.value, InstanceModifiers.mode_values()) for m in modes))
+def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], tuple[int, tuple[int, int]], str]:
+    """Create-row ordering: profession-less agents first (then by each
+    profession's registry position), engine model family/version within a
+    group, name as the tiebreak."""
+    prof_order = list(registry.professions)
+    prof_key = tuple(sorted(ordering_index_or_end(p, prof_order) for p in agent.build.professions))
+    engine = registry.engines.get(agent.build.engine or agent.name) or registry.engines.get("default")
+    model = engine.conf_map.get("ANTHROPIC_MODEL", "") if engine else ""
+    return (prof_key, engine_sort_key(model), agent.name)
 
 
 # ============================================================
-# Identity factories — name-string / disk-scan → identity
+# Identity factories — name string / disk state → Agent | Instance
 # ============================================================
 
-def resolve_pick(name: str | None) -> AgentIdentity | InstanceIdentity | None:
-    """Resolve a name string into an identity matching select_agent's return shape.
-    Two cases:
-        '<agent>__<session>' with a state dir on disk → InstanceIdentity (is_brand_new=False)
-        '<agent>'           with a matching .md       → AgentIdentity
-    Returns None if `name` is None / empty, or if neither match (orphan state
-    dir without .md, typo, etc.). The None-safe input lets parse_cli pass
-    `args.target` through without a guard.
+def instance_from_store(instance_id: str, registry: Registry) -> Instance | None:
+    """Rehydrate a stored/continuing instance: its store entry (or, for a
+    pre-store instance dir, its agent's `.lego` defaults) resolved into tag
+    objects. None when the agent's `.md` is gone (orphan state dir). A store
+    entry referencing an unknown tag fails loud via validate_build — same
+    contract as `.lego` references."""
+    agent_name, _, session = instance_id.partition(SESSION_SEP)
+    agent = load_agent(agent_name, AGENTS_DIR)
+    if agent is None:
+        return None
+    entry = store.load().get(instance_id)
+    build = store.entry_to_build(entry) if entry else agent.build
+    registry.validate_build(build, f"instances.json[{instance_id}]")
+    return Instance(
+        agent=agent_name,
+        md_path=agent.md_path,
+        session=session,
+        workspace=entry.get("workspace") if entry else None,
+        is_brand_new=False,
+        **resolve_build(build, agent_name, registry),
+    )
 
-    The cont path packages stored workspace + modes into the identity so the
-    downstream flow doesn't need a second pass over the maps; the workspace may
-    still be None (missing-map entry) — resolve_target validates / re-prompts.
-    Whether this is a brand-new vs continuing launch is encoded by the returned
-    type (and by is_brand_new for InstanceIdentity-shaped picks), so callers
-    don't carry a parallel `kind` string alongside.
 
-    Used by run.py's parse_cli to convert sys.argv[1] into the same shape the
-    picker would have returned, so launch's downstream flow is uniform."""
+def resolve_pick(name: str | None, registry: Registry) -> Agent | Instance | None:
+    """Resolve a CLI name string into what the picker would have returned:
+        '<agent>__<session>' with a state dir on disk → Instance (cont)
+        '<agent>'           with a matching `.md`     → Agent (create)
+    None if `name` is None/empty or neither matches (typo, orphan dir). The
+    None-safe input lets parse_cli pass `args.target` through unguarded."""
     if not name:
         return None
     if SESSION_SEP in name and is_dir(instance_state_dir_path(name)):
-        agent, _, session = name.partition(SESSION_SEP)
-        if agent in agent_md_index():
-            # JSON-load boundary for modes: convert each string → enum member
-            # via InstanceModifiers(s), which raises ValueError on unknowns
-            # (fail-fast for defective modes-map entries).
-            return InstanceIdentity(
-                agent=agent,
-                session=session,
-                workspace=load_workspace_map().get(name),
-                is_brand_new=False,
-                modes=tuple(InstanceModifiers.from_value(s) for s in load_modes_map().get(name, [])),
-            )
-    if name in agent_md_index():
-        return AgentIdentity(agent=name)
-    return None
+        inst = instance_from_store(name, registry)
+        if inst is not None:
+            return inst
+    return load_agent(name, AGENTS_DIR)
 
 
-def creatable_agents() -> list[AgentIdentity]:
-    """AgentIdentities for the picker's Create rows, sorted first by tag set
-    (untagged first, then groups ordered by each tag's position in InstanceModifiers.tags());
-    within each tag group, the existing model family/version sort applies.
-    `AgentIdentity.tags` / `.md_path` are properties (the md_path lookup
-    hits file_access.agent_md_index, parse_stem is cheap), so the sort doesn't need
-    a side cache."""
-    out = [AgentIdentity(agent=name) for name in agent_md_index()]
-    out.sort(key=lambda a: (
-        tag_sort_key(a.tags),                       # untagged sinks to top; rest follow InstanceModifiers.tags() positions
-        agent_sort_key((a.agent, a.md_path)),       # within each tag group: family/version/name
-    ))
+def creatable_agents(registry: Registry) -> list[Agent]:
+    """Agents for the picker's Create rows — every `.md` in AGENTS_DIR with
+    its `.lego` defaults attached, sorted by profession group then engine
+    capability then name."""
+    from .file_access import agent_md_index
+    out = [a for name in agent_md_index() if (a := load_agent(name, AGENTS_DIR))]
+    out.sort(key=lambda a: _agent_sort_key(a, registry))
     return out

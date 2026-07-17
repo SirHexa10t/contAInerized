@@ -184,11 +184,6 @@ class TestPathBuilderLambdas(unittest.TestCase):
             paths.DOCKER_DIR / "compose.code.yml",
         )
 
-    def test_agent_conf_path(self):
-        self.assertEqual(
-            paths.agent_conf_path("poet"),
-            paths.AGENTS_DIR / "poet.conf",
-        )
 
 
 if __name__ == "__main__":
