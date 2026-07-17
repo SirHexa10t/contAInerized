@@ -157,7 +157,7 @@ class TestProfession(TagTreeTestCase):
             "specialty/auto/tag.info": 'full_description = "a"\n',
             "specialty/_shared/helper.sh": "#!/bin/sh\n",
         })
-        self.assertEqual({s.name for s in Specialty.scan(root, {})}, {"auto"})
+        self.assertEqual({s.name for s in Specialty.scan(root, {}, {})}, {"auto"})
 
     def test_discover_layers(self):
         layers = Profession.discover_layers(self.full_tree())
@@ -190,7 +190,7 @@ class TestProfession(TagTreeTestCase):
 class TestSpecialty(TagTreeTestCase):
     def _specialties(self, root):
         layers = Profession.discover_layers(root)
-        return {s.name: s for s in Specialty.scan(root, layers)}
+        return {s.name: s for s in Specialty.scan(root, layers, {})}
 
     def test_fields_and_label(self):
         s = self._specialties(self.full_tree())["auto"]
@@ -378,7 +378,7 @@ class TestManifestParsing(TagTreeTestCase):
                 'env_forward = ["WHITELIST_ADDRESSES"]\n'
             ),
         })
-        (fw,) = Specialty.scan(root, {})
+        (fw,) = Specialty.scan(root, {}, {})
         d = fw.docker
         self.assertEqual(d.cap_add, ("NET_ADMIN",))
         self.assertEqual(d.env_forward, ("WHITELIST_ADDRESSES",))
@@ -393,7 +393,7 @@ class TestManifestParsing(TagTreeTestCase):
             "specialty/x/tag.docker": '[run]\nmounts = ["ghost.sh -> /bin/ghost.sh"]\n',
         })
         with self.assertRaisesRegex(TagError, "mount source 'ghost.sh' not found"):
-            Specialty.scan(root, {})
+            Specialty.scan(root, {}, {})
 
     def test_docker_malformed_mount_raises(self):
         root = self.tree({
@@ -401,7 +401,7 @@ class TestManifestParsing(TagTreeTestCase):
             "specialty/x/tag.docker": '[run]\nmounts = ["no arrow here"]\n',
         })
         with self.assertRaisesRegex(TagError, "not 'source -> target'"):
-            Specialty.scan(root, {})
+            Specialty.scan(root, {}, {})
 
     def test_docker_bare_entrypoint_must_exist(self):
         root = self.tree({
@@ -409,17 +409,17 @@ class TestManifestParsing(TagTreeTestCase):
             "specialty/x/tag.docker": '[run]\nentrypoint = "ghost.sh"\n',
         })
         with self.assertRaisesRegex(TagError, "entrypoint 'ghost.sh' not found"):
-            Specialty.scan(root, {})
+            Specialty.scan(root, {}, {})
 
     def test_wants_non_string_message_raises(self):
         root = self.tree({"specialty/x/tag.info": 'full_description="x"\n[wants]\nfirewall = 5\n'})
         with self.assertRaisesRegex(TagError, "wants.firewall must be a string"):
-            Specialty.scan(root, {})
+            Specialty.scan(root, {}, {})
 
     def test_malformed_toml_names_file(self):
         root = self.tree({"specialty/x/tag.info": 'full_description = "unterminated\n'})
         with self.assertRaisesRegex(TagError, r"tag\.info: cannot read TOML"):
-            Specialty.scan(root, {})
+            Specialty.scan(root, {}, {})
 
 
 # ============================================================
@@ -683,6 +683,103 @@ class TestAddendums(unittest.TestCase):
         self.assertEqual(reg.professions["web"].addendum[0], "Headless browser")
         self.assertEqual(reg.specialties["firewall"].addendum[0], "Firewall")
         self.assertIsNone(reg.specialties["auto"].addendum)
+
+
+class TestWorkspaceReadonly(TagTreeTestCase):
+    """The `workspace_readonly` specialty field ({ro}) → Instance property
+    that docker_config reads for the /workspace mount mode."""
+
+    def test_field_parsed_from_tag_info(self):
+        (s,) = Specialty.scan(self.tree({
+            "specialty/read-only/tag.info": 'full_description = "ro"\nworkspace_readonly = true\n',
+        }), {}, {})
+        self.assertTrue(s.workspace_readonly)
+
+    def test_field_defaults_false(self):
+        (s,) = Specialty.scan(self.tree({
+            "specialty/plain/tag.info": 'full_description = "x"\n',
+        }), {}, {})
+        self.assertFalse(s.workspace_readonly)
+
+    def test_instance_property_true_when_any_specialty_asks(self):
+        reg = scan_all(_REAL_AGENTS_DIR())
+        from launch.tags import Instance, resolve_build, AgentBuild
+        from pathlib import Path as _P
+        inst = Instance(agent="x", md_path=_P("/fake/x.md"), session="s",
+                        workspace="/w", is_brand_new=False,
+                        **resolve_build(AgentBuild(specialties=("read-only",)), "x", reg))
+        self.assertTrue(inst.workspace_readonly)
+
+    def test_instance_property_false_without_it(self):
+        reg = scan_all(_REAL_AGENTS_DIR())
+        from launch.tags import Instance, resolve_build, AgentBuild
+        from pathlib import Path as _P
+        inst = Instance(agent="x", md_path=_P("/fake/x.md"), session="s",
+                        workspace="/w", is_brand_new=False,
+                        **resolve_build(AgentBuild(specialties=("auto",)), "x", reg))
+        self.assertFalse(inst.workspace_readonly)
+
+
+def _REAL_AGENTS_DIR():
+    from launch.paths import AGENTS_DIR
+    return AGENTS_DIR
+
+
+class TestPolicyFragments(TagTreeTestCase):
+    """Hidden `policy/_<name>` fragments — a settings fragment a same-named
+    specialty claims (the policy-tree twin of `_<name>` image layers). How
+    `{ro}` bundles its Write/Edit deny."""
+
+    def test_discover_finds_underscore_fragments(self):
+        agents = self.tree({"policy/_read-only/policy.json": '{"permissions": {"deny": ["Write"]}}'})
+        frags = Policy.discover_fragments(agents)
+        self.assertEqual(set(frags), {"read-only"})
+
+    def test_offered_policies_exclude_underscore_dirs(self):
+        agents = self.tree({"policy/_read-only/policy.json": '{"permissions": {"deny": ["Write"]}}'})
+        self.assertEqual(Policy.scan(agents), [])   # hidden — not offered
+
+    def test_fragment_with_tag_info_raises(self):
+        agents = self.tree({
+            "policy/_bad/policy.json": "{}",
+            "policy/_bad/tag.info": 'full_description = "no"\n',
+        })
+        with self.assertRaisesRegex(TagError, "must not contain tag.info"):
+            Policy.discover_fragments(agents)
+
+    def test_fragment_missing_json_raises(self):
+        agents = self.tree({"policy/_bad/placeholder": ""})
+        with self.assertRaisesRegex(TagError, "missing policy.json"):
+            Policy.discover_fragments(agents)
+
+    def test_specialty_claims_same_named_fragment(self):
+        agents = self.tree({
+            "specialty/read-only/tag.info": 'full_description = "ro"\nworkspace_readonly = true\n',
+            "policy/_read-only/policy.json": '{"permissions": {"deny": ["Write", "Edit"]}}',
+        })
+        reg = scan_all(agents)
+        ro = reg.specialties["read-only"]
+        self.assertEqual(ro.policy_dir.name, "_read-only")
+        self.assertEqual(ro.load_fragment(), {"permissions": {"deny": ["Write", "Edit"]}})
+
+    def test_unclaimed_fragment_fails_scan(self):
+        agents = self.tree({"policy/_orphan/policy.json": "{}"})   # no specialty 'orphan'
+        with self.assertRaisesRegex(TagError, "no matching specialty"):
+            scan_all(agents)
+
+    def test_specialty_without_fragment_loads_empty(self):
+        agents = self.tree({"specialty/auto/tag.info": 'full_description = "a"\n'})
+        (s,) = Specialty.scan(agents, {}, Policy.discover_fragments(agents))
+        self.assertEqual(s.load_fragment(), {})
+
+    def test_real_tree_read_only_bundles_both(self):
+        # The shipped {ro} specialty mounts :ro AND claims the _read-only
+        # fragment that denies the edit tools — one tag, defense in depth.
+        reg = scan_all(_REAL_AGENTS_DIR())
+        ro = reg.specialties["read-only"]
+        self.assertTrue(ro.workspace_readonly)
+        self.assertEqual(ro.load_fragment(), {"permissions": {"deny": ["Write", "Edit", "NotebookEdit"]}})
+        self.assertNotIn("read-only", reg.policies)   # the fragment is not an offered policy
 
 
 if __name__ == "__main__":

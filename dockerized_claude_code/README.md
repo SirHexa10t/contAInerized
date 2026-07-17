@@ -35,7 +35,8 @@ isolated Docker container with persistent per-instance state.
     adds Rust + Node + uv; `[web]` adds the playwright CLI).
   - `{specialty}` — exceptional access or running conditions: `{auto}` skips
     permission prompts, `{firewall}` applies an iptables outbound whitelist,
-    `{dood}` bind-mounts the host's Docker socket.
+    `{dood}` bind-mounts the host's Docker socket, `{ro}` mounts the
+    workspace read-only (and denies the edit tools) for reviewers.
   - `<policy>` — what it's permitted to do: a Claude Code settings fragment
     (`<+qry>` allows WebSearch/WebFetch, `<-su>` denies sudo, `<!plan>`
     mandates plan mode), merged and mounted read-only so the agent can't
@@ -331,7 +332,19 @@ punctuation — `firewall` displays as `{frwl}`, `web-research` as
 `<+qry>`), and an optional `[addendum]` table (`title` + `body`) injected
 into CLAUDE.md while the tag is active — bodies may use the launcher
 placeholders published in `launch/tags/addendums.py`. Policies also carry
-`is_enhancing_security` (drives the blue/orange coloring).
+`stance` (`"allow"` / `"deny"` / `"obligation"` → orange / blue / white);
+specialties carry `warn`, `claude_args`, and `workspace_readonly` (the
+`{ro}` flag). A specialty can also claim a hidden `policy/_<name>` settings
+fragment — that's how `{ro}` bundles the workspace `:ro` mount with a
+Write/Edit/NotebookEdit tool-deny in one tag (the policy-tree analogue of
+how `{dood}` claims its `_dood` image layer).
+
+**Editor association:** the launcher's own config files are all TOML —
+`*.lego`, `tag.info`, `tag.docker`, `combos.info`, and `instances.toml`.
+Point your editor at the TOML grammar for those extensions/filenames to get
+syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
+"toml", "*.info": "toml", "*.docker": "toml"}`). `engine.conf` is dotenv
+(`KEY=value`), and `policy.json` is JSON.
 
 ## Persistent State Layout
 

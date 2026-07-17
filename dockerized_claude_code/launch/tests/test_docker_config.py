@@ -181,20 +181,20 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         return recorded
 
     def test_workspace_set_uses_provided_path(self):
-        inst_id = SimpleNamespace(workspace="/some/host/path", state_dir=Path("/tmp/state"))
+        inst_id = SimpleNamespace(workspace="/some/host/path", state_dir=Path("/tmp/state"), workspace_readonly=False)
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], "/some/host/path")
 
     def test_workspace_none_falls_back_to_default(self):
-        inst_id = SimpleNamespace(workspace=None, state_dir=Path("/tmp/state"))
+        inst_id = SimpleNamespace(workspace=None, state_dir=Path("/tmp/state"), workspace_readonly=False)
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
     def test_workspace_empty_string_falls_back_to_default(self):
         # `or` covers None AND empty string — both treated as "no workspace".
-        inst_id = SimpleNamespace(workspace="", state_dir=Path("/tmp/state"))
+        inst_id = SimpleNamespace(workspace="", state_dir=Path("/tmp/state"), workspace_readonly=False)
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
@@ -202,11 +202,26 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
     def test_generated_settings_mounted_read_only(self):
         # The launcher-generated settings file shadows the state-dir's rw
         # view of ~/.claude/settings.json — the leash the agent can't undo.
-        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"))
+        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"), workspace_readonly=False)
         mounts = self._capture_mounts(inst_id)
         settings_pair = next(p for p in mounts if "settings.json" in p[1])
         self.assertEqual(settings_pair[0], "/tmp/state/settings.json")
         self.assertTrue(settings_pair[1].endswith(":ro"))
+
+    def test_readonly_specialty_mounts_workspace_ro(self):
+        # A workspace_readonly specialty ({ro}) makes the /workspace mount
+        # :ro; the state dir stays writable (Claude Code writes history there).
+        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"), workspace_readonly=True)
+        mounts = self._capture_mounts(inst_id)
+        ws = next(p for p in mounts if p[1].startswith("/workspace"))
+        self.assertEqual(ws, ("/w", "/workspace:ro"))
+        state = next(p for p in mounts if p[1] == "/home/claude/.claude")  # CLAUDE_CONFIG_IN_CONTAINER
+        self.assertFalse(state[1].endswith(":ro"))
+
+    def test_workspace_read_write_by_default(self):
+        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"), workspace_readonly=False)
+        mounts = self._capture_mounts(inst_id)
+        self.assertIn(("/w", "/workspace"), mounts)
 
 
 class TestAddDockerMountCollisions(unittest.TestCase):

@@ -7,10 +7,17 @@ specialty). Defined by `agents/policy/<name>/` with a `tag.info`
 
 At launch the selected policies' fragments deep-merge with the shared
 settings template into a per-instance `settings.json`, bind-mounted
-read-only so the agent can't act outside given limite. `merge_fragments` is
-that pure merge (built + tested now, consumed in P2): dicts recurse, lists
-concatenate + dedupe, scalar conflicts abort loudly (silent last-wins would
-make policy combinations order-dependent).
+read-only so the agent can't act outside given limits. `merge_fragments` is
+that pure merge: dicts recurse, lists concatenate + dedupe, scalar conflicts
+abort loudly (silent last-wins would make policy combinations
+order-dependent).
+
+A `_<name>` dir under `agents/policy/` is a **hidden fragment** — not an
+offered policy, but a settings fragment a same-named *specialty* claims and
+merges as part of its own contribution (the policy-tree analogue of the
+profession tree's `_<name>` image layers). `discover_fragments` finds them;
+`Specialty.scan` claims them. That's how `{ro}` bundles a hard `/workspace`
+`:ro` mount with the soft Write/Edit/NotebookEdit tool-deny in one tag.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .base import Tag, TagError, common_fields, is_hidden_asset_dir
+from .base import HIDDEN_PREFIX, INFO_FILE, Tag, TagError, common_fields, is_hidden_asset_dir
 
 POLICY_FILE = "policy.json"
 
@@ -50,7 +57,27 @@ class Policy(Tag):
         """(Re)read this policy's `policy.json`. Validated at scan time, so
         this is safe to call in the launch path; kept as a method rather than
         a stored dict to keep the frozen record hashable."""
-        return _read_fragment(self.path / POLICY_FILE)
+        return read_fragment(self.path / POLICY_FILE)
+
+    @classmethod
+    def discover_fragments(cls, agents_dir: Path) -> dict[str, Path]:
+        """Find every `_<name>` hidden fragment dir under `agents/policy/` and
+        return `{name: dir}` (underscore stripped). Each is a specialty-owned
+        settings fragment: it must hold a valid `policy.json` and must NOT
+        carry a `tag.info` (it's an asset, not an offered tag). The
+        profession-tree `_<name>` layers are the image-side twin of this."""
+        root = agents_dir / cls.root
+        out: dict[str, Path] = {}
+        if not root.is_dir():
+            return out
+        for d in sorted(root.iterdir(), key=lambda p: p.name):
+            if not d.is_dir() or not d.name.startswith(HIDDEN_PREFIX):
+                continue
+            if (d / INFO_FILE).is_file():
+                raise TagError(f"{d}: a hidden policy fragment ('_'-prefixed) must not contain {INFO_FILE}")
+            read_fragment(d / POLICY_FILE)   # validate now; discard
+            out[d.name[len(HIDDEN_PREFIX):]] = d
+        return out
 
     @classmethod
     def scan(cls, agents_dir: Path) -> list["Policy"]:
@@ -68,7 +95,7 @@ class Policy(Tag):
                 continue   # `_`-dir → skip; a stray non-tag dir raises inside is_hidden_asset_dir
             fields = common_fields(tag_dir)
             info = fields.pop("_info")
-            _read_fragment(tag_dir / POLICY_FILE)   # validate now; discard
+            read_fragment(tag_dir / POLICY_FILE)   # validate now; discard
             raw_stance = info.get("stance", PolicyStance.ALLOW.value)
             try:
                 stance = PolicyStance(raw_stance)
@@ -81,9 +108,10 @@ class Policy(Tag):
         return out
 
 
-def _read_fragment(path: Path) -> dict[str, Any]:
+def read_fragment(path: Path) -> dict[str, Any]:
     """Parse a `policy.json`; must exist and be a JSON object. Fail loud
-    (TagError naming the path) otherwise."""
+    (TagError naming the path) otherwise. Shared by the Policy scanner and by
+    specialties that claim a hidden `_<name>` fragment."""
     if not path.is_file():
         raise TagError(f"{path.parent}: policy is missing {POLICY_FILE}")
     try:

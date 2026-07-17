@@ -91,6 +91,28 @@ Bedrock-backed agent — within the agent's .conf file, embed an alternative API
 
 
 
+**Professions** `[ ]` (image layers — the highest-value gap, since these are pure Dockerfile + `tag.docker`, no launcher code):
+- `[data]` — pandas / polars / duckdb / jupyter / csvkit. For data-pipeline and analysis work.
+- `[infra]` — terraform / kubectl / helm / ansible baked in. For infra / devops agents. (Distinct from the optional-creds path, which only mounts *credentials* — this bakes the *tools*.)
+- `[media]` — ffmpeg / imagemagick / yt-dlp, for media / download agents.
+- `[docs]` — pandoc / LaTeX / mermaid-cli, for doc-heavy agents.
+
+**Policies** `< >` (settings fragments — cheap, no image cost):
+- `<-rm>` (deny) — block destructive shell: `Bash(rm -rf *)`, `Bash(git clean *)`, etc. A guardrail short of full `{frozen}`.
+- `<-secrets>` (deny) — `Read` denies on `**/.env`, `**/.aws/**`, `**/credentials*` — keep an agent's eyes off secret files.
+- `<!edits>` (obligation) — `defaultMode: acceptEdits`: auto-accept file edits but still prompt for bash. The natural middle rung between normal and `{auto}`.
+- `<+read>` (allow) — allow all `Read`/`Glob`/`Grep` without prompts; a milder autonomy than `<+bash>`.
+
+**Specialties** `{ }`:
+- `{persist-home}` — bind-mount a host dir at `~/.local` so tools an agent installs survive across launches. Feasible today via `tag.docker` `[run] mounts`.
+- `{scratch}` — mount a big host scratch dir at `/scratch` for large intermediates. Also just a `tag.docker` mount.
+- `{gpu}` (`--gpus all`) and `{net-host}` (`--network=host` at run) — genuinely useful for ML / local-server-testing agents, **but they need a `tag.docker` extension**: `[run]` currently models `cap_add`/`entrypoint`/`mounts`/`env_forward`, not arbitrary `docker run` flags. Adding a small `run_flags` list (or named `gpus`/`network` fields) is the extension point — ~an afternoon, and then both become pure data.
+
+**Engines** `( )` (conf variations only):
+- `(draft)` — sonnet/haiku at low effort, thinking off: fast cheap iteration, a rung below `(poet)`.
+- `(delegator)` — sets `CLAUDE_CODE_SUBAGENT_MODEL` to a cheap model so an agent that fans out many subagents keeps them inexpensive while the main loop stays premium.
+
+
 
 
 

@@ -20,10 +20,10 @@ Four kinds (closed set — classes in `launch/tags/`), members open (folders und
 |---|---|---|---|
 | engine | `( )` | `engine.conf` env budget (model/effort); nested dirs overlay parent conf | default, golem, poet, thinker, researcher, breakthrough |
 | profession | `[ ]` | Dockerfile image layer (+`tag.docker` build-args); nesting ⇒ requirement | code, code/web |
-| specialty | `{ }` | `warn`, `claude_args`, `[wants]`; optional hidden `_<name>` image layer in the profession tree; `tag.docker` run config | auto (skip-permissions, wants firewall), firewall (iptables whitelist, run-only), dood (docker socket, `_dood` layer under code/) |
-| policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (obligation) | web-research `<+qry>`, no-sudo `<-su>`, read-only `<-write>`, no-net `<-net>`, vcs-safe `<-push>`, plan-first `<!plan>`, free-bash `<+bash>` |
+| specialty | `{ }` | `warn`, `claude_args`, `workspace_readonly`, `[wants]`; optional hidden `_<name>` image layer in the profession tree; `tag.docker` run config | auto (skip-permissions, wants firewall), firewall (iptables whitelist, run-only), dood (docker socket, `_dood` image layer under code/), read-only (`{ro}` — `/workspace` :ro + claims the hidden `policy/_read-only` fragment denying Write/Edit) |
+| policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (obligation) | web-research `<+qry>`, no-sudo `<-su>`, no-net `<-net>`, vcs-safe `<-push>`, plan-first `<!plan>`, free-bash `<+bash>` (plus the hidden `_read-only` fragment, owned by the `{ro}` specialty) |
 
-`agents/specialty/combos.info` holds multi-tag warnings (dood+auto). STRICT tree rule: a non-`_` dir in a kind subtree MUST have `tag.info`; `_` dirs are hidden assets (image layers). `scan_all(AGENTS_DIR)` → `Registry`, fail-loud cross-validation at startup.
+`agents/specialty/combos.info` holds multi-tag warnings (dood+auto). STRICT tree rule: a non-`_` dir in a kind subtree MUST have `tag.info`; `_` dirs are hidden assets (image layers or specialty-claimed policy fragments). `scan_all(AGENTS_DIR)` → `Registry`, fail-loud cross-validation at startup.
 
 ### Project Structure
 
@@ -90,7 +90,7 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 
 ### Current State
 
-- The tags rewrite (design: `refactoring-replan.md`) is COMPLETE and launch-verified: tree migration, `.lego` files, code flip, plain-docker flip with the auto/firewall split, policy RO-mounts, TOML store with isolated migrations, terminology sweep, docs refresh. Replan §14 still lists open design TODOs (policy coloring duality, engine selection in the form, hard read-only workspaces, poet/golem lego default grants); `refactoring_plan.md` + `TODO.txt` are older idea archives.
+- The tags rewrite (design: `refactoring-replan.md`) is COMPLETE and launch-verified: tree migration, `.lego` files, code flip, plain-docker flip with the auto/firewall split, policy RO-mounts, TOML store with isolated migrations, terminology sweep, docs refresh. Replan §14/§15 are all resolved (see the doc's status banner); `refactoring_plan.md` + `TODO.txt` are older idea archives.
 - First launch on a pre-rewrite state dir auto-folds the legacy `agent_workspace_map.json` + `agent_modes_map.json` into `instances.toml` (renaming them `*.pre-rewrite.bak`); legacy `auto` translates to `auto`+`firewall` (it used to bundle the firewall).
 - `ISSUES.md` is the live tracker (currently: no open decisions).
 

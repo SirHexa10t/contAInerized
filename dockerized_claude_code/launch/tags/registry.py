@@ -91,26 +91,27 @@ def _by_name(tags: list, kind_label: str) -> dict:
 
 
 def scan_all(agents_dir: Path) -> Registry:
-    """Discover + validate the whole tree. Order matters: hidden layers first
-    (specialties consume them), then the four kinds, then combos; finally the
-    cross-cutting validation pass."""
+    """Discover + validate the whole tree. Order matters: hidden assets first
+    (image layers + policy fragments — specialties consume them), then the
+    four kinds, then combos; finally the cross-cutting validation pass."""
     layers = Profession.discover_layers(agents_dir)
+    fragments = Policy.discover_fragments(agents_dir)
     reg = Registry(
         engines=_by_name(Engine.scan(agents_dir), "engine"),
         professions=_by_name(Profession.scan(agents_dir), "profession"),
-        specialties=_by_name(Specialty.scan(agents_dir, layers), "specialty"),
+        specialties=_by_name(Specialty.scan(agents_dir, layers, fragments), "specialty"),
         policies=_by_name(Policy.scan(agents_dir), "policy"),
         combos=tuple(scan_combos(agents_dir)),
     )
-    _validate(reg, layers)
+    _validate(reg, layers, fragments)
     return reg
 
 
-def _validate(reg: Registry, layers: dict[str, Layer]) -> None:
+def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path]) -> None:
     """Cross-cutting checks no single scanner can make (fail loud on the
     first fault):
       - names unique across ALL kinds (one namespace);
-      - every hidden layer is claimed by exactly one specialty;
+      - every hidden layer / policy fragment is claimed by exactly one specialty;
       - `requires` (tree-derived) resolve to real professions;
       - `wants` and combo references resolve to real tags (any kind)."""
     # Global name uniqueness across kinds.
@@ -121,10 +122,13 @@ def _validate(reg: Registry, layers: dict[str, Layer]) -> None:
                 raise TagError(f"tag name '{name}' used by both {seen[name]} and {kind} — names must be unique across kinds")
             seen[name] = kind
 
-    # Every hidden layer must be claimed by a same-named specialty.
+    # Every hidden asset must be claimed by a same-named specialty.
     for layer_name in layers:
         if layer_name not in reg.specialties:
             raise TagError(f"hidden layer '_{layer_name}' has no matching specialty '{layer_name}'")
+    for fragment_name in fragments:
+        if fragment_name not in reg.specialties:
+            raise TagError(f"hidden policy fragment 'policy/_{fragment_name}' has no matching specialty '{fragment_name}'")
 
     # requires resolve to professions (professions nest under professions;
     # specialties inherit their layer's profession ancestors).

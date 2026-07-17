@@ -110,7 +110,11 @@ For each common addition, place it where the rest of the project would expect.
   `tag.docker` naming the build-args the Dockerfile consumes). Nest under
   another profession to declare a requirement (`code/web/` ⇒ web requires code).
 - **Specialty**: `agents/specialty/<name>/tag.info` (`short_description`,
-  `full_description`, `warn`, `claude_args`, `[wants]`, `[addendum]`). Image layer, if any: a hidden
+  `full_description`, `warn`, `claude_args`, `workspace_readonly`, `[wants]`,
+  `[addendum]`). May claim two hidden same-named assets: a `_<name>` image
+  layer in the profession tree (→ `requires` + Dockerfile) and/or a
+  `policy/_<name>/policy.json` settings fragment (merged like a policy). See
+  `{ro}` for both-flavored (mount + fragment); `{dood}` for the layer. Image layer, if any: a hidden
   `_<name>/Dockerfile` under the profession it depends on. Static container
   config (mounts, `cap_add`, `entrypoint`, `env_forward`) goes in `tag.docker`.
   Multi-tag warnings go in `agents/specialty/combos.info`.

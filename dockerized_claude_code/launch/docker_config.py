@@ -352,8 +352,15 @@ def set_container_mounts(inst_id: Instance) -> None:
     Workspace fallback: if `inst_id.workspace` is None (stale store entry that
     survived all the upstream prompts, or a session constructed without a
     workspace), default to DEFAULT_WORKSPACE so the bind-mount still resolves
-    to a real host directory rather than crashing the docker invocation."""
-    add_docker_mount(inst_id.workspace or DEFAULT_WORKSPACE, "/workspace")
+    to a real host directory rather than crashing the docker invocation.
+
+    Workspace access mode: read-only when a `workspace_readonly` specialty
+    (e.g. `{frozen}`) is active — the mount itself denies writes, a harder
+    guarantee than the `read-only` policy's harness-level tool denial. The
+    state dir stays read-write regardless (Claude Code writes history/memory
+    there)."""
+    workspace_target = "/workspace" + (f":{RO_MOUNT_OPTION}" if inst_id.workspace_readonly else "")
+    add_docker_mount(inst_id.workspace or DEFAULT_WORKSPACE, workspace_target)
     add_docker_mount(inst_id.state_dir, CLAUDE_CONFIG_IN_CONTAINER)
     add_docker_mount(state_settings_path(inst_id.state_dir),
                      f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}")

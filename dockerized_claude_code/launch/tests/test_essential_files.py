@@ -17,7 +17,7 @@ from launch.tags import load_lego, scan_all
 # the rest are data-only ({auto} = claude_args + wants; [web]'s playwright
 # cache rides [code]'s ~/.cache mount).
 HANDLER_TAGS = ["code", "dood", "firewall"]
-DATA_ONLY_TAGS = ["web", "auto"]
+DATA_ONLY_TAGS = ["web", "auto", "read-only"]   # read-only's effects (workspace :ro + claimed policy fragment) are data, not a handler
 
 
 class TestRepoLayout(unittest.TestCase):

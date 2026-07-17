@@ -100,9 +100,14 @@ def install_settings(inst: Instance) -> None:
     `~/.claude/settings.json` in-container, so the agent reads its policies
     but can't relax them (the mount shadows the state-dir's rw view of the
     same path). Policy-vs-policy or policy-vs-base scalar conflicts abort
-    the launch via merge_fragments' TagError, naming both culprits."""
+    the launch via merge_fragments' TagError, naming both culprits.
+
+    Specialties that claim a hidden `policy/_<name>` fragment (e.g. `{ro}`)
+    contribute it here too, alongside the selected policies — same merge, so
+    a specialty fragment that conflicts with a policy is caught the same way."""
     fragments = [(BASE_SETTINGS_FILE.name + " (base)", json.loads(read_text(BASE_SETTINGS_FILE)))]
     fragments += [(p.name, p.load_fragment()) for p in inst.policies]
+    fragments += [(s.name, s.load_fragment()) for s in inst.specialties if s.policy_dir]
     merged = merge_fragments(fragments)
     write_text(state_settings_path(inst.state_dir), json.dumps(merged, indent=2, sort_keys=True) + "\n")
 

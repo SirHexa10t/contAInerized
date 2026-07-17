@@ -180,6 +180,14 @@ class Instance:
         return self.engine.conf_map if self.engine else {}
 
     @property
+    def workspace_readonly(self) -> bool:
+        """True when any active specialty asks for the workspace mounted
+        read-only (the hard `{frozen}`-style guarantee — the agent physically
+        cannot write to the project). docker_config.set_container_mounts reads
+        this to pick the `/workspace` mount's access mode."""
+        return any(s.workspace_readonly for s in self.specialties)
+
+    @property
     def claude_args(self) -> list[str]:
         """CLI args contributed by the selected specialties (e.g. auto's
         `--dangerously-skip-permissions`), in chain order."""

@@ -1,0 +1,5 @@
+fullname           = "read-only workspace"
+shortname          = "ro"
+short_description  = "workspace read-only, edits denied"
+full_description   = "Locks the agent out of writing to your project, two ways at once: /workspace is mounted read-only (the kernel refuses writes — the agent cannot create, edit, or delete project files even via Bash), AND the Write/Edit/NotebookEdit tools are denied at the harness level (the claimed _read-only policy fragment). Defense in depth for reviewers, auditors, and investigators. The agent's own state (history, memory) lives outside the workspace and stays writable."
+workspace_readonly = true
