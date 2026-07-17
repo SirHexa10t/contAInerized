@@ -20,24 +20,35 @@ run_container (terminal title); nothing else does."""
 
 from .file_access import read_json_field
 from .paths import ACCOUNT_FILE
-from .tags import Instance, Tag
+from .tags import Instance, PolicyStance, Tag
 
-# Warning-aware tag colors for the status line. The two opening codes are
-# 8 bytes each by design — rich's markdown-table column-width detection counts
-# bytes including escapes, so unequal-length codes would shift columns.
+# Field-driven tag colors for the status line — same dispatch as the picker's
+# `_tag_style` (menu_picker), in raw ANSI: warn-flagged specialties bright
+# red; policies by stance (DENY blue, ALLOW orange, OBLIGATION bold white);
+# everything else bright green.
 _WARN_ANSI = "\033[01;91m"
 _SAFE_ANSI = "\033[22;92m"
 _RESET_ANSI = "\033[0m"
+_STANCE_ANSI = {
+    PolicyStance.ALLOW:      "\033[38;5;208m",
+    PolicyStance.DENY:       "\033[01;94m",
+    PolicyStance.OBLIGATION: "\033[01;97m",
+}
+
+
+def _tag_ansi(tag: Tag) -> str:
+    if getattr(tag, "warn", False):
+        return _WARN_ANSI
+    stance = getattr(tag, "stance", None)
+    if stance is not None:
+        return _STANCE_ANSI[stance]
+    return _SAFE_ANSI
 
 
 def colored_tag_chain(tags: tuple[Tag, ...]) -> str:
-    """Space-separated ANSI-colored tag labels: bright red for warn-flagged
-    specialties (auto, dood), bright green otherwise. Each label self-resets
-    so consecutive labels don't bleed colour."""
-    return " ".join(
-        f"{_WARN_ANSI if getattr(t, 'warn', False) else _SAFE_ANSI}{t.label}{_RESET_ANSI}"
-        for t in tags
-    )
+    """Space-separated ANSI-colored tag labels (see _tag_ansi for the color
+    dispatch). Each label self-resets so consecutive labels don't bleed."""
+    return " ".join(f"{_tag_ansi(t)}{t.label}{_RESET_ANSI}" for t in tags)
 
 
 def build_status_line(inst: Instance) -> str:

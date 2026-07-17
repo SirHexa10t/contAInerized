@@ -1,1 +1,3 @@
-description = "Most-resourced tier — long reasoning chains, large reads, specialized tool discovery (algorithm invention, NP-hard attack, novel-approach problem-solving)."
+shortname         = "💡"
+short_description = "most-resourced reasoning"
+full_description  = "Most-resourced tier — long reasoning chains, large reads, specialized tool discovery (algorithm invention, NP-hard attack, novel-approach problem-solving)."

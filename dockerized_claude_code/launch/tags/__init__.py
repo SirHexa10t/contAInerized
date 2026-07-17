@@ -19,10 +19,11 @@ Public surface:
 from .base import DockerContribution, Tag, TagError
 from .engine import Engine
 from .identity import (
-    Agent, Instance, agent_md_path, image_chain, load_agent, resolve_build,
+    Agent, Instance, agent_md_path, effective_engine_name, image_chain,
+    load_agent, resolve_build,
 )
 from .lego import AgentBuild, load_lego
-from .policy import Policy, merge_fragments
+from .policy import Policy, PolicyStance, merge_fragments
 from .profession import Layer, Profession
 from .registry import Registry, scan_all
 from .specialty import Combo, Specialty, scan_combos
@@ -30,10 +31,11 @@ from . import addendums, migrations, store
 
 __all__ = [
     "Tag", "DockerContribution", "TagError",
-    "Engine", "Profession", "Specialty", "Policy",
+    "Engine", "Profession", "Specialty", "Policy", "PolicyStance",
     "Layer", "Combo", "scan_combos", "merge_fragments",
     "AgentBuild", "load_lego",
     "Registry", "scan_all",
     "Agent", "Instance", "image_chain", "resolve_build", "agent_md_path",
+    "effective_engine_name",
     "load_agent", "store", "migrations", "addendums",
 ]

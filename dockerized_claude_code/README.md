@@ -37,15 +37,18 @@ isolated Docker container with persistent per-instance state.
     permission prompts, `{firewall}` applies an iptables outbound whitelist,
     `{dood}` bind-mounts the host's Docker socket.
   - `<policy>` — what it's permitted to do: a Claude Code settings fragment
-    (`<+query>` allows WebSearch/WebFetch, `<-su>` denies sudo), merged and
-    mounted read-only so the agent can't relax its own leash.
+    (`<+qry>` allows WebSearch/WebFetch, `<-su>` denies sudo, `<!plan>`
+    mandates plan mode), merged and mounted read-only so the agent can't
+    redefine its limits. Colored by stance: orange grants, blue denies,
+    white obligates.
 
   Adding a member is a folder with a `tag.info` (and optionally a
   `Dockerfile` / `tag.docker` / `policy.json`) — no launcher code. Tree
   position encodes requirements: `profession/code/web/` means `[web]`
-  requires `[code]`. Selections are made in a checkbox form at
-  create/modify time (requirements auto-check; risky picks and unmet
-  companion requests warn in red) and persist per instance.
+  requires `[code]`. Selections are made in a kind-sectioned form at
+  create/modify time — engines as a radio group up top, checkboxes for the
+  rest (requirements auto-check; risky picks and unmet companion requests
+  warn in red) — and persist per instance.
 - **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
   `~/.claude-agents/cache/` and bind-mount into `[code]`-tagged containers
   (the base image has no compilers to use them). One agent's downloads
@@ -227,7 +230,7 @@ then drops you into Claude Code:
   Agent definition: agents/researcher.md
   Engine:           (researcher) — agents/engine/researcher
   Professions:      [code]
-  Specialties:      {auto} {firewall}
+  Specialties:      {auto} {frwl}
   User whitelist:   3 domains (from ~/.claude-agents/user_extras/firewall_whitelist.txt)
   Building base → claude-agents:base...
   Building code → claude-agents:code...
@@ -253,7 +256,7 @@ red under the banner.
 | Enter | Select |
 | Del | Delete the highlighted instance (with confirmation) |
 | F2 | Redefine an instance — walks through workspace, session name, and the tag form |
-| F8 | Toggle the composition legend — overlays per-kind tables (professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
+| F8 | Toggle the composition legend — overlays one table per kind (engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
 
 ### Audit
@@ -319,9 +322,16 @@ launcher code:
   scalar conflict aborts the launch naming both policies) on top of
   `settings/settings.json`, and the result is mounted read-only.
 
-`tag.info` is TOML: `description` (shown in the form and F8 legend) and an
-optional `shortname` (what renders inside the kind's punctuation — e.g. the
-`web-research` policy displays as `<+query>`).
+`tag.info` is TOML: `short_description` (a few words, shown right next to
+the form row and in the F8 legend), `full_description` (the focused row's
+body panel — rendered after the tag's underlined `fullname`, which defaults
+to the folder name and exists for expansions like dood →
+`Docker-outside-of-Docker`), an optional `shortname` (what renders inside the kind's
+punctuation — `firewall` displays as `{frwl}`, `web-research` as
+`<+qry>`), and an optional `[addendum]` table (`title` + `body`) injected
+into CLAUDE.md while the tag is active — bodies may use the launcher
+placeholders published in `launch/tags/addendums.py`. Policies also carry
+`is_enhancing_security` (drives the blue/orange coloring).
 
 ## Persistent State Layout
 

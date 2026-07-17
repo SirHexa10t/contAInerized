@@ -1,7 +1,8 @@
-description = "autonomous; doesn't need permission to perform actions. Comes with a firewall for a slight security increase. Danger: hard to control!"
-shortname   = "auto"
-warn        = true
-claude_args = ["--dangerously-skip-permissions"]
+shortname         = "auto"
+short_description = "no permission prompts"
+full_description  = "autonomous; doesn't need permission to perform actions. Comes with a firewall for a slight security increase. Danger: hard to control!"
+warn              = true
+claude_args       = ["--dangerously-skip-permissions"]
 
 [wants]
 firewall = """{auto} skips ALL permission prompts - without {firewall},

@@ -128,7 +128,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
 
     def test_policies_discovered(self):
         self.assertLessEqual({"web-research", "no-sudo"}, set(self.reg.policies))
-        self.assertEqual(self.reg.policies["web-research"].label, "<+query>")
+        self.assertEqual(self.reg.policies["web-research"].label, "<+qry>")
 
 
 class TestAgentLegoFiles(unittest.TestCase):

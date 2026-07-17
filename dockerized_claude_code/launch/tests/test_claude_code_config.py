@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from launch import claude_code_config
 from launch.claude_code_config import colored_tag_chain
-from launch.tags import Instance
+from launch.tags import Instance, PolicyStance
 
 
 def _inst() -> Instance:
@@ -65,6 +65,18 @@ class TestColoredTagChain(unittest.TestCase):
     def test_warn_tag_red(self):
         chain = colored_tag_chain((SimpleNamespace(label="{dood}", warn=True),))
         self.assertIn("\033[01;91m{dood}\033[0m", chain)
+
+    def test_deny_policy_blue(self):
+        chain = colored_tag_chain((SimpleNamespace(label="<-su>", stance=PolicyStance.DENY),))
+        self.assertIn("\033[01;94m<-su>\033[0m", chain)
+
+    def test_allow_policy_orange(self):
+        chain = colored_tag_chain((SimpleNamespace(label="<+qry>", stance=PolicyStance.ALLOW),))
+        self.assertIn("\033[38;5;208m<+qry>\033[0m", chain)
+
+    def test_obligation_policy_white(self):
+        chain = colored_tag_chain((SimpleNamespace(label="<!plan>", stance=PolicyStance.OBLIGATION),))
+        self.assertIn("\033[01;97m<!plan>\033[0m", chain)
 
     def test_labels_space_separated(self):
         chain = colored_tag_chain((SimpleNamespace(label="[code]"),

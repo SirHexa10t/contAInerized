@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .addendums import KNOWN_PLACEHOLDERS, referenced_placeholders
 from .base import Tag, TagError
 from .engine import Engine
 from .lego import AgentBuild
@@ -142,3 +143,15 @@ def _validate(reg: Registry, layers: dict[str, Layer]) -> None:
         for name in combo.tags:
             if name not in known:
                 raise TagError(f"combos.info: combo references unknown tag '{name}'")
+
+    # addendum bodies only reference launcher-known placeholders — a typo'd
+    # `{cred_cils}` would otherwise crash compose at launch time.
+    for tag in reg.get_all():
+        if tag.addendum is None:
+            continue
+        unknown = referenced_placeholders(tag.addendum[1]) - KNOWN_PLACEHOLDERS
+        if unknown:
+            raise TagError(
+                f"{tag.path}: [addendum] body references unknown placeholder(s) "
+                f"{sorted(unknown)} — known: {sorted(KNOWN_PLACEHOLDERS)}"
+            )

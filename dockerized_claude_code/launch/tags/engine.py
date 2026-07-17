@@ -18,15 +18,46 @@ Engines are single-select (radio) in the form, so nesting contributes NO
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
 from dotenv import dotenv_values
 
+from ..utils import ordering_index_or_end
 from .base import Tag, common_fields, walk_tag_tree
 
 CONF_FILE = "engine.conf"
+
+
+# ============================================================
+# Model-family ordering (picker sort keys)
+# ============================================================
+# An engine's capability rank derives from its conf's ANTHROPIC_MODEL — the
+# picker sorts agents by their engine's family, then version, then name.
+
+ORDERED_MODEL_FAMILIES = ["fable", "mythos", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last). mythos = fable's same-tier Project-Glasswing sibling, pre-added so a future mythos conf can't repeat the fable-sorted-last bug
+_FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
+
+
+def parse_model_id(model: str) -> tuple[str, int, int] | None:
+    """Extract (family, major, minor) from a model ID like 'claude-opus-4-7'.
+    Returns None when no recognized family is present. The regex's family
+    alternation is derived from ORDERED_MODEL_FAMILIES, so a new family means
+    one list-entry change — no parallel regex to update."""
+    m = _FAMILY_RE.search(model)
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)), int(m.group(3) or 0)
+
+
+def engine_sort_key(model: str) -> tuple[int, tuple[int, int]]:
+    """Ordering fragment for an engine's ANTHROPIC_MODEL: family rank
+    (ORDERED_MODEL_FAMILIES — fable first, haiku last, unknown past the end),
+    then version descending. Callers append their own name tiebreak."""
+    family, major, minor = parse_model_id(model) or (None, 0, 0)
+    return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor))
 
 
 def _read_conf(conf_path: Path) -> dict[str, str]:

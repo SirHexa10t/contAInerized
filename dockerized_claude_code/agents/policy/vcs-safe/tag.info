@@ -1,0 +1,4 @@
+shortname         = "-push"
+short_description = "no git push/reset"
+full_description  = "Deny history-destructive and outward-facing git operations (push, hard reset) via the Bash tool. Local commits and branches stay allowed."
+stance            = "deny"

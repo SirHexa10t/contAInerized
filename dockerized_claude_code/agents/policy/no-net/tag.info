@@ -1,0 +1,4 @@
+shortname         = "-net"
+short_description = "no network access"
+full_description  = "Deny web tools (WebSearch / WebFetch) and the common Bash fetchers (curl / wget). Harness-level: other network-capable binaries still exist in the container (a hard block is the inverse of {frwl})."
+stance            = "deny"

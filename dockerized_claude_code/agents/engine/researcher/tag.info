@@ -1,1 +1,3 @@
-description = "Tool-heavy max-effort tier — long multi-step research across many tool calls, large reads, verbose MCP output."
+shortname         = "🔬"
+short_description = "tool-heavy research"
+full_description  = "Tool-heavy max-effort tier — long multi-step research across many tool calls, large reads, verbose MCP output."

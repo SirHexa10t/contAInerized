@@ -1,19 +1,22 @@
-"""Per-launch CLAUDE.md addendum text + composer.
+"""Per-launch CLAUDE.md addendum composition.
 
 A `## Launch-time addendums` section, built from `### <title>` sub-sections,
-appended to the agent's source `.md` at install time — keyed by tag **name**
-and driven by an instance's `chain` (`["base", <professions…>,
-<specialties…>]`). Iterating the chain preserves section order (base first).
+appended to the agent's source `.md` at install time. Two sources, in order:
 
-Kept as code rather than static `addendum.md` files because the content isn't
-static: the Credentials notice is computed at import from
-`installed_cred_clis()` (which optional creds are present on the host), and
-Firewall/Privacy interpolate launcher path/label constants. Empty bodies drop
-out; an all-empty result renders nothing (install writes the source `.md`
-byte-for-byte).
+  1. BASE_ADDENDUMS — launcher-universal notices (project summary, privacy).
+     These belong to no tag, so they live here rather than in a tag.info.
+  2. Each active tag's `[addendum]` table from its own `tag.info`, in chain
+     order (professions → specialties → policies).
 
+Tag addendum bodies may use `{placeholder}` fields from PLACEHOLDERS below —
+launcher-known values a static tag.info can't carry (in-container paths,
+which optional creds are present). An addendum whose body references a
+placeholder that resolves EMPTY this launch is dropped whole (that's how the
+Credentials notice disappears on a creds-less host). The registry validator
+rejects unknown placeholder names at scan time (KNOWN_PLACEHOLDERS).
 """
 
+from string import Formatter
 from typing import NamedTuple
 
 from ..file_access import installed_cred_clis
@@ -21,6 +24,7 @@ from ..paths import (
     CLAUDE_CONFIG_IN_CONTAINER, CLAUDE_SUMMARY_IN_CONTAINER,
     FIREWALL_WHITELIST_FILE, state_domain_resolve_status_path,
 )
+from .base import Tag
 
 
 class Addendum(NamedTuple):
@@ -33,36 +37,20 @@ class Addendum(NamedTuple):
 
 ADDENDUM_SECTION_TITLE = "Launch-time addendums"
 
+# Names tag.info addendum bodies may reference. The VALUES are computed per
+# launch by _placeholder_values (installed_cred_clis probes the host);
+# the registry validator imports this set to reject typo'd names at scan.
+KNOWN_PLACEHOLDERS = frozenset({
+    "cred_clis",                # space-joined CLIs with optional creds present ('' when none)
+    "domain_resolve_status",    # in-container path of the firewall's pending/failed status file
+    "firewall_whitelist_file",  # host-side path of the user's whitelist file
+})
+
 
 SEEK_SUMMARY = Addendum(
     "Project summary",
     f"""A comprehensive project summary lives at `{CLAUDE_SUMMARY_IN_CONTAINER}`. `Read` it when the current task would benefit from project context.
 If that file is missing or empty, suggest running `/write-summary` to create / populate it.""",
-)
-
-FIREWALL_NOTICE = Addendum(
-    "Firewall",
-    f"""You are currently running with a firewall in place, a fact the user is aware of. Blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
-
-**Before bothering the user about a block, check `{state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)}` first.** Brief retries are appropriate for hosts listed under `pending:` (DNS may resolve within seconds). Hosts under `failed:` were unresolvable at launch but are re-attempted every few minutes — retry once more before surfacing them as whitelist offers. Entries under `skipped:` can never work as written (the reason column says why — e.g. IPv6 on a v4-only network); relay the corrective form to the user. Hosts under `wildcard_gaps:` come from `*.` entries only honored for their base host (unknown CDN provider), so a refused subdomain there is expected — surface it to the user.
-
-**If a whitelisted host worked earlier and now refuses**, its DNS answer likely changed (VPN exit swap, CDN rotation). The launcher re-resolves every whitelisted hostname every ~5 minutes and opens newly-reported addresses automatically — retry shortly before escalating.
-
-**If a host you'd expect to reach (not in any section above) still gives `ConnectionRefused`**, inform the user that you may access it if the appropriate domain-name, `*.` wildcard (covers rotating subdomains on known CDNs), or IP/CIDR (tell the user how to discover all appropriate CDN addresses) were added to the host-side file: `{FIREWALL_WHITELIST_FILE}`
-
-**Surface every legitimate block as a whitelist offer** (treat this as `feedback`-type guidance per your auto-memory taxonomy — the user has asked for it directly), even when a separate obstacle exists (JS-rendered SPA, login wall, etc.) and even when an alternative source is available. Mention secondary obstacles and alternatives separately — never as a reason to skip the whitelist offer.""",
-)
-
-_installed_clis = installed_cred_clis()
-CREDENTIALS_NOTICE = Addendum(
-    "Credentials",
-    f"The user has provided credentials for the following CLI tools, which are already installed and ready to use: {_installed_clis}"
-    if _installed_clis else "",
-)
-
-WEB_NOTICE = Addendum(
-    "Headless browser",
-    """You're in a headless-browser profession — the `playwright` CLI is available for browser automation. Run `playwright install chromium` (or `firefox` / `webkit`) before first use; subsequent `[code][web]` instances share the same browser cache so the install is idempotent and fast when warm. For Python: `uv pip install playwright` in your project venv.""",
 )
 
 MAINTAIN_PRIVACY = Addendum(
@@ -77,29 +65,55 @@ A future reader of any persisted text should see the same content regardless of 
 **Exception (rare):** when the user explicitly asks for such a detail to be written, surface an extra confirmation *before* writing it — name the specific personal / environment detail and ask the user to confirm. Issue this confirmation even when running under a permission-bypass mode — the bypass covers routine actions, not embedding identifying information into persistent files.""",
 )
 
-
-# Addendums keyed by tag name — `base` (the always-on chain root) carries the
-# universal notices; a tag's addendums activate when its name is in the chain.
-# Iteration in `compose` follows chain order, so `base` renders first.
-ADDENDUMS_BY_TAG: dict[str, list[Addendum]] = {
-    "base":     [SEEK_SUMMARY, MAINTAIN_PRIVACY],
-    "code":     [CREDENTIALS_NOTICE],
-    "firewall": [FIREWALL_NOTICE],
-    "web":      [WEB_NOTICE],
-}
+# Universal notices — active on EVERY launch, ahead of any tag addendum.
+BASE_ADDENDUMS: list[Addendum] = [SEEK_SUMMARY, MAINTAIN_PRIVACY]
 
 
-def compose(chain: list[str]) -> str:
-    """Render the `## Launch-time addendums` section for an instance's `chain`
-    (`["base", …]`). One `### <title>` sub-section per non-empty addendum body,
-    in chain order. Returns `""` when nothing active — the caller then appends
-    nothing and the state-dir CLAUDE.md matches the source `.md` byte-for-byte."""
-    sub_sections = [
-        f"### {a.title}\n\n{a.body}"
-        for name in chain
-        for a in ADDENDUMS_BY_TAG.get(name, ())
-        if a.body
-    ]
-    if not sub_sections:
+def _placeholder_values() -> dict[str, str]:
+    """Per-launch values for KNOWN_PLACEHOLDERS. Computed at compose time —
+    installed_cred_clis reflects the host's optional_creds/ state NOW, not
+    at import."""
+    return {
+        "cred_clis":               installed_cred_clis(),
+        "domain_resolve_status":   str(state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)),
+        "firewall_whitelist_file": str(FIREWALL_WHITELIST_FILE),
+    }
+
+
+def referenced_placeholders(body: str) -> set[str]:
+    """The `{field}` names a body references (str.format grammar). Used here
+    for the empty-value drop rule and by the registry validator to reject
+    unknown names at scan time."""
+    return {field for _, field, _, _ in Formatter().parse(body) if field}
+
+
+def _tag_addendums(tags: list[Tag]) -> list[Addendum]:
+    """The active tags' addendums, formatted. An addendum referencing a
+    placeholder whose value is empty THIS launch is dropped whole — the
+    notice would be describing something absent (no creds → no Credentials
+    section)."""
+    values = _placeholder_values()
+    out: list[Addendum] = []
+    for tag in tags:
+        if tag.addendum is None:
+            continue
+        title, body = tag.addendum
+        referenced = referenced_placeholders(body)
+        if any(not values[name] for name in referenced):
+            continue
+        out.append(Addendum(title, body.format(**values)))
+    return out
+
+
+def compose(tags: list[Tag]) -> str:
+    """Render the `## Launch-time addendums` section for an instance's active
+    tags (chain order — professions, specialties, policies). Base notices
+    first, then one `### <title>` sub-section per tag addendum. Returns `""`
+    when nothing is active — the caller then appends nothing and the
+    state-dir CLAUDE.md matches the source `.md` byte-for-byte."""
+    active = [a for a in (*BASE_ADDENDUMS, *_tag_addendums(tags)) if a.body]
+    if not active:
         return ""
-    return f"## {ADDENDUM_SECTION_TITLE}\n\n" + "\n\n".join(sub_sections)
+    return f"## {ADDENDUM_SECTION_TITLE}\n\n" + "\n\n".join(
+        f"### {a.title}\n\n{a.body}" for a in active
+    )

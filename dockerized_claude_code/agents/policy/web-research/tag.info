@@ -1,2 +1,4 @@
-description = "Never ask permission for web searches and fetches."
-shortname   = "+query"
+shortname             = "+qry"
+short_description     = "free web search/fetch"
+full_description      = "Never ask permission for web searches and fetches."
+stance                = "allow"

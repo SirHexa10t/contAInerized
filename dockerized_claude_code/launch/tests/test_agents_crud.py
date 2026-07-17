@@ -16,14 +16,15 @@ import json
 
 from launch import paths
 from launch.agents_crud import (
-    ORDERED_MODEL_FAMILIES, delete_instance, engine_sort_key,
-    install_latest_md, install_settings, modify_instance, parse_model_id,
+    delete_instance, install_latest_md, install_settings, modify_instance,
     persist_instance,
 )
 from launch.tags import Instance, TagError, scan_all, store
-from launch.tags.addendums import (
-    ADDENDUM_SECTION_TITLE, ADDENDUMS_BY_TAG, SEEK_SUMMARY,
+from launch.tags.engine import (
+    ORDERED_MODEL_FAMILIES, engine_sort_key, parse_model_id,
 )
+from launch.tags import addendums
+from launch.tags.addendums import ADDENDUM_SECTION_TITLE, SEEK_SUMMARY
 
 
 # ============================================================
@@ -309,11 +310,11 @@ class TestInstallLatestMd(unittest.TestCase):
         self.assertIn(SEEK_SUMMARY.body, result)
 
     def test_empty_addendum_yields_source_only(self):
-        # Patch ADDENDUMS_BY_TAG to empty so compose() returns ''.
-        # install_latest_md must skip the separator+addendum append, yielding
-        # the source body byte-for-byte.
+        # Patch BASE_ADDENDUMS empty so compose() returns '' (a bare instance
+        # has no tag addendums). install_latest_md must skip the
+        # separator+addendum append, yielding the source body byte-for-byte.
         inst = self._inst("just the body\n")
-        with patch.dict(ADDENDUMS_BY_TAG, {}, clear=True):
+        with patch.object(addendums, "BASE_ADDENDUMS", []):
             install_latest_md(inst)
         self.assertEqual(inst.state_md.read_text(), "just the body\n")
 

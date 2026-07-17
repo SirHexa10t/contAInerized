@@ -1,2 +1,4 @@
-description = "Deny sudo via the Bash tool. Harness-level — the sudo binary still exists in the container (a hard block would be a specialty)."
-shortname   = "-su"
+shortname             = "-su"
+short_description     = "deny sudo"
+full_description      = "Deny sudo via the Bash tool. Harness-level — the sudo binary still exists in the container (a hard block would be a specialty)."
+stance                = "deny"

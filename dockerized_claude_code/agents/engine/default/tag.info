@@ -1,1 +1,3 @@
-description = "Baseline engine — the fallback when an agent names no engine of its own. Max effort, thinking on."
+shortname         = "def"
+short_description = "baseline max-effort"
+full_description  = "Baseline engine — the fallback when an agent names no engine of its own. Max effort, thinking on."

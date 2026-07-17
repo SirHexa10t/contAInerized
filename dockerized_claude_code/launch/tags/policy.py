@@ -3,12 +3,12 @@
 A policy is exactly a Claude Code `settings.json` fragment and nothing more
 (the classifier law: needs-only-a-fragment ⇒ policy; needs-anything-else ⇒
 specialty). Defined by `agents/policy/<name>/` with a `tag.info`
-(description, shortname, risk_level) and a `policy.json` (the fragment).
+(descriptions, shortname, stance) and a `policy.json` (the fragment).
 
 At launch the selected policies' fragments deep-merge with the shared
 settings template into a per-instance `settings.json`, bind-mounted
-read-only so the agent can't relax its own leash. `merge_fragments` is that
-pure merge (built + tested now, consumed in P2): dicts recurse, lists
+read-only so the agent can't act outside given limite. `merge_fragments` is
+that pure merge (built + tested now, consumed in P2): dicts recurse, lists
 concatenate + dedupe, scalar conflicts abort loudly (silent last-wins would
 make policy combinations order-dependent).
 """
@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -26,13 +27,24 @@ from .base import Tag, TagError, common_fields, is_hidden_asset_dir
 POLICY_FILE = "policy.json"
 
 
+class PolicyStance(Enum):
+    """Which way a policy moves the leash — drives its color everywhere:
+      ALLOW      (orange)     — grants ability, loosens the sandbox
+      DENY       (blue)       — restricts, tightens the sandbox
+      OBLIGATION (bold white)  — mandates a behavior (e.g. start in plan mode)
+    The tag.info key is `stance = "allow" | "deny" | "obligation"`."""
+    ALLOW = "allow"
+    DENY = "deny"
+    OBLIGATION = "obligation"
+
+
 @dataclass(frozen=True)
 class Policy(Tag):
     parentheses: ClassVar[tuple[str, str]] = ("<", ">")
     root: ClassVar[str] = "policy"
     nutshell: ClassVar[str] = "what's PERMITTED"
 
-    risk_level: int = 0
+    stance: PolicyStance = PolicyStance.ALLOW
 
     def load_fragment(self) -> dict[str, Any]:
         """(Re)read this policy's `policy.json`. Validated at scan time, so
@@ -45,7 +57,8 @@ class Policy(Tag):
         """Discover every policy (a dir with `tag.info` directly under
         `agents/policy/`). Each must carry a `policy.json` that parses to a
         JSON object — validated here so a broken fragment fails at startup,
-        not mid-launch. `risk_level` comes from `tag.info` (default 0)."""
+        not mid-launch. `stance` comes from `tag.info` (default "allow" —
+        granting is the common case); an unrecognized value is a TagError."""
         root = agents_dir / cls.root
         out: list[Policy] = []
         if not root.is_dir():
@@ -56,7 +69,15 @@ class Policy(Tag):
             fields = common_fields(tag_dir)
             info = fields.pop("_info")
             _read_fragment(tag_dir / POLICY_FILE)   # validate now; discard
-            out.append(cls(**fields, risk_level=int(info.get("risk_level", 0))))
+            raw_stance = info.get("stance", PolicyStance.ALLOW.value)
+            try:
+                stance = PolicyStance(raw_stance)
+            except ValueError:
+                raise TagError(
+                    f"{tag_dir}/tag.info: stance must be one of "
+                    f"{[s.value for s in PolicyStance]}, got {raw_stance!r}"
+                ) from None
+            out.append(cls(**fields, stance=stance))
         return out
 
 

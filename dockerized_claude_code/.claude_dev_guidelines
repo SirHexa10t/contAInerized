@@ -24,13 +24,13 @@ Grouped by layer, top of the dependency graph last.
 ### The tag system — `launch/tags/`, depends on disk + leaves
 
 - `tags/base.py` — the `Tag` record, `DockerContribution`, `tag.info`/`tag.docker` parsing, the STRICT tree rule, `TagError`.
-- `tags/engine.py`, `tags/profession.py`, `tags/specialty.py`, `tags/policy.py` — the four kind classes, each with its own `scan(agents_dir)`; profession also discovers hidden `_<name>` image layers, specialty adds `combos.info`, policy adds `merge_fragments`.
+- `tags/engine.py`, `tags/profession.py`, `tags/specialty.py`, `tags/policy.py` — the four kind classes, each with its own `scan(agents_dir)`; engine also owns the model-family sort keys (`engine_sort_key`), profession discovers hidden `_<name>` image layers, specialty adds `combos.info`, policy adds `merge_fragments`.
 - `tags/registry.py` — `scan_all(agents_dir)` → `Registry`: discover, cross-validate (fail loud), look up.
 - `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections).
 - `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `claude_args`, `unmet_wants`).
 - `tags/store.py` — `instances.toml` load/save (stdlib `tomllib` in; a small fixed-schema TOML emitter out).
 - `tags/migrations.py` — ISOLATED one-shot conversions from retired on-disk formats; the only module allowed to know retired formats exist.
-- `tags/addendums.py` — chain-keyed CLAUDE.md addendum copy + `compose(chain)`.
+- `tags/addendums.py` — the CLAUDE.md addendum composer: universal BASE_ADDENDUMS, the placeholder registry, and `compose(active_tags)`; per-tag copy lives in each tag.info's `[addendum]` table.
 
 ### Small services — depend on disk + tags
 
@@ -42,13 +42,14 @@ Grouped by layer, top of the dependency graph last.
 - `launch/container_env.py` — env staging (`ContainerEnvKey` taxonomy, the staged-value accumulator, `-e`/build-arg formatters, `set_container_env` orchestrator).
 - `launch/docker_config.py` — plain-docker orchestration: `ensure_image` (base + per-layer `docker build`), `run_container` (`docker run` assembly), tag.docker flag emitters, bind-mount accumulator, docker CLI wrappers, the dry-run gate.
 - `launch/tag_handlers.py` — `apply_tags(instance)`: stages declarative tag.docker mounts, then dispatches per-tag `_apply_<name>` handlers (dynamic-only side effects; data-only tags have no handler).
-- `launch/agents_crud.py` — instance state CRUD (instances.toml writers), state-dir installs (`install_latest_md`, `install_settings`), `resolve_pick`, picker-entry factories, engine sort keys.
+- `launch/agents_crud.py` — instance state CRUD (instances.toml writers), state-dir installs (`install_latest_md`, `install_settings`), `resolve_pick`, picker-entry factories.
 - `launch/user_additions.py` — user-side contributions to the container (optional-creds mounts + first-launch template plants).
 - `launch/audit.py` — read-only state-correctness checker, runnable as `python -m launch.audit`.
 
 ### UI
 
-- `launch/menu_picker.py` — prompt_toolkit picker + the tag checkbox form (requires-cascade, combos + wants warnings) + line prompts (workspace, session) + pre-launch banner.
+- `launch/tag_form.py` — the kind-sectioned tag form (`prompt_tags` / `checkbox_form`: engine radio, requires-cascade, combos + wants warnings, context preamble) plus the shared TUI style system (`UiClass`, `tag_style`, the stance colors) both surfaces use.
+- `launch/menu_picker.py` — prompt_toolkit picker + F8 legend + line prompts (workspace, session) + pre-launch banner; imports the form and styles from tag_form (one-way).
 
 ### Entry
 
@@ -80,7 +81,7 @@ leaves: utils, paths, template_code/   (independent — none imports in-project)
                                                     agents_crud, user_additions, audit)
                                              │
                                              ▼
-                                             UI (menu_picker)
+                                             UI (tag_form ─► menu_picker)
                                              │
                                              ▼
                                              entry (run.py)
@@ -108,13 +109,15 @@ For each common addition, place it where the rest of the project would expect.
 - **Profession**: `agents/profession/<name>/{tag.info, Dockerfile}` (+
   `tag.docker` naming the build-args the Dockerfile consumes). Nest under
   another profession to declare a requirement (`code/web/` ⇒ web requires code).
-- **Specialty**: `agents/specialty/<name>/tag.info` (`description`, `warn`,
-  `claude_args`, `[wants]`). Image layer, if any: a hidden
+- **Specialty**: `agents/specialty/<name>/tag.info` (`short_description`,
+  `full_description`, `warn`, `claude_args`, `[wants]`, `[addendum]`). Image layer, if any: a hidden
   `_<name>/Dockerfile` under the profession it depends on. Static container
   config (mounts, `cap_add`, `entrypoint`, `env_forward`) goes in `tag.docker`.
   Multi-tag warnings go in `agents/specialty/combos.info`.
 - **Policy**: `agents/policy/<name>/{tag.info, policy.json}` — a Claude Code
-  settings fragment, merged per instance and mounted read-only.
+  settings fragment, merged per instance and mounted read-only. `stance`
+  (`allow`/`deny`/`obligation`) drives the orange/blue/white coloring; the
+  shortname convention mirrors it (`+` grants, `-` restricts, `!` obligates).
 
 Only add an `_apply_<name>` handler in `tag_handlers.py` when the tag needs
 *dynamic* host-side work (cache pruning, GID detection, DNS kickoff) that
@@ -163,11 +166,11 @@ feels constant-like; `paths.py` stays declarations-only.
 
 ### A new launch-time CLAUDE.md directive
 
-→ `tags/addendums.py`. Add an `Addendum(title=..., body=...)` instance, then
-key it under the relevant tag name in `ADDENDUMS_BY_TAG` (`"base"` for
-always-on). `compose(chain)` picks it up via chain membership and renders it
-as a `### <title>` section under the single `## Launch-time addendums`
-block. Bodies can `format(...)` in path constants from `paths.py`.
+→ the owning tag's `tag.info`, as an `[addendum]` table (`title` + `body`);
+`compose(active_tags)` renders it as a `### <title>` section while the tag
+is active. Bodies may use the `{placeholder}` names published in
+`tags/addendums.py` (validated at scan). A launcher-universal notice (no
+owning tag) goes in `BASE_ADDENDUMS` in that module instead.
 
 ### A new picker row kind
 

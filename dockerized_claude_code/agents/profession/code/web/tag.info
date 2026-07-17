@@ -1,1 +1,7 @@
-description = "headless browser automation (playwright + chromium baked in); for web-scraping / browser-testing / dynamic-page extraction. Built on [code]; no display server needed."
+shortname         = "web"
+short_description = "headless browser"
+full_description  = "headless browser automation (playwright + chromium baked in); for web-scraping / browser-testing / dynamic-page extraction. Built on [code]; no display server needed."
+
+[addendum]
+title = "Headless browser"
+body  = """You're in a headless-browser profession — the `playwright` CLI is available for browser automation. Run `playwright install chromium` (or `firefox` / `webkit`) before first use; subsequent `[code][web]` instances share the same browser cache so the install is idempotent and fast when warm. For Python: `uv pip install playwright` in your project venv."""

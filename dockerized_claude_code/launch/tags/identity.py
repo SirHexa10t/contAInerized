@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..file_access import agent_md_index, has_continuable_jsonl, last_history_mtime
 from ..paths import instance_state_dir_path, state_md_path
-from .base import DockerContribution
+from .base import DockerContribution, Tag
 from .engine import Engine
 from .lego import AgentBuild
 from .policy import Policy
@@ -109,6 +109,29 @@ class Instance:
         return image_chain(self.professions, self.specialties)
 
     @property
+    def active_tags(self) -> list[Tag]:
+        """Every active tag as objects, in chain order — professions
+        (requirement order), specialties (alphabetical), then policies.
+        Drives the addendum composition; anything wanting 'all my tags,
+        ordered' reads this instead of re-deriving."""
+        return [
+            *_topo_professions(self.professions),
+            *sorted(self.specialties, key=lambda s: s.name),
+            *self.policies,
+        ]
+
+    @property
+    def build(self) -> AgentBuild:
+        """The instance's axis selections as name strings — what the store
+        persists and the form pre-checks (inverse of resolve_build)."""
+        return AgentBuild(
+            engine=self.engine.name if self.engine else None,
+            professions=tuple(p.name for p in self.professions),
+            specialties=tuple(s.name for s in self.specialties),
+            policies=tuple(p.name for p in self.policies),
+        )
+
+    @property
     def build_steps(self) -> list[tuple[str, Path, DockerContribution | None]]:
         """(name, dockerfile, contribution) per image layer in chain order:
         professions (requirement order), then layer-bearing specialties
@@ -176,14 +199,21 @@ class Instance:
         return last_history_mtime(self.state_dir)
 
 
+def effective_engine_name(build: AgentBuild, agent: str, registry: Registry) -> str:
+    """The engine that would actually run: `build.engine` → an engine named
+    like the agent → `default`. Shared by resolve_build and the form's
+    radio pre-check (the form shows the concrete outcome, not the fallback
+    chain)."""
+    return build.engine or (agent if agent in registry.engines else "default")
+
+
 def resolve_build(build: AgentBuild, agent: str, registry: Registry) -> dict:
     """Turn an `AgentBuild` (name lists from a `.lego`) into resolved tag
-    objects, as a kwargs dict for `Instance`. Engine falls back
-    `build.engine` → an engine named like the agent → `default`. References
-    are assumed already validated (`Registry.validate_build`); a missing one
-    surfaces as a KeyError, which the caller has validated away upstream."""
-    engine_name = build.engine or (agent if agent in registry.engines else "default")
-    engine = registry.engines.get(engine_name)
+    objects, as a kwargs dict for `Instance`. Engine falls back via
+    `effective_engine_name`. References are assumed already validated
+    (`Registry.validate_build`); a missing one surfaces as a KeyError, which
+    the caller has validated away upstream."""
+    engine = registry.engines.get(effective_engine_name(build, agent, registry))
     return {
         "engine": engine,
         "professions": tuple(registry.professions[n] for n in build.professions),

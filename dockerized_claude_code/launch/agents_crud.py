@@ -11,8 +11,8 @@ Sections:
   - resolve_pick — name string → Agent (create) | Instance (cont) factory
     used by run.py's CLI parsing
   - creatable_agents / instance_from_store — picker-entry factories
-  - engine_sort_key — model-family ordering for picker rows (reads the
-    engine's ANTHROPIC_MODEL)
+  - _agent_sort_key — Create-row ordering (profession group, then the
+    engine's model family via tags.engine.engine_sort_key, then name)
 
 Identity types (Agent / Instance) and the store primitives live in the tags
 package; this module wires them to the filesystem lifecycle. menu_picker and
@@ -20,7 +20,6 @@ run.py import from here; nothing here imports them back.
 """
 
 import json
-import re
 
 from .file_access import force_remove, is_dir, iter_subdirs, move_path, path_exists, read_text, write_text
 from .paths import (
@@ -28,9 +27,9 @@ from .paths import (
     state_settings_path,
 )
 from .tags import (
-    Agent, AgentBuild, Instance, Registry, addendums, load_agent, resolve_build,
-    store,
+    Agent, Instance, Registry, addendums, load_agent, resolve_build, store,
 )
+from .tags.engine import engine_sort_key
 from .tags.identity import SESSION_SEP
 from .tags.policy import merge_fragments
 from .utils import ordering_index_or_end, prompt_keypress
@@ -48,22 +47,12 @@ def list_all_instances() -> list[str]:
 # instances.toml writers (load → mutate → save over tags.store)
 # ============================================================
 
-def _build_of(inst: Instance) -> AgentBuild:
-    """The instance's axis selections as an AgentBuild (names), for storage."""
-    return AgentBuild(
-        engine=inst.engine.name if inst.engine else None,
-        professions=tuple(p.name for p in inst.professions),
-        specialties=tuple(s.name for s in inst.specialties),
-        policies=tuple(p.name for p in inst.policies),
-    )
-
-
 def persist_instance(inst: Instance) -> None:
     """Write/replace this instance's store entry (workspace + all four axes).
     Full-replacement semantics: the entry IS the instance's configuration;
     `.lego` defaults only matter when no entry exists yet."""
     mapping = store.load()
-    mapping[inst.instance] = store.build_entry(_build_of(inst), inst.workspace)
+    mapping[inst.instance] = store.build_entry(inst.build, inst.workspace)
     store.save(mapping)
 
 
@@ -96,7 +85,7 @@ def modify_instance(old: Instance, new: Instance) -> None:
         move_path(old.state_dir, new.state_dir)
     mapping = store.load()
     mapping.pop(old.instance, None)
-    mapping[new.instance] = store.build_entry(_build_of(new), new.workspace)
+    mapping[new.instance] = store.build_entry(new.build, new.workspace)
     store.save(mapping)
 
 
@@ -119,41 +108,14 @@ def install_settings(inst: Instance) -> None:
 
 
 def install_latest_md(inst: Instance) -> None:
-    """Write the agent's source `.md` plus the active-chain addendum section
+    """Write the agent's source `.md` plus the active-tag addendum section
     into the state dir as CLAUDE.md, in a single overwrite. Refreshed each
     launch so a source-side edit AND any tag toggle both propagate. The
     result is launcher-owned: whatever a previous launch wrote is replaced
     wholesale, no marker-based reconciliation."""
     body = read_text(inst.md_path)
-    addendum = addendums.compose(inst.chain)
+    addendum = addendums.compose(inst.active_tags)
     write_text(inst.state_md, f"{body}\n\n{addendum}" if addendum else body)
-
-
-# ============================================================
-# Engine-model sort key (picker ordering)
-# ============================================================
-
-ORDERED_MODEL_FAMILIES = ["fable", "mythos", "opus", "sonnet", "haiku"]   # most capable first; unknown families sink past the end (add new families here or their agents sort last). mythos = fable's same-tier Project-Glasswing sibling, pre-added so a future mythos conf can't repeat the fable-sorted-last bug
-_FAMILY_RE = re.compile(rf"({'|'.join(ORDERED_MODEL_FAMILIES)})-(\d+)(?:-(\d+))?")
-
-
-def parse_model_id(model: str) -> tuple[str, int, int] | None:
-    """Extract (family, major, minor) from a model ID like 'claude-opus-4-7'.
-    Returns None when no recognized family is present. The regex's family
-    alternation is derived from ORDERED_MODEL_FAMILIES, so a new family means
-    one list-entry change — no parallel regex to update."""
-    m = _FAMILY_RE.search(model)
-    if not m:
-        return None
-    return m.group(1), int(m.group(2)), int(m.group(3) or 0)
-
-
-def engine_sort_key(model: str) -> tuple[int, tuple[int, int]]:
-    """Ordering fragment for an engine's ANTHROPIC_MODEL: family rank
-    (ORDERED_MODEL_FAMILIES — fable first, haiku last, unknown past the end),
-    then version descending. Callers append their own name tiebreak."""
-    family, major, minor = parse_model_id(model) or (None, 0, 0)
-    return (ordering_index_or_end(family, ORDERED_MODEL_FAMILIES), (-major, -minor))
 
 
 def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], tuple[int, tuple[int, int]], str]:

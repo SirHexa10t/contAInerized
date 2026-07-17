@@ -12,10 +12,12 @@ import textwrap
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from launch import tags
 from launch.tags import (
-    AgentBuild, Engine, Instance, Policy, Profession, Registry, Specialty,
+    AgentBuild, Engine, Instance, Policy, PolicyStance, Profession, Registry, Specialty,
     TagError, addendums, image_chain, load_lego, merge_fragments, migrations,
     resolve_build, scan_all, store,
 )
@@ -39,22 +41,22 @@ class TagTreeTestCase(unittest.TestCase):
     # A small, valid, full-coverage tree reused by several tests.
     def full_tree(self) -> Path:
         return self.tree({
-            "engine/default/tag.info": 'description = "baseline"\n',
+            "engine/default/tag.info": 'full_description = "baseline"\n',
             "engine/default/engine.conf": 'CLAUDE_CODE_EFFORT_LEVEL=high\n',
-            "profession/code/tag.info": 'description = "coding toolchains"\n',
+            "profession/code/tag.info": 'full_description = "coding toolchains"\n',
             "profession/code/Dockerfile": "FROM base\n",
-            "profession/code/web/tag.info": 'description = "browser"\n',
+            "profession/code/web/tag.info": 'full_description = "browser"\n',
             "profession/code/web/Dockerfile": "FROM code\n",
             "profession/code/_dood/Dockerfile": "FROM code\n",
             "specialty/auto/tag.info": (
-                'description = "work nonstop"\nwarn = true\n'
+                'full_description = "work nonstop"\nwarn = true\n'
                 'claude_args = ["--dangerously-skip-permissions"]\n'
                 '[wants]\nfirewall = "open network!"\n'
             ),
-            "specialty/dood/tag.info": 'description = "host docker"\nwarn = true\n',
-            "specialty/firewall/tag.info": 'description = "whitelist"\n',
+            "specialty/dood/tag.info": 'full_description = "host docker"\nwarn = true\n',
+            "specialty/firewall/tag.info": 'full_description = "whitelist"\n',
             "specialty/combos.info": '[warnings]\n"dood + auto" = "both = danger"\n',
-            "policy/no-sudo/tag.info": 'description = "no sudo"\nshortname = "-su"\n',
+            "policy/no-sudo/tag.info": 'full_description = "no sudo"\nshortname = "-su"\n',
             "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
         })
 
@@ -66,7 +68,7 @@ class TagTreeTestCase(unittest.TestCase):
 class TestEngine(TagTreeTestCase):
     def test_flat_engine_conf(self):
         root = self.tree({
-            "engine/golem/tag.info": 'description = "cheap"\n',
+            "engine/golem/tag.info": 'full_description = "cheap"\n',
             "engine/golem/engine.conf": 'ANTHROPIC_MODEL="claude-haiku-4-5"\nCLAUDE_CODE_EFFORT_LEVEL=low\n',
         })
         (golem,) = Engine.scan(root)
@@ -77,9 +79,9 @@ class TestEngine(TagTreeTestCase):
 
     def test_nested_engine_inherits_and_overrides(self):
         root = self.tree({
-            "engine/thinker/tag.info": 'description = "t"\n',
+            "engine/thinker/tag.info": 'full_description = "t"\n',
             "engine/thinker/engine.conf": 'ANTHROPIC_MODEL="claude-opus-4-8"\nCLAUDE_CODE_EFFORT_LEVEL=high\n',
-            "engine/thinker/breakthrough/tag.info": 'description = "b"\n',
+            "engine/thinker/breakthrough/tag.info": 'full_description = "b"\n',
             "engine/thinker/breakthrough/engine.conf": 'CLAUDE_CODE_EFFORT_LEVEL=max\n',
         })
         by_name = {e.name: e for e in Engine.scan(root)}
@@ -90,20 +92,20 @@ class TestEngine(TagTreeTestCase):
         self.assertEqual(by_name["thinker"].conf_map["CLAUDE_CODE_EFFORT_LEVEL"], "high")
 
     def test_engine_without_conf_is_empty(self):
-        root = self.tree({"engine/bare/tag.info": 'description = "no conf"\n'})
+        root = self.tree({"engine/bare/tag.info": 'full_description = "no conf"\n'})
         (bare,) = Engine.scan(root)
         self.assertEqual(bare.conf_map, {})
 
     def test_valueless_conf_key_dropped(self):
         root = self.tree({
-            "engine/x/tag.info": 'description = "x"\n',
+            "engine/x/tag.info": 'full_description = "x"\n',
             "engine/x/engine.conf": 'BARE_KEY\nREAL=1\n',
         })
         (x,) = Engine.scan(root)
         self.assertEqual(x.conf_map, {"REAL": "1"})
 
     def test_missing_engine_root_yields_nothing(self):
-        self.assertEqual(Engine.scan(self.tree({"profession/code/tag.info": 'description="c"\n'})), [])
+        self.assertEqual(Engine.scan(self.tree({"profession/code/tag.info": 'full_description="c"\n'})), [])
 
 
 # ============================================================
@@ -131,7 +133,7 @@ class TestProfession(TagTreeTestCase):
         # forgotten/misnamed tag.info would otherwise silently drop the tag
         # and sever any requirement edge routed through it.
         root = self.tree({
-            "profession/code/tag.info": 'description = "c"\n',
+            "profession/code/tag.info": 'full_description = "c"\n',
             "profession/code/Dockerfile": "FROM base\n",
             "profession/stray/notes.txt": "not a tag\n",
         })
@@ -142,7 +144,7 @@ class TestProfession(TagTreeTestCase):
         # The inverse of the old "grouping" allowance: an intermediate dir
         # meant to hold [web] must itself be a tag (carry tag.info), else error.
         root = self.tree({
-            "profession/grp/web/tag.info": 'description = "w"\n',
+            "profession/grp/web/tag.info": 'full_description = "w"\n',
             "profession/grp/web/Dockerfile": "FROM base\n",
         })
         with self.assertRaisesRegex(TagError, r"needs tag\.info"):
@@ -152,7 +154,7 @@ class TestProfession(TagTreeTestCase):
         # A `_`-dir OUTSIDE the profession tree is just an ignored asset dir —
         # no layer semantics (layers are a profession-tree concept).
         root = self.tree({
-            "specialty/auto/tag.info": 'description = "a"\n',
+            "specialty/auto/tag.info": 'full_description = "a"\n',
             "specialty/_shared/helper.sh": "#!/bin/sh\n",
         })
         self.assertEqual({s.name for s in Specialty.scan(root, {})}, {"auto"})
@@ -164,9 +166,9 @@ class TestProfession(TagTreeTestCase):
 
     def test_duplicate_hidden_layer_raises(self):
         root = self.tree({
-            "profession/a/tag.info": 'description="a"\n', "profession/a/Dockerfile": "x\n",
+            "profession/a/tag.info": 'full_description="a"\n', "profession/a/Dockerfile": "x\n",
             "profession/a/_dup/Dockerfile": "x\n",
-            "profession/b/tag.info": 'description="b"\n', "profession/b/Dockerfile": "x\n",
+            "profession/b/tag.info": 'full_description="b"\n', "profession/b/Dockerfile": "x\n",
             "profession/b/_dup/Dockerfile": "x\n",
         })
         with self.assertRaisesRegex(TagError, "duplicate hidden layer 'dup'"):
@@ -174,8 +176,8 @@ class TestProfession(TagTreeTestCase):
 
     def test_hidden_dir_with_taginfo_raises(self):
         root = self.tree({
-            "profession/code/tag.info": 'description="c"\n', "profession/code/Dockerfile": "x\n",
-            "profession/code/_bad/tag.info": 'description="oops"\n',
+            "profession/code/tag.info": 'full_description="c"\n', "profession/code/Dockerfile": "x\n",
+            "profession/code/_bad/tag.info": 'full_description="oops"\n',
         })
         with self.assertRaisesRegex(TagError, "must not contain a tag"):
             Profession.discover_layers(root)
@@ -218,7 +220,7 @@ class TestSpecialty(TagTreeTestCase):
             tags.scan_combos(root)
 
     def test_absent_combos_file_is_empty(self):
-        self.assertEqual(tags.scan_combos(self.tree({"specialty/auto/tag.info": 'description="a"\n'})), [])
+        self.assertEqual(tags.scan_combos(self.tree({"specialty/auto/tag.info": 'full_description="a"\n'})), [])
 
 
 # ============================================================
@@ -228,28 +230,49 @@ class TestSpecialty(TagTreeTestCase):
 class TestPolicy(TagTreeTestCase):
     def test_fields_and_fragment(self):
         (p,) = Policy.scan(self.tree({
-            "policy/web-research/tag.info": 'description = "no ask"\nshortname = "+query"\nrisk_level = 2\n',
+            "policy/web-research/tag.info": 'full_description = "no ask"\nshortname = "+query"\nstance = "allow"\n',
             "policy/web-research/policy.json": '{"permissions": {"allow": ["WebSearch"]}}',
         }))
         self.assertEqual(p.label, "<+query>")
-        self.assertEqual(p.risk_level, 2)
+        self.assertIs(p.stance, PolicyStance.ALLOW)
         self.assertEqual(p.load_fragment(), {"permissions": {"allow": ["WebSearch"]}})
+
+    def test_stance_parsed(self):
+        (p,) = Policy.scan(self.tree({
+            "policy/no-sudo/tag.info": 'full_description = "deny sudo"\nstance = "deny"\n',
+            "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
+        }))
+        self.assertIs(p.stance, PolicyStance.DENY)
+
+    def test_unknown_stance_raises(self):
+        with self.assertRaisesRegex(TagError, "stance must be one of"):
+            Policy.scan(self.tree({
+                "policy/x/tag.info": 'full_description = "x"\nstance = "sideways"\n',
+                "policy/x/policy.json": '{}',
+            }))
+
+    def test_stance_defaults_to_allow(self):
+        (p,) = Policy.scan(self.tree({
+            "policy/x/tag.info": 'full_description = "x"\n',
+            "policy/x/policy.json": '{}',
+        }))
+        self.assertIs(p.stance, PolicyStance.ALLOW)
 
     def test_missing_json_raises(self):
         with self.assertRaisesRegex(TagError, "missing policy.json"):
-            Policy.scan(self.tree({"policy/x/tag.info": 'description="x"\n'}))
+            Policy.scan(self.tree({"policy/x/tag.info": 'full_description="x"\n'}))
 
     def test_non_object_fragment_raises(self):
         with self.assertRaisesRegex(TagError, "must be a JSON object"):
             Policy.scan(self.tree({
-                "policy/x/tag.info": 'description="x"\n',
+                "policy/x/tag.info": 'full_description="x"\n',
                 "policy/x/policy.json": '["not", "an", "object"]',
             }))
 
     def test_bad_json_raises(self):
         with self.assertRaisesRegex(TagError, "invalid JSON"):
             Policy.scan(self.tree({
-                "policy/x/tag.info": 'description="x"\n',
+                "policy/x/tag.info": 'full_description="x"\n',
                 "policy/x/policy.json": '{not valid',
             }))
 
@@ -257,7 +280,7 @@ class TestPolicy(TagTreeTestCase):
         # STRICT applies to every kind subtree, not just professions.
         with self.assertRaisesRegex(TagError, r"needs tag\.info"):
             Policy.scan(self.tree({
-                "policy/real/tag.info": 'description = "r"\n',
+                "policy/real/tag.info": 'full_description = "r"\n',
                 "policy/real/policy.json": "{}",
                 "policy/junk/readme.txt": "notes\n",
             }))
@@ -347,7 +370,7 @@ class TestLego(TagTreeTestCase):
 class TestManifestParsing(TagTreeTestCase):
     def test_docker_mount_relative_resolved_absolute_kept(self):
         root = self.tree({
-            "specialty/firewall/tag.info": 'description = "fw"\n',
+            "specialty/firewall/tag.info": 'full_description = "fw"\n',
             "specialty/firewall/init.sh": "#!/bin/sh\n",
             "specialty/firewall/tag.docker": (
                 '[run]\ncap_add = ["NET_ADMIN"]\nentrypoint = "init.sh"\n'
@@ -366,7 +389,7 @@ class TestManifestParsing(TagTreeTestCase):
 
     def test_docker_missing_mount_source_raises(self):
         root = self.tree({
-            "specialty/x/tag.info": 'description="x"\n',
+            "specialty/x/tag.info": 'full_description="x"\n',
             "specialty/x/tag.docker": '[run]\nmounts = ["ghost.sh -> /bin/ghost.sh"]\n',
         })
         with self.assertRaisesRegex(TagError, "mount source 'ghost.sh' not found"):
@@ -374,7 +397,7 @@ class TestManifestParsing(TagTreeTestCase):
 
     def test_docker_malformed_mount_raises(self):
         root = self.tree({
-            "specialty/x/tag.info": 'description="x"\n',
+            "specialty/x/tag.info": 'full_description="x"\n',
             "specialty/x/tag.docker": '[run]\nmounts = ["no arrow here"]\n',
         })
         with self.assertRaisesRegex(TagError, "not 'source -> target'"):
@@ -382,19 +405,19 @@ class TestManifestParsing(TagTreeTestCase):
 
     def test_docker_bare_entrypoint_must_exist(self):
         root = self.tree({
-            "specialty/x/tag.info": 'description="x"\n',
+            "specialty/x/tag.info": 'full_description="x"\n',
             "specialty/x/tag.docker": '[run]\nentrypoint = "ghost.sh"\n',
         })
         with self.assertRaisesRegex(TagError, "entrypoint 'ghost.sh' not found"):
             Specialty.scan(root, {})
 
     def test_wants_non_string_message_raises(self):
-        root = self.tree({"specialty/x/tag.info": 'description="x"\n[wants]\nfirewall = 5\n'})
+        root = self.tree({"specialty/x/tag.info": 'full_description="x"\n[wants]\nfirewall = 5\n'})
         with self.assertRaisesRegex(TagError, "wants.firewall must be a string"):
             Specialty.scan(root, {})
 
     def test_malformed_toml_names_file(self):
-        root = self.tree({"specialty/x/tag.info": 'description = "unterminated\n'})
+        root = self.tree({"specialty/x/tag.info": 'full_description = "unterminated\n'})
         with self.assertRaisesRegex(TagError, r"tag\.info: cannot read TOML"):
             Specialty.scan(root, {})
 
@@ -416,8 +439,8 @@ class TestRegistryValidation(TagTreeTestCase):
 
     def test_cross_kind_name_collision_raises(self):
         root = self.tree({
-            "profession/dup/tag.info": 'description="p"\n', "profession/dup/Dockerfile": "x\n",
-            "specialty/dup/tag.info": 'description="s"\n',
+            "profession/dup/tag.info": 'full_description="p"\n', "profession/dup/Dockerfile": "x\n",
+            "specialty/dup/tag.info": 'full_description="s"\n',
         })
         with self.assertRaisesRegex(TagError, "'dup' used by both .* names must be unique"):
             scan_all(root)
@@ -425,20 +448,20 @@ class TestRegistryValidation(TagTreeTestCase):
     def test_orphan_hidden_layer_raises(self):
         # A `_ghost` layer with no matching specialty is an error.
         root = self.tree({
-            "profession/code/tag.info": 'description="c"\n', "profession/code/Dockerfile": "x\n",
+            "profession/code/tag.info": 'full_description="c"\n', "profession/code/Dockerfile": "x\n",
             "profession/code/_ghost/Dockerfile": "x\n",
         })
         with self.assertRaisesRegex(TagError, "hidden layer '_ghost' has no matching specialty"):
             scan_all(root)
 
     def test_unknown_wants_reference_raises(self):
-        root = self.tree({"specialty/auto/tag.info": 'description="a"\n[wants]\nnosuchthing = "msg"\n'})
+        root = self.tree({"specialty/auto/tag.info": 'full_description="a"\n[wants]\nnosuchthing = "msg"\n'})
         with self.assertRaisesRegex(TagError, "wants unknown tag 'nosuchthing'"):
             scan_all(root)
 
     def test_unknown_combo_reference_raises(self):
         root = self.tree({
-            "specialty/auto/tag.info": 'description="a"\n',
+            "specialty/auto/tag.info": 'full_description="a"\n',
             "specialty/combos.info": '[warnings]\n"auto + ghost" = "x"\n',
         })
         with self.assertRaisesRegex(TagError, "combo references unknown tag 'ghost'"):
@@ -448,10 +471,10 @@ class TestRegistryValidation(TagTreeTestCase):
         # Two engines resolving to the same name via nesting (parents are
         # valid tags, so strict is satisfied — the clash is the leaf name).
         root = self.tree({
-            "engine/a/tag.info": 'description="a"\n',
-            "engine/a/dup/tag.info": 'description="d1"\n',
-            "engine/b/tag.info": 'description="b"\n',
-            "engine/b/dup/tag.info": 'description="d2"\n',
+            "engine/a/tag.info": 'full_description="a"\n',
+            "engine/a/dup/tag.info": 'full_description="d1"\n',
+            "engine/b/tag.info": 'full_description="b"\n',
+            "engine/b/dup/tag.info": 'full_description="d2"\n',
         })
         with self.assertRaisesRegex(TagError, "duplicate engine 'dup'"):
             scan_all(root)
@@ -606,32 +629,60 @@ class TestStore(TagTreeTestCase):
 # ============================================================
 
 
+def _tag_with_addendum(title, body):
+    """Stand-in for compose() input — it only reads `.addendum`."""
+    return SimpleNamespace(addendum=(title, body))
+
+
+_NO_ADDENDUM = SimpleNamespace(addendum=None)
+
+
 class TestAddendums(unittest.TestCase):
-    def test_base_carries_universal_notices(self):
-        out = addendums.compose(["base"])
+    def test_base_notices_always_present(self):
+        out = addendums.compose([])
         self.assertIn(f"## {addendums.ADDENDUM_SECTION_TITLE}", out)
         self.assertIn(addendums.SEEK_SUMMARY.body, out)
         self.assertIn(addendums.MAINTAIN_PRIVACY.body, out)
-        self.assertNotIn(addendums.FIREWALL_NOTICE.body, out)
 
-    def test_firewall_adds_firewall_notice(self):
-        self.assertIn(addendums.FIREWALL_NOTICE.body, addendums.compose(["base", "code", "firewall"]))
-
-    def test_auto_alone_carries_no_firewall_notice(self):
-        # Post-split, {auto} is pure skip-permissions — the firewall notice
-        # belongs to {firewall}, which auto merely *wants*.
-        self.assertNotIn(addendums.FIREWALL_NOTICE.body, addendums.compose(["base", "auto"]))
-
-    def test_web_adds_browser_notice(self):
-        self.assertIn(addendums.WEB_NOTICE.body, addendums.compose(["base", "code", "web"]))
-
-    def test_empty_chain_renders_nothing(self):
-        self.assertEqual(addendums.compose([]), "")
-
-    def test_section_order_follows_chain(self):
-        # base's summary sub-section precedes firewall's sub-section.
-        out = addendums.compose(["base", "firewall"])
+    def test_tag_addendum_rendered_after_base(self):
+        out = addendums.compose([_tag_with_addendum("Firewall", "watch the wall")])
+        self.assertIn("### Firewall\n\nwatch the wall", out)
         self.assertLess(out.index("### Project summary"), out.index("### Firewall"))
+
+    def test_addendumless_tags_contribute_nothing(self):
+        base_only = addendums.compose([])
+        self.assertEqual(addendums.compose([_NO_ADDENDUM, _NO_ADDENDUM]), base_only)
+
+    def test_placeholder_interpolated(self):
+        out = addendums.compose([_tag_with_addendum("Firewall", "status: {domain_resolve_status}")])
+        self.assertNotIn("{domain_resolve_status}", out)
+        self.assertIn("domains_pending_resolve", out)
+
+    def test_empty_placeholder_drops_the_addendum(self):
+        # The Credentials case: no optional creds on the host → the whole
+        # section disappears rather than rendering a dangling sentence.
+        with patch("launch.tags.addendums.installed_cred_clis", return_value=""):
+            out = addendums.compose([_tag_with_addendum("Credentials", "tools: {cred_clis}")])
+        self.assertNotIn("Credentials", out)
+
+    def test_populated_placeholder_keeps_the_addendum(self):
+        with patch("launch.tags.addendums.installed_cred_clis", return_value="gh jira"):
+            out = addendums.compose([_tag_with_addendum("Credentials", "tools: {cred_clis}")])
+        self.assertIn("tools: gh jira", out)
+
+    def test_nothing_active_renders_empty(self):
+        with patch.object(addendums, "BASE_ADDENDUMS", []):
+            self.assertEqual(addendums.compose([]), "")
+
+    def test_real_tree_addendums_wired(self):
+        # The shipped tree carries the moved notices: code → Credentials,
+        # web → Headless browser, firewall → Firewall; auto has none.
+        from launch.paths import AGENTS_DIR
+        reg = scan_all(AGENTS_DIR)
+        self.assertEqual(reg.professions["code"].addendum[0], "Credentials")
+        self.assertEqual(reg.professions["web"].addendum[0], "Headless browser")
+        self.assertEqual(reg.specialties["firewall"].addendum[0], "Firewall")
+        self.assertIsNone(reg.specialties["auto"].addendum)
 
 
 if __name__ == "__main__":

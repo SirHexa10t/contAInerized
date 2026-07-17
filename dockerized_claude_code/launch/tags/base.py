@@ -100,17 +100,31 @@ class Tag:
       nutshell    — one-line gloss of the KIND (form section header, legend).
 
     Member-level:
-      name        — folder name; the canonical string stored in instances.toml,
-                    used as an image-tag component and a form key.
-      shortname   — what shows inside the parentheses (defaults to name).
-      description — full prose; first line is the member nutshell.
-      requires    — names of tags that must also be active — DERIVED from tree
-                    position by the scanner, never authored.
-      wants       — 1-directional (name, message) pairs: this tag proclaims an
-                    almost-dependency, and the message surfaces in the form's
-                    warning zone while the wanted tag is unchecked.
-      docker      — parsed tag.docker, or None when the tag makes no container
-                    contribution."""
+      name              — folder name; the canonical string stored in
+                          instances.toml, used as an image-tag component and
+                          a form key.
+      fullname          — the unabbreviated display name (defaults to name);
+                          leads the form body panel and the legend
+                          description so shortnames are never a puzzle
+                          (`dood` → `Docker-outside-of-Docker`).
+      shortname         — what shows inside the parentheses (defaults to name).
+      short_description — a few words, rendered right next to the choice
+                          (form rows, legend). Falls back to the first line
+                          of full_description when unset.
+      full_description  — full prose; the form's body panel shows it while
+                          the row is focused.
+      addendum          — optional (title, body) from the `[addendum]` table:
+                          a launch-time CLAUDE.md section injected while the
+                          tag is active. Bodies may use the placeholders
+                          documented in tags/addendums.py.
+      requires          — names of tags that must also be active — DERIVED
+                          from tree position by the scanner, never authored.
+      wants             — 1-directional (name, message) pairs: this tag
+                          proclaims an almost-dependency, and the message
+                          surfaces in the form's warning zone while the
+                          wanted tag is unchecked.
+      docker            — parsed tag.docker, or None when the tag makes no
+                          container contribution."""
 
     parentheses: ClassVar[tuple[str, str]] = ("", "")
     root: ClassVar[str] = ""
@@ -118,8 +132,11 @@ class Tag:
 
     name: str
     path: Path
+    fullname: str = ""
     shortname: str = ""
-    description: str = ""
+    short_description: str = ""
+    full_description: str = ""
+    addendum: tuple[str, str] | None = None
     requires: frozenset[str] = frozenset()
     wants: tuple[tuple[str, str], ...] = ()
     docker: DockerContribution | None = None
@@ -268,18 +285,42 @@ def walk_tag_tree(root: Path) -> Iterator[tuple[Path, tuple[str, ...]]]:
     yield from rec(root, ())
 
 
+def _parse_addendum(info: dict[str, Any], tag_dir: Path) -> tuple[str, str] | None:
+    """Extract the optional `[addendum]` table as a (title, body) pair. Both
+    keys required, both strings; anything else is a `TagError`. Placeholder
+    validity (`{cred_clis}` etc.) is checked cross-kind in the registry
+    validator, against the set tags/addendums.py publishes."""
+    raw = info.get("addendum")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TagError(f"{tag_dir}/{INFO_FILE}: [addendum] must be a table, got {type(raw).__name__}")
+    title, body = raw.get("title"), raw.get("body")
+    if not isinstance(title, str) or not title.strip():
+        raise TagError(f"{tag_dir}/{INFO_FILE}: [addendum] needs a non-empty string `title`")
+    if not isinstance(body, str) or not body.strip():
+        raise TagError(f"{tag_dir}/{INFO_FILE}: [addendum] needs a non-empty string `body`")
+    return (title.strip(), body.strip())
+
+
 def common_fields(tag_dir: Path) -> dict[str, Any]:
     """The `tag.info`/`tag.docker`-derived fields every kind shares, as a
     kwargs dict the per-kind scanners splat into their constructor alongside
     the kind-specific fields (and the tree-derived `requires`). Keeps the four
     scanners from each re-reading the manifest."""
     info = read_info(tag_dir)
-    description = str(info.get("description", "")).strip()
+    full = str(info.get("full_description", "")).strip()
+    short = str(info.get("short_description", "")).strip()
+    if not short and full:
+        short = full.splitlines()[0]   # fallback — a one-field tag.info still renders everywhere
     return {
         "name": tag_dir.name,
         "path": tag_dir,
+        "fullname": str(info.get("fullname", "") or tag_dir.name),
         "shortname": str(info.get("shortname", "") or tag_dir.name),
-        "description": description,
+        "short_description": short,
+        "full_description": full,
+        "addendum": _parse_addendum(info, tag_dir),
         "wants": parse_wants(info, tag_dir),
         "docker": parse_docker(tag_dir),
         "_info": info,   # handed back so the kind can read its own keys without a re-read

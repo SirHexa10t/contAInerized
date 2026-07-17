@@ -1,6 +1,9 @@
 """Interactive agent UI: full-screen picker (prompt_toolkit) plus supporting
 line-prompt helpers for workspace path and session suffix. Pulls picker-entry
 builders and state lookups from agents_crud; has no agent-domain logic.
+The tag-selection form (`prompt_tags` / `checkbox_form`) and the shared TUI
+style system live in `tag_form.py` — this module drives it from the create
+and F2-modify flows and reuses its styles.
 
 Public API:
 
@@ -18,28 +21,6 @@ Public API:
       Line prompt for a session suffix; rejects collisions with existing
       instances (except `current` — the modify flow's keep-the-name case).
       -> session suffix string
-
-  prompt_tags(registry, current)
-      Full-screen checkbox form over every discovered profession, specialty,
-      and policy (registry order), pre-checked from `current` (an AgentBuild —
-      `.lego` defaults for creates, the store entry for modifies). Labels
-      carry each tag's kind punctuation + warn coloring + a `(requires: …)`
-      parenthetical; checking a tag auto-checks its requirements and
-      unchecking a requirement unchecks its dependents (live, in-form).
-      combos.info warnings render live above the confirm row while their
-      full tag set is checked. The engine axis isn't in the form (it stays
-      whatever `current.engine` says — engine switching is a `.lego` edit).
-      -> AgentBuild | None on cancel (Esc)
-
-  checkbox_form(title, options, warnings=None, requires=None, wants=None)
-      Generic full-screen multi-select form primitive behind prompt_tags.
-      ↑↓ cycles rows (options + the confirm button), Space toggles, Enter
-      confirms, Esc cancels. An option can render attached beneath an anchor
-      option (`attached_to`) with a connector line — visual proximity for
-      related options. `requires` maps option keys to prerequisite keys and
-      drives the live check-cascade (see requires_closure); `wants` renders
-      advisory unmet-companion messages in the warning zone (wants_warnings).
-      -> list of checked option keys in display order | None on cancel
 
   pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
       Generic full-screen picker primitive used by select_agent.
@@ -86,12 +67,14 @@ from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
-from rich.console import Console                                           # dep — declared in pyproject.toml [project]
+from rich import box                                                       # dep — declared in pyproject.toml [project]
+from rich.console import Console
 from rich.markdown import Markdown
-from rich.theme import Theme
+from rich.table import Table
+from rich.text import Text
 
 from .agents_crud import (
-    creatable_agents, delete_instance, engine_sort_key, instance_from_store,
+    creatable_agents, delete_instance, instance_from_store,
     list_all_instances, modify_instance,
 )
 from .file_access import (
@@ -103,9 +86,12 @@ from .paths import (
     DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
     FIREWALL_WHITELIST_FILE, instance_state_dir_path,
 )
-from .tags import (
-    Agent, AgentBuild, Instance, Registry, Tag, resolve_build,
+from .tag_form import (
+    RICH_BY_STYLE, STYLE_DICT, UiClass, _normalize, _plain, prompt_tags,
+    tag_style,
 )
+from .tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
+from .tags.engine import engine_sort_key
 from .tags.identity import SESSION_SEP
 from .utils import ordering_index_or_end, plural, relative_time
 
@@ -125,13 +111,6 @@ DIVIDER_CHAR         = "│"
 CONFIRM_PROMPT_FMT   = "{message}  [y/N]: "
 CONFIRM_YES_ANSWERS  = ("y", "yes")
 
-# Checkbox form (see checkbox_form below)
-FORM_HINT_TEXT      = "↑↓ navigate  •  Space toggle  •  Enter confirm  •  Esc cancel"
-FORM_CONFIRM_LABEL  = "[ Confirm ]"
-CHECKBOX_ON         = "[x] "
-CHECKBOX_OFF        = "[ ] "
-ATTACHED_CONNECTOR  = "  └─ "        # prefix for options rendered attached beneath their anchor
-TITLE_TAGS_FORM     = "Configure instance tags  (Space to toggle):"
 
 # ============================================================
 # Layout
@@ -145,7 +124,7 @@ DIVIDER_WIDTH  = 1
 PAGE_JUMP      = 10  # rows skipped per PageUp/PageDown
 
 # Style class names + their corresponding style strings live as the
-# PickerClass enum below.
+# UiClass enum in tag_form (shared by the form and this picker).
 
 # ============================================================
 # Agent-picker UI strings
@@ -171,18 +150,6 @@ CONFIRM_DELETE_FMT = "Delete '{name}'?"
 STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
-# Tag coloring is warn-driven: a warn-flagged specialty renders bold bright
-# red, everything else bright green (`_tag_style`). The warn flag lives on
-# the tag itself (specialty tag.info), so adding a new dangerous specialty
-# doesn't require touching the picker.
-STYLE_TAG_WARN = "bold fg:ansibrightred"
-STYLE_TAG_SAFE = "fg:ansibrightgreen"
-
-
-def _tag_style(tag: Tag) -> str:
-    """The picker style for one tag's label — red when the tag carries a
-    truthy `warn` (specialties only; other kinds have no such field)."""
-    return STYLE_TAG_WARN if getattr(tag, "warn", False) else STYLE_TAG_SAFE
 
 
 class PickerAction(Enum):
@@ -192,36 +159,6 @@ class PickerAction(Enum):
     SELECT = "select"     # Enter — user picked a row
     DELETE = "delete"     # Del   — user pressed delete on a row (only fires for deletable rows)
     MODIFY = "modify"     # F2    — user pressed modify on a row (only fires for modifiable rows)
-
-
-class PickerClass(Enum):
-    """prompt_toolkit CSS-like class names + the style applied to spans tagged
-    with each. Bundling both on the enum member keeps the class name and its
-    style co-located (adding a new entry threads through STYLE_DICT below
-    without a second hand-maintained list). Members expose:
-      .cls_name — the CSS-like class string used in prompt_toolkit style refs
-      .style    — the prompt_toolkit style string applied to that class
-      .css      — `class:<cls_name>` — what span tuples want as the style key
-    """
-    TITLE    = ("picker-title",    "bold fg:ansibrightcyan")
-    DIVIDER  = ("picker-divider",  "fg:ansibrightblack")
-    STATUS   = ("picker-status",   "fg:ansibrightblack")
-    FILTER   = ("picker-filter",   "bold fg:ansiyellow")
-    CURSOR   = ("picker-cursor",   "reverse")
-    PREVIEW  = ("picker-preview",  "")
-    NO_MATCH = ("picker-no-match", "italic fg:ansibrightblack")
-    WARNING  = ("picker-warning",  "bold fg:ansibrightred")
-
-    def __init__(self, cls_name: str, style: str) -> None:
-        self.cls_name = cls_name
-        self.style = style
-
-    @property
-    def css(self) -> str:
-        return f"class:{self.cls_name}"
-
-
-STYLE_DICT = {e.cls_name: e.style for e in PickerClass}
 
 
 class PickerRowMarker(Enum):
@@ -396,49 +333,48 @@ def continuable_instances(registry: Registry) -> list[ContEntry]:
     return out
 
 
-def _render_md(text: str, *, theme: dict[str, str] | None = None) -> str:
-    """Render markdown text to an ANSI-encoded string for the picker's preview pane.
-    Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower. Optional
-    `theme` (dict of Rich style names → style strings) overrides Markdown's defaults
-    for this render — used by the legend to colour-code the tag tables."""
+def _render_md(text: str) -> str:
+    """Render markdown text to an ANSI-encoded string for the picker's preview
+    pane. Width is fixed to 80; prompt_toolkit re-wraps if the pane is
+    narrower."""
     buf = io.StringIO()
     Console(
         file=buf, force_terminal=True, color_system="truecolor", width=80,
-        theme=Theme(theme) if theme else None,
     ).print(Markdown(text))
     return buf.getvalue()
 
 
 def _build_composition_legend(registry: Registry) -> str:
     """Build the F8 'composition legend' shown over the preview pane — one
-    markdown table per tag kind (engines, professions, specialties, policies),
-    header = the kind's nutshell, rows = each discovered member's label +
-    description first line. Warn-flagged specialties get their red inline via
-    `_ANSI_BY_STYLE`; the `markdown.code: none` override stops rich's default
-    code styling from overlaying the injected colors."""
-    ANSI_BY_STYLE = {STYLE_TAG_WARN: "\033[01;91m", STYLE_TAG_SAFE: "\033[22;92m"}
-
-    def colored(tag: Tag) -> str:
-        return f"{ANSI_BY_STYLE[_tag_style(tag)]}{tag.label}\033[0m"
-
-    def table(title: str, nutshell: str, members: Iterable[Tag]) -> str:
-        rows = "\n".join(
-            f"| {colored(t)} | {t.description.splitlines()[0] if t.description else ''} |"
-            for t in members
-        )
-        return (
-            f"# {title}\n\n{nutshell}\n\n"
-            f"| {title[:-1]} | Description |\n|-----|-------------|\n{rows}\n\n"
-        )
-
-    # Engines stay out of the legend for now — the picker never renders engine
-    # labels (engine choice lives in `.lego`, not the tag column or the form).
-    md = (
-        table("Professions", "Tools it can use — each is a docker image layer.", registry.professions.values())
-        + table("Specialties", "Exceptional access or running conditions.", registry.specialties.values())
-        + table("Policies",    "What it's permitted to do — pure settings fragments.", registry.policies.values())
-    )
-    return _render_md(md, theme={"markdown.code": "none"})
+    table per tag kind, header = the kind's nutshell, rows = each discovered
+    member's underlined fullname + short description (the fullname spells
+    out what the shortname abbreviates). Built with rich Table objects and
+    rich styles — injecting raw ANSI into markdown-table source made rich
+    count escape bytes as width and misalign the columns."""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, color_system="truecolor", width=80)
+    sections: list[tuple[str, str, str, Iterable[Tag]]] = [
+        ("Engines",     "Engine",     "How hard the agent thinks — a model/effort budget.", registry.engines.values()),
+        ("Professions", "Profession", "Tools it can use — each is a docker image layer.", registry.professions.values()),
+        ("Specialties", "Specialty",  "Exceptional access or running conditions.", registry.specialties.values()),
+        # Policies sort by shortname WITH its symbol (`!` < `+` < `-`), so
+        # same-stance policies group: obligations, grants, denials.
+        ("Policies",    "Policy",     "What it's permitted to do — orange grants, blue denies, white obligates.",
+         sorted(registry.policies.values(), key=lambda t: t.shortname)),
+    ]
+    for title, singular, nutshell, members in sections:
+        console.print(Markdown(f"# {title}\n\n{nutshell}"))
+        console.print()
+        table = Table(box=box.SIMPLE_HEAD, header_style="cyan", pad_edge=False)
+        table.add_column(singular)
+        table.add_column("Description")
+        for t in members:
+            table.add_row(
+                Text(t.label, style=RICH_BY_STYLE[tag_style(t)]),
+                Text.assemble((t.fullname, "underline"), f": {t.short_description}"),
+            )
+        console.print(table)
+    return buf.getvalue()
 
 
 def _agent_description(md_text: str) -> str:
@@ -469,315 +405,12 @@ def _tags_column(tags: Iterable[Tag]) -> tuple[list[tuple[str, str]], int]:
     for tag in tags:
         if fragments:
             fragments.append(("", " "))
-        fragments.append((_tag_style(tag), tag.label))
+        fragments.append((tag_style(tag), tag.label))
     if not fragments:
         return [], 0
     fragments.append(("", " "))   # trailing separator — bakes into the column width
     visible = sum(len(text) for _, text in fragments)
     return fragments, visible
-
-
-def _normalize(display: str | Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Coerce any accepted display form into a list of (style, text) tuples."""
-    if isinstance(display, str):
-        return [("", display)]
-    return list(display)
-
-
-def _plain(display: str | Iterable[tuple[str, str]]) -> str:
-    """Plain-text view of a display, used for filter matching."""
-    return "".join(text for _, text in _normalize(display))
-
-
-# ============================================================
-# Checkbox form (multi-select) — generic primitive behind prompt_tags
-# ============================================================
-
-@dataclass
-class FormOption:
-    """One checkbox row in `checkbox_form`. `key` is the canonical string the
-    form returns when the box is checked (a tag name, for the tag form);
-    `label` is the row's display (plain string or (style, text)
-    fragments); `body` is the focused-row explanation shown under the list.
-    `attached_to` names another option's key this row renders directly
-    beneath, with a connector line — visual proximity for related options
-    (e.g. a future standalone `firewall` beneath `auto`). Purely layout:
-    no dependency logic — the user can check either, neither, or both."""
-    key: str
-    label: str | list[tuple[str, str]]
-    body: list[str] = field(default_factory=list)
-    checked: bool = False
-    attached_to: str | None = None
-
-
-def ordered_form_options(options: list[FormOption]) -> list[FormOption]:
-    """Display order for form rows: anchor options keep their given order;
-    each attached option is re-inserted directly after its anchor (several
-    attachments to one anchor keep their given relative order). Options
-    attached to an unknown key are appended at the end unattached-style —
-    better a detached row than a vanished one."""
-    anchors = [o for o in options if o.attached_to is None]
-    known = {o.key for o in anchors}
-    out: list[FormOption] = []
-    for anchor in anchors:
-        out.append(anchor)
-        out.extend(o for o in options if o.attached_to == anchor.key)
-    out.extend(o for o in options if o.attached_to is not None and o.attached_to not in known)
-    return out
-
-
-def active_warnings(checked: set[str],
-                    warnings: dict[frozenset[str], tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:
-    """The (header, body) warning entries whose key-combination is fully
-    covered by the checked set. The form's warning zone recomputes this on
-    every toggle, so dangerous combinations surface the moment the last box
-    of the combo is ticked — and disappear when it's unticked."""
-    return [entry for combo, entry in warnings.items() if combo <= checked]
-
-
-def wants_warnings(checked: set[str],
-                   wants: dict[str, tuple[tuple[str, str], ...]]) -> list[tuple[str, list[str]]]:
-    """(header, body) warning entries for every checked tag whose `[wants]`
-    names an UNchecked tag — e.g. {auto} ticked without {firewall}. Rendered
-    in the same red zone as combo warnings, live per toggle. A want never
-    blocks confirmation — it's a request with a message, not a requirement."""
-    return [
-        (f"'{wanter}' wants '{wanted}':", message.splitlines())
-        for wanter, entries in wants.items() if wanter in checked
-        for wanted, message in entries if wanted not in checked
-    ]
-
-
-def requires_closure(key: str, requires: dict[str, frozenset[str]]) -> set[str]:
-    """Transitive prerequisite set for `key`, excluding `key` itself — what
-    must also be checked when `key` is checked. Drives checkbox_form's
-    check-cascade in both directions: checking a key checks its closure;
-    unchecking a key unchecks every checked option whose closure contains it.
-    Keys absent from `requires` (or with no prerequisites) yield set()."""
-    seen: set[str] = set()
-    stack = [key]
-    while stack:
-        for dep in requires.get(stack.pop(), ()):
-            if dep not in seen:
-                seen.add(dep)
-                stack.append(dep)
-    return seen
-
-
-def checkbox_form(title: str, options: list[FormOption],
-                  warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None,
-                  requires: dict[str, frozenset[str]] | None = None,
-                  wants: dict[str, tuple[tuple[str, str], ...]] | None = None) -> list[str] | None:
-    """Render a full-screen multi-select form; block until confirm or cancel.
-
-    ↑↓ cycle through the rows (options first, then the [ Confirm ] button,
-    wrapping around); Space toggles the focused checkbox (or confirms, on
-    the button); Enter confirms from anywhere; Esc / Ctrl-C cancels. The
-    focused option's `body` renders in an explanation panel under the list;
-    `warnings` entries whose combination is fully checked render live, in
-    warning red, directly above the confirm button.
-
-    `requires` maps option keys to prerequisite option keys and drives the
-    live check-cascade: checking a box also checks its transitive
-    prerequisites; unchecking a box that others depend on unchecks those
-    dependents. No disabling or indentation — every row stays freely
-    toggleable, the cascade just keeps the set consistent.
-
-    `wants` maps option keys to their (wanted-key, message) requests —
-    rendered in the warning zone while the wanter is checked and the wanted
-    key isn't (see wants_warnings). Purely advisory.
-
-    Returns the checked options' keys in display order, or None on cancel."""
-    if not options:
-        raise ValueError("options must be non-empty")
-    rows = ordered_form_options(options)
-    warning_map = warnings or {}
-    req_map = requires or {}
-    wants_map = wants or {}
-    by_key = {o.key: o for o in rows}
-    confirm_index = len(rows)              # the confirm button is the last navigable row
-    row_count = len(rows) + 1
-    state: dict[str, Any] = {"cursor": 0, "confirmed": False}
-
-    def cascade(toggled: FormOption) -> None:
-        """Keep the checked set requires-consistent after `toggled` flips."""
-        if toggled.checked:
-            for key in requires_closure(toggled.key, req_map):
-                if key in by_key:
-                    by_key[key].checked = True
-        else:
-            for opt in rows:
-                if opt.checked and toggled.key in requires_closure(opt.key, req_map):
-                    opt.checked = False
-
-    def checked_keys() -> set[str]:
-        return {o.key for o in rows if o.checked}
-
-    def option_fragments() -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
-        for i, opt in enumerate(rows):
-            frags: list[tuple[str, str]] = []
-            if opt.attached_to is not None:
-                frags.append((PickerClass.STATUS.css, ATTACHED_CONNECTOR))
-            frags.append(("", CHECKBOX_ON if opt.checked else CHECKBOX_OFF))
-            frags.extend(_normalize(opt.label))
-            if i == state["cursor"]:
-                frags = [(f"{PickerClass.CURSOR.css} {style}".strip(), text)
-                         for style, text in frags]
-            out.extend(frags)
-            out.append(("", "\n"))
-        if out:
-            out.pop()   # trailing newline
-        return out
-
-    def body_fragments() -> list[tuple[str, str]]:
-        if state["cursor"] >= confirm_index:
-            return []
-        lines = rows[state["cursor"]].body
-        return [("", "\n".join(f"  {line}" if line else "" for line in lines))]
-
-    def warning_fragments() -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
-        checked = checked_keys()
-        entries = active_warnings(checked, warning_map) + wants_warnings(checked, wants_map)
-        for header, body in entries:
-            out.append((PickerClass.WARNING.css, f"  {header}\n"))
-            out.extend((PickerClass.WARNING.css, f"  {line}\n") for line in body)
-        if out:
-            out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
-        return out
-
-    def confirm_fragments() -> list[tuple[str, str]]:
-        style = PickerClass.CURSOR.css if state["cursor"] == confirm_index else PickerClass.TITLE.css
-        return [("", "  "), (style, FORM_CONFIRM_LABEL)]
-
-    def title_fragments() -> list[tuple[str, str]]:
-        return [(PickerClass.TITLE.css, title)]
-
-    def hint_fragments() -> list[tuple[str, str]]:
-        return [(PickerClass.STATUS.css, FORM_HINT_TEXT)]
-
-    def cursor_pos() -> Point:
-        return Point(0, min(state["cursor"], len(rows) - 1))
-
-    def move(delta: int) -> None:
-        state["cursor"] = (state["cursor"] + delta) % row_count
-
-    def confirm(event: KeyPressEvent) -> None:
-        state["confirmed"] = True
-        event.app.exit()
-
-    kb = KeyBindings()
-
-    @kb.add("up")
-    def _(event: KeyPressEvent) -> None: move(-1)
-
-    @kb.add("down")
-    def _(event: KeyPressEvent) -> None: move(1)
-
-    @kb.add(" ")
-    def _(event: KeyPressEvent) -> None:
-        if state["cursor"] == confirm_index:
-            confirm(event)
-        else:
-            opt = rows[state["cursor"]]
-            opt.checked = not opt.checked
-            cascade(opt)
-
-    @kb.add("enter")
-    def _(event: KeyPressEvent) -> None: confirm(event)
-
-    @kb.add("escape")
-    def _(event: KeyPressEvent) -> None: event.app.exit()
-
-    @kb.add("c-c")
-    def _(event: KeyPressEvent) -> None: event.app.exit()
-
-    body_layout = HSplit([
-        Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
-        Window(height=1, char=" "),
-        Window(FormattedTextControl(option_fragments,
-                                    get_cursor_position=cursor_pos,
-                                    focusable=True,
-                                    show_cursor=False),
-               wrap_lines=False, dont_extend_height=True),
-        Window(height=1, char=" "),
-        Window(FormattedTextControl(body_fragments), wrap_lines=True),   # flexible filler — focused option's explanation
-        Window(FormattedTextControl(warning_fragments), wrap_lines=True, dont_extend_height=True),
-        Window(height=1, char=" "),
-        Window(FormattedTextControl(confirm_fragments), height=1),
-        Window(FormattedTextControl(hint_fragments), height=STATUS_HEIGHT),
-    ])
-
-    Application(
-        layout=Layout(body_layout),
-        key_bindings=kb,
-        style=Style.from_dict(STYLE_DICT),
-        full_screen=True,
-    ).run()
-
-    if not state["confirmed"]:
-        return None
-    return [o.key for o in rows if o.checked]
-
-
-def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOption]:
-    """FormOption rows for every discovered profession, specialty, and policy
-    (registry order within each kind), pre-checked from `current`'s axis
-    lists. Row label = the tag's warn-aware colored kind-punctuated label,
-    its description's first line, and — when the tag has prerequisites — a
-    dim `(requires: …)` parenthetical. Body = the full description. Keys are
-    the tags' full names (what `.lego` / instances.toml store)."""
-    checked = {*current.professions, *current.specialties, *current.policies}
-    out: list[FormOption] = []
-    for tag in (*registry.professions.values(), *registry.specialties.values(),
-                *registry.policies.values()):
-        label: list[tuple[str, str]] = [(_tag_style(tag), tag.label), ("", " ")]
-        first_line = tag.description.splitlines()[0] if tag.description else ""
-        label.append(("", first_line))
-        if tag.requires:
-            label.append((PickerClass.STATUS.css, f"  (requires: {', '.join(sorted(tag.requires))})"))
-        out.append(FormOption(
-            key=tag.name,
-            label=label,
-            body=tag.description.splitlines(),
-            checked=tag.name in checked,
-        ))
-    return out
-
-
-def _combo_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[str]]]:
-    """specialty/combos.info entries re-shaped for checkbox_form's warning
-    zone: {tag-name set: (first message line, remaining lines)}."""
-    out: dict[frozenset[str], tuple[str, list[str]]] = {}
-    for combo in registry.combos:
-        first, *rest = combo.message.splitlines() or [""]
-        out[combo.tags] = (first, rest)
-    return out
-
-
-def _form_requires(registry: Registry) -> dict[str, frozenset[str]]:
-    """{tag name: prerequisite tag names} across the three form kinds — the
-    shape checkbox_form's check-cascade consumes. Tags without prerequisites
-    are omitted (requires_closure treats absent keys as empty)."""
-    return {
-        tag.name: frozenset(tag.requires)
-        for tag in (*registry.professions.values(), *registry.specialties.values(),
-                    *registry.policies.values())
-        if tag.requires
-    }
-
-
-def _form_wants(registry: Registry) -> dict[str, tuple[tuple[str, str], ...]]:
-    """{tag name: its (wanted, message) requests} across the three form kinds
-    — the shape checkbox_form's wants zone consumes. Tags without wants are
-    omitted."""
-    return {
-        tag.name: tag.wants
-        for tag in (*registry.professions.values(), *registry.specialties.values(),
-                    *registry.policies.values())
-        if tag.wants
-    }
 
 
 def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
@@ -808,12 +441,12 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     def list_fragments() -> list[tuple[str, str]]:
         if not state["shown"]:
-            return [(PickerClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
+            return [(UiClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
         out = []
         for i in state["shown"]:
             segments = _normalize(entries[i].display)
             if i == state["cursor"]:
-                segments = [(f"{PickerClass.CURSOR.css} {style}".strip(), text)
+                segments = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
                             for style, text in segments]
             out.extend(segments)
             out.append(("", "\n"))
@@ -831,7 +464,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         return ANSI(entries[state["cursor"]].preview)
 
     def title_fragments() -> list[tuple[str, str]]:
-        return [(PickerClass.TITLE.css, title)]
+        return [(UiClass.TITLE.css, title)]
 
     def status_fragments() -> list[tuple[str, str]]:
         if state["legend_open"]:
@@ -844,9 +477,9 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
                 hint += HINT_MODIFY_SUFFIX
             if legend_text is not None:
                 hint += HINT_LEGEND_SUFFIX
-        out = [(PickerClass.STATUS.css, hint), ("", "\n")]
+        out = [(UiClass.STATUS.css, hint), ("", "\n")]
         if state["filter"]:
-            out.append((PickerClass.FILTER.css, FILTER_LABEL))
+            out.append((UiClass.FILTER.css, FILTER_LABEL))
             out.append(("", state["filter"]))
         return out
 
@@ -950,13 +583,13 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         green for Create rows (Agent), yellow for Cont rows (Instance), dim
         default for menu/back rows."""
         if not state["shown"]:
-            return PickerClass.DIVIDER.css
+            return UiClass.DIVIDER.css
         value = entries[state["cursor"]].value
         if isinstance(value, Instance):             # cont row
             return PickerRowMarker.CONT.style       # fg:ansiyellow
         if isinstance(value, Agent):                # new row
             return PickerRowMarker.NEW.style        # fg:ansigreen
-        return PickerClass.DIVIDER.css
+        return UiClass.DIVIDER.css
 
     body = HSplit([
         Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
@@ -969,13 +602,13 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
                 wrap_lines=False,
                 width=D(weight=LIST_WEIGHT),
             ),
-            Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=PickerClass.DIVIDER.css),
+            Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=UiClass.DIVIDER.css),
             Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
             Window(
                 FormattedTextControl(preview_text),
                 wrap_lines=True,
                 width=D(weight=PREVIEW_WEIGHT),
-                style=PickerClass.PREVIEW.css,
+                style=UiClass.PREVIEW.css,
             ),
         ]),
         Window(FormattedTextControl(status_fragments), height=STATUS_HEIGHT),
@@ -1048,41 +681,6 @@ def prompt_session(agent: str, workspace: str, current: str | None = None) -> st
             print(f"Instance '{candidate}' already exists. Pick another name.")
             continue
         return suffix
-
-
-def build_of(inst: Instance) -> AgentBuild:
-    """The instance's current axis selections as name strings — the form's
-    pre-check shape (and what resolve_build turns back into tag objects)."""
-    return AgentBuild(
-        engine=inst.engine.name if inst.engine else None,
-        professions=tuple(p.name for p in inst.professions),
-        specialties=tuple(s.name for s in inst.specialties),
-        policies=tuple(p.name for p in inst.policies),
-    )
-
-
-def prompt_tags(registry: Registry, current: AgentBuild) -> AgentBuild | None:
-    """Full-screen tag-selection form: one checkbox per discovered profession /
-    specialty / policy (assembled by `_tag_form_options`, defaults from
-    `current`), requires-cascade live in the form, combos.info warnings
-    rendered above the confirm button while their combination is checked.
-    Returns a new AgentBuild carrying `current.engine` plus the selection
-    split back into its axes, or None when the user cancels (Esc) — callers
-    abort their create / modify flow on None rather than persisting anything."""
-    options = _tag_form_options(registry, current)
-    keys = checkbox_form(TITLE_TAGS_FORM, options,
-                         warnings=_combo_warnings(registry),
-                         requires=_form_requires(registry),
-                         wants=_form_wants(registry))
-    if keys is None:
-        return None
-    picked = set(keys)
-    return AgentBuild(
-        engine=current.engine,
-        professions=tuple(n for n in registry.professions if n in picked),
-        specialties=tuple(n for n in registry.specialties if n in picked),
-        policies=tuple(n for n in registry.policies if n in picked),
-    )
 
 
 def select_agent(registry: Registry) -> Agent | Instance | None:
@@ -1186,7 +784,9 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
             # current= it accepts keeping the existing name.
             new_workspace = ask_for_workspace(old_inst.agent, default=old_inst.workspace)
             new_session = prompt_session(old_inst.agent, new_workspace, current=old_inst.session)
-            new_build = prompt_tags(registry, build_of(old_inst))
+            new_build = prompt_tags(registry, old_inst.build,
+                                    instance=f"{old_inst.agent}{SESSION_SEP}{new_session}",
+                                    workspace=new_workspace)
             if new_build is None:   # Esc on the tag form — abort the modify, back to the picker
                 continue
             new_inst = dataclasses.replace(

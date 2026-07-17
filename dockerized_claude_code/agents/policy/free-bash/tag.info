@@ -1,0 +1,4 @@
+shortname         = "+bash"
+short_description = "bash without prompts"
+full_description  = "Allow every Bash invocation without per-command permission prompts — shell autonomy without the full {auto} (other tools still prompt)."
+stance            = "allow"

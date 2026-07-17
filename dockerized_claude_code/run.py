@@ -14,12 +14,15 @@ from launch.docker_config import (
 )
 from launch.file_access import agent_md_index, ensure_shared_oauth_files, is_dir
 from launch.menu_picker import (
-    ask_for_workspace, print_launch_banner, prompt_session, prompt_tags, select_agent,
+    ask_for_workspace, print_launch_banner, prompt_session, select_agent,
 )
+from launch.tag_form import prompt_tags
+from launch.tags.identity import SESSION_SEP
 from launch.paths import AGENTS_DIR, INSTANCES_FILE
 from launch.tag_handlers import apply_tags
 from launch.tags import (
-    Agent, Instance, Registry, TagError, migrations, resolve_build, scan_all,
+    Agent, Instance, Registry, TagError, effective_engine_name, migrations,
+    resolve_build, scan_all,
 )
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
@@ -137,10 +140,15 @@ def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
         if not picked.workspace:           # stale / missing store entry (None or "") — re-prompt
             return dataclasses.replace(picked, workspace=ask_for_workspace(picked.agent))
         return picked
-    # new — Agent only; prompt workspace, session, then tags
+    # new — Agent only; prompt workspace, session, then tags. The engine
+    # radio pre-dots the RESOLVED engine (`.lego` → agent-named → default),
+    # not the raw `.lego` value, so the form shows what would actually run.
     workspace = ask_for_workspace(picked.name)
     session = prompt_session(picked.name, workspace)
-    build = prompt_tags(registry, picked.build)
+    engine = effective_engine_name(picked.build, picked.name, registry)
+    build = prompt_tags(registry, dataclasses.replace(picked.build, engine=engine),
+                        instance=f"{picked.name}{SESSION_SEP}{session}",
+                        workspace=workspace)
     if build is None:
         sys.exit(0)
     return Instance(agent=picked.name, md_path=picked.md_path, session=session,

@@ -1,1 +1,7 @@
-description = "coding/programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)"
+shortname         = "code"
+short_description = "coding toolchains"
+full_description  = "coding/programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)"
+
+[addendum]
+title = "Credentials"
+body  = "The user has provided credentials for the following CLI tools, which are already installed and ready to use: {cred_clis}"

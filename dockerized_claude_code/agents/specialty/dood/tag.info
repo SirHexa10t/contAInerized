@@ -1,3 +1,5 @@
-description = "Docker-outside-of-Docker; can run Docker. Danger: authority to do anything (effectively host-root)!"
-shortname   = "dood"
-warn        = true
+fullname          = "Docker-outside-of-Docker"
+shortname         = "dood"
+short_description = "controls host docker"
+full_description  = "can run Docker. Danger: authority to do anything (effectively host-root)!"
+warn              = true

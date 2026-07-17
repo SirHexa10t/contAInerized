@@ -1,1 +1,3 @@
-description = "Cheapest tier — Haiku, no extended thinking, low effort. For fast, mechanical, low-stakes work."
+shortname         = "golem"
+short_description = "cheap & fast (haiku)"
+full_description  = "Cheapest tier — Haiku, no extended thinking, low effort. For fast, mechanical, low-stakes work."

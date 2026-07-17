@@ -1,0 +1,4 @@
+shortname         = "-write"
+short_description = "no file edits"
+full_description  = "Deny file modifications (Write / Edit / NotebookEdit) — for reviewer and investigator agents that should only read. Harness-level: the filesystem itself stays writable through Bash."
+stance            = "deny"
