@@ -31,13 +31,14 @@ Public API:
       whatever `current.engine` says — engine switching is a `.lego` edit).
       -> AgentBuild | None on cancel (Esc)
 
-  checkbox_form(title, options, warnings=None, requires=None)
+  checkbox_form(title, options, warnings=None, requires=None, wants=None)
       Generic full-screen multi-select form primitive behind prompt_tags.
       ↑↓ cycles rows (options + the confirm button), Space toggles, Enter
       confirms, Esc cancels. An option can render attached beneath an anchor
       option (`attached_to`) with a connector line — visual proximity for
       related options. `requires` maps option keys to prerequisite keys and
-      drives the live check-cascade (see requires_closure).
+      drives the live check-cascade (see requires_closure); `wants` renders
+      advisory unmet-companion messages in the warning zone (wants_warnings).
       -> list of checked option keys in display order | None on cancel
 
   pick_with_preview(title, entries, *, allow_delete=False, allow_modify=False)
@@ -54,7 +55,7 @@ Public API:
       per-axis tag lines, creds, user whitelist count) before docker builds
       the image. Conditional lines — only shown when applicable; everything
       comes off the Instance. The user-whitelist line counts
-      user_firewall_whitelist_lines() on demand only when {auto} is active.
+      user_firewall_whitelist_lines() on demand only when {firewall} is active.
 
 Generic-picker entry shape (pick_with_preview):
     {
@@ -399,7 +400,7 @@ def _render_md(text: str, *, theme: dict[str, str] | None = None) -> str:
     """Render markdown text to an ANSI-encoded string for the picker's preview pane.
     Width is fixed to 80; prompt_toolkit re-wraps if the pane is narrower. Optional
     `theme` (dict of Rich style names → style strings) overrides Markdown's defaults
-    for this render — used by the legend to colour-code tag vs mode entries."""
+    for this render — used by the legend to colour-code the tag tables."""
     buf = io.StringIO()
     Console(
         file=buf, force_terminal=True, color_system="truecolor", width=80,
@@ -495,8 +496,8 @@ def _plain(display: str | Iterable[tuple[str, str]]) -> str:
 @dataclass
 class FormOption:
     """One checkbox row in `checkbox_form`. `key` is the canonical string the
-    form returns when the box is checked (a modifier `.value` for the modes
-    form); `label` is the row's display (plain string or (style, text)
+    form returns when the box is checked (a tag name, for the tag form);
+    `label` is the row's display (plain string or (style, text)
     fragments); `body` is the focused-row explanation shown under the list.
     `attached_to` names another option's key this row renders directly
     beneath, with a connector line — visual proximity for related options
@@ -784,7 +785,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
     over the preview pane (Esc closes it). The agent picker passes LEGEND_TEXT so
-    users can recall what each [tag] / {mode} marker means."""
+    users can recall what each tag's kind punctuation means."""
     if not entries:
         raise ValueError("entries must be non-empty")
 

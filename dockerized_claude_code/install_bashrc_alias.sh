@@ -43,7 +43,7 @@ esac
 # --- 4. Required software checks (mirroring README) -------------------------
 
 command -v docker >/dev/null 2>&1 || die "docker not found in PATH. Install Docker Desktop or Docker Engine (see README)."
-docker compose version >/dev/null 2>&1 || die "docker compose v2 plugin not responding. Install or update the Compose plugin (see README)."
+docker version >/dev/null 2>&1 || die "docker not responding. Install Docker Engine (see README) and ensure the daemon is running."
 command -v python3 >/dev/null 2>&1 || die "python3 not found in PATH. Install Python 3.10+ (see README)."
 
 PY_VERSION_OK="$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 10) else 0)' 2>/dev/null || printf 0)"

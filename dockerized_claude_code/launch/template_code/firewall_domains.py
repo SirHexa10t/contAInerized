@@ -1,4 +1,4 @@
-"""Firewall data for the {auto} mode — pure data, no logic (the
+"""Firewall data for the {firewall} specialty — pure data, no logic (the
 template_code/ convention). One table:
 
   BUILTIN_FIREWALL_DOMAINS — the curated always-allowed domain list. The

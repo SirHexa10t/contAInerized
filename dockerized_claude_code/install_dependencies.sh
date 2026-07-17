@@ -82,9 +82,6 @@ if [[ "$OS" == "linux" ]]; then
     else
         log "Docker already installed: $(docker --version)"
     fi
-    if ! docker compose version >/dev/null 2>&1; then
-        err "Docker Compose v2 plugin not found. Reinstall via https://get.docker.com or check your apt sources."
-    fi
     # Group membership (Linux only)
     if id -nG "$USER" | grep -qw docker; then
         log "$USER is already in the docker group."

@@ -194,7 +194,7 @@ DOCKER_BASE_MOUNTS = {
 OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"
 
 # Addendum text + composition lives in tags/addendums.py rather than as
-# `<modifier>-addendum.md` files; agents_crud.install_latest_md asks it for
+# per-tag addendum files; agents_crud.install_latest_md asks it for
 # the rendered section and appends it to CLAUDE.md at write time. No path
 # constants needed here.
 

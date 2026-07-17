@@ -90,7 +90,7 @@ Reports any type errors. Exit 0 = clean.
 
 ### 4. Launcher dry-run
 
-Exercise the launcher's full orchestration up to (but not including) `docker compose run` — catches import-time errors and orchestration bugs that the unit tests stub past.
+Exercise the launcher's full orchestration up to (but not including) the real `docker build` / `docker run` calls — catches import-time errors and orchestration bugs that the unit tests stub past.
 
 ```bash
 python3 run.py --dry-run
@@ -122,7 +122,7 @@ Mypy findings:
   (none)
 
 Dry-run:
-  (no errors; ran through gather_input → resolve_target → compose_chain → setup_state → ensure_image → run_compose; docker_compose_subprocess printed each "would invoke" line and returned)
+  (no errors; ran through gather_input → resolve_target → apply_tags → setup_state → ensure_image → run_container; docker_subprocess printed each "would invoke" line and returned)
 ```
 
 Example where preflight auto-installed everything that was missing (the run then proceeds with real findings):

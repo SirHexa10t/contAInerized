@@ -1,5 +1,5 @@
-"""Host-side network helpers — currently the {auto}-mode firewall whitelist
-resolver. DNS resolution happens here, on the host, before `docker compose run`
+"""Host-side network helpers — currently the {firewall} whitelist
+resolver. DNS resolution happens here, on the host, before `docker run`
 spins up the container. In-container, init-firewall.sh just writes iptables
 rules from the pre-resolved address list — no DNS calls, no parallel-xargs
 plumbing, no `getent` timeouts to babysit.
@@ -11,11 +11,11 @@ Concurrency model (two-phase, streaming):
     they're known. tag_handlers._apply_firewall fires the whole thing via
     start_whitelist_resolution(state_dir) during apply_tags;
     docker_config.run_container awaits via wait_for_critical_addresses()
-    before staging WHITELIST_ADDRESSES and firing `docker compose run`.
+    before staging WHITELIST_ADDRESSES and firing `docker run`.
   - Phase 2 (rest): every other whitelist entry resolves in a background
     thread that streams ready-to-open `addr[:port]` tokens onto an internal
     queue. A daemon updater thread (start_firewall_updater, spawned right
-    before `docker compose run`) drains the queue in bursts and applies each
+    before `docker run`) drains the queue in bursts and applies each
     burst with ONE `docker exec --user root <container> sh -c 'iptables -I
     OUTPUT 1 ... && ...'` — batching dozens of ACCEPT rules per exec instead
     of one exec per rule (per-rule pacing would take minutes for the full
@@ -27,7 +27,7 @@ Concurrency model (two-phase, streaming):
 Status surface: one file per launch — `domains_pending_resolve.yml` inside
 the per-instance state dir (bind-mounted into the container at
 /home/claude/.claude/). Holds status + pending list + failed list;
-auto-addendum.md points the agent here for "I hit a connection refused"
+the Firewall addendum points the agent here for "I hit a connection refused"
 classification. Rewritten atomically as the picture changes.
 
 Cross-launch DNS cache: RESOLVED_DOMAINS_CACHE_FILE (at the AGENTS_STATE
@@ -294,7 +294,7 @@ def _save_resolution_cache(resolved: dict[str, list[str]]) -> None:
     write_text refreshes mtime, so the TTL window starts from this moment for
     the next launch's is_file_recent check."""
     lines = [
-        "# {auto}-mode firewall resolved-domains cache.",
+        "# {firewall} resolved-domains cache.",
         f"# TTL: {_CACHE_TTL_SECONDS // (60 * 60 * 24)} days since this file's mtime. While fresh,",
         "# the launcher reuses these IPs and skips DNS for any host listed here.",
         "# Lines: <host>=<ip>[,<ip>]*",
@@ -361,13 +361,13 @@ def _cascade(hosts: Iterable[str], on_resolved: Callable[[str, list[str]], None]
 # ============================================================
 # The whitelist split into two tiers:
 #   Phase 1 ("critical"): api.anthropic.com + console.anthropic.com.
-#     Resolved synchronously, before `docker compose run` fires — Claude Code
+#     Resolved synchronously, before `docker run` fires — Claude Code
 #     cannot do anything without api.anthropic.com, so it MUST be in the
 #     initial iptables ruleset that init-firewall.sh applies at container
 #     start. Failing here aborts the launch (loud).
 #   Phase 2 ("rest"): everything else from BUILTIN_FIREWALL_DOMAINS ∪ the
 #     user's firewall_whitelist.txt. Resolved in a background thread while
-#     the launcher fires `docker compose run` and Claude Code starts. As
+#     the launcher fires `docker run` and Claude Code starts. As
 #     each domain resolves on the host, a sibling "updater" thread (see
 #     start_firewall_updater) runs `docker exec --user root <container>
 #     iptables -I OUTPUT 1 -d <ip> ...` to insert an ACCEPT rule into the
@@ -686,7 +686,7 @@ def _tokens_for(host: str, ips: list[str], port: str, wildcard: bool = False) ->
 # The `domains_pending_resolve.yml` file (under each instance's state dir,
 # bind-mounted into the container at /home/claude/.claude/) is the runtime
 # surface the agent reads to classify a `ConnectionRefused`: pending vs.
-# failed vs. neither. memory/auto-addendum.md points the agent here.
+# failed vs. neither. The Firewall addendum points the agent here.
 #
 # Phase 1, Phase 2, and the docker-exec updater all mutate the same in-memory
 # state and rewrite the file from it — the class below bundles the lock, the
@@ -695,7 +695,7 @@ def _tokens_for(host: str, ips: list[str], port: str, wildcard: bool = False) ->
 # All public methods take the lock themselves; callers don't.
 
 class _WhitelistResolutionStatus:
-    """Tracks DNS resolution progress for the {auto}-mode firewall whitelist
+    """Tracks DNS resolution progress for the {firewall} whitelist
     and mirrors the in-memory state to `domains_pending_resolve.yml`. Single-
     process singleton (one launcher = one resolution = one tracker)."""
 
@@ -713,7 +713,7 @@ class _WhitelistResolutionStatus:
     def init(self, state_dir: Path) -> None:
         """Reset to a clean 'resolving' state and record where to write — wipes
         any leftover from a previous run on this instance so the agent never
-        observes stale content. Called once at the start of every {auto} launch
+        observes stale content. Called once at the start of every {firewall} launch
         from start_whitelist_resolution, gated by that function's idempotency
         check."""
         with self._lock:
@@ -795,7 +795,7 @@ class _WhitelistResolutionStatus:
         without reading the launcher's source."""
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         lines = [
-            "# {auto}-mode firewall whitelist — pending/failed view",
+            "# {firewall} whitelist — pending/failed view",
             "# Auto-generated by the host launcher; updated as DNS resolution",
             "# progresses. The agent uses this file to classify a connection",
             "# refused: still pending vs. terminally failed vs. neither.",
@@ -865,7 +865,7 @@ _phase2_done = object()    # sentinel: end-of-stream
 _phase2_thread: threading.Thread | None = None
 
 # Firewall updater — daemon thread; lifetime bounded by the launcher process,
-# which itself blocks inside `docker compose run` for the container's lifetime.
+# which itself blocks inside `docker run` for the container's lifetime.
 _updater_thread: threading.Thread | None = None
 
 # Refresher — daemon thread the updater hands off to once Phase 2's stream
@@ -1097,7 +1097,7 @@ def wait_for_critical_addresses() -> list[str] | None:
     """Block until Phase 1 (critical Anthropic) completes and return the
     list of address strings to stage as WHITELIST_ADDRESSES for the initial
     in-container firewall. Returns None if start_whitelist_resolution() was
-    never called (e.g. non-{auto} launches don't need a firewall). If a
+    never called (e.g. non-{firewall} launches need no rules). If a
     critical host failed terminally, _phase1_worker raised RuntimeError and
     that propagates here — the launcher should abort rather than start a
     half-broken agent."""
@@ -1127,7 +1127,7 @@ def start_firewall_updater(container_name: str) -> None:
     by that point Claude Code already has critical Anthropic access via the
     initial ruleset, and a missing docs domain isn't worth aborting.
 
-    No-op when Phase 2 isn't active (non-{auto} launches)."""
+    No-op when Phase 2 isn't active (non-{firewall} launches)."""
     global _updater_thread
     if _phase2_queue is None or _updater_thread is not None:
         return

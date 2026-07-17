@@ -13,44 +13,54 @@ Grouped by layer, top of the dependency graph last.
 
 ### Leaves — depend on nothing in-project
 
-- `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split).
+- `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split, user prompts).
 - `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined. Constants + path-builder lambdas only — no disk listings (those are file_access work).
-- `launch/template_code/` — pure data, no logic: per-modifier prompt copy (`modifier_prompts.py`), docker-side strings (`docker_prompts.py`), launch-time CLAUDE.md addendums (`memory_addendums.py`), firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; network.py fetches them live).
+- `launch/template_code/` — pure data, no logic: docker-side strings (`docker_prompts.py`), the curated firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; network.py fetches them live).
 
-### Disk + identity — depend only on leaves
+### Disk — depends only on leaves
 
 - `launch/file_access.py` — sole chokepoint for every disk-touching call (reads, atomic writes, removes, queries, lists, stats) — including the agents/ name → md-path index (`agent_md_index`, cached).
-- `launch/structs.py` — identity dataclasses (`AgentIdentity` → `InstanceIdentity`) + `InstanceModifiers` enum taxonomy.
 
-### Small services — depend on disk + identity
+### The tag system — `launch/tags/`, depends on disk + leaves
+
+- `tags/base.py` — the `Tag` record, `DockerContribution`, `tag.info`/`tag.docker` parsing, the STRICT tree rule, `TagError`.
+- `tags/engine.py`, `tags/profession.py`, `tags/specialty.py`, `tags/policy.py` — the four kind classes, each with its own `scan(agents_dir)`; profession also discovers hidden `_<name>` image layers, specialty adds `combos.info`, policy adds `merge_fragments`.
+- `tags/registry.py` — `scan_all(agents_dir)` → `Registry`: discover, cross-validate (fail loud), look up.
+- `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections).
+- `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `claude_args`, `unmet_wants`).
+- `tags/store.py` — `instances.toml` load/save (stdlib `tomllib` in; a small fixed-schema TOML emitter out).
+- `tags/migrations.py` — ISOLATED one-shot conversions from retired on-disk formats; the only module allowed to know retired formats exist.
+- `tags/addendums.py` — chain-keyed CLAUDE.md addendum copy + `compose(chain)`.
+
+### Small services — depend on disk + tags
 
 - `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
-- `launch/network.py` — `{auto}`-mode firewall: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift.
+- `launch/network.py` — `{firewall}` coordination: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift.
 
 ### Orchestration — depend on services
 
-- `launch/compose_env.py` — compose env-var staging (`ComposeEnvKey` taxonomy, `_compose_env` accumulator, `-e` flag emission).
-- `launch/docker_config.py` — docker subprocess wrappers + bind-mount accumulator + image-chain naming + `run_compose`.
-- `launch/agent_modifiers_handler.py` — chain composition via `_apply_<modifier>` dispatch + `{auto}+{DooD}` warning + cache lifecycle.
-- `launch/agents_crud.py` — instance state CRUD (create/modify/delete) + workspace + modes-map writers + picker-entry builders + sort keys.
+- `launch/container_env.py` — env staging (`ContainerEnvKey` taxonomy, the staged-value accumulator, `-e`/build-arg formatters, `set_container_env` orchestrator).
+- `launch/docker_config.py` — plain-docker orchestration: `ensure_image` (base + per-layer `docker build`), `run_container` (`docker run` assembly), tag.docker flag emitters, bind-mount accumulator, docker CLI wrappers, the dry-run gate.
+- `launch/tag_handlers.py` — `apply_tags(instance)`: stages declarative tag.docker mounts, then dispatches per-tag `_apply_<name>` handlers (dynamic-only side effects; data-only tags have no handler).
+- `launch/agents_crud.py` — instance state CRUD (instances.toml writers), state-dir installs (`install_latest_md`, `install_settings`), `resolve_pick`, picker-entry factories, engine sort keys.
 - `launch/user_additions.py` — user-side contributions to the container (optional-creds mounts + first-launch template plants).
 - `launch/audit.py` — read-only state-correctness checker, runnable as `python -m launch.audit`.
 
 ### UI
 
-- `launch/menu_picker.py` — prompt_toolkit picker + line prompts (workspace, session, modes) + pre-launch banner.
+- `launch/menu_picker.py` — prompt_toolkit picker + the tag checkbox form (requires-cascade, combos + wants warnings) + line prompts (workspace, session) + pre-launch banner.
 
 ### Entry
 
-- `run.py` — `launch()` 7-stage orchestrator (input → fs-validate → resume → persist → categorise → setup → run).
+- `run.py` — staged `launch()` orchestrator (scan tags → migrate store → input → fs-validate → resume → persist → apply tags → setup → build → run).
 
 ### Other directories
 
 - `launch/template_files/` — source-side files `file_access.copy_file` plants to `user_extras/` on first launch.
 - `launch/tests/` — unittest suite (`python3 -m unittest discover -s launch/tests` from project root).
-- `agents/` — agent definitions (`<name>[tag](parent).md` + optional matching `.conf`).
-- `docker/` — `Dockerfile.<step>` + `compose.<step>.yml` per modifier; `init-firewall.sh` + `auto-entrypoint.sh` for `{auto}`.
-- `settings/` — in-container bashrc + status line + manifest helpers + Claude settings/keybindings (bind-mounted via `DOCKER_BASE_MOUNTS`).
+- `agents/` — agent personas (`<name>.md` + `<name>.lego`) and the tag tree (`engine/`, `profession/`, `specialty/`, `policy/`).
+- `Dockerfile` (repo root) — the base image; per-layer Dockerfiles live in the tag tree next to their tags.
+- `settings/` — in-container bashrc + status line + manifest helpers + base Claude settings/keybindings (bind-mounted via `DOCKER_BASE_MOUNTS`; `settings.json` is merged with policy fragments per instance rather than mounted directly).
 - `custom_commands/` — launcher-bundled slash commands (bind-mounted into every container).
 - `custom_skills/` — launcher-bundled skills (bind-mounted as a single dir; each `<name>/SKILL.md` becomes a `/<name>` skill).
 
@@ -63,17 +73,17 @@ lazy imports, which is the bandage of last resort).
 leaves: utils, paths, template_code/   (independent — none imports in-project)
                   │
                   ▼
-            file_access ──► structs ──┐
-                                      ├─► small services (claude_code_config, network)
-                                      │
-                    small services ──► orchestration (compose_env, docker_config, agent_modifiers_handler,
-                                                      agents_crud, user_additions, audit)
-                                               │
-                                               ▼
-                                               UI (menu_picker)
-                                               │
-                                               ▼
-                                               entry (run.py)
+            file_access ──► tags/ ──┐
+                                    ├─► small services (claude_code_config, network)
+                                    │
+                  small services ──► orchestration (container_env, docker_config, tag_handlers,
+                                                    agents_crud, user_additions, audit)
+                                             │
+                                             ▼
+                                             UI (menu_picker)
+                                             │
+                                             ▼
+                                             entry (run.py)
 ```
 
 **One acknowledged cycle:** `docker_config ↔ network`. `docker_config` imports
@@ -89,6 +99,30 @@ prefer to push the shared logic to a leaf-er module first.
 For each common addition, place it where the rest of the project would expect.
 "X belongs in Y because Z" — the *because* matters more than the rule.
 
+### A new tag (any kind)
+
+→ a folder in the `agents/` tree — no launcher code:
+
+- **Engine**: `agents/engine/<name>/{tag.info, engine.conf}`. Nested folders
+  overlay the parent's conf key-by-key.
+- **Profession**: `agents/profession/<name>/{tag.info, Dockerfile}` (+
+  `tag.docker` naming the build-args the Dockerfile consumes). Nest under
+  another profession to declare a requirement (`code/web/` ⇒ web requires code).
+- **Specialty**: `agents/specialty/<name>/tag.info` (`description`, `warn`,
+  `claude_args`, `[wants]`). Image layer, if any: a hidden
+  `_<name>/Dockerfile` under the profession it depends on. Static container
+  config (mounts, `cap_add`, `entrypoint`, `env_forward`) goes in `tag.docker`.
+  Multi-tag warnings go in `agents/specialty/combos.info`.
+- **Policy**: `agents/policy/<name>/{tag.info, policy.json}` — a Claude Code
+  settings fragment, merged per instance and mounted read-only.
+
+Only add an `_apply_<name>` handler in `tag_handlers.py` when the tag needs
+*dynamic* host-side work (cache pruning, GID detection, DNS kickoff) that
+declarative `tag.docker` data can't express; tags without a handler are
+legal no-ops. If the tag should inject launch-time CLAUDE.md guidance, add
+an `Addendum` in `tags/addendums.py` and key it under the tag's name in
+`ADDENDUMS_BY_TAG`.
+
 ### A new host or container path
 
 → `paths.py`. Because every path constant in the project lives here — search
@@ -98,49 +132,28 @@ the bottom.
 
 ### A new bind-mount
 
-→ one of the `DOCKER_*_MOUNTS` dicts in `paths.py`. Because the per-launch
-mount-staging code (`docker_config.set_container_mounts` and the `_apply_<modifier>`
-handlers in `agent_modifiers_handler`) just iterates these dicts — new entry is a
-data-side change, not a code change. Pick the dict by scope: `DOCKER_BASE_MOUNTS`
-(every launch), `DOCKER_AUTO_MOUNTS` (`{auto}` only), `DOCKER_DOOD_MOUNTS` (`{DooD}`
-only), `CACHE_MOUNTS` (`[code]` cache shares).
-
-### A new modifier (tag or mode)
-
-Five touch points, in this order:
-1. Append an `InstanceModifiers` enum member in `structs.py` (declaration order
-   = chain order). Prefix `TAG_` for filename-grammar tags, `MODE_` for
-   per-instance modes.
-2. Add `docker/Dockerfile.<slug>` + `docker/compose.<slug>.yml`.
-3. Add an `_apply_<slug>(inst_id)` handler in `agent_modifiers_handler.py` —
-   `compose_chain` dispatches by naming convention, so the handler wires
-   itself up (no conditional or table entry to add). All handlers share the
-   uniform `(inst_id)` signature.
-4. (Optional) `Addendum(...)` instance in `template_code/memory_addendums.py`
-   + entry under the modifier in `MODIFIER_ADDENDUMS` if you want a
-   launch-time CLAUDE.md directive.
-5. (Optional) a `(header, body)` entry in
-   `template_code/modifier_prompts.py`'s `MODIFIER_YN_PROMPTS` if it's a
-   per-instance mode (user opt-in — `prompt_for_modes` iterates that dict).
-
-`launch/tests/test_essential_files.py` enforces 1–3 by asserting every non-BASE
-member has matching Dockerfile + compose + `_apply_<slug>` handler.
+→ `DOCKER_BASE_MOUNTS` in `paths.py` when every launch needs it; the owning
+tag's `tag.docker` `[run] mounts` when it belongs to a tag (that's data, not
+code — `apply_tags` stages every contribution generically); `CACHE_MOUNTS`
+for `[code]` cache shares.
 
 ### A new disk-touching helper
 
 → `file_access.py`. Because that's the project's chokepoint — no other module
-calls `open()`, `Path.exists()`, `shutil.*`, `subprocess` for git/sudo, etc.
-The chokepoint rule is what makes the rest of the codebase mock-able and
-keeps OS-quirk handling (root-owned bind-mount leftovers, etc.) in one place.
+calls `open()`, `Path.exists()`, `shutil.*`, etc. The chokepoint rule is what
+makes the rest of the codebase mock-able and keeps OS-quirk handling
+(root-owned bind-mount leftovers, atomic writes) in one place.
 
-### A new env var staged to compose / container
+### A new env var staged for the container
 
-→ `compose_env.py`. If it's a known static key, add it to the `ComposeEnvKey`
-enum and stage via `stage_compose_env(key, value)`. If it's forwarded from
-the host shell, add to `CONTAINER_ENV_FORWARDS`. If it's a constant fixed at
-launch, add to `CONTAINER_ENV_FIXED`. Dynamic INSTALL_<TOOL> / token vars
-derive from `OPTIONAL_CREDS_MOUNTS` and `OPTIONAL_CREDS_TOKEN_ENV_VARS` in
-`paths.py` — adding a new optional-cred service flows through both.
+→ `container_env.py`. If it's a known static key, add it to the
+`ContainerEnvKey` enum (flag `container_emit=True` for unconditional `-e`
+emission) and stage via `stage_container_env(key, value)`. Build-args are
+pulled by each layer's `tag.docker` `[build] arg_forward`; tag-conditional
+run env by `[run] env_forward` — so a tag-scoped var usually needs the enum
+entry + one line in the owning `tag.docker`, not new emission code. Dynamic
+INSTALL_<TOOL> / token vars derive from `OPTIONAL_CREDS_MOUNTS` and
+`OPTIONAL_CREDS_TOKEN_ENV_VARS` in `paths.py`.
 
 ### A new directory-contents lookup (like the agents/ name → md index)
 
@@ -150,11 +163,11 @@ feels constant-like; `paths.py` stays declarations-only.
 
 ### A new launch-time CLAUDE.md directive
 
-→ `template_code/memory_addendums.py`. Add an `Addendum(title=..., body=...)` instance,
-then list it under the relevant modifier in `MODIFIER_ADDENDUMS`. `composed_addendum(chain)`
-picks it up via `chain` membership and renders it as a `### <title>` section
-under the single `## Launch-time addendums` block. Bodies can `format(...)`
-in path constants from `paths.py`.
+→ `tags/addendums.py`. Add an `Addendum(title=..., body=...)` instance, then
+key it under the relevant tag name in `ADDENDUMS_BY_TAG` (`"base"` for
+always-on). `compose(chain)` picks it up via chain membership and renders it
+as a `### <title>` section under the single `## Launch-time addendums`
+block. Bodies can `format(...)` in path constants from `paths.py`.
 
 ### A new picker row kind
 
@@ -165,15 +178,21 @@ generic over `PickerEntry.value`.
 
 ### A new state-correctness check
 
-→ `audit.py`. Add a check function (the existing `_modes_map_issues`,
+→ `audit.py`. Add a check function (the existing `_store_entry_issues`,
 `_check_json_file` are unit-testable in isolation) and call it from `main()`.
 Tests go in `launch/tests/test_audit.py`.
 
 ### A new identity property derived from existing fields
 
-→ a `@property` on the appropriate identity class in `structs.py`. Don't
-add a free function elsewhere — the dataclass owns its derivations. Same
-for any "compute X from inst_id" — it's `inst_id.x`, not `compute_x(inst_id)`.
+→ a `@property` on `Instance` (or `Agent`) in `tags/identity.py`. Don't add
+a free function elsewhere — the dataclass owns its derivations. Same for any
+"compute X from the instance" — it's `inst.x`, not `compute_x(inst)`.
+
+### A new store-format change
+
+→ the format itself lives in `tags/store.py`; the conversion FROM the
+previous format goes in `tags/migrations.py` (the only module that may know
+retired formats exist) as an extension of `ensure_migrated`.
 
 ### A new helper that's pure (no disk, no third-party)
 
@@ -187,13 +206,19 @@ Things to NOT do, with the reason:
 
 - **Don't import `Path` or call `open()` outside `file_access.py`.** The
   chokepoint rule is what keeps disk-quirk handling (sudo fallbacks, atomic
-  writes, JSON-map caching) in one place. New disk reader → new function in
-  `file_access.py`.
+  writes) in one place. New disk reader → new function in `file_access.py`.
 - **Don't add a constant `FOO_PATH` outside `paths.py`.** Search returns one
   hit for any path; that's the point.
-- **Don't add a free function that takes a `InstanceIdentity` and computes
-  one of its fields.** That's a `@property` on the dataclass — same call site
+- **Don't hard-code a tag name in launcher logic when the tag tree can carry
+  the fact.** Requirements come from tree nesting; container config from
+  `tag.docker`; copy from `tag.info`. An `if name == "code"` in orchestration
+  is a smell — the handful of legitimate ones (cache mounts, the whitelist
+  plant) live in `tag_handlers` / `user_additions` and say why.
+- **Don't add a free function that takes an `Instance` and computes one of
+  its fields.** That's a `@property` on the dataclass — same call site
   shape, lives next to the rest of the identity surface.
+- **Don't teach any module outside `tags/migrations.py` about retired
+  formats.** Format knowledge ages out in one place.
 - **Don't introduce a new cycle (even a lazy one).** The existing `network
   ↔ docker_config` cycle is a documented exception; new ones get pushed to
   a leaf-er module first.
@@ -207,8 +232,8 @@ Things to NOT do, with the reason:
   read-only probe of a CLI tool." Every read-only docker/getent probe routes
   through it. Reserve direct `subprocess.run` / `subprocess.call` for cases
   that genuinely need extra kwargs (`timeout=`, `env=`, `check=True`).
-- **Functions that exist to prompt the user start with `prompt_`.** `prompt_yn`,
-  `prompt_keypress`, `prompt_install_failures`, `prompt_modes`, `prompt_session`,
-  `prompt_modifier` — name reflects the side-effect shape. Don't pick a name
-  that reads like a getter (`collect_*`, `check_*`, `get_*`) when the function
-  returns `None` and exists for the user-facing prompt.
+- **Functions that exist to prompt the user start with `prompt_`.** `prompt_keypress`,
+  `prompt_install_failures`, `prompt_tags`, `prompt_session` — name reflects
+  the side-effect shape. Don't pick a name that reads like a getter
+  (`collect_*`, `check_*`, `get_*`) when the function returns `None` and
+  exists for the user-facing prompt.

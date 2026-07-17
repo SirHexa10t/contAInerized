@@ -47,7 +47,7 @@ def relative_time(mtime: float) -> str:
 def ordering_index_or_end(value: object, ordering: Sequence[object]) -> int:
     """Position of `value` in `ordering`, or `len(ordering)` if absent —
     pushes unknowns past the end when used as a sort-key element. Backs the
-    picker's tag-set and mode-set sort keys in agents_crud. `object`-typed
+    picker's tag-ordering sort keys in agents_crud. `object`-typed
     (not a TypeVar) because membership/index only need equality, and one
     caller legitimately probes with None (engine_sort_key's unknown-family
     sentinel)."""

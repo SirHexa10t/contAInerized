@@ -7,7 +7,7 @@
 name = "claude-code-agents"
 version = "1.0.0"
 description = "Launcher for pre-made Claude Code agents — Dockerized personas, each with its own model, memory, and toolchain."
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "prompt-toolkit>=3.0",
     "python-dotenv>=1.0",

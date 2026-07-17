@@ -250,7 +250,7 @@ Update an existing file, or create one if absent. Cover at minimum:
   - *"Walrus operator to bind constants inside their ordered list rather
     than separate declarations."*
   - *"`Enum` + memoized `classmethod` views for taxonomies (see
-    `InstanceModifiers`)."*
+    `ContainerEnvKey`)."*
   Concrete enough that an agent can pattern-match.
 - **Anti-patterns removed during this / prior refactors.** What NOT to
   introduce, with the reasoning. Drawn from real findings this pass
