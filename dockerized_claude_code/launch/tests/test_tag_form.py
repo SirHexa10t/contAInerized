@@ -116,12 +116,12 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertEqual(dood.body[0], (STYLE_UNDERLINE, "Docker-outside-of-Docker"))
 
     def test_policies_grouped_by_shortname_symbol(self):
-        # `!` < `+` < `-` in ASCII — obligations, then grants, then denials.
+        # `!` < `+` < `-` in ASCII — demands, then grants, then denials.
         rows = _tag_form_options(REGISTRY, AgentBuild())
         policy_keys = [o.key for o in rows if o.key in REGISTRY.policies]
         shortnames = [REGISTRY.policies[k].shortname for k in policy_keys]
         self.assertEqual(shortnames, sorted(shortnames))
-        self.assertEqual(shortnames[0][0], "!")   # obligations first
+        self.assertEqual(shortnames[0][0], "!")   # demands first
         self.assertTrue(all(s[0] == "+" for s in shortnames[1:3]))
         self.assertTrue(all(s[0] == "-" for s in shortnames[3:]))
 

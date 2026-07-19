@@ -358,8 +358,8 @@ def _build_composition_legend(registry: Registry) -> str:
         ("Professions", "Profession", "Tools it can use — each is a docker image layer.", registry.professions.values()),
         ("Specialties", "Specialty",  "Exceptional access or running conditions.", registry.specialties.values()),
         # Policies sort by shortname WITH its symbol (`!` < `+` < `-`), so
-        # same-stance policies group: obligations, grants, denials.
-        ("Policies",    "Policy",     "What it's permitted to do — orange grants, blue denies, white obligates.",
+        # same-stance policies group: demands, grants, denials.
+        ("Policies",    "Policy",     "What it's permitted to do — orange grants, blue denies, white demands.",
          sorted(registry.policies.values(), key=lambda t: t.shortname)),
     ]
     for title, singular, nutshell, members in sections:

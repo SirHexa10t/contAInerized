@@ -120,8 +120,8 @@ For each common addition, place it where the rest of the project would expect.
   Multi-tag warnings go in `agents/specialty/combos.info`.
 - **Policy**: `agents/policy/<name>/{tag.info, policy.json}` — a Claude Code
   settings fragment, merged per instance and mounted read-only. `stance`
-  (`allow`/`deny`/`obligation`) drives the orange/blue/white coloring; the
-  shortname convention mirrors it (`+` grants, `-` restricts, `!` obligates).
+  (`allow`/`deny`/`demand`) drives the orange/blue/white coloring; the
+  shortname convention mirrors it (`+` grants, `-` restricts, `!` demands).
 
 Only add an `_apply_<name>` handler in `tag_handlers.py` when the tag needs
 *dynamic* host-side work (cache pruning, GID detection, DNS kickoff) that

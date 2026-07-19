@@ -1,4 +1,4 @@
 shortname         = "!plan"
 short_description = "start in plan mode"
 full_description  = "Every session starts in plan mode — the agent must present a plan and get approval before making changes."
-stance            = "obligation"
+stance            = "demand"

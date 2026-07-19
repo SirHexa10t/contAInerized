@@ -24,7 +24,7 @@ from .tags import Instance, PolicyStance, Tag
 
 # Field-driven tag colors for the status line — same dispatch as the picker's
 # `_tag_style` (menu_picker), in raw ANSI: warn-flagged specialties bright
-# red; policies by stance (DENY blue, ALLOW orange, OBLIGATION bold white);
+# red; policies by stance (DENY blue, ALLOW orange, DEMAND bold white);
 # everything else bright green.
 _WARN_ANSI = "\033[01;91m"
 _SAFE_ANSI = "\033[22;92m"
@@ -32,7 +32,7 @@ _RESET_ANSI = "\033[0m"
 _STANCE_ANSI = {
     PolicyStance.ALLOW:      "\033[38;5;208m",
     PolicyStance.DENY:       "\033[01;94m",
-    PolicyStance.OBLIGATION: "\033[01;97m",
+    PolicyStance.DEMAND:     "\033[01;97m",
 }
 
 

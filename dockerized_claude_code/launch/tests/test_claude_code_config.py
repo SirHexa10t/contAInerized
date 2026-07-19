@@ -74,8 +74,8 @@ class TestColoredTagChain(unittest.TestCase):
         chain = colored_tag_chain((SimpleNamespace(label="<+qry>", stance=PolicyStance.ALLOW),))
         self.assertIn("\033[38;5;208m<+qry>\033[0m", chain)
 
-    def test_obligation_policy_white(self):
-        chain = colored_tag_chain((SimpleNamespace(label="<!plan>", stance=PolicyStance.OBLIGATION),))
+    def test_demand_policy_white(self):
+        chain = colored_tag_chain((SimpleNamespace(label="<!plan>", stance=PolicyStance.DEMAND),))
         self.assertIn("\033[01;97m<!plan>\033[0m", chain)
 
     def test_labels_space_separated(self):

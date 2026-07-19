@@ -41,7 +41,7 @@ isolated Docker container with persistent per-instance state.
     (`<+qry>` allows WebSearch/WebFetch, `<-su>` denies sudo, `<!plan>`
     mandates plan mode), merged and mounted read-only so the agent can't
     redefine its limits. Colored by stance: orange grants, blue denies,
-    white obligates.
+    white demands.
 
   Adding a member is a folder with a `tag.info` (and optionally a
   `Dockerfile` / `tag.docker` / `policy.json`) — no launcher code. Tree
@@ -332,7 +332,7 @@ punctuation — `firewall` displays as `{frwl}`, `web-research` as
 `<+qry>`), and an optional `[addendum]` table (`title` + `body`) injected
 into CLAUDE.md while the tag is active — bodies may use the launcher
 placeholders published in `launch/tags/addendums.py`. Policies also carry
-`stance` (`"allow"` / `"deny"` / `"obligation"` → orange / blue / white);
+`stance` (`"allow"` / `"deny"` / `"demand"` → orange / blue / white);
 specialties carry `warn`, `claude_args`, and `workspace_readonly` (the
 `{ro}` flag). A specialty can also claim a hidden `policy/_<name>` settings
 fragment — that's how `{ro}` bundles the workspace `:ro` mount with a

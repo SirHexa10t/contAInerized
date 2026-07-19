@@ -38,11 +38,11 @@ class PolicyStance(Enum):
     """Which way a policy moves the leash — drives its color everywhere:
       ALLOW      (orange)     — grants ability, loosens the sandbox
       DENY       (blue)       — restricts, tightens the sandbox
-      OBLIGATION (bold white)  — mandates a behavior (e.g. start in plan mode)
-    The tag.info key is `stance = "allow" | "deny" | "obligation"`."""
+      DEMAND     (bold white)  — mandates a behavior (e.g. start in plan mode)
+    The tag.info key is `stance = "allow" | "deny" | "demand"`."""
     ALLOW = "allow"
     DENY = "deny"
-    OBLIGATION = "obligation"
+    DEMAND = "demand"
 
 
 @dataclass(frozen=True)

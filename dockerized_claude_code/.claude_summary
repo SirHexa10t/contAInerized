@@ -21,7 +21,7 @@ Four kinds (closed set — classes in `launch/tags/`), members open (folders und
 | engine | `( )` | `engine.conf` env budget (model/effort); nested dirs overlay parent conf | default, golem, poet, thinker, researcher, breakthrough |
 | profession | `[ ]` | Dockerfile image layer (+`tag.docker` build-args); nesting ⇒ requirement | code, code/web |
 | specialty | `{ }` | `warn`, `claude_args`, `workspace_readonly`, `[wants]`; optional hidden `_<name>` image layer in the profession tree; `tag.docker` run config | auto (skip-permissions, wants firewall), firewall (iptables whitelist, run-only), dood (docker socket, `_dood` image layer under code/), read-only (`{ro}` — `/workspace` :ro + claims the hidden `policy/_read-only` fragment denying Write/Edit) |
-| policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (obligation) | web-research `<+qry>`, no-sudo `<-su>`, no-net `<-net>`, vcs-safe `<-push>`, plan-first `<!plan>`, free-bash `<+bash>` (plus the hidden `_read-only` fragment, owned by the `{ro}` specialty) |
+| policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (demand) | web-research `<+qry>`, no-sudo `<-su>`, no-net `<-net>`, vcs-safe `<-push>`, plan-first `<!plan>`, free-bash `<+bash>` (plus the hidden `_read-only` fragment, owned by the `{ro}` specialty) |
 
 `agents/specialty/combos.info` holds multi-tag warnings (dood+auto). STRICT tree rule: a non-`_` dir in a kind subtree MUST have `tag.info`; `_` dirs are hidden assets (image layers or specialty-claimed policy fragments). `scan_all(AGENTS_DIR)` → `Registry`, fail-loud cross-validation at startup.
 

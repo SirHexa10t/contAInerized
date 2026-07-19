@@ -108,21 +108,21 @@ STYLE_DICT = {e.cls_name: e.style for e in UiClass}
 #   warn-flagged specialty      → bold bright red (danger)
 #   policy, stance=DENY         → blue       (tightens the leash)
 #   policy, stance=ALLOW        → orange     (grants ability, loosens it)
-#   policy, stance=OBLIGATION   → bold white (mandates a behavior)
+#   policy, stance=DEMAND       → bold white (mandates a behavior)
 #   engine                      → cyan       (a budget, not a capability/risk)
 #   everything else             → bright green
 STYLE_TAG_WARN       = "bold fg:ansibrightred"
 STYLE_TAG_SAFE       = "fg:ansibrightgreen"
 STYLE_TAG_DENY       = "bold fg:ansibrightblue"
 STYLE_TAG_ALLOW      = "bold fg:#ff8700"
-STYLE_TAG_OBLIGATION = "bold fg:ansiwhite"
+STYLE_TAG_DEMAND     = "bold fg:ansiwhite"
 STYLE_TAG_ENGINE     = "fg:ansibrightcyan"
 STYLE_UNDERLINE      = "underline"   # the fullname lead-in of description text
 
 _STYLE_BY_STANCE = {
     PolicyStance.ALLOW:      STYLE_TAG_ALLOW,
     PolicyStance.DENY:       STYLE_TAG_DENY,
-    PolicyStance.OBLIGATION: STYLE_TAG_OBLIGATION,
+    PolicyStance.DEMAND:     STYLE_TAG_DEMAND,
 }
 
 # Rich equivalents for the same tag styles (rich and prompt_toolkit name
@@ -132,7 +132,7 @@ RICH_BY_STYLE = {
     STYLE_TAG_SAFE:       "bright_green",
     STYLE_TAG_DENY:       "bold bright_blue",
     STYLE_TAG_ALLOW:      "bold #ff8700",
-    STYLE_TAG_OBLIGATION: "bold white",
+    STYLE_TAG_DEMAND:     "bold white",
     STYLE_TAG_ENGINE:     "bright_cyan",
 }
 
@@ -481,7 +481,7 @@ def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOptio
     run), then professions / specialties / policies as checkboxes pre-checked
     from `current`'s axis lists. Policies are ordered by shortname WITH its
     leading symbol (`!` < `+` < `-` in ASCII), so same-stance policies sit
-    together: obligations, then grants, then denials."""
+    together: demands, then grants, then denials."""
     checked = {*current.professions, *current.specialties, *current.policies}
 
     def header(kind_cls: type[Tag]) -> FormOption:
