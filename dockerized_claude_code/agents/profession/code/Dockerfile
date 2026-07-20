@@ -19,6 +19,7 @@ FROM ${PARENT_IMAGE}
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    cmake \
     pkg-config \
     libssl-dev \
     python3-dotenv \

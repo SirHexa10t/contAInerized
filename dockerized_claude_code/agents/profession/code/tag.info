@@ -1,6 +1,6 @@
 shortname         = "code"
 short_description = "coding toolchains"
-full_description  = "coding/programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, uv)"
+full_description  = "coding/programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, CMake, uv)"
 
 [addendum]
 title = "Credentials"
