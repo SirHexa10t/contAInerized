@@ -47,9 +47,11 @@ RUN useradd -m -s /bin/bash -u ${HOST_UID} claude
 # specialty's tag.docker; inert when the specialty is off since the script
 # then doesn't exist), and preserve WHITELIST_ADDRESSES across the privilege
 # boundary so the script can read the launcher-supplied whitelist. Other sudo
-# calls (apt, root shell, etc.) are blocked. Re-running with a tampered
-# WHITELIST_ADDRESSES is prevented by the init-once marker inside
-# init-firewall.sh, not by sudoers.
+# calls (apt, root shell, etc.) are blocked. The entry names the command
+# with no argument list, so sudoers permits arguments — the entrypoint passes
+# the self-test address as $1. Re-running with a tampered WHITELIST_ADDRESSES
+# or $1 is prevented by the init-once marker inside init-firewall.sh, not by
+# sudoers.
 RUN { \
       echo 'Defaults env_keep += "WHITELIST_ADDRESSES"'; \
       echo 'claude ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh'; \

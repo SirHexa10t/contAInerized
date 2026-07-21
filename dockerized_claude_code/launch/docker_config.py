@@ -41,7 +41,10 @@ from .container_env import (
     ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
     staged_env,
 )
-from .network import is_critical_pending, start_firewall_updater, wait_for_critical_addresses
+from .network import (
+    is_critical_pending, selftest_address, start_firewall_updater,
+    wait_for_critical_addresses,
+)
 from .paths import (
     BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, DEFAULT_WORKSPACE,
     DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT, FIREWALL_DONE_IN_CONTAINER,
@@ -490,6 +493,8 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     addresses = call_or_exit(wait_for_critical_addresses, exceptions=RuntimeError)
     if addresses is not None:
         stage_container_env(ContainerEnvKey.WHITELIST_ADDRESSES, " ".join(addresses))
+        if (selftest := selftest_address()) is not None:
+            stage_container_env(ContainerEnvKey.FIREWALL_SELFTEST_ADDR, selftest)
     container_name = f"{CONTAINER_NAME_PREFIX}{inst.instance}"
     # Spawn the updater BEFORE docker_subprocess (which blocks for the
     # container's lifetime). No-op for non-{firewall} launches.

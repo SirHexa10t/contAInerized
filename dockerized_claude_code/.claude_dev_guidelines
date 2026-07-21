@@ -35,7 +35,7 @@ Grouped by layer, top of the dependency graph last.
 ### Small services — depend on disk + tags
 
 - `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
-- `launch/network.py` — `{firewall}` coordination: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift.
+- `launch/network.py` — `{firewall}` coordination: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift. Critical Anthropic pins are widened to the registered `160.79.104.0/21` block, and `selftest_address()` feeds init-firewall.sh's DNS-free self-test (`$1` → `curl --resolve`); the script also probes/reorders dead-first nameservers in resolv.conf at startup.
 
 ### Orchestration — depend on services
 

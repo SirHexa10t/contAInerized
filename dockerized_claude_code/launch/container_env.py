@@ -84,6 +84,7 @@ class ContainerEnvKey(str, Enum):
     DOCKER_GID               = (auto(), False)   # {dood} host docker group GID — `_dood` Dockerfile build-arg for /var/run/docker.sock access
     # Tag-conditional run env (pulled by the owning tag's `[run] env_forward`)
     WHITELIST_ADDRESSES      = (auto(), False)   # {firewall} pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens, space-separated — read by init-firewall.sh; forwarded only when {firewall} is active
+    FIREWALL_SELFTEST_ADDR   = (auto(), False)   # {firewall} launcher-resolved api.anthropic.com IP — the entrypoint hands it to init-firewall.sh as $1 so the positive self-test probes via `curl --resolve` (no container-DNS dependency)
     # Always-on run env (emitted as `-e KEY=VALUE` flags by container_env_args)
     AGENT_STATUS_LINE        = (auto(), True)    # pre-styled ANSI status line at the bottom of Claude Code
     BASH_ENV                 = (auto(), True)    # path to the bashrc that non-interactive bash sources at startup

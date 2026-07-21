@@ -69,7 +69,14 @@ isolated Docker container with persistent per-instance state.
   them every few minutes for the container's lifetime (so VPN-exit swaps
   and CDN rotation heal without a relaunch), and the in-container firewall
   self-tests and refuses to launch the agent if enforcement isn't actually
-  working. IPv6 egress is denied outright — the whitelist pipeline is
+  working. The self-test probes a launcher-resolved address directly
+  (`curl --resolve`), so slow or broken container DNS can't fail a healthy
+  firewall; the critical Anthropic hosts are additionally whitelisted by
+  their registered IP block, not just the momentary A record. Firewall
+  startup also probes each nameserver in the container's resolv.conf and
+  reorders a dead one off the front (a VPN kill-switch commonly kills
+  container→LAN DNS, which otherwise costs ~5s per lookup for the whole
+  session). IPv6 egress is denied outright — the whitelist pipeline is
   IPv4-only.
 - **Custom slash commands** — drop a markdown file in `custom_commands/` and
   it's available as `/<filename>` inside every agent.

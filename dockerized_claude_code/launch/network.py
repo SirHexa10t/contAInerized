@@ -390,6 +390,30 @@ def _cascade(hosts: Iterable[str], on_resolved: Callable[[str, list[str]], None]
 
 _CRITICAL_HOSTS = ("api.anthropic.com", "console.anthropic.com")
 
+# The critical hosts are served from Anthropic's OWN registered space — not a
+# CDN (verified via ARIN RDAP 2026-07-21: NET-160-79-104-0-1 "AP-2440",
+# Anthropic PBC, 160.79.104.0/21). A single momentary A record is the most
+# drift-fragile rule shape there is, and these are the two hosts the agent
+# cannot live without — so phase 1 widens their pins to this whole block,
+# making IP rotation inside Anthropic's space a non-event. The block is
+# static registered space, safe to keep as data (unlike the CDN provider
+# ranges, which are fetched live because they churn).
+_ANTHROPIC_BLOCKS = ("160.79.104.0/21",)
+_ANTHROPIC_WIDEN_LABEL = "anthropic (own registered block)"
+
+# The momentary resolved IP of the FIRST critical host, kept for the
+# in-container self-test: init-firewall.sh probes it via `curl --resolve`
+# (handed over as the script's $1), so the positive enforcement check never
+# depends on the container's DNS latency. Set by phase 1; None before it.
+_selftest_addr: str | None = None
+
+
+def selftest_address() -> str | None:
+    """The launcher-resolved api.anthropic.com IP for the in-container
+    firewall self-test, or None when phase 1 hasn't resolved it (yet)."""
+    return _selftest_addr
+
+
 # HTTPS + HTTP — opened for any whitelist entry that doesn't specify :port.
 _DEFAULT_OPEN_PORTS = ("443", "80")
 
@@ -970,19 +994,27 @@ def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: lis
     critical IPs plus literal IP/CIDR entries (which need no resolution).
     Raises if any critical host fails terminally — those are non-optional and
     the launcher should abort loudly rather than start a half-broken agent.
-    Critical hosts get the same CDN widening as Phase 2 (api.anthropic.com is
-    CDN-fronted — widening it in the INITIAL ruleset is what protects the
-    very first request against POP rotation), which is why the provider
-    ranges load here, before the first resolution callback can fire."""
+    Critical pins are widened to _ANTHROPIC_BLOCKS (the API is served from
+    Anthropic's own registered range, not a CDN — see the constant), and the
+    first critical's momentary IP is recorded for the in-container self-test
+    (selftest_address). The generic CDN widening still applies too — inert
+    today, but if Anthropic ever fronts these hosts with a known provider it
+    resumes without a code change — which is why the provider ranges load
+    here, before the first resolution callback can fire."""
     _load_cdn_ranges()
     critical_addresses: list[str] = list(literal_entries)
     _emitted_tokens.update(literal_entries)
     critical_failed: list[str] = []
 
     def on_ok(host: str, ips: list[str]) -> None:
+        global _selftest_addr
         tokens, cdn_label = _emit_tokens_for_host(host, ips)
-        critical_addresses.extend(tokens)
-        _status.mark_resolved(host, ips, cdn=cdn_label)
+        fresh_blocks = [b for b in _ANTHROPIC_BLOCKS if b not in _emitted_tokens]
+        _emitted_tokens.update(fresh_blocks)
+        critical_addresses.extend(tokens + fresh_blocks)
+        if host == _CRITICAL_HOSTS[0] and ips and _selftest_addr is None:
+            _selftest_addr = ips[0]
+        _status.mark_resolved(host, ips, cdn=cdn_label or _ANTHROPIC_WIDEN_LABEL)
 
     def on_fail(host: str) -> None:
         _status.mark_failed(host, _FAILED_RESOLVE_REASON)
@@ -1056,10 +1088,11 @@ def start_whitelist_resolution(state_dir: Path) -> None:
         initial WHITELIST_ADDRESSES set
       - start_firewall_updater(container_name) — spawn the daemon that
         consumes Phase 2 and incrementally inserts iptables rules"""
-    global _phase1_executor, _phase1_future, _phase2_queue
+    global _phase1_executor, _phase1_future, _phase2_queue, _selftest_addr
     if _phase1_future is not None:
         return   # idempotent
 
+    _selftest_addr = None
     _status.init(state_dir)
     _load_resolution_cache()
     _seen_cdn_ranges.clear()

@@ -771,6 +771,7 @@ class TestWhitelistResolutionStatus(unittest.TestCase):
         self.assertIn("flaky.com", self.status.resolved)
 
 
+
 class _EmitterStateMixin(unittest.TestCase):
     """Shared seeding/restore for suites that drive _emit_tokens_for_host —
     directly or via _refresh_pass. Gives each test a fresh status singleton,
@@ -886,3 +887,59 @@ class TestRefreshPass(_EmitterStateMixin):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPhase1CriticalWidening(_EmitterStateMixin):
+    """_phase1_worker must widen the critical pins to Anthropic's registered
+    block and record the momentary api IP for the in-container self-test
+    (init-firewall.sh's `curl --resolve` probe). _cascade and the phase-2
+    thread spawn are patched out — this exercises phase 1's own token policy,
+    not DNS or threading."""
+
+    def _run_phase1(self, resolved):
+        """Drive _phase1_worker with _cascade replaced by a synchronous stub
+        that 'resolves' each host to `resolved[host]`."""
+        def fake_cascade(hosts, on_ok, on_fail):
+            for host in sorted(hosts):
+                on_ok(host, resolved[host])
+        entries = [network.HostnameEntry(h, h, "") for h in resolved]
+        self._entries(*[(h, "", False) for h in resolved])
+        with patch.object(network, "_cascade", side_effect=fake_cascade), \
+             patch.object(network, "_load_cdn_ranges"), \
+             patch.object(network.threading, "Thread") as thread_cls:
+            network._selftest_addr = None
+            tokens = network._phase1_worker(entries, [], [])
+        thread_cls.return_value.start.assert_called_once()   # phase 2 handed off
+        return tokens
+
+    def test_critical_pin_widened_to_anthropic_block(self):
+        tokens = self._run_phase1({"api.anthropic.com": ["160.79.104.10"]})
+        self.assertIn("160.79.104.10", tokens)
+        for block in network._ANTHROPIC_BLOCKS:
+            self.assertIn(block, tokens)
+
+    def test_block_emitted_once_across_both_criticals(self):
+        tokens = self._run_phase1({
+            "api.anthropic.com": ["160.79.104.10"],
+            "console.anthropic.com": ["160.79.104.20"],
+        })
+        for block in network._ANTHROPIC_BLOCKS:
+            self.assertEqual(tokens.count(block), 1)
+
+    def test_selftest_address_records_primary_critical_ip(self):
+        self._run_phase1({
+            "api.anthropic.com": ["160.79.104.10"],
+            "console.anthropic.com": ["160.79.104.20"],
+        })
+        self.assertEqual(network.selftest_address(), "160.79.104.10")
+
+    def test_status_annotates_the_widening(self):
+        self._run_phase1({"api.anthropic.com": ["160.79.104.10"]})
+        self.assertEqual(self.status.cdn.get("api.anthropic.com"),
+                         network._ANTHROPIC_WIDEN_LABEL)
+
+    def test_anthropic_blocks_are_valid_ipv4_networks(self):
+        # Static registered space kept as data — a typo here must fail in CI,
+        # not at iptables time inside a container.
+        for block in network._ANTHROPIC_BLOCKS:
+            ipaddress.IPv4Network(block)   # raises on malformed / host bits

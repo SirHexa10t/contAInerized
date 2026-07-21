@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # init-firewall.sh — iptables-based outbound whitelist for the {firewall} specialty.
 #
-# All DNS resolution happens on the host, in launch/network.py:
-# resolved_whitelist_domains(). The pre-resolved entries arrive here as a
-# space-separated $WHITELIST_ADDRESSES env var — each one is `<ip>[:port]`
-# or `<cidr>[:port]`, ready for iptables -A directly. This script just writes
-# rules: no DNS, no parallelism, no timeouts to babysit.
+# All whitelist DNS resolution happens on the host, in launch/network.py.
+# The pre-resolved entries arrive here as a space-separated
+# $WHITELIST_ADDRESSES env var — each one is `<ip>[:port]` or
+# `<cidr>[:port]`, ready for iptables -A directly. $1 (optional) is the
+# launcher-resolved api.anthropic.com IP: the positive self-test probes it
+# via `curl --resolve`, so enforcement verification never depends on the
+# container's DNS. The only DNS this script does itself is a lightweight
+# nameserver health probe (below) to un-bury a dead first resolver.
 #
 # Invoked by firewall-entrypoint.sh (this tag dir; bind-mounted alongside)
 # on container start, via sudo. The sudoers entry baked into the base image
@@ -31,6 +34,48 @@ if [ -e "$MARKER" ]; then
     exit 1
 fi
 touch "$MARKER"
+
+# --- Nameserver health -------------------------------------------------------
+# Docker copies the host's resolv.conf into every container, dead entries and
+# all. A VPN kill-switch commonly drops container→LAN DNS while the host
+# itself resolves fine — leaving a dead nameserver FIRST in the list, which
+# costs glibc's ~5s failover on EVERY fresh lookup the agent makes. Probe
+# each nameserver with a raw DNS query (bash /dev/udp, 1s budget) and rewrite
+# the file so a responsive one leads. Dead ones stay listed as failover — if
+# the network flips again mid-session (VPN down), resolution still works,
+# just slowly. The rewrite is in-place (`cat >`): docker bind-mounts
+# resolv.conf, so the file can be edited but not replaced (rename → EBUSY).
+ns_responds() {   # $1 = nameserver IP → 0 iff it answers a DNS query within 1s
+    # Raw A query for api.anthropic.com; tid \x41\x42 keeps byte 1 printable
+    # for `read`. Any response byte = alive; parsing is not the point.
+    local query='\x41\x42\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03api\x09anthropic\x03com\x00\x00\x01\x00\x01'
+    # Brace group so 2>/dev/null is scoped to the open (a bare `exec N<>…
+    # 2>…` would redirect the WHOLE script's stderr for good — swallowing
+    # every diagnostic below); fd 3 itself persists past the group.
+    { exec 3<>"/dev/udp/$1/53"; } 2>/dev/null || return 1
+    if ! printf "$query" >&3 2>/dev/null; then exec 3>&- 3<&-; return 1; fi
+    if read -r -t 1 -n 1 -u 3; then exec 3>&- 3<&-; return 0; fi
+    exec 3>&- 3<&-
+    return 1
+}
+
+mapfile -t nameservers < <(awk '/^nameserver /{print $2}' /etc/resolv.conf)
+if [ "${#nameservers[@]}" -gt 1 ]; then
+    alive=(); dead=()
+    for ns in "${nameservers[@]}"; do
+        if ns_responds "$ns"; then alive+=("$ns"); else dead+=("$ns"); fi
+    done
+    if [ "${#alive[@]}" -gt 0 ] && [ "${#dead[@]}" -gt 0 ] && [ "${nameservers[0]}" != "${alive[0]}" ]; then
+        {
+            grep -v '^nameserver ' /etc/resolv.conf || true
+            printf 'nameserver %s\n' "${alive[@]}" "${dead[@]}"
+        } > /tmp/resolv.conf.reordered
+        cat /tmp/resolv.conf.reordered > /etc/resolv.conf
+        rm -f /tmp/resolv.conf.reordered
+        echo "init-firewall.sh: nameserver(s) ${dead[*]} unresponsive from this container (VPN kill-switch?);"
+        echo "  reordered resolv.conf to lead with ${alive[0]} — the dead-first order costs ~5s per DNS lookup."
+    fi
+fi
 
 # --- Reset filter chains ----------------------------------------------------
 # DON'T flush the nat table — Docker's embedded DNS resolver at 127.0.0.11 is
@@ -147,15 +192,36 @@ if [ "$probe_rc" -ne 7 ]; then
     exit 1
 fi
 
-# Positive test: api.anthropic.com SHOULD be reachable. Note this depends on
-# the container's DNS now returning an IP that the launcher's host-side resolve
-# also saw — if they diverge (CDN POP rotation, etc.), this fails and would be
-# the first symptom of the "DNS-pin drift" caveat documented in network.py.
-if ! curl --connect-timeout 5 -s -o /dev/null -I https://api.anthropic.com; then
-    echo "init-firewall.sh: ERROR: api.anthropic.com unreachable through the firewall." >&2
-    echo "  Likely cause: the IP this container's DNS just returned doesn't match what" >&2
-    echo "  the launcher's host-side resolve pinned at launch (CDN POP drift). Re-launch" >&2
-    echo "  to refresh, or add the tenant explicitly to the user whitelist." >&2
+# Positive test: api.anthropic.com SHOULD be reachable through the applied
+# rules. The launcher pre-resolved it on the host and hands the IP in as $1 —
+# `--resolve` pins curl to that address, so container DNS plays NO part in
+# this probe. (The old hostname probe conflated the two: a dead first
+# nameserver in docker-copied resolv.conf made DNS failover eat the whole
+# 5s connect budget and abort perfectly healthy launches.)
+SELFTEST_HOST="api.anthropic.com"
+SELFTEST_ADDR="${1:-}"
+probe_rc=0
+if [ -n "$SELFTEST_ADDR" ]; then
+    curl --connect-timeout 5 -s -o /dev/null -I \
+         --resolve "${SELFTEST_HOST}:443:${SELFTEST_ADDR}" "https://${SELFTEST_HOST}" || probe_rc=$?
+else
+    # Bare invocation without the launcher (no $1): fall back to a hostname
+    # probe with a budget that survives one dead-nameserver failover (~5s).
+    curl --connect-timeout 15 -s -o /dev/null -I "https://${SELFTEST_HOST}" || probe_rc=$?
+fi
+if [ "$probe_rc" -ne 0 ]; then
+    echo "init-firewall.sh: ERROR: ${SELFTEST_HOST}${SELFTEST_ADDR:+ (${SELFTEST_ADDR})} unreachable through the firewall (curl exit ${probe_rc})." >&2
+    case "$probe_rc" in
+        7)  echo "  Exit 7 = connection refused: our own REJECT rule answered, so the probed" >&2
+            echo "  address is NOT covered by the applied whitelist — launcher staging fault, or" >&2
+            echo "  a host-side resolve that shifted between staging and start. Re-launch; if it" >&2
+            echo "  persists, compare \$WHITELIST_ADDRESSES against the probed address." >&2 ;;
+        28) echo "  Exit 28 = timeout: packets LEFT the container and nothing answered. That is" >&2
+            echo "  an upstream/network problem (VPN tunnel down? host offline?), not a firewall" >&2
+            echo "  fault — the rules let the traffic through." >&2 ;;
+        *)  echo "  See 'man curl' EXIT CODES. The probe used a launcher-resolved address, so" >&2
+            echo "  container DNS is only a factor if the no-\$1 hostname fallback was in use." >&2 ;;
+    esac
     exit 1
 fi
 

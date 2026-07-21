@@ -39,7 +39,7 @@ launch/
   docker_config.py      plain-docker orchestration: ensure_image, run_container, tag.docker flag emitters, mount accumulator, docker CLI wrappers, dry-run gate
   tag_handlers.py       apply_tags(instance): stage declarative tag.docker mounts, then dispatch _apply_<name> handlers (code cache prep, dood GID, firewall DNS kickoff); handler-less tags are data-only no-ops
   agents_crud.py        instances.toml CRUD, install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker factories, engine sort keys
-  network.py            {firewall} machinery (~1300 lines): whitelist expansion, live-fetched CDN provider ranges, two-phase DNS cascade, burst-batched iptables updater, 5-min drift-heal refresher, agent-visible status file
+  network.py            {firewall} machinery (~1300 lines): whitelist expansion, live-fetched CDN provider ranges, two-phase DNS cascade, burst-batched iptables updater, 5-min drift-heal refresher, agent-visible status file; criticals widened to Anthropic's registered block + selftest_address() staged for init-firewall.sh's DNS-free `curl --resolve` probe
   tag_form.py           the kind-sectioned tag form (engine radio, requires-cascade, combos + wants red-zone warnings, context preamble) + the shared TUI style system (UiClass, stance colors)
   menu_picker.py        picker + F8 legend + workspace/session prompts + banner (imports form + styles from tag_form)
   user_additions.py     optional-creds mounts + first-launch template plants

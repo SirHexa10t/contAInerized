@@ -146,6 +146,16 @@ class TestEnvForwardFlags(ContainerEnvFixture):
         stage_container_env(ContainerEnvKey.WHITELIST_ADDRESSES, "1.2.3.4:443")
         self.assertEqual(env_forward_flags([]), [])
 
+    def test_selftest_addr_forwards_alongside_whitelist(self):
+        # The DNS-free self-test target rides the same {firewall} gate.
+        contribution = DockerContribution(
+            env_forward=("WHITELIST_ADDRESSES", "FIREWALL_SELFTEST_ADDR"))
+        stage_container_env(ContainerEnvKey.WHITELIST_ADDRESSES, "1.2.3.4:443")
+        stage_container_env(ContainerEnvKey.FIREWALL_SELFTEST_ADDR, "1.2.3.4")
+        self.assertEqual(env_forward_flags([contribution]),
+                         ["-e", "WHITELIST_ADDRESSES=1.2.3.4:443",
+                          "-e", "FIREWALL_SELFTEST_ADDR=1.2.3.4"])
+
 
 class TestEntrypointFlags(unittest.TestCase):
     def test_no_override_uses_image_entrypoint(self):

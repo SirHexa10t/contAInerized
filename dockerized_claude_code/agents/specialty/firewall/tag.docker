@@ -9,4 +9,4 @@ mounts = [
     "init-firewall.sh -> /usr/local/bin/init-firewall.sh:ro",
     "firewall-entrypoint.sh -> /usr/local/bin/firewall-entrypoint.sh:ro",
 ]
-env_forward = ["WHITELIST_ADDRESSES"]
+env_forward = ["WHITELIST_ADDRESSES", "FIREWALL_SELFTEST_ADDR"]

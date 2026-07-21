@@ -169,6 +169,12 @@ class TestFirewallSpecialtyArtifacts(unittest.TestCase):
             with self.subTest(path=str(source)):
                 self.assertTrue(source.is_file(), f"mount source missing: {source}")
 
+    def test_env_forward_carries_whitelist_and_selftest_addr(self):
+        # init-firewall.sh consumes both: the whitelist via env (sudoers
+        # env_keep) and the self-test address via $1 (entrypoint hand-off).
+        self.assertEqual(tuple(self.fw.docker.env_forward),
+                         ("WHITELIST_ADDRESSES", "FIREWALL_SELFTEST_ADDR"))
+
     def test_entrypoint_and_cap_declared(self):
         self.assertEqual(self.fw.docker.entrypoint, "firewall-entrypoint.sh")
         self.assertIn("NET_ADMIN", self.fw.docker.cap_add)
