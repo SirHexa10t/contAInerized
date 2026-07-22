@@ -248,7 +248,7 @@ def is_hidden_asset_dir(child: Path) -> bool:
     i.e. every non-`_` directory MUST carry a `tag.info`. A bare dir is almost
     always a forgotten or misnamed manifest — treating it permissively (as a
     silent grouping shelf) would drop the tag AND sever any requirement edge
-    routed through it (a nested `[web]` losing its `requires: code`), with no
+    routed through it (a nested `[webdev]` losing its `requires: code`), with no
     error. `_`-dir meaning varies by location: in the profession tree a `_dir`
     is a specialty-claimed image layer (see `profession.discover_layers`);
     anywhere else it's simply an ignored asset dir."""

@@ -1,1 +1,2 @@
 engine = "thinker"
+specialties = ["auto", "firewall"]

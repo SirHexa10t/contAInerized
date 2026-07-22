@@ -6,16 +6,18 @@ Application itself (checkbox_form) is interactive and stays out of unit
 scope."""
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from launch import tag_form
+from launch.gui import tag_form
 from launch.paths import AGENTS_DIR
-from launch.tag_form import (
+from launch.gui.tag_form import (
     STYLE_UNDERLINE, FormOption, _combo_warnings, _form_requires, _normalize,
     _plain, _tag_form_options, active_warnings, ordered_form_options,
-    prompt_tags, requires_closure,
+    _toolkit_form_options, prompt_tags, requires_closure,
 )
 from launch.tags import AgentBuild, scan_all
+from launch.tags.profession import ToolkitEntry
 
 REGISTRY = scan_all(AGENTS_DIR)
 
@@ -91,12 +93,22 @@ class TestTagFormOptions(unittest.TestCase):
                             if not o.header and o.key not in REGISTRY.engines))
 
     def test_build_prechecks_boxes(self):
+        # Locked always-on rows (<-su>) are checked regardless of the build.
         build = AgentBuild(professions=("code",), specialties=("auto",))
-        checked = {o.key for o in _tag_form_options(REGISTRY, build) if o.checked}
+        checked = {o.key for o in _tag_form_options(REGISTRY, build) if o.checked and not o.locked}
         self.assertEqual(checked, {"code", "auto"})
 
     def test_nothing_prechecked_for_empty_build(self):
-        self.assertFalse(any(o.checked for o in _tag_form_options(REGISTRY, AgentBuild())))
+        # ...except the locked always-on rows, which are always checked.
+        rows = _tag_form_options(REGISTRY, AgentBuild())
+        self.assertFalse(any(o.checked for o in rows if not o.locked))
+        self.assertEqual({o.key for o in rows if o.locked}, {"no-sudo"})
+
+    def test_always_on_policy_row_is_locked_checked_and_marked(self):
+        no_sudo = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "no-sudo")
+        self.assertTrue(no_sudo.locked)
+        self.assertTrue(no_sudo.checked)
+        self.assertIn("(always-on)", _plain(no_sudo.label))
 
     def test_labels_show_short_description(self):
         fw = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "firewall")
@@ -126,10 +138,10 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertTrue(all(s[0] == "-" for s in shortnames[3:]))
 
     def test_requires_parenthetical_present(self):
-        # web's tree position (profession/code/web) makes code a prerequisite;
+        # webdev's tree position (profession/code/webdev) makes code a prerequisite;
         # the label must say so.
-        web = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "web")
-        self.assertIn("(requires: code)", _plain(web.label))
+        webdev = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "webdev")
+        self.assertIn("(requires: code)", _plain(webdev.label))
 
     def test_no_parenthetical_without_requires(self):
         code = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "code")
@@ -160,8 +172,8 @@ class TestRequiresClosure(unittest.TestCase):
         req = {"a": frozenset({"b"}), "b": frozenset({"a"})}
         self.assertEqual(requires_closure("a", req), {"a", "b"})
 
-    def test_real_tree_web_requires_code(self):
-        self.assertEqual(requires_closure("web", _form_requires(REGISTRY)), {"code"})
+    def test_real_tree_webdev_requires_code(self):
+        self.assertEqual(requires_closure("webdev", _form_requires(REGISTRY)), {"code"})
 
 
 class TestOrderedFormOptions(unittest.TestCase):
@@ -232,10 +244,16 @@ class TestPromptTags(unittest.TestCase):
         self.assertIsNone(self._run(None))
 
     def test_keys_split_into_axes(self):
-        build = self._run(["code", "auto", "no-sudo"])
+        build = self._run(["code", "auto", "web-research"])
         self.assertEqual(build.professions, ("code",))
         self.assertEqual(build.specialties, ("auto",))
-        self.assertEqual(build.policies, ("no-sudo",))
+        self.assertEqual(build.policies, ("web-research",))
+
+    def test_always_on_policy_never_lands_in_the_build(self):
+        # <-su> is static: its locked row comes back checked from the form,
+        # but it must not be persisted onto the instance.
+        build = self._run(["code", "no-sudo", "web-research"])
+        self.assertEqual(build.policies, ("web-research",))
 
     def test_engine_preserved_from_current(self):
         self.assertEqual(self._run([]).engine, "poet")
@@ -258,23 +276,23 @@ class TestPromptTags(unittest.TestCase):
 class TestCascadeInForm(unittest.TestCase):
     """The check-cascade wiring: simulate what the form's Space handler does
     (toggle + cascade) using the pure pieces, against the real tree's
-    web→code edge."""
+    webdev→code edge."""
 
     def test_checking_dependent_checks_requirement(self):
         req = _form_requires(REGISTRY)
-        checked = {"web"} | requires_closure("web", req)
+        checked = {"webdev"} | requires_closure("webdev", req)
         self.assertIn("code", checked)
 
     def test_unchecking_requirement_identifies_dependents(self):
         req = _form_requires(REGISTRY)
-        dependents = {k for k in ("web",) if "code" in requires_closure(k, req)}
-        self.assertEqual(dependents, {"web"})
+        dependents = {k for k in ("webdev",) if "code" in requires_closure(k, req)}
+        self.assertEqual(dependents, {"webdev"})
 
 
 class TestFormRequires(unittest.TestCase):
     def test_only_tags_with_requires_present(self):
         req = _form_requires(REGISTRY)
-        self.assertIn("web", req)          # tree-nested under code
+        self.assertIn("webdev", req)       # tree-nested under code
         self.assertNotIn("code", req)      # top-level profession — no requires
 
     def test_dood_layer_requires_code(self):
@@ -282,6 +300,85 @@ class TestFormRequires(unittest.TestCase):
         # specialty inherits the code requirement from its claimed layer.
         self.assertEqual(_form_requires(REGISTRY).get("dood"), frozenset({"code"}))
 
+
+
+class TestToolkitFormOptions(unittest.TestCase):
+    """_toolkit_form_options — the pure assembly behind the "Edit Toolkits"
+    menu: one row per manifest entry, key-sorted; toggleable rows checked from
+    the current profile (falling back to the entry's own default for a key the
+    profile doesn't mention); locked rows grayed + fixed to their default;
+    each row's flavor (run command + language type) in its body; `—`
+    separators aligned into columns."""
+
+    ENTRIES = {
+        "python": ToolkitEntry(key="python", description="Python 3", run_command="python3", language="interpreted", default=True, locked=True),
+        "rust":   ToolkitEntry(key="rust",   description="Rust toolchain", run_command="cargo", language="compiled", approx_size_mb=613, default=True,  build_arg="INSTALL_RUST"),
+        "cmake":  ToolkitEntry(key="cmake",  description="CMake", run_command="cmake", language="build-system", approx_size_mb=66, default=False, build_arg="INSTALL_CMAKE"),
+    }
+
+    def test_one_row_per_entry_key_sorted(self):
+        options = _toolkit_form_options(self.ENTRIES, {})
+        self.assertEqual([o.key for o in options], ["cmake", "python", "rust"])
+
+    def test_toggleable_checked_from_profile(self):
+        options = {o.key: o for o in _toolkit_form_options(self.ENTRIES, {"rust": False, "cmake": True})}
+        self.assertFalse(options["rust"].checked)
+        self.assertTrue(options["cmake"].checked)
+
+    def test_missing_profile_key_falls_back_to_entry_default(self):
+        options = {o.key: o for o in _toolkit_form_options(self.ENTRIES, {})}
+        self.assertTrue(options["rust"].checked)     # default True
+        self.assertFalse(options["cmake"].checked)   # default False
+
+    def test_locked_row_is_grayed_and_fixed(self):
+        # Python: locked=True → the row is flagged locked (grayed, inert to
+        # Space) and shows its fixed default, ignoring any profile value.
+        (python,) = [o for o in _toolkit_form_options(self.ENTRIES, {"python": False}) if o.key == "python"]
+        self.assertTrue(python.locked)
+        self.assertTrue(python.checked)   # default True wins over the profile's False
+
+    def test_locked_row_shows_included_not_a_size(self):
+        (python,) = [o for o in _toolkit_form_options(self.ENTRIES, {}) if o.key == "python"]
+        self.assertIn("included", "".join(t for _, t in python.label))
+
+    def test_label_carries_size_and_description(self):
+        (rust,) = [o for o in _toolkit_form_options(self.ENTRIES, {}) if o.key == "rust"]
+        text = "".join(t for _, t in rust.label)
+        self.assertIn("~613MB", text)
+        self.assertIn("Rust toolchain", text)
+
+    def test_body_carries_run_command_and_language(self):
+        (rust,) = [o for o in _toolkit_form_options(self.ENTRIES, {}) if o.key == "rust"]
+        body = "".join(t for _, t in rust.body)
+        self.assertIn("cargo", body)
+        self.assertIn("compiled", body)
+
+    def test_dash_separators_align_across_rows(self):
+        # Key + size columns are padded, so both `—` separators sit at the
+        # same index in every label — the form reads as a table.
+        labels = ["".join(t for _, t in o.label) for o in _toolkit_form_options(self.ENTRIES, {})]
+        first = {label.index("—") for label in labels}
+        second = {label.rindex("—") for label in labels}
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+
+
+class TestToolkitFormDisclaimer(unittest.TestCase):
+    """The size disclaimer rides into the toolkit form as a preamble line."""
+
+    def test_size_note_passed_as_preamble(self):
+        captured = {}
+
+        def fake_form(title, options, **kwargs):
+            captured.update(kwargs)
+            return None   # cancel — nothing persisted
+
+        code = scan_all(AGENTS_DIR).professions["code"]
+        with patch("launch.gui.tag_form.toolkit_profile_path",
+                   return_value=Path("/nonexistent/code_profile.toml")), \
+             patch("launch.gui.tag_form.checkbox_form", side_effect=fake_form):
+            tag_form._edit_profession_toolkit(code)
+        self.assertIn(tag_form.TOOLKIT_SIZE_NOTE, captured.get("preamble", []))
 
 
 if __name__ == "__main__":

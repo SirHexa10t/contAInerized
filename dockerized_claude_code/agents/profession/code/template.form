@@ -1,0 +1,92 @@
+# [code]'s configurable installs — the picker's "Edit Toolkits" form is built
+# from this file: one table per tool. A toggleable tool names the Dockerfile
+# build-arg it drives (`build_arg`) — the sibling Dockerfile gates that tool's
+# install behind `ARG <build_arg>`, so the whole install definition lives in
+# this directory (test_essential_files.py keeps manifest and ARGs in
+# lockstep). User toggles persist in ~/.claude-agents/code_profile.toml;
+# `default` only seeds that file's first generation.
+#
+# `run_command` + `language` are flavor shown in the focused row's panel at
+# the bottom of the form (how you invoke the tool; what kind of language it
+# is). `locked = true` marks an informational, un-toggleable row (grayed in
+# the form) for something present regardless of choice — it carries no
+# `build_arg` or `approx_size_mb`. Python is listed that way: it ships in the
+# base image, so it's always available and can't be turned off here.
+#
+# Scope: language toolchains only. Service CLIs (gh, gcloud, aws, ...) are
+# deliberately NOT offered here — they install on creds-presence under
+# user_extras/optional_creds/, and only there. The unconditional installs
+# (build-essential, pkg-config, libssl-dev, python3-dotenv) are the
+# compiler/linker/headers everything else assumes — never listed.
+#
+# Defaults: rust/node/cmake on (they were unconditional installs before the
+# form existed — a user who never opens the form keeps the same image);
+# go/java/kotlin/ruby off (never previously installed — defaulting them on
+# would silently grow every existing image by ~1GB).
+#
+# approx_size_mb: du delta over the mandatory base layer.
+#   rust / node / cmake — measured 2026-07-21 (amd64, --no-install-recommends).
+#   go / java / kotlin / ruby — estimates pending a measured pass.
+
+[python]
+description    = "Python 3 (ships in the base image — always available)"
+run_command    = "python3"
+language       = "interpreted · multi-paradigm · dynamic"
+default        = true
+locked         = true
+
+[rust]
+description    = "Rust toolchain (rustup + cargo, stable, minimal profile)"
+run_command    = "cargo"
+language       = "compiled · systems · memory-safe"
+approx_size_mb = 613
+default        = true
+build_arg      = "INSTALL_RUST"
+
+[node]
+description    = "Node.js LTS + npm (corepack: yarn/pnpm shims)"
+run_command    = "node"
+language       = "interpreted · JS runtime · event-driven"
+approx_size_mb = 196
+default        = true
+build_arg      = "INSTALL_NODE"
+
+[cmake]
+description    = "CMake build system"
+run_command    = "cmake"
+language       = "build-system generator (C/C++ projects)"
+approx_size_mb = 66
+default        = true
+build_arg      = "INSTALL_CMAKE"
+
+[go]
+description    = "Go toolchain (official go.dev tarball, latest stable)"
+run_command    = "go"
+language       = "compiled · C-like · concurrent (goroutines)"
+approx_size_mb = 250
+default        = false
+build_arg      = "INSTALL_GO"
+
+[java]
+description    = "Java (OpenJDK headless JDK, Debian default-jdk)"
+run_command    = "java"
+language       = "compiled · OOP · JVM"
+approx_size_mb = 330
+default        = false
+build_arg      = "INSTALL_JAVA"
+
+[kotlin]
+description    = "Kotlin compiler (JetBrains release; adds a JRE unless Java is also selected)"
+run_command    = "kotlin"
+language       = "compiled · OOP + functional · JVM"
+approx_size_mb = 340
+default        = false
+build_arg      = "INSTALL_KOTLIN"
+
+[ruby]
+description    = "Ruby (Debian ruby-full: interpreter + dev headers + gems)"
+run_command    = "ruby"
+language       = "interpreted · OOP · dynamic"
+approx_size_mb = 70
+default        = false
+build_arg      = "INSTALL_RUBY"

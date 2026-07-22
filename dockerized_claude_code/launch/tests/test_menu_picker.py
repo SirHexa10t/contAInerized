@@ -9,13 +9,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from launch import menu_picker
-from launch.menu_picker import (
-    _agent_description, _tags_column, continuable_instances, prompt_session,
+from launch.gui import menu_picker
+from launch.gui.menu_picker import (
+    _agent_description, _cont_tags_column, _tags_column,
+    continuable_instances, prompt_session,
 )
-from launch.tag_form import STYLE_TAG_SAFE, STYLE_TAG_WARN
+from launch.gui.tag_form import STYLE_TAG_SAFE, STYLE_TAG_WARN
 from launch.paths import AGENTS_DIR
 from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+from launch.gui.tag_form import STYLE_TAG_INVALID
 
 REGISTRY = scan_all(AGENTS_DIR)
 
@@ -78,10 +80,10 @@ class TestTagsColumn(unittest.TestCase):
 
 class TestInstanceBuild(unittest.TestCase):
     def test_round_trips_axis_names(self):
-        inst = make_inst(professions=["code", "web"], specialties=["auto"],
+        inst = make_inst(professions=["code", "webdev"], specialties=["auto"],
                          policies=["no-sudo"])
         build = inst.build
-        self.assertEqual(build.professions, ("code", "web"))
+        self.assertEqual(build.professions, ("code", "webdev"))
         self.assertEqual(build.specialties, ("auto",))
         self.assertEqual(build.policies, ("no-sudo",))
 
@@ -181,5 +183,34 @@ class TestPromptSession(unittest.TestCase):
 
     def test_rename_to_fresh_name_accepted(self):
         self.assertEqual(self._run(["newname"], existing=["mysess"], current="mysess"), "newname")
+
+
+class TestContTagsColumn(unittest.TestCase):
+    """_cont_tags_column renders a Cont row's tags: resolved ones colored
+    normally, then any invalid (stored-but-unresolvable) names in the
+    red-background/black-foreground alert style, in the expected kind's
+    punctuation."""
+
+    def _inst_with_invalid(self, build):
+        clean, problems = REGISTRY.resolve_store_build(build)
+        return Instance(agent="refactorer", md_path=Path("/x.md"), session="s",
+                        workspace="/tmp", is_brand_new=False, invalid_tags=tuple(problems),
+                        **resolve_build(clean, "refactorer", REGISTRY))
+
+    def test_valid_only_matches_plain_tags_column(self):
+        inst = self._inst_with_invalid(AgentBuild(professions=("code",)))
+        self.assertEqual(_cont_tags_column(inst), _tags_column(inst.active_tags))
+
+    def test_invalid_tag_rendered_in_alert_style(self):
+        inst = self._inst_with_invalid(AgentBuild(professions=("code", "web")))
+        frags, _ = _cont_tags_column(inst)
+        self.assertIn((STYLE_TAG_INVALID, "[web]"), frags)          # bad name, profession brackets, alert style
+        self.assertIn("[code]", "".join(t for _, t in frags))       # the valid one still shown
+
+    def test_width_counts_invalid_labels(self):
+        inst = self._inst_with_invalid(AgentBuild(professions=("code", "web")))
+        frags, width = _cont_tags_column(inst)
+        self.assertEqual(width, sum(len(text) for _, text in frags))
+
 if __name__ == "__main__":
     unittest.main()

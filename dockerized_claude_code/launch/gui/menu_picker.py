@@ -1,16 +1,17 @@
-"""Interactive agent UI: full-screen picker (prompt_toolkit) plus supporting
-line-prompt helpers for workspace path and session suffix. Pulls picker-entry
-builders and state lookups from agents_crud; has no agent-domain logic.
-The tag-selection form (`prompt_tags` / `checkbox_form`) and the shared TUI
-style system live in `tag_form.py` — this module drives it from the create
-and F2-modify flows and reuses its styles.
+"""The full-screen picker (launch/gui): main menu, deletion submenu, the
+"Edit Toolkits" opener, plus supporting line-prompt helpers for workspace
+path and session suffix. Pulls picker-entry builders and state lookups from
+agents_crud; has no agent-domain logic. Every *form* (tag form, toolkit
+form, checkbox_form) and the shared TUI style system live in the sibling
+`tag_form.py` — this module only opens them and reuses their styles.
 
 Public API:
 
   select_agent(registry)
-      Run the agent/session picker (main menu + nested deletion submenu) until the
-      user picks something or cancels. Discovers agents/instances and handles
-      deletions internally.
+      Run the agent/session picker (main menu + nested deletion submenu +
+      "Edit Toolkits" submenu) until the user picks something or cancels.
+      Discovers agents/instances and handles deletions + toolkit-profile
+      edits internally.
       -> Agent (new) | Instance (cont) | None on cancel/empty
 
   ask_for_workspace(agent, default=None)
@@ -73,27 +74,27 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from .agents_crud import (
-    creatable_agents, delete_instance, instance_from_store,
+from ..agents_crud import (
+    creatable_agents, delete_instance, instance_from_store, invalid_tags_report,
     list_all_instances, modify_instance,
 )
-from .file_access import (
+from ..file_access import (
     expand_user_path, home_dir, is_dir,
     path_exists, read_text, resolved_cwd, resolved_path,
     tab_complete_paths, user_firewall_whitelist_lines,
 )
-from .paths import (
+from ..paths import (
     DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
     FIREWALL_WHITELIST_FILE, instance_state_dir_path,
 )
 from .tag_form import (
-    RICH_BY_STYLE, STYLE_DICT, UiClass, _normalize, _plain, prompt_tags,
-    tag_style,
+    RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _normalize, _plain,
+    edit_toolkits_menu, prompt_tags, tag_style,
 )
-from .tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
-from .tags.engine import engine_sort_key, sorted_engines
-from .tags.identity import SESSION_SEP
-from .utils import ordering_index_or_end, plural, relative_time
+from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
+from ..tags.engine import engine_sort_key, sorted_engines
+from ..tags.identity import SESSION_SEP
+from ..utils import ordering_index_or_end, plural, relative_time
 
 
 # ============================================================
@@ -137,8 +138,15 @@ TITLE_DELETE_MENU  = "‼️  DELETE AGENT INSTANCES  ‼️"
 # Cwd-relation labels ("(CURRENT DIR) " / "(DEFAULT DIR) ") live on
 # PickerCwdHint there too.
 
+TOOLKITS_LABEL  = "(Edit Toolkits)"
 DELMENU_LABEL  = "(Move onto deletions menu)"
 BACK_LABEL     = "(Move back to Agent Selection)"
+TOOLKITS_PREVIEW = ("Choose which language toolchains a configurable profession's shared image "
+                    "installs (today: [code]'s Rust / Node / CMake) — edits "
+                    "~/.claude-agents/<profession>_profile.toml; a changed toggle rebuilds only that "
+                    "tool's Docker layer on the next launch. Service CLIs (gh, gcloud, aws, ...) are "
+                    "not chosen here — they install when matching creds exist under "
+                    "user_extras/optional_creds/.")
 DELMENU_PREVIEW = "Open the deletion sub-menu to remove agent instances and their state directories."
 BACK_PREVIEW    = "Return to the main agent picker."
 CONFIRM_DELETE_FMT = "Delete '{name}'?"
@@ -175,6 +183,7 @@ class PickerRowMarker(Enum):
     """
     NEW    = ("✨ Create",       "fg:ansigreen")
     CONT   = ("🏷️ Cont.",        "fg:ansiyellow")
+    TOOLS  = ("🧰 Toolkits",     "fg:ansicyan")
     DELMNU = ("⚠️ DELETE‼️",     "fg:ansired")
     DLET   = ("🗑 DELETE",       "fg:ansired")
     BACK   = ("🚪  Back",        "")
@@ -272,11 +281,13 @@ class PickerEntry:
     modifiable: bool = True
 
 
-# Sentinel entry value signalling "open the delete submenu" — used in the
-# main picker where most rows hold an identity dataclass; this is the one
-# non-identity row, so a distinct singleton lets the dispatcher match by
-# `is` rather than tagging identities with extra metadata.
+# Sentinel entry values signalling "open the delete submenu" / "open the
+# toolkits editor" — used in the main picker where most rows hold an
+# identity dataclass; these are the non-identity rows, so distinct
+# singletons let the dispatcher match by `is` rather than tagging
+# identities with extra metadata.
 _OPEN_DELMENU = object()
+_OPEN_TOOLKITS = object()
 
 
 def continuable_instances(registry: Registry) -> list[ContEntry]:
@@ -411,6 +422,26 @@ def _tags_column(tags: Iterable[Tag]) -> tuple[list[tuple[str, str]], int]:
     fragments.append(("", " "))   # trailing separator — bakes into the column width
     visible = sum(len(text) for _, text in fragments)
     return fragments, visible
+
+
+def _cont_tags_column(inst: Instance) -> tuple[list[tuple[str, str]], int]:
+    """A Cont row's tag column: the resolved tags (warn-aware colored, via
+    `_tags_column`) followed by any `invalid_tags` — stored names that no
+    longer resolve — rendered in the expected kind's punctuation with a
+    red-background/black-foreground alert style so a stale/typo'd tag is
+    impossible to miss. The invalid tags also block the instance from
+    starting (see select_agent / resolve_target)."""
+    fragments, width = _tags_column(inst.active_tags)
+    for problem in inst.invalid_tags:
+        if fragments:
+            fragments.append(("", " "))
+            width += 1
+        fragments.append((STYLE_TAG_INVALID, problem.label))
+        width += len(problem.label)
+    if inst.invalid_tags:
+        fragments.append(("", " "))   # trailing separator, matching _tags_column
+        width += 1
+    return fragments, width
 
 
 def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
@@ -713,8 +744,7 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
             return [t for n in names if (t := registry.get(n)) is not None]
 
         tag_by_agent = {a.name: _tags_column(build_tags(a.build)) for a in agents}
-        tag_by_inst = {i.identity.instance: _tags_column((*i.identity.professions, *i.identity.specialties, *i.identity.policies))
-                       for i in instances}
+        tag_by_inst = {i.identity.instance: _cont_tags_column(i.identity) for i in instances}
         tag_col_width  = max((w for _, w in tag_by_agent.values()), default=0)
         cont_col_width = max((w for _, w in tag_by_inst.values()), default=0)
 
@@ -757,6 +787,18 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                     value=identity,
                 ))
 
+        if any(p.toolkit_path for p in registry.professions.values()):
+            entries.append(PickerEntry(
+                display=[
+                    PickerRowMarker.TOOLS.fragment("  "),
+                    ("", TOOLKITS_LABEL),
+                ],
+                preview=TOOLKITS_PREVIEW,
+                value=_OPEN_TOOLKITS,
+                deletable=False,
+                modifiable=False,
+            ))
+
         entries.append(PickerEntry(
             display=[
                 PickerRowMarker.DELMNU.fragment("  "),
@@ -791,16 +833,30 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                 continue
             new_inst = dataclasses.replace(
                 old_inst, session=new_session, workspace=new_workspace,
+                invalid_tags=(),   # re-picking against the live registry clears any stale/typo'd tags
                 **resolve_build(new_build, old_inst.agent, registry),
             )  # is_brand_new stays False via the dataclass replace
             modify_instance(old_inst, new_inst)
+            continue
+
+        if value is _OPEN_TOOLKITS:
+            edit_toolkits_menu(registry)
             continue
 
         if value is _OPEN_DELMENU:
             _delete_submenu(registry, legend_text)
             continue
 
+        if isinstance(value, Instance) and not value.is_startable:
+            # A Cont row whose stored tags no longer resolve — explain and
+            # bounce back to the picker (F2 re-picks; Del removes it) rather
+            # than starting a half-resolved instance.
+            print("\n" + invalid_tags_report(value) + "\n")
+            input("  Press Enter to return to the picker… ")
+            continue
+
         return value  # Agent (new) | Instance (cont)
+
 
 
 def _delete_submenu(registry: Registry, legend_text: str) -> None:

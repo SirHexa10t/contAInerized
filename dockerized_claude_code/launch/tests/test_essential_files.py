@@ -8,16 +8,17 @@ here at test time rather than at runtime.
 The tag tree itself (Dockerfiles, tag.info shapes, `.lego` references) is
 validated by TestTagTreeDiscovery / TestAgentLegoFiles below via scan_all."""
 
+import re
 import unittest
 
 from launch import paths, tag_handlers
 from launch.tags import load_lego, scan_all
 
 # Chain tags with host-side launch behavior must have an _apply_ handler;
-# the rest are data-only ({auto} = claude_args + wants; [web]'s playwright
+# the rest are data-only ({auto} = claude_args + wants; [webdev]'s playwright
 # cache rides [code]'s ~/.cache mount).
 HANDLER_TAGS = ["code", "dood", "firewall"]
-DATA_ONLY_TAGS = ["web", "auto", "read-only"]   # read-only's effects (workspace :ro + claimed policy fragment) are data, not a handler
+DATA_ONLY_TAGS = ["webdev", "auto", "read-only"]   # read-only's effects (workspace :ro + claimed policy fragment) are data, not a handler
 
 
 class TestRepoLayout(unittest.TestCase):
@@ -114,8 +115,8 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertTrue(self.reg.engines["breakthrough"].conf_map.get("ANTHROPIC_MODEL"))
 
     def test_professions_discovered_with_nesting_requires(self):
-        self.assertLessEqual({"code", "web"}, set(self.reg.professions))
-        self.assertEqual(self.reg.professions["web"].requires, frozenset({"code"}))
+        self.assertLessEqual({"code", "webdev"}, set(self.reg.professions))
+        self.assertEqual(self.reg.professions["webdev"].requires, frozenset({"code"}))
 
     def test_specialties_discovered_with_layer_requires(self):
         self.assertLessEqual({"auto", "dood"}, set(self.reg.specialties))
@@ -123,12 +124,20 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertTrue(self.reg.specialties["auto"].warn)
 
     def test_professions_have_dockerfile(self):
-        for name in ("code", "web"):
+        for name in ("code", "webdev"):
             self.assertTrue((self.reg.professions[name].path / "Dockerfile").is_file())
 
     def test_policies_discovered(self):
         self.assertLessEqual({"web-research", "no-sudo"}, set(self.reg.policies))
         self.assertEqual(self.reg.policies["web-research"].label, "<+qry>")
+        self.assertEqual(self.reg.policies["vcs-safe"].label, "<-gpush>")
+
+    def test_no_sudo_is_the_always_on_static_policy(self):
+        # <-su> applies to every instance (install_settings merges it from
+        # the registry); nothing else ships always-on, and no .lego lists it
+        # (validate_build would reject that — covered by TestAgentLegoFiles).
+        always_on = {n for n, p in self.reg.policies.items() if p.always_on}
+        self.assertEqual(always_on, {"no-sudo"})
 
 
 class TestAgentLegoFiles(unittest.TestCase):
@@ -187,6 +196,68 @@ class TestFirewallSpecialtyArtifacts(unittest.TestCase):
         auto = scan_all(paths.AGENTS_DIR).specialties["auto"]
         self.assertIn("firewall", dict(auto.wants))
         self.assertIn("--dangerously-skip-permissions", auto.claude_args)
+
+
+class TestCodeToolkitManifest(unittest.TestCase):
+    """[code]'s template.form — the configurable-installs manifest behind the
+    "Edit Toolkits" menu. Guards the scope decisions: the form offers the
+    LANGUAGE TOOLCHAINS only (all default on, matching the pre-toggle
+    unconditional installs); the service CLIs are creds-driven and never
+    manifest entries; every Dockerfile INSTALL_* ARG is owned by exactly one
+    of the two mechanisms."""
+
+    CREDS_CLI_KEYS = frozenset(
+        name.upper() for name, (_, cli) in paths.OPTIONAL_CREDS_MOUNTS.items() if cli is not None
+    )
+
+    def setUp(self):
+        self.code = scan_all(paths.AGENTS_DIR).professions["code"]
+
+    def test_template_form_present(self):
+        self.assertIsNotNone(self.code.toolkit_path)
+        self.assertEqual(self.code.toolkit_path.name, "template.form")
+
+    def test_offers_the_toolchains_plus_locked_python(self):
+        self.assertEqual(set(self.code.load_toolkit()),
+                         {"python", "rust", "node", "cmake", "go", "java", "kotlin", "ruby"})
+
+    def test_python_is_locked_and_argless(self):
+        # Python ships in the base image — shown so users know it's there,
+        # but un-toggleable and not gated by any build-arg.
+        python = self.code.load_toolkit()["python"]
+        self.assertTrue(python.locked)
+        self.assertEqual(python.build_arg, "")
+        self.assertTrue(python.default)
+
+    def test_pretoggle_toolchains_default_on_new_languages_off(self):
+        # rust/node/cmake were unconditional before the form existed — their
+        # defaults preserve that image; the languages added WITH the form
+        # default off so nobody's image silently grows by ~1GB.
+        entries = self.code.load_toolkit()
+        for key in ("rust", "node", "cmake"):
+            with self.subTest(tool=key):
+                self.assertTrue(entries[key].default)
+        for key in ("go", "java", "kotlin", "ruby"):
+            with self.subTest(tool=key):
+                self.assertFalse(entries[key].default)
+
+    def test_manifest_disjoint_from_creds_clis(self):
+        # A build-arg claimed by both would make two mechanisms fight over it.
+        manifest_args = {e.build_arg for e in self.code.load_toolkit().values() if e.build_arg}
+        self.assertFalse(manifest_args & {f"INSTALL_{k}" for k in self.CREDS_CLI_KEYS})
+
+    def test_every_install_arg_owned_by_exactly_one_mechanism(self):
+        # The drift-catcher: an INSTALL_* ARG that neither the manifest nor
+        # creds-presence stages would silently keep its Dockerfile default
+        # (never install); a manifest entry whose build_arg has no ARG would
+        # no-op the toggle. Both must fail loud here, not surface as "I
+        # toggled it and nothing changed" at launch time. (Locked entries
+        # like python carry no build_arg — excluded.)
+        dockerfile = (self.code.path / "Dockerfile").read_text()
+        arg_names = set(re.findall(r"^ARG (INSTALL_\w+)=", dockerfile, re.MULTILINE))
+        manifest_args = {e.build_arg for e in self.code.load_toolkit().values() if e.build_arg}
+        creds_args = {f"INSTALL_{k}" for k in self.CREDS_CLI_KEYS}
+        self.assertEqual(manifest_args | creds_args, arg_names)
 
 
 if __name__ == "__main__":

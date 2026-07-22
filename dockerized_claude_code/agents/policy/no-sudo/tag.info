@@ -1,4 +1,5 @@
 shortname             = "-su"
 short_description     = "deny sudo"
-full_description      = "Deny sudo via the Bash tool. Harness-level — the sudo binary still exists in the container (a hard block would be a specialty)."
+full_description      = "Deny sudo via the Bash tool. ALWAYS ON — applied to every instance regardless of selections (the container's user has no sudo password anyway; this turns the OS-level dead end into a clean, instant harness refusal). Not listed in .lego files or instances.toml."
 stance                = "deny"
+always_on             = true

@@ -16,10 +16,11 @@ import json
 
 from launch import paths
 from launch.agents_crud import (
-    delete_instance, install_latest_md, install_settings, modify_instance,
-    persist_instance,
+    delete_instance, install_latest_md, install_settings, invalid_tags_report,
+    modify_instance, persist_instance,
 )
-from launch.tags import Instance, TagError, scan_all, store
+from launch.tags import AgentBuild, Instance, TagError, scan_all, store
+from launch.tags.identity import resolve_build
 from launch.tags.engine import (
     ORDERED_MODEL_FAMILIES, engine_sort_key, parse_model_id,
 )
@@ -333,22 +334,28 @@ class TestInstallSettings(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     @staticmethod
-    def _policy(name, fragment):
-        return SimpleNamespace(name=name, load_fragment=lambda: fragment)
+    def _policy(name, fragment, always_on=False):
+        return SimpleNamespace(name=name, load_fragment=lambda: fragment, always_on=always_on)
+
+    @staticmethod
+    def _registry(*policies):
+        """A registry stand-in — install_settings only reads `.policies`
+        (values + each one's always_on/name/load_fragment)."""
+        return SimpleNamespace(policies={p.name: p for p in policies})
 
     def _written(self, inst):
         return json.loads((inst.state_dir / "settings.json").read_text())
 
     def test_no_policies_yields_base_settings(self):
         inst = _inst()
-        install_settings(inst)
+        install_settings(inst, self._registry())
         base = json.loads(paths.BASE_SETTINGS_FILE.read_text())
         self.assertEqual(self._written(inst), base)
 
     def test_policy_fragment_merges_onto_base(self):
         inst = _inst(policies=(self._policy("web-research",
                                             {"permissions": {"allow": ["WebSearch"]}}),))
-        install_settings(inst)
+        install_settings(inst, self._registry())
         merged = self._written(inst)
         self.assertEqual(merged["permissions"], {"allow": ["WebSearch"]})
         self.assertIn("statusLine", merged)   # base settings preserved
@@ -358,9 +365,20 @@ class TestInstallSettings(unittest.TestCase):
             self._policy("a", {"permissions": {"deny": ["Bash(sudo *)"]}}),
             self._policy("b", {"permissions": {"deny": ["WebFetch"]}}),
         ))
-        install_settings(inst)
+        install_settings(inst, self._registry())
         self.assertEqual(self._written(inst)["permissions"]["deny"],
                          ["Bash(sudo *)", "WebFetch"])
+
+    def test_always_on_policy_merges_without_being_selected(self):
+        # The static-tag path: <-su>-style policies come from the REGISTRY,
+        # not the instance — every settings.json carries them.
+        static = self._policy("no-sudo", {"permissions": {"deny": ["Bash(sudo *)"]}}, always_on=True)
+        offered = self._policy("web-research", {"permissions": {"allow": ["WebSearch"]}})
+        inst = _inst()   # no policies selected
+        install_settings(inst, self._registry(static, offered))
+        merged = self._written(inst)
+        self.assertEqual(merged["permissions"], {"deny": ["Bash(sudo *)"]})   # static applied
+        self.assertNotIn("allow", merged["permissions"])                       # non-static NOT applied unselected
 
     def test_scalar_conflict_aborts_naming_culprits(self):
         inst = _inst(policies=(
@@ -368,15 +386,60 @@ class TestInstallSettings(unittest.TestCase):
             self._policy("tight", {"cleanupPeriodDays": 7}),
         ))
         with self.assertRaises(TagError) as ctx:
-            install_settings(inst)
+            install_settings(inst, self._registry())
         self.assertIn("loose", str(ctx.exception))
         self.assertIn("tight", str(ctx.exception))
 
     def test_regenerated_each_call(self):
         inst = _inst(policies=(self._policy("p", {"x": {"a": 1}}),))
-        install_settings(inst)
-        install_settings(_inst())   # same instance id, no policies → base only
+        install_settings(inst, self._registry())
+        install_settings(_inst(), self._registry())   # same instance id, no policies → base only
         self.assertNotIn("x", self._written(inst))
+
+
+class TestInvalidTagsReport(unittest.TestCase):
+    """invalid_tags_report — the fix-it message for an instance whose store
+    entry names tags that no longer resolve. Built against the real registry
+    so the listed alternatives are the shipped ones."""
+
+    def setUp(self):
+        self.reg = scan_all(paths.AGENTS_DIR)
+
+    def _instance(self, build: AgentBuild) -> Instance:
+        clean, problems = self.reg.resolve_store_build(build)
+        return Instance(agent="refactorer", md_path=Path("/x.md"), session="s",
+                        workspace="/tmp", is_brand_new=False, invalid_tags=tuple(problems),
+                        **resolve_build(clean, "refactorer", self.reg))
+
+    def test_startable_flag_tracks_invalid_tags(self):
+        self.assertTrue(self._instance(AgentBuild(professions=("code",))).is_startable)
+        self.assertFalse(self._instance(AgentBuild(professions=("web",))).is_startable)
+
+    def test_report_lists_same_kind_alternatives_only(self):
+        # A bad policy name lists policy tags — never professions/specialties.
+        report = invalid_tags_report(self._instance(AgentBuild(policies=("nope",))))
+        self.assertIn("<nope>", report)
+        self.assertIn("web-research", report)   # a real policy
+        self.assertNotIn("code", report)         # a profession — wrong kind, not offered
+        self.assertNotIn("firewall", report)     # a specialty — wrong kind, not offered
+
+    def test_report_names_the_renamed_profession_alternative(self):
+        # The web→webdev rename case: 'web' is gone, 'webdev' is the fix.
+        report = invalid_tags_report(self._instance(AgentBuild(professions=("web",))))
+        self.assertIn("[web]", report)
+        self.assertIn("webdev", report)
+        self.assertIn("F2", report)              # the picker fix path is mentioned
+
+    def test_report_explains_wrong_axis(self):
+        # A real tag on the wrong axis reads differently from a typo.
+        report = invalid_tags_report(self._instance(AgentBuild(specialties=("no-sudo",))))
+        self.assertIn("policy tag", report)      # no-sudo is really a policy
+
+    def test_report_does_not_leak_absolute_home_path(self):
+        # The store location is shown ~-relative, never as a raw /home/<user> path.
+        report = invalid_tags_report(self._instance(AgentBuild(policies=("nope",))))
+        self.assertIn("~/", report)
+        self.assertNotIn(str(Path.home()), report)
 
 
 if __name__ == "__main__":

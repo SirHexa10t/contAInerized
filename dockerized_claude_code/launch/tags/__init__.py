@@ -14,6 +14,9 @@ Public surface:
   - `Agent`, `Instance`, `resolve_build` — the identity records launches run on.
   - `store` / `migrations` — the instances.toml store and one-shot
     retired-format conversions.
+  - `ToolkitEntry` — one row of a profession's optional `template.form`
+    (`Profession.load_toolkit()`); `toolkit_profile` owns the per-user
+    `~/.claude-agents/<profession>_profile.toml` that toggles them.
 """
 
 from .base import DockerContribution, Tag, TagError
@@ -24,18 +27,18 @@ from .identity import (
 )
 from .lego import AgentBuild, load_lego
 from .policy import Policy, PolicyStance, merge_fragments
-from .profession import Layer, Profession
-from .registry import Registry, scan_all
+from .profession import Layer, Profession, ToolkitEntry
+from .registry import Registry, TagProblem, scan_all
 from .specialty import Combo, Specialty, scan_combos
-from . import addendums, migrations, store
+from . import addendums, migrations, store, toolkit_profile
 
 __all__ = [
     "Tag", "DockerContribution", "TagError",
     "Engine", "Profession", "Specialty", "Policy", "PolicyStance",
-    "Layer", "Combo", "scan_combos", "merge_fragments",
+    "Layer", "Combo", "scan_combos", "merge_fragments", "ToolkitEntry",
     "AgentBuild", "load_lego",
-    "Registry", "scan_all",
+    "Registry", "TagProblem", "scan_all",
     "Agent", "Instance", "image_chain", "resolve_build", "agent_md_path",
     "effective_engine_name",
-    "load_agent", "store", "migrations", "addendums",
+    "load_agent", "store", "migrations", "addendums", "toolkit_profile",
 ]

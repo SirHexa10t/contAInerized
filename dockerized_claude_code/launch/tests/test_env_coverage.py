@@ -6,7 +6,8 @@ time (an unforwarded ARG keeps its Dockerfile default; a typo'd forward
 name never matches a staged value). Four checks:
 
 1. `${VAR}` references in every Dockerfile — must be a ContainerEnvKey, an
-   INSTALL_<TOOL> from install_creds_flags, a token env-var from
+   INSTALL_<TOOL> from toolkit_install_flags (profile-driven toolchains) or
+   install_creds_flags (creds-driven CLIs), a token env-var from
    OPTIONAL_CREDS_TOKEN_ENV_VARS, PARENT_IMAGE (threaded by ensure_image),
    or in the allowlist of build-time-default ARGs / RUN-local shell vars.
 2. `ARG VAR` declarations — same allowed set.
@@ -21,9 +22,11 @@ name never matches a staged value). Four checks:
 import fnmatch
 import re
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from launch import paths
-from launch.container_env import ContainerEnvKey, install_creds_flags
+from launch.container_env import ContainerEnvKey, install_creds_flags, toolkit_install_flags
 from launch.tags import scan_all
 
 REGISTRY = scan_all(paths.AGENTS_DIR)
@@ -36,7 +39,7 @@ _dood_layer = REGISTRY.specialties["dood"].layer
 assert _dood_layer is not None   # the shipped tree claims profession/code/_dood
 BUILD_LAYERS = [
     ("code", REGISTRY.professions["code"].path / "Dockerfile", REGISTRY.professions["code"].docker),
-    ("web",  REGISTRY.professions["web"].path / "Dockerfile",  REGISTRY.professions["web"].docker),
+    ("webdev", REGISTRY.professions["webdev"].path / "Dockerfile", REGISTRY.professions["webdev"].docker),
     ("dood", _dood_layer.path / "Dockerfile", _dood_layer.docker),
 ]
 
@@ -53,16 +56,26 @@ BUILD_LAYERS = [
 #                  jira-cli install RUN block (version comes from the
 #                  GitHub API; arch from `dpkg --print-architecture`).
 #                  Not Docker ARGs — they live entirely within one RUN.
-_ALLOWLIST = {"HOST_UID", "PARENT_IMAGE", "VERSION", "ARCH_SUFFIX"}
+#   GO_VER /
+#   KOTLIN_VER   — same pattern for the go / kotlin install RUN blocks.
+_ALLOWLIST = {"HOST_UID", "PARENT_IMAGE", "VERSION", "ARCH_SUFFIX", "GO_VER", "KOTLIN_VER"}
 
 
 def _staged_env_vars():
     """Union of every env-var name the launcher actively stages: the static
-    ContainerEnvKey set, the per-service INSTALL_<TOOL> build flags, and the
-    optional-cred token vars."""
+    ContainerEnvKey set, the profile-driven toolchain INSTALL_<TOOL> flags
+    (one per template.form entry — value-independent, since
+    toolkit_install_flags emits one key per manifest entry regardless; the
+    profile path is patched to a throwaway location purely for hermeticity,
+    so this never touches the real ~/.claude-agents/code_profile.toml), the
+    creds-driven CLI INSTALL_<TOOL> flags, and the optional-cred token vars."""
+    configurable = [p for p in REGISTRY.professions.values() if p.toolkit_path]
+    with patch("launch.container_env.toolkit_profile_path", lambda name: Path("/nonexistent")):
+        toolkit_flags = toolkit_install_flags(configurable)
     return (
         {m.value for m in ContainerEnvKey}
-        | set(install_creds_flags(set()))   # INSTALL_<TOOL> for cli-backed services only — same filter the launcher stages with
+        | set(toolkit_flags)
+        | set(install_creds_flags(set()))
         | set(paths.OPTIONAL_CREDS_TOKEN_ENV_VARS.values())
     )
 

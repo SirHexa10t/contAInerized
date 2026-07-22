@@ -1,2 +1,3 @@
 engine = "researcher"
 professions = ["code"]
+policies = ["web-research"]

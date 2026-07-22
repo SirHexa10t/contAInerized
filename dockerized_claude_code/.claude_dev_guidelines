@@ -26,7 +26,8 @@ Grouped by layer, top of the dependency graph last.
 - `tags/base.py` — the `Tag` record, `DockerContribution`, `tag.info`/`tag.docker` parsing, the STRICT tree rule, `TagError`.
 - `tags/engine.py`, `tags/profession.py`, `tags/specialty.py`, `tags/policy.py` — the four kind classes, each with its own `scan(agents_dir)`; engine also owns the model-family sort keys (`engine_sort_key`), profession discovers hidden `_<name>` image layers, specialty adds `combos.info`, policy adds `merge_fragments`.
 - `tags/registry.py` — `scan_all(agents_dir)` → `Registry`: discover, cross-validate (fail loud), look up.
-- `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections).
+- `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections). Shipped `.lego` files are validated with the RAISING `Registry.validate_build`; user-editable `instances.toml` entries use the NON-raising `Registry.resolve_store_build` (keeps valid tags, returns `TagProblem`s for the rest) so a stale/typo'd stored tag becomes a blocked, flagged instance rather than a crash.
+- `tags/toolkit_profile.py` — per-profession `~/.claude-agents/<profession>_profile.toml` load/generate/save (install toggles for a profession's optional `template.form` entries); depends on `tags/profession.py`'s `ToolkitEntry`.
 - `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `claude_args`, `unmet_wants`).
 - `tags/store.py` — `instances.toml` load/save (stdlib `tomllib` in; a small fixed-schema TOML emitter out).
 - `tags/migrations.py` — ISOLATED one-shot conversions from retired on-disk formats; the only module allowed to know retired formats exist.
@@ -39,7 +40,7 @@ Grouped by layer, top of the dependency graph last.
 
 ### Orchestration — depend on services
 
-- `launch/container_env.py` — env staging (`ContainerEnvKey` taxonomy, the staged-value accumulator, `-e`/build-arg formatters, `set_container_env` orchestrator).
+- `launch/container_env.py` — env staging (`ContainerEnvKey` taxonomy, the staged-value accumulator, `-e`/build-arg formatters, `set_container_env` orchestrator, `toolkit_install_flags` — profile-driven toolchain INSTALL_<TOOL> flags — and `install_creds_flags` — creds-driven CLI flags; disjoint key sets).
 - `launch/docker_config.py` — plain-docker orchestration: `ensure_image` (base + per-layer `docker build`), `run_container` (`docker run` assembly), tag.docker flag emitters, bind-mount accumulator, docker CLI wrappers, the dry-run gate.
 - `launch/tag_handlers.py` — `apply_tags(instance)`: stages declarative tag.docker mounts, then dispatches per-tag `_apply_<name>` handlers (dynamic-only side effects; data-only tags have no handler).
 - `launch/agents_crud.py` — instance state CRUD (instances.toml writers), state-dir installs (`install_latest_md`, `install_settings`), `resolve_pick`, picker-entry factories.
@@ -48,8 +49,12 @@ Grouped by layer, top of the dependency graph last.
 
 ### UI
 
-- `launch/tag_form.py` — the kind-sectioned tag form (`prompt_tags` / `checkbox_form`: engine radio, requires-cascade, combos + wants warnings, context preamble) plus the shared TUI style system (`UiClass`, `tag_style`, the stance colors) both surfaces use.
-- `launch/menu_picker.py` — prompt_toolkit picker + F8 legend + line prompts (workspace, session) + pre-launch banner; imports the form and styles from tag_form (one-way).
+The TUI lives in the `launch/gui/` subpackage — nothing outside it imports
+prompt_toolkit; run.py drives everything through `launch/gui/__init__.py`'s
+re-exports.
+
+- `launch/gui/tag_form.py` — every form: the kind-sectioned tag form (`prompt_tags`: engine radio, requires-cascade, combos + wants warnings, context preamble), the per-profession toolkit form (`edit_toolkits_menu`), and the generic `checkbox_form` primitive behind both — plus the shared TUI style system (`UiClass`, `tag_style`, the stance colors) both surfaces use.
+- `launch/gui/menu_picker.py` — prompt_toolkit picker + F8 legend + line prompts (workspace, session) + pre-launch banner + the "Edit Toolkits" opener row; imports the forms and styles from tag_form (one-way: tag_form never imports the picker).
 
 ### Entry
 
@@ -81,7 +86,7 @@ leaves: utils, paths, template_code/   (independent — none imports in-project)
                                                     agents_crud, user_additions, audit)
                                              │
                                              ▼
-                                             UI (tag_form ─► menu_picker)
+                                             gui/ (tag_form ─► menu_picker)
                                              │
                                              ▼
                                              entry (run.py)
@@ -108,7 +113,7 @@ For each common addition, place it where the rest of the project would expect.
   overlay the parent's conf key-by-key.
 - **Profession**: `agents/profession/<name>/{tag.info, Dockerfile}` (+
   `tag.docker` naming the build-args the Dockerfile consumes). Nest under
-  another profession to declare a requirement (`code/web/` ⇒ web requires code).
+  another profession to declare a requirement (`code/webdev/` ⇒ webdev requires code).
 - **Specialty**: `agents/specialty/<name>/tag.info` (`short_description`,
   `full_description`, `warn`, `claude_args`, `workspace_readonly`, `[wants]`,
   `[addendum]`). May claim two hidden same-named assets: a `_<name>` image
@@ -119,7 +124,10 @@ For each common addition, place it where the rest of the project would expect.
   config (mounts, `cap_add`, `entrypoint`, `env_forward`) goes in `tag.docker`.
   Multi-tag warnings go in `agents/specialty/combos.info`.
 - **Policy**: `agents/policy/<name>/{tag.info, policy.json}` — a Claude Code
-  settings fragment, merged per instance and mounted read-only. `stance`
+  settings fragment, merged per instance and mounted read-only; `always_on
+  = true` makes it STATIC (merged into every instance by
+  agents_crud.install_settings, locked in the form, rejected in .lego /
+  silently dropped from store entries). `stance`
   (`allow`/`deny`/`demand`) drives the orange/blue/white coloring; the
   shortname convention mirrors it (`+` grants, `-` restricts, `!` demands).
 
@@ -178,7 +186,7 @@ owning tag) goes in `BASE_ADDENDUMS` in that module instead.
 
 ### A new picker row kind
 
-→ `menu_picker.py`. Define a dataclass for the row's data (see `ContEntry` /
+→ `gui/menu_picker.py`. Define a dataclass for the row's data (see `ContEntry` /
 `PickerEntry`). Add a `PickerRowMarker` enum member if you want a new glyph
 prefix. Build entries via the existing `pick_with_preview` primitive — it's
 generic over `PickerEntry.value`.

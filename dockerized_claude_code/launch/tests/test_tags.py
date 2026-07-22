@@ -18,7 +18,7 @@ from unittest.mock import patch
 from launch import tags
 from launch.tags import (
     AgentBuild, Engine, Instance, Policy, PolicyStance, Profession, Registry, Specialty,
-    TagError, addendums, image_chain, load_lego, merge_fragments, migrations,
+    TagError, ToolkitEntry, addendums, image_chain, load_lego, merge_fragments, migrations,
     resolve_build, scan_all, store,
 )
 
@@ -181,6 +181,159 @@ class TestProfession(TagTreeTestCase):
         })
         with self.assertRaisesRegex(TagError, "must not contain a tag"):
             Profession.discover_layers(root)
+
+class TestProfessionToolkit(TagTreeTestCase):
+    """`template.form` — a profession's optional, sibling-file-declared set of
+    configurable installs (ToolkitEntry / Profession.load_toolkit)."""
+
+    def test_no_manifest_yields_none_and_empty_toolkit(self):
+        (code,) = [p for p in Profession.scan(self.full_tree()) if p.name == "code"]
+        self.assertIsNone(code.toolkit_path)
+        self.assertEqual(code.load_toolkit(), {})
+
+    def test_manifest_present_is_discovered_and_parsed(self):
+        root = self.tree({
+            "profession/code/tag.info": 'full_description = "c"\n',
+            "profession/code/Dockerfile": "FROM base\n",
+            "profession/code/template.form": (
+                '[rust]\ndescription = "Rust toolchain"\nrun_command = "cargo"\nlanguage = "compiled"\napprox_size_mb = 613\ndefault = true\nbuild_arg = "INSTALL_RUST"\n'
+                '[node]\ndescription = "Node.js LTS"\nrun_command = "node"\nlanguage = "interpreted"\napprox_size_mb = 196\ndefault = false\nbuild_arg = "INSTALL_NODE"\n'
+            ),
+        })
+        (code,) = Profession.scan(root)
+        self.assertIsNotNone(code.toolkit_path)
+        entries = code.load_toolkit()
+        self.assertEqual(set(entries), {"rust", "node"})
+        self.assertEqual(entries["rust"], ToolkitEntry(key="rust", description="Rust toolchain",
+                                                        run_command="cargo", language="compiled",
+                                                        approx_size_mb=613, default=True,
+                                                        build_arg="INSTALL_RUST"))
+        self.assertFalse(entries["node"].default)
+
+    def test_missing_required_field_raises(self):
+        root = self.tree({
+            "profession/code/tag.info": 'full_description = "c"\n',
+            "profession/code/Dockerfile": "FROM base\n",
+            "profession/code/template.form": '[rust]\ndescription = "Rust toolchain"\nrun_command = "cargo"\nlanguage = "compiled"\napprox_size_mb = 613\nbuild_arg = "INSTALL_RUST"\n',   # no default
+        })
+        (code,) = Profession.scan(root)
+        with self.assertRaisesRegex(TagError, "'rust'.*'default'"):
+            code.load_toolkit()
+
+    def test_malformed_build_arg_raises(self):
+        root = self.tree({
+            "profession/code/tag.info": 'full_description = "c"\n',
+            "profession/code/Dockerfile": "FROM base\n",
+            "profession/code/template.form": '[rust]\ndescription = "d"\nrun_command = "x"\nlanguage = "y"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "install-rust"\n',
+        })
+        (code,) = Profession.scan(root)
+        with self.assertRaisesRegex(TagError, "not a valid ARG name"):
+            code.load_toolkit()
+
+    def test_duplicate_build_arg_raises(self):
+        root = self.tree({
+            "profession/code/tag.info": 'full_description = "c"\n',
+            "profession/code/Dockerfile": "FROM base\n",
+            "profession/code/template.form": (
+                '[rust]\ndescription = "d"\nrun_command = "x"\nlanguage = "y"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "INSTALL_X"\n'
+                '[node]\ndescription = "d"\nrun_command = "x"\nlanguage = "y"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "INSTALL_X"\n'
+            ),
+        })
+        (code,) = Profession.scan(root)
+        with self.assertRaisesRegex(TagError, "both claim build_arg"):
+            code.load_toolkit()
+
+    def test_load_toolkit_reflects_live_edits(self):
+        # Parsed fresh each call (small file, no cache) — the picker's "Edit
+        # Toolkits" menu must see a manifest edited since the last scan.
+        root = self.tree({
+            "profession/code/tag.info": 'full_description = "c"\n',
+            "profession/code/Dockerfile": "FROM base\n",
+            "profession/code/template.form": '[rust]\ndescription = "d"\nrun_command = "x"\nlanguage = "y"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "INSTALL_RUST"\n',
+        })
+        (code,) = Profession.scan(root)
+        self.assertEqual(set(code.load_toolkit()), {"rust"})
+        code.toolkit_path.write_text('[rust]\ndescription = "d"\nrun_command = "x"\nlanguage = "y"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "INSTALL_RUST"\n'
+                                     '[node]\ndescription = "d"\nrun_command = "x"\nlanguage = "y"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "INSTALL_NODE"\n')
+        self.assertEqual(set(code.load_toolkit()), {"rust", "node"})
+
+
+
+class TestResolveStoreBuild(TagTreeTestCase):
+    """Registry.resolve_store_build — the non-raising partition used for
+    (user-editable) instances.toml entries: keep names that resolve to their
+    axis's kind, and report the rest as `TagProblem`s with same-kind
+    alternatives. (Shipped `.lego` files use the raising validate_build.)"""
+
+    def setUp(self):
+        self.reg = scan_all(self.full_tree())   # code, web(→requires code), auto/dood/firewall, no-sudo
+
+    def test_all_valid_yields_no_problems(self):
+        clean, problems = self.reg.resolve_store_build(
+            AgentBuild(engine="default", professions=("code", "web"), specialties=("auto",)))
+        self.assertEqual(problems, [])
+        self.assertEqual(clean.professions, ("code", "web"))
+
+    def test_unknown_name_is_dropped_and_reported(self):
+        clean, problems = self.reg.resolve_store_build(AgentBuild(professions=("code", "ghost")))
+        self.assertEqual(clean.professions, ("code",))              # good one kept
+        (prob,) = problems
+        self.assertEqual((prob.name, prob.axis, prob.kind, prob.reason), ("ghost", "professions", "profession", "unknown"))
+        self.assertEqual(prob.label, "[ghost]")                     # expected-kind punctuation
+        self.assertEqual(prob.options, ("code", "web"))             # only professions offered
+
+    def test_wrong_axis_is_reported_with_actual_kind(self):
+        _, problems = self.reg.resolve_store_build(AgentBuild(specialties=("no-sudo",)))
+        (prob,) = problems
+        self.assertEqual(prob.reason, "wrong_axis")
+        self.assertEqual(prob.actual_kind, "policy")
+        self.assertEqual(prob.kind, "specialty")
+
+    def test_unknown_engine_reported_options_are_engines(self):
+        _, problems = self.reg.resolve_store_build(AgentBuild(engine="ghost"))
+        (prob,) = problems
+        self.assertEqual((prob.axis, prob.kind, prob.label), ("engine", "engine", "(ghost)"))
+        self.assertEqual(prob.options, ("default",))
+
+    def test_never_raises_on_bad_input(self):
+        # The whole point vs validate_build: a stale store entry must not crash.
+        clean, problems = self.reg.resolve_store_build(
+            AgentBuild(engine="x", professions=("y",), specialties=("z",), policies=("w",)))
+        self.assertEqual(len(problems), 4)
+        self.assertEqual((clean.professions, clean.specialties, clean.policies), ((), (), ()))
+
+
+
+class TestAlwaysOnPolicy(TagTreeTestCase):
+    """`always_on = true` — a STATIC policy: applied to every instance,
+    locked in the form, and never listed in .lego / instances.toml (shipped
+    .lego listing it is a repo bug → validate_build raises; a store entry
+    listing it is harmless staleness → resolve_store_build drops silently)."""
+
+    def _tree_with_static(self):
+        return self.tree({
+            "engine/default/tag.info": 'full_description = "d"\n',
+            "policy/no-sudo/tag.info": 'full_description = "no sudo"\nstance = "deny"\nalways_on = true\n',
+            "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
+            "policy/open/tag.info": 'full_description = "o"\n',
+            "policy/open/policy.json": "{}",
+        })
+
+    def test_scan_parses_always_on(self):
+        reg = scan_all(self._tree_with_static())
+        self.assertTrue(reg.policies["no-sudo"].always_on)
+        self.assertFalse(reg.policies["open"].always_on)   # default False
+
+    def test_lego_listing_always_on_raises(self):
+        reg = scan_all(self._tree_with_static())
+        with self.assertRaisesRegex(TagError, "always-on"):
+            reg.validate_build(AgentBuild(policies=("no-sudo",)), Path("x.lego"))
+
+    def test_store_listing_always_on_dropped_silently(self):
+        reg = scan_all(self._tree_with_static())
+        clean, problems = reg.resolve_store_build(AgentBuild(policies=("no-sudo", "open")))
+        self.assertEqual(problems, [])                    # not a fault — just stale
+        self.assertEqual(clean.policies, ("open",))       # static name dropped, rest kept
 
 
 # ============================================================
@@ -615,7 +768,7 @@ class TestStore(TagTreeTestCase):
     def test_migrate_web_mode_becomes_profession(self):
         agents = self.tree({"researcher.lego": 'engine = "researcher"\nprofessions = ["code"]\n'})
         out = migrations.migrate_from_maps({}, {"researcher__x": ["web"]}, agents)
-        self.assertEqual(sorted(out["researcher__x"]["professions"]), ["code", "web"])
+        self.assertEqual(sorted(out["researcher__x"]["professions"]), ["code", "webdev"])
         self.assertEqual(out["researcher__x"]["specialties"], [])
 
     def test_migrate_engine_defaults_to_agent_when_lego_absent(self):
@@ -676,11 +829,11 @@ class TestAddendums(unittest.TestCase):
 
     def test_real_tree_addendums_wired(self):
         # The shipped tree carries the moved notices: code → Credentials,
-        # web → Headless browser, firewall → Firewall; auto has none.
+        # webdev → Headless browser, firewall → Firewall; auto has none.
         from launch.paths import AGENTS_DIR
         reg = scan_all(AGENTS_DIR)
         self.assertEqual(reg.professions["code"].addendum[0], "Credentials")
-        self.assertEqual(reg.professions["web"].addendum[0], "Headless browser")
+        self.assertEqual(reg.professions["webdev"].addendum[0], "Headless browser")
         self.assertEqual(reg.specialties["firewall"].addendum[0], "Firewall")
         self.assertIsNone(reg.specialties["auto"].addendum)
 

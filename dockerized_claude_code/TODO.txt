@@ -349,8 +349,12 @@ let the firewall do 'dig' on CDN'd addresses, to find their multiple addresses
     if not done already
     see if these resolve properly:  index.crates.io, static.crates.io, and crates.io
 
-
-
+Create an agent that's RO, for general quick questions (Opus; not Fable)
+    example: "how do you call <something>"
+    example: "when did <thing> happen and who <was invloved in some specific way>"
+    example: "explain <programming language> <specific feature>"
+    Call it "Informant" - the trivia / quick-question / secretarial agent
+        It can have [auto], no firewall. Obviously should have RO.
 
 
 

@@ -2,7 +2,7 @@
 emitters (build args / env forwards / entrypoint), the plain-docker build
 loop, and set_container_mounts (workspace fallback).
 
-Env-formatter tests (install_creds_flags, token_env_dict, etc.) live in
+Env-formatter tests (toolkit_install_flags, token_env_dict, etc.) live in
 test_container_env.py alongside the accumulator they feed."""
 
 import unittest

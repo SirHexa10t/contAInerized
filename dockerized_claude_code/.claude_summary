@@ -19,9 +19,9 @@ Four kinds (closed set — classes in `launch/tags/`), members open (folders und
 | Kind | Punct. | Carries | Members shipped |
 |---|---|---|---|
 | engine | `( )` | `engine.conf` env budget (model/effort); nested dirs overlay parent conf | default, golem, poet, thinker, researcher, breakthrough |
-| profession | `[ ]` | Dockerfile image layer (+`tag.docker` build-args); nesting ⇒ requirement | code, code/web |
+| profession | `[ ]` | Dockerfile image layer (+`tag.docker` build-args); nesting ⇒ requirement | code, code/webdev |
 | specialty | `{ }` | `warn`, `claude_args`, `workspace_readonly`, `[wants]`; optional hidden `_<name>` image layer in the profession tree; `tag.docker` run config | auto (skip-permissions, wants firewall), firewall (iptables whitelist, run-only), dood (docker socket, `_dood` image layer under code/), read-only (`{ro}` — `/workspace` :ro + claims the hidden `policy/_read-only` fragment denying Write/Edit) |
-| policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (demand) | web-research `<+qry>`, no-sudo `<-su>`, no-net `<-net>`, vcs-safe `<-push>`, plan-first `<!plan>`, free-bash `<+bash>` (plus the hidden `_read-only` fragment, owned by the `{ro}` specialty) |
+| policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (demand); `always_on = true` = static tag (merged into EVERY instance, locked in the form, never in .lego/instances.toml) | web-research `<+qry>`, no-sudo `<-su>` (always-on), no-net `<-net>`, vcs-safe `<-gpush>`, plan-first `<!plan>`, free-bash `<+bash>` (plus the hidden `_read-only` fragment, owned by the `{ro}` specialty) |
 
 `agents/specialty/combos.info` holds multi-tag warnings (dood+auto). STRICT tree rule: a non-`_` dir in a kind subtree MUST have `tag.info`; `_` dirs are hidden assets (image layers or specialty-claimed policy fragments). `scan_all(AGENTS_DIR)` → `Registry`, fail-loud cross-validation at startup.
 
@@ -34,14 +34,13 @@ launch/
   paths.py              every host+container path constant / mount dict / builder lambda — leaf, declarations only
   utils.py              domain-neutral pure helpers — leaf, no disk
   file_access.py        sole disk-I/O chokepoint (atomic writes, sudo-fallback removal, agent_md_index)
-  tags/                 the tag system: base (Tag/DockerContribution/parsers/strict rule), 4 kind modules (engine also owns the model-family sort keys), registry, lego (AgentBuild), identity (Agent + Instance), store (instances.toml; tomllib in, small emitter out), migrations (ISOLATED retired-format conversions), addendums (composer + placeholder registry; per-tag copy lives in tag.info [addendum] tables)
-  container_env.py      env staging: ContainerEnvKey enum + accumulator + -e/build-arg formatters
+  tags/                 the tag system: base (Tag/DockerContribution/parsers/strict rule), 4 kind modules (engine also owns the model-family sort keys; profession also owns optional template.form parsing — ToolkitEntry/load_toolkit), registry (scan_all + Registry.resolve_store_build — non-raising partition of a stored build into valid tags + TagProblem list for stale/typo'd names), lego (AgentBuild), identity (Agent + Instance; invalid_tags + is_startable), store (instances.toml; tomllib in, small emitter out), toolkit_profile (per-profession ~/.claude-agents/<profession>_profile.toml — install toggles, same tomllib-in/small-emitter-out shape as store), migrations (ISOLATED retired-format conversions), addendums (composer + placeholder registry; per-tag copy lives in tag.info [addendum] tables)
+  container_env.py      env staging: ContainerEnvKey enum + accumulator + -e/build-arg formatters; toolkit_install_flags (profile-driven toolchains) + install_creds_flags (creds-driven CLIs; disjoint key sets)
   docker_config.py      plain-docker orchestration: ensure_image, run_container, tag.docker flag emitters, mount accumulator, docker CLI wrappers, dry-run gate
   tag_handlers.py       apply_tags(instance): stage declarative tag.docker mounts, then dispatch _apply_<name> handlers (code cache prep, dood GID, firewall DNS kickoff); handler-less tags are data-only no-ops
   agents_crud.py        instances.toml CRUD, install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker factories, engine sort keys
   network.py            {firewall} machinery (~1300 lines): whitelist expansion, live-fetched CDN provider ranges, two-phase DNS cascade, burst-batched iptables updater, 5-min drift-heal refresher, agent-visible status file; criticals widened to Anthropic's registered block + selftest_address() staged for init-firewall.sh's DNS-free `curl --resolve` probe
-  tag_form.py           the kind-sectioned tag form (engine radio, requires-cascade, combos + wants red-zone warnings, context preamble) + the shared TUI style system (UiClass, stance colors)
-  menu_picker.py        picker + F8 legend + workspace/session prompts + banner (imports form + styles from tag_form)
+  gui/                  the TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py = every form (kind-sectioned tag form, toolkit form, generic checkbox_form) + shared style system (UiClass, stance colors); menu_picker.py = picker + F8 legend + workspace/session prompts + banner + "Edit Toolkits" opener + stale-tag guard (invalid stored tags render red-bg/black-fg on the Cont row and block start — invalid_tags_report explains the fix; F2 re-picks) (imports forms/styles from tag_form, one-way)
   user_additions.py     optional-creds mounts + first-launch template plants
   claude_code_config.py status line + terminal title (host-staged in-container UX)
   audit.py              read-only state checker (python -m launch.audit)

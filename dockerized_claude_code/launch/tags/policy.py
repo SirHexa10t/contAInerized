@@ -52,6 +52,7 @@ class Policy(Tag):
     nutshell: ClassVar[str] = "what's PERMITTED"
 
     stance: PolicyStance = PolicyStance.ALLOW
+    always_on: bool = False   # static tag: applied to EVERY instance; shown locked in the form; never listed in .lego / instances.toml
 
     def load_fragment(self) -> dict[str, Any]:
         """(Re)read this policy's `policy.json`. Validated at scan time, so
@@ -85,7 +86,11 @@ class Policy(Tag):
         `agents/policy/`). Each must carry a `policy.json` that parses to a
         JSON object — validated here so a broken fragment fails at startup,
         not mid-launch. `stance` comes from `tag.info` (default "allow" —
-        granting is the common case); an unrecognized value is a TagError."""
+        granting is the common case); an unrecognized value is a TagError.
+        `always_on = true` marks a STATIC tag — merged into every instance's
+        settings unconditionally (agents_crud.install_settings), rendered
+        locked in the form, and rejected/dropped if a .lego or store entry
+        lists it (registry.validate_build / resolve_store_build)."""
         root = agents_dir / cls.root
         out: list[Policy] = []
         if not root.is_dir():
@@ -104,7 +109,7 @@ class Policy(Tag):
                     f"{tag_dir}/tag.info: stance must be one of "
                     f"{[s.value for s in PolicyStance]}, got {raw_stance!r}"
                 ) from None
-            out.append(cls(**fields, stance=stance))
+            out.append(cls(**fields, stance=stance, always_on=bool(info.get("always_on", False))))
         return out
 
 

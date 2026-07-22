@@ -1,1 +1,2 @@
 engine = "researcher"
+policies = ["web-research"]

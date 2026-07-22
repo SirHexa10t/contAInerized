@@ -1,56 +1,42 @@
 # Programming-stack image — extends its PARENT_IMAGE (default claude-agents:base)
-# with build-essential, Rust toolchain, and Node.js LTS. Built when an agent's
-# filename includes the [code] tag.
+# with the coding toolchain. Built when an agent's filename includes the
+# [code] tag.
 #
 # Build chain: PARENT_IMAGE is set by run.py's ensure_image() to whatever
 # precedes code in the chain — for code as the first chain step, that's
 # claude-agents:base. The default below is the standalone case.
 #
-# Optional CLI installs at the end are gated by INSTALL_<TOOL>=1 build-args, set
-# by run.py based on which directories exist under ~/.claude-agents/user_extras/optional_creds/.
-# Each tool gets its own ARG/RUN so adding a new credential only invalidates that
-# tool's layer (downstream layers re-run as no-ops). Order matters: stable layers
-# (rustup, node) come BEFORE optional installs so opting into a new tool doesn't
-# trigger a Rust reinstall.
-
-ARG PARENT_IMAGE=claude-agents:base
-FROM ${PARENT_IMAGE}
-
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    pkg-config \
-    libssl-dev \
-    python3-dotenv \
-    && rm -rf /var/lib/apt/lists/*
-
-# Node.js (current LTS) + npm via NodeSource — gets a recent LTS instead of the
-# stale apt version. Includes corepack (yarn / pnpm shims) automatically.
-RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/*
-
-USER claude
-
-ARG SOFTWARE_STACK_REFRESH=bootstrap
-
-RUN : "${SOFTWARE_STACK_REFRESH}" \
- && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-
-ENV PATH="/home/claude/.cargo/bin:$PATH"
-# Lets `npm install -g <pkg>` write to ~/.local/{lib/node_modules,bin} as the claude
-# user — no sudo, no /usr/lib/node_modules permission errors. Applies to the optional
-# vercel/railway installs below AND any runtime `npm install -g` the agent runs.
-ENV NPM_CONFIG_PREFIX="/home/claude/.local"
-
-# === Optional CLI installs — gated by INSTALL_<TOOL>=1 build-args from run.py ===
+# Mandatory (below, unconditional): build-essential, pkg-config, libssl-dev,
+# python3-dotenv — the compiler/linker/headers every other install in this
+# file (and every [code] agent) can assume are present. Never gated.
+#
+# Everything else is gated by an INSTALL_<TOOL>=1 build-arg, computed by the
+# launcher from one of two DISJOINT mechanisms (test_essential_files.py
+# cross-checks the split and the manifest↔ARG lockstep):
+#   - Language toolchains (rust / node / cmake / go / java / kotlin /
+#     ruby) — the picker's "Edit Toolkits" form, persisted at
+#     ~/.claude-agents/code_profile.toml; each `ARG` name below is declared
+#     by its entry's `build_arg` in the sibling template.form, so the
+#     manifest→ARG pairing is defined in THIS directory
+#     (container_env.toolkit_install_flags emits whatever the form names).
+#   - Service CLIs (gh ... railway) — creds-presence: a matching
+#     ~/.claude-agents/user_extras/optional_creds/<name>/ dir is the opt-in
+#     (container_env.install_creds_flags). Deliberately NOT form-toggleable.
+# Each tool gets its own ARG/RUN so toggling one only invalidates that tool's
+# layer (downstream layers re-run as no-ops). Order matters for cache
+# locality: rust/node/cmake (on by default for every fresh profile) come
+# first, so a user who never opens the toolkit form gets the same cache
+# behavior this file had before it grew toggles; the off-by-default
+# languages (go/java/kotlin/ruby) follow — toggling one never rebuilds the
+# default-on layers above it — and the creds-gated CLIs come last.
 #
 # Each install block follows the same resilient pattern:
-#   - Reference both INSTALL_<TOOL> and FORCE_INSTALLS_REFRESH in the leading
-#     `:` no-op so docker's layer cache key includes both. Changing either
-#     value (e.g. opting in a new cred OR launching with --refresh-installs)
-#     busts the layer and the install retries.
+#   - Reference this tool's own INSTALL_<TOOL> and FORCE_INSTALLS_REFRESH
+#     (rust also references the weekly SOFTWARE_STACK_REFRESH rotation) in
+#     the leading `:` no-op, so docker's layer cache key includes all of
+#     them. Changing any value (toggling the toolkit profile, opting in a
+#     new cred, or launching with --refresh-installs) busts the layer and
+#     the install retries.
 #   - Strip this tool's own name from /var/log/claude-agents/install_failures.log at the
 #     start, so a previously-failed install that succeeds on retry clears
 #     its own warning.
@@ -60,21 +46,134 @@ ENV NPM_CONFIG_PREFIX="/home/claude/.local"
 #     a single optional install. The launcher reads the log post-build and
 #     surfaces failures in the launch banner.
 #
-# Adding a new optional install means following the same pattern: ARG + RUN
-# with the strip-then-try-then-log shape, plus one INSTALL_<TOOL> entry in
-# compose.code.yml's `args:` block.
+# Adding a new install means following the same pattern: ARG + RUN with the
+# strip-then-try-then-log shape, plus EITHER a `[<tool>]` table in
+# template.form (toolchain, form-toggleable) OR an OPTIONAL_CREDS_MOUNTS
+# entry in launch/paths.py (creds-driven CLI).
+
+ARG PARENT_IMAGE=claude-agents:base
+FROM ${PARENT_IMAGE}
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    python3-dotenv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-create the failure log in a claude-owned subdir of /var/log so both root
+# and non-root install blocks below (root: cmake/node/gh/…; claude: rust/aws/…)
+# can manage it. Root writes regardless of perms; claude owns the dir (needed
+# because `sed -i` writes a tempfile alongside the target and renames over —
+# that requires write access to the *parent dir*, not just the file, and
+# claude lacks write on /var/log itself).
+RUN install -d -o claude -g claude /var/log/claude-agents \
+ && install -o claude -g claude -m 644 /dev/null /var/log/claude-agents/install_failures.log
+
+ARG SOFTWARE_STACK_REFRESH=bootstrap
+ARG FORCE_INSTALLS_REFRESH=stable
+
+ARG INSTALL_CMAKE=1
+RUN : "${INSTALL_CMAKE}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^cmake$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_CMAKE" = "1" ]; then \
+        { apt-get update \
+        && apt-get install -y --no-install-recommends cmake \
+        && rm -rf /var/lib/apt/lists/*; } \
+        || { echo "cmake" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ cmake install failed; continuing" >&2; }; \
+    fi
+
+# Node.js (current LTS) + npm via NodeSource — gets a recent LTS instead of
+# the stale apt version. Includes corepack (yarn / pnpm shims) automatically.
+ARG INSTALL_NODE=1
+RUN : "${INSTALL_NODE}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^node$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_NODE" = "1" ]; then \
+        { curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+        && apt-get install -y --no-install-recommends nodejs \
+        && rm -rf /var/lib/apt/lists/*; } \
+        || { echo "node" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ node install failed; continuing" >&2; }; \
+    fi
+
+USER claude
+
+ARG INSTALL_RUST=1
+RUN : "${INSTALL_RUST}" "${SOFTWARE_STACK_REFRESH}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^rust$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_RUST" = "1" ]; then \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+        || { echo "rust" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ rust install failed; continuing" >&2; }; \
+    fi
+
+ENV PATH="/home/claude/.cargo/bin:$PATH"
+# Lets `npm install -g <pkg>` write to ~/.local/{lib/node_modules,bin} as the claude
+# user — no sudo, no /usr/lib/node_modules permission errors. Applies to the optional
+# vercel/railway installs below AND any runtime `npm install -g` the agent runs.
+ENV NPM_CONFIG_PREFIX="/home/claude/.local"
+# Go's install prefix — on PATH unconditionally (inert while [go] is off;
+# ENV can't be conditional on a build-arg).
+ENV PATH="/usr/local/go/bin:$PATH"
+
+# === Additional language toolchains — off by default in template.form (they
+# were never part of the pre-toggle image); flip them on in the "Edit
+# Toolkits" form. Placed after the default-on layers so toggling one never
+# rebuilds rust/node/cmake. ===
+
+USER root
+
+ARG INSTALL_GO=0
+RUN : "${INSTALL_GO}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^go$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_GO" = "1" ]; then \
+        { GO_VER=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1) \
+        && curl -fsSL "https://go.dev/dl/${GO_VER}.linux-$(dpkg --print-architecture).tar.gz" | tar -C /usr/local -xz; } \
+        || { echo "go" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ go install failed; continuing" >&2; }; \
+    fi
+
+ARG INSTALL_JAVA=0
+RUN : "${INSTALL_JAVA}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^java$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_JAVA" = "1" ]; then \
+        { apt-get update \
+        && apt-get install -y --no-install-recommends default-jdk-headless \
+        && rm -rf /var/lib/apt/lists/*; } \
+        || { echo "java" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ java install failed; continuing" >&2; }; \
+    fi
+
+# Kotlin compiler (JetBrains GitHub release zip). Needs a JRE — installs the
+# headless default alongside; an apt no-op when [java] is also selected.
+ARG INSTALL_KOTLIN=0
+RUN : "${INSTALL_KOTLIN}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^kotlin$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_KOTLIN" = "1" ]; then \
+        { apt-get update \
+        && apt-get install -y --no-install-recommends default-jre-headless unzip \
+        && KOTLIN_VER=$(curl -fsSL https://api.github.com/repos/JetBrains/kotlin/releases/latest | grep -oP '"tag_name": "v\K[^"]+') \
+        && curl -fsSL -o /tmp/kotlin.zip "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VER}/kotlin-compiler-${KOTLIN_VER}.zip" \
+        && unzip -q /tmp/kotlin.zip -d /opt \
+        && rm /tmp/kotlin.zip \
+        && ln -sf /opt/kotlinc/bin/kotlin /opt/kotlinc/bin/kotlinc /usr/local/bin/ \
+        && rm -rf /var/lib/apt/lists/*; } \
+        || { echo "kotlin" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ kotlin install failed; continuing" >&2; }; \
+    fi
+
+ARG INSTALL_RUBY=0
+RUN : "${INSTALL_RUBY}" "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^ruby$/d' /var/log/claude-agents/install_failures.log \
+ && if [ "$INSTALL_RUBY" = "1" ]; then \
+        { apt-get update \
+        && apt-get install -y --no-install-recommends ruby-full \
+        && rm -rf /var/lib/apt/lists/*; } \
+        || { echo "ruby" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ ruby install failed; continuing" >&2; }; \
+    fi
+
+# === Creds-gated service CLI installs — same resilient pattern as above;
+# installed only for users who drop matching creds into
+# user_extras/optional_creds/ (never offered in the toolkit form). ===
 
 # Root-needing (apt-based) — installed as root, then we drop back to claude.
 USER root
-
-ARG FORCE_INSTALLS_REFRESH=stable
-# Pre-create the failure log in a claude-owned subdir of /var/log so both root
-# and non-root install blocks can manage it. Root writes regardless of perms;
-# claude owns the dir (needed because `sed -i` writes a tempfile alongside the
-# target and renames over — that requires write access to the *parent dir*,
-# not just the file, and claude lacks write on /var/log itself).
-RUN install -d -o claude -g claude /var/log/claude-agents \
- && install -o claude -g claude -m 644 /dev/null /var/log/claude-agents/install_failures.log
 
 ARG INSTALL_GH=0
 RUN : "${INSTALL_GH}" "${FORCE_INSTALLS_REFRESH}" \
@@ -110,7 +209,7 @@ RUN : "${INSTALL_SSH}" "${FORCE_INSTALLS_REFRESH}" \
         || { echo "ssh" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ ssh install failed; continuing" >&2; }; \
     fi
 
-# Heavy install (~400-500MB); only paid by users who actually opt in via user_extras/optional_creds/gcloud/.
+# Heavy install (~400-500MB); only paid by users who actually opt in.
 ARG INSTALL_GCLOUD=0
 RUN : "${INSTALL_GCLOUD}" "${FORCE_INSTALLS_REFRESH}" \
  && sed -i '/^gcloud$/d' /var/log/claude-agents/install_failures.log \

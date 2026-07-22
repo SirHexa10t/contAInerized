@@ -1,2 +1,3 @@
 engine = "thinker"
 professions = ["code"]
+policies = ["vcs-safe"]

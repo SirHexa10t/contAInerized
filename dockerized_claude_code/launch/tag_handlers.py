@@ -122,7 +122,7 @@ def apply_tags(inst: Instance) -> list[str]:
          side-effect-only (cache prep, GID staging, the {firewall} DNS
          kickoff). Looked up in this module per entry (so tests can patch
          individual handlers); a tag without a handler is a NO-OP: data-only
-         tags ({auto}'s claude_args, [web]'s playwright cache riding [code]'s
+         tags ({auto}'s claude_args, [webdev]'s playwright cache riding [code]'s
          ~/.cache mount) are legal and need no code here.
 
     The returned chain drives the addendum composition; image naming/building

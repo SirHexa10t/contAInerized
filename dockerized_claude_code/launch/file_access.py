@@ -290,6 +290,17 @@ def home_dir() -> Path:
     return Path.home()
 
 
+def home_relative(path: Path) -> str:
+    """`path` with the home dir collapsed to `~` for display (e.g. in
+    user-facing messages), leaving paths outside home untouched. Keeps the
+    launcher from printing an operator's absolute home path verbatim."""
+    home = home_dir()
+    try:
+        return f"~/{path.relative_to(home)}"
+    except ValueError:
+        return str(path)
+
+
 def expand_user_path(s: str) -> str:
     """Expand `~` in `s` and make it absolute; returns a string. For user-typed
     workspace paths where we want the literal expanded form (not symlink-resolved)."""
@@ -407,8 +418,8 @@ def last_history_mtime(state_dir: Path) -> float | None:
 def present_optional_cred_services() -> frozenset[str]:
     """Frozenset of OPTIONAL_CREDS_MOUNTS service names whose host dir is
     present. LRU-cached for the launcher process lifetime — both
-    user_additions.optional_creds_mounts and docker_config.set_container_env
-    (via install_creds_flags) consume it, so without dedupe each would
+    user_additions.optional_creds_mounts and container_env.set_container_env
+    (via toolkit_install_flags) consume it, so without dedupe each would
     independently stat-check every service (~11 × 2 = ~22 stats per launch)."""
     return frozenset(
         name for name in OPTIONAL_CREDS_MOUNTS

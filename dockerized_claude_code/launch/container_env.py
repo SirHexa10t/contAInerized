@@ -16,22 +16,25 @@ docker_config pulls them back out at flag-emission time:
     WHITELIST_ADDRESSES.
 
 Also owns the related formatters that shape user-side data into env dicts:
-  - `install_creds_flags` — INSTALL_<TOOL>=0|1 build args from the
-    present optional-cred services.
+  - `toolkit_install_flags` — INSTALL_<TOOL>=0|1 build args for a
+    configurable profession's language toolchains, from its toolkit profile.
+  - `install_creds_flags` — INSTALL_<TOOL>=0|1 build args for the service
+    CLIs, from optional-cred presence. Disjoint key sets by design
+    (test_essential_files guards it).
   - `token_env_dict` — per-service secret tokens forwarded as
     JIRA_API_TOKEN etc.
   - `conf_env_args` — flattens an engine conf dict into `-e KEY=VALUE`
     flags for the final `docker run`.
 
 `set_container_env` is the per-launch orchestrator that bulk-stages
-everything in one update — status line, cache-busters, cred-flag fan-out,
+everything in one update — status line, cache-busters, toolkit-flag fan-out,
 token forwards, and the in-container BASH_ENV literal.
 
 tag_handlers / docker_config / run.py all import from here.
 """
 
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from datetime import date
 from enum import Enum, auto
 from functools import cache
@@ -41,8 +44,10 @@ from .claude_code_config import build_status_line
 from .file_access import optional_cred_tokens, present_optional_cred_services
 from .paths import (
     BASHRC_IN_CONTAINER, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS,
+    toolkit_profile_path,
 )
-from .tags import Instance
+from .tags import Instance, Profession
+from .tags.toolkit_profile import load_profile
 
 
 # ============================================================
@@ -171,6 +176,28 @@ def staged_env() -> dict[str, str]:
 # {KEY: VALUE} dicts the env accumulator consumes. Bind-mount staging for the
 # same user-side data goes through add_docker_mount in user_additions, not here.
 
+def toolkit_install_flags(professions: Iterable[Profession]) -> dict[str, str]:
+    """`{INSTALL_<TOOL>: '0' | '1'}` build-args for every configurable
+    profession among `professions` (one with no template.form contributes
+    nothing), driven purely by its toolkit profile
+    (`~/.claude-agents/<profession>_profile.toml`, defaulting per the
+    manifest). Language toolchains only — the service CLIs are the separate,
+    creds-driven `install_creds_flags` below; the two key sets are disjoint
+    (test_essential_files guards it), so merging both dicts into the staged
+    env can never conflict. Each flag's NAME comes from the manifest entry's
+    own `build_arg` — the tag dir defines the pairing, not launcher code.
+    The Dockerfile branches on each flag to decide whether to install."""
+    flags: dict[str, str] = {}
+    for profession in professions:
+        entries = profession.load_toolkit()
+        if not entries:
+            continue
+        profile = load_profile(toolkit_profile_path(profession.name), entries)
+        flags.update({entry.build_arg: "1" if profile[key] else "0"
+                      for key, entry in entries.items() if not entry.locked})
+    return flags
+
+
 def install_creds_flags(services: Collection[str]) -> dict[str, str]:
     """`{INSTALL_<TOOL>: '0' | '1'}` dict for the [code] Dockerfile's
     build-args. One entry per OPTIONAL_CREDS_MOUNTS service that has an
@@ -236,7 +263,8 @@ def set_container_env(inst: Instance, refresh_installs: bool = False) -> None:
         ContainerEnvKey.FORCE_INSTALLS_REFRESH:  refresh_value or "stable",
         ContainerEnvKey.AGENT_STATUS_LINE:       build_status_line(inst),
         ContainerEnvKey.BASH_ENV:                BASHRC_IN_CONTAINER,
-        # Dynamic-key updates from optional_creds/
-        **install_creds_flags(present_optional_cred_services()),   # INSTALL_<TOOL>=0|1 build flags
-        **token_env_dict(optional_cred_tokens()),                  # per-service tokens (e.g. JIRA_API_TOKEN)
+        # Dynamic-key updates from toolkit profiles + optional_creds/
+        **toolkit_install_flags(inst.professions),                  # INSTALL_<TOOL> for language toolchains (profile-driven)
+        **install_creds_flags(present_optional_cred_services()),    # INSTALL_<TOOL> for service CLIs (creds-presence-driven)
+        **token_env_dict(optional_cred_tokens()),                   # per-service tokens (e.g. JIRA_API_TOKEN)
     })

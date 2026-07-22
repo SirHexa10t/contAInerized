@@ -1,4 +1,9 @@
-"""The tag-selection form + the shared TUI style system.
+"""Every launcher form + the shared TUI style system (launch/gui).
+
+Owns the kind-sectioned tag form (prompt_tags), the per-profession toolkit
+form (edit_toolkits_menu), and the generic checkbox_form primitive behind
+both. Sibling menu_picker imports from here (one-way: this module never
+imports the picker).
 
 Public API:
 
@@ -51,8 +56,13 @@ from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
-from .tags import AgentBuild, Engine, Policy, PolicyStance, Profession, Registry, Specialty, Tag
-from .tags.engine import sorted_engines
+from ..paths import toolkit_profile_path
+from ..tags import (
+    AgentBuild, Engine, Policy, PolicyStance, Profession, Registry, Specialty,
+    Tag, ToolkitEntry,
+)
+from ..tags.engine import sorted_engines
+from ..tags.toolkit_profile import load_profile, save_profile
 
 # ============================================================
 # UI strings + layout
@@ -66,6 +76,9 @@ RADIO_ON            = "(•) "         # radio-group rows (`FormOption.group`) r
 RADIO_OFF           = "( ) "
 ATTACHED_CONNECTOR  = "  └─ "        # prefix for options rendered attached beneath their anchor
 TITLE_TAGS_FORM     = "Configure instance tags  (Space to toggle):"
+# Shown dim under the toolkit form's title — sizes are ballpark and
+# platform/time-dependent (rust/node/cmake measured, the rest estimated).
+TOOLKIT_SIZE_NOTE   = "# sizes are approximate — amd64, mid-July 2026"
 
 TITLE_HEIGHT  = 1
 STATUS_HEIGHT = 2
@@ -118,6 +131,8 @@ STYLE_TAG_ALLOW      = "bold fg:#ff8700"
 STYLE_TAG_DEMAND     = "bold fg:ansiwhite"
 STYLE_TAG_ENGINE     = "fg:ansibrightcyan"
 STYLE_UNDERLINE      = "underline"   # the fullname lead-in of description text
+STYLE_TAG_INVALID    = "fg:ansiblack bg:ansired"   # a stored tag name that no longer resolves (picker Cont rows)
+STYLE_LOCKED         = "fg:ansibrightblack"         # a form row the user can't toggle (grayed; e.g. [code]'s always-on Python)
 
 _STYLE_BY_STANCE = {
     PolicyStance.ALLOW:      STYLE_TAG_ALLOW,
@@ -181,7 +196,13 @@ class FormOption:
     `header=True` makes the row a non-focusable section header — skipped by
     navigation, never checked, never returned. `group` puts the row in a
     radio group: checking it unchecks the group's other members, and a
-    checked radio can't be unchecked directly (pick another instead)."""
+    checked radio can't be unchecked directly (pick another instead).
+
+    `locked=True` makes the row informational: still focusable (its `body`
+    shows) and still counted in the result by its fixed `checked` state, but
+    grayed out and inert to Space — the user can read it and see whether it's
+    on, but can't change it. For a mandatory-and-always-present item shown so
+    the user knows it's included regardless of their choices."""
     key: str
     label: str | list[tuple[str, str]]
     body: list[tuple[str, str]] = field(default_factory=list)
@@ -189,6 +210,7 @@ class FormOption:
     attached_to: str | None = None
     header: bool = False
     group: str | None = None
+    locked: bool = False
 
 
 def ordered_form_options(options: list[FormOption]) -> list[FormOption]:
@@ -287,7 +309,8 @@ def checkbox_form(title: str, options: list[FormOption],
     rows — context the form was opened with (instance name, workspace).
 
     Rows with `header=True` render but are skipped by navigation; rows with
-    a `group` behave as radios (see FormOption).
+    a `group` behave as radios; rows with `locked=True` render grayed and
+    ignore Space (see FormOption).
 
     Returns the checked options' keys in display order, or None on cancel."""
     if not options:
@@ -304,20 +327,23 @@ def checkbox_form(title: str, options: list[FormOption],
     state: dict[str, Any] = {"cursor": stops[0], "confirmed": False}
 
     def cascade(toggled: FormOption) -> None:
-        """Keep the checked set requires-consistent after `toggled` flips."""
+        """Keep the checked set requires-consistent after `toggled` flips.
+        Locked rows are never flipped by the cascade — their state is fixed."""
         if toggled.checked:
             for key in requires_closure(toggled.key, req_map):
-                if key in by_key:
+                if key in by_key and not by_key[key].locked:
                     by_key[key].checked = True
         else:
             for opt in rows:
-                if opt.checked and toggled.key in requires_closure(opt.key, req_map):
+                if opt.checked and not opt.locked and toggled.key in requires_closure(opt.key, req_map):
                     opt.checked = False
 
     def toggle(opt: FormOption) -> None:
         """Space on a row: plain rows flip (with requires-cascade); radio rows
         check-and-exclude their group (a checked radio stays checked — pick a
-        different member to move the dot)."""
+        different member to move the dot). Locked rows are inert."""
+        if opt.locked:
+            return
         if opt.group is not None:
             if not opt.checked:
                 for other in rows:
@@ -344,6 +370,8 @@ def checkbox_form(title: str, options: list[FormOption],
                 else:
                     frags.append(("", CHECKBOX_ON if opt.checked else CHECKBOX_OFF))
                 frags.extend(_normalize(opt.label))
+            if opt.locked:   # gray the whole row — a fixed, un-toggleable entry
+                frags = [(STYLE_LOCKED, text) for _, text in frags]
             if i == state["cursor"]:
                 frags = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
                          for style, text in frags]
@@ -460,17 +488,26 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None) -> FormOption:
     prerequisites, and the full description as the focused-row body — led by
     the tag's underlined FULLNAME, so the abbreviation in the label is never
     a puzzle (`{dood}` focuses to `Docker-outside-of-Docker: can run …`).
-    Keys are the tags' full names (what `.lego` / instances.toml store)."""
+    Keys are the tags' full names (what `.lego` / instances.toml store).
+
+    An always-on tag (a static policy like `<-su>`) renders locked: grayed,
+    checked, inert to Space, with an `(always-on)` marker — the user sees
+    it applies but can't change it (prompt_tags also filters it out of the
+    returned build; it's never persisted)."""
+    always_on = getattr(tag, "always_on", False)
     label: list[tuple[str, str]] = [(tag_style(tag), tag.label), ("", " ")]
     label.append(("", tag.short_description))
+    if always_on:
+        label.append((UiClass.STATUS.css, "  (always-on)"))
     if tag.requires:
         label.append((UiClass.STATUS.css, f"  (requires: {', '.join(sorted(tag.requires))})"))
     return FormOption(
         key=tag.name,
         label=label,
         body=[(STYLE_UNDERLINE, tag.fullname), ("", f": {tag.full_description}")],
-        checked=checked,
+        checked=True if always_on else checked,
         group=group,
+        locked=always_on,
     )
 
 
@@ -555,9 +592,73 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
     if keys is None:
         return None
     picked = set(keys)
+    # Always-on (static) tags come back checked — they're locked rows — but
+    # are never part of the build: applied unconditionally, never persisted.
     return AgentBuild(
         engine=next((n for n in registry.engines if n in picked), current.engine),
         professions=tuple(n for n in registry.professions if n in picked),
         specialties=tuple(n for n in registry.specialties if n in picked),
-        policies=tuple(n for n in registry.policies if n in picked),
+        policies=tuple(n for n, p in registry.policies.items()
+                       if n in picked and not p.always_on),
     )
+
+def _toolkit_size_text(entry: ToolkitEntry) -> str:
+    """The size column for a toolkit row: `~NNNMb` for an install, `included`
+    for a locked entry (in the base image, no added footprint)."""
+    return "included" if entry.locked else f"~{entry.approx_size_mb}MB"
+
+
+def _toolkit_form_options(entries: dict[str, ToolkitEntry], profile: dict[str, bool]) -> list[FormOption]:
+    """One `FormOption` per `template.form` entry, key-sorted. Toggleable rows
+    are checked from the current profile (a key the profile doesn't mention
+    yet — a tool added to the manifest after the profile was written — falls
+    back to the entry's own `default`, matching `load_profile`'s
+    reconciliation); locked rows show their fixed `default` state, grayed and
+    un-toggleable. Key and size columns are padded so the `—` separators
+    align down the form. The focused row's body panel carries the flavor:
+    how you run the tool + what kind of language it is. Callers guard
+    non-empty `entries`."""
+    sizes = {key: _toolkit_size_text(entry) for key, entry in entries.items()}
+    key_width = max(len(key) for key in entries)
+    size_width = max(len(size) for size in sizes.values())
+    out: list[FormOption] = []
+    for key, entry in sorted(entries.items()):
+        checked = entry.default if entry.locked else profile.get(key, entry.default)
+        out.append(FormOption(
+            key=key,
+            label=[("", f"{key:<{key_width}} — {sizes[key]:<{size_width}} — {entry.description}")],
+            body=[("", "run with "), (STYLE_UNDERLINE, entry.run_command),
+                  ("", f"   ·   {entry.language}")],
+            checked=checked,
+            locked=entry.locked,
+        ))
+    return out
+
+
+def _edit_profession_toolkit(profession: Profession) -> None:
+    """Open the toolkit form for one configurable profession and persist the
+    result. Esc leaves the on-disk profile untouched. Only the toggleable
+    rows' states are saved — locked rows (e.g. Python) carry no toggle. No-op
+    if the profession has no template.form — the caller already filters, but
+    this stays safe called standalone."""
+    entries = profession.load_toolkit()
+    if not entries:
+        return
+    path = toolkit_profile_path(profession.name)
+    current = load_profile(path, entries)   # toggleable keys only
+    result = checkbox_form(f"Edit {profession.label} toolkit  (Space to toggle):",
+                           _toolkit_form_options(entries, current),
+                           preamble=[TOOLKIT_SIZE_NOTE])
+    if result is None:   # Esc — cancel, no changes written
+        return
+    save_profile(path, {key: key in result for key in current}, entries)
+
+
+def edit_toolkits_menu(registry: Registry) -> None:
+    """Open the toolkit form for every configurable profession, one after
+    another. Only [code] has a template.form today, so this opens exactly one
+    form; no chooser UI is built for a hypothetical second profession — if
+    one ever ships, this just opens twice, back to back."""
+    for profession in registry.professions.values():
+        if profession.toolkit_path:
+            _edit_profession_toolkit(profession)

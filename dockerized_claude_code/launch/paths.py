@@ -237,8 +237,10 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACH
 # bind-mounted to the matching location inside the container so the
 # corresponding CLI (aws/gcloud/gh/etc.) just works. Read-write — cloud CLIs
 # need to refresh tokens / write cache; presence on host is the opt-in.
-# (The matching INSTALL_<TOOL> build-arg semantics — install_creds_flags
-# in docker_config — are spread into the container env in set_container_env.)
+# (The matching INSTALL_<TOOL> build-arg semantics — install_creds_flags in
+# container_env — are spread into the container env in set_container_env.
+# Creds-presence is the ONLY driver for these CLIs; the "Edit Toolkits" form
+# covers language toolchains, a disjoint set.)
 #
 # Value tuple: (container_mount_target, cli_name). `cli_name` is the binary
 # name of the CLI installed by Dockerfile.code for this service (e.g. "kubectl"
@@ -320,6 +322,12 @@ state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (s
 
 # Per-instance state directory itself (one level up from the per-state-dir files)
 instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS_STATE / instance
+
+# Per-profession toolkit profile — the user's install toggles for a
+# configurable profession's optional tools (tags/toolkit_profile.py). Global,
+# not per-instance: it configures the one shared image every instance of that
+# profession builds from (e.g. every [code] launch reuses claude-agents:code).
+toolkit_profile_path:    Callable[[str], Path]         = lambda profession: AGENTS_STATE / f"{profession}_profile.toml"
 
 # Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys).
 # `optional_creds_token_path` points at `<service>/token` — a plain-text

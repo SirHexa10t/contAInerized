@@ -32,7 +32,7 @@ isolated Docker container with persistent per-instance state.
   instance composes from members of `agents/{engine,profession,specialty,policy}/`:
   - `(engine)` — how hard it thinks: an `engine.conf` of model/effort env vars.
   - `[profession]` — tools it can use: a Dockerfile image layer (`[code]`
-    adds Rust + Node + uv; `[web]` adds the playwright CLI).
+    adds Rust + Node + uv; `[webdev]` adds the playwright CLI).
   - `{specialty}` — exceptional access or running conditions: `{auto}` skips
     permission prompts, `{firewall}` applies an iptables outbound whitelist,
     `{dood}` bind-mounts the host's Docker socket, `{ro}` mounts the
@@ -41,11 +41,14 @@ isolated Docker container with persistent per-instance state.
     (`<+qry>` allows WebSearch/WebFetch, `<-su>` denies sudo, `<!plan>`
     mandates plan mode), merged and mounted read-only so the agent can't
     redefine its limits. Colored by stance: orange grants, blue denies,
-    white demands.
+    white demands. A policy marked `always_on = true` in its tag.info is a
+    STATIC tag — applied to every instance unconditionally, shown grayed and
+    locked in the form, and never listed in `.lego` files or
+    `instances.toml` (`<-su>` ships that way: sudo is denied everywhere).
 
   Adding a member is a folder with a `tag.info` (and optionally a
   `Dockerfile` / `tag.docker` / `policy.json`) — no launcher code. Tree
-  position encodes requirements: `profession/code/web/` means `[web]`
+  position encodes requirements: `profession/code/webdev/` means `[webdev]`
   requires `[code]`. Selections are made in a kind-sectioned form at
   create/modify time — engines as a radio group up top, checkboxes for the
   rest (requirements auto-check; risky picks and unmet companion requests
@@ -105,6 +108,29 @@ isolated Docker container with persistent per-instance state.
   `~/.claude-agents/user_extras/optional_creds/` and the matching CLI
   inside the container picks it up automatically. See *Optional Host
   Mounts* below for the full table.
+- **"Edit Toolkits" menu** — a row in the picker (above the delete menu)
+  for professions that expose a configurable install set (today: `[code]`).
+  Toggle language toolchains on or off: Rust, Node, and CMake (on by
+  default — they were always part of `[code]`), plus opt-in Go, Java,
+  Kotlin, and Ruby (off by default; sizes shown in the form). Python is
+  shown too but grayed out and un-toggleable — it ships in the base image,
+  so it's always available. The focused row's panel names how you run the
+  tool and what kind of language it is. Selections persist in
+  `~/.claude-agents/code_profile.toml`, which the launcher reads on every
+  `[code]` build; each tool's defaults, size, run command, language blurb,
+  and the Dockerfile build-arg it drives live in
+  `agents/profession/code/template.form`, beside the Dockerfile that
+  consumes it. Service CLIs (gh, gcloud, aws, ...) are not part of the form
+  — they install on creds-presence, as ever. Global, not per-instance: it's
+  the one shared `claude-agents:code` image every `[code]` launch reuses.
+  Toggling a value only rebuilds that tool's Docker layer on the next launch.
+- **Stale-tag safety** — if an instance's saved tags in `instances.toml`
+  name something that no longer exists (a typo, or a tag renamed/removed
+  since the instance was set up), the picker flags it on the instance's row
+  in a red alert style and refuses to start it, printing which names are bad
+  and the valid tags of that kind to pick instead. Fix it by editing
+  `instances.toml`, or press F2 on the row to re-pick against the current
+  tag set.
 - **State auditor** — `python3 -m launch.audit` reports tag-tree faults,
   orphaned state dirs, ghost `instances.toml` entries, bad workspaces,
   entries referencing unknown tags, missing or empty OAuth files, and
@@ -125,7 +151,7 @@ layers. The root `Dockerfile` (the **base** stage) installs Claude Code +
 `uv` + ripgrep + iptables — what every agent needs. On top of that, each
 image-bearing tag supplies its own Dockerfile from the agents/ tree
 (`agents/profession/code/Dockerfile` adds `build-essential`, Rust, Node;
-`agents/profession/code/web/Dockerfile` adds the playwright CLI;
+`agents/profession/code/webdev/Dockerfile` adds the playwright CLI;
 `agents/profession/code/_dood/Dockerfile` is `{dood}`'s layer), plus an
 optional `tag.docker` declaring its build-args, mounts, capabilities, and
 entrypoint. Run-only specialties (`{auto}`, `{firewall}`) contribute
@@ -317,7 +343,7 @@ launcher code:
 - **Profession**: `agents/profession/<name>/{tag.info, Dockerfile}` (+
   optional `tag.docker` naming the build-args its Dockerfile consumes).
   Nest it under another profession to declare a requirement
-  (`profession/code/web/` ⇒ `[web]` requires `[code]`).
+  (`profession/code/webdev/` ⇒ `[webdev]` requires `[code]`).
 - **Specialty**: `agents/specialty/<name>/tag.info` (fields: `description`,
   `warn`, `claude_args`, `[wants]`). If it needs an image layer, add a
   hidden `_<name>/Dockerfile` under the profession it depends on (that tree
@@ -347,7 +373,8 @@ Write/Edit/NotebookEdit tool-deny in one tag (the policy-tree analogue of
 how `{dood}` claims its `_dood` image layer).
 
 **Editor association:** the launcher's own config files are all TOML —
-`*.lego`, `tag.info`, `tag.docker`, `combos.info`, and `instances.toml`.
+`*.lego`, `tag.info`, `tag.docker`, `combos.info`, `template.form`, and
+`instances.toml`.
 Point your editor at the TOML grammar for those extensions/filenames to get
 syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
 "toml", "*.info": "toml", "*.docker": "toml"}`). `engine.conf` is dotenv
@@ -418,6 +445,8 @@ host also flips an `INSTALL_<TOOL>=1` build-arg, and the `[code]`
 Dockerfile (`agents/profession/code/Dockerfile`) installs the CLI on the
 next `[code]` build. Each tool gets its own ARG, so adding a new credential
 only invalidates that tool's layer (downstream layers re-run as no-ops).
+Creds-presence is the only driver for these CLIs — the "Edit Toolkits" form
+covers the language toolchains, a disjoint set.
 Removing a credential reverses it on the next build. Auto-install only
 happens for `[code]` agents; others get the credentials passthrough but no
 CLI (those agents probably don't need cloud tools anyway).
@@ -508,7 +537,7 @@ launch/
 agents/                              # agent definitions + the tag tree
   <name>.md, <name>.lego             #   persona + default tag selections, per agent
   engine/<name>/                     #   (engine) members — tag.info + engine.conf (nested folders overlay parent conf)
-  profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; web/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
+  profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall}/    #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
   policy/{web-research,no-sudo}/     #   <policy> members — tag.info + policy.json settings fragment
 custom_commands/                     # launcher-bundled slash commands (mounted into every container)

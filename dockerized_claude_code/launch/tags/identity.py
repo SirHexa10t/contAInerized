@@ -26,7 +26,7 @@ from .engine import Engine
 from .lego import AgentBuild
 from .policy import Policy
 from .profession import Profession
-from .registry import Registry
+from .registry import Registry, TagProblem
 from .specialty import Specialty
 
 SESSION_SEP = "__"
@@ -90,6 +90,7 @@ class Instance:
     professions: tuple[Profession, ...] = ()
     specialties: tuple[Specialty, ...] = ()
     policies: tuple[Policy, ...] = ()
+    invalid_tags: tuple[TagProblem, ...] = ()   # store names that no longer resolve (see resolve_store_build); block start, flagged in the picker
 
     @property
     def instance(self) -> str:
@@ -197,6 +198,13 @@ class Instance:
             if name in by_name:
                 out.extend(by_name[name].claude_args)
         return out
+
+    @property
+    def is_startable(self) -> bool:
+        """False when the store entry named tags that no longer resolve
+        (`invalid_tags`) — the launch is blocked with a fix-it report; F2 in
+        the picker re-picks against the current tag set."""
+        return not self.invalid_tags
 
     @property
     def has_continuable_history(self) -> bool:

@@ -5,7 +5,8 @@ import sys
 from typing import NamedTuple
 
 from launch.agents_crud import (
-    install_latest_md, install_settings, persist_instance, resolve_pick,
+    install_latest_md, install_settings, invalid_tags_report, persist_instance,
+    resolve_pick,
 )
 from launch.container_env import set_container_env
 from launch.docker_config import (
@@ -13,10 +14,10 @@ from launch.docker_config import (
     set_container_mounts, set_dry_run,
 )
 from launch.file_access import agent_md_index, ensure_shared_oauth_files, is_dir
-from launch.menu_picker import (
-    ask_for_workspace, print_launch_banner, prompt_session, select_agent,
+from launch.gui import (
+    ask_for_workspace, print_launch_banner, prompt_session, prompt_tags,
+    select_agent,
 )
-from launch.tag_form import prompt_tags
 from launch.tags.identity import SESSION_SEP
 from launch.paths import AGENTS_DIR, INSTANCES_FILE
 from launch.tag_handlers import apply_tags
@@ -132,6 +133,8 @@ def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
     cancels the whole launch (clean exit — nothing has been persisted at
     that point)."""
     if isinstance(picked, Instance):       # cont — workspace + tags + is_brand_new already set
+        if not picked.is_startable:        # store entry names tags that no longer resolve
+            sys.exit(invalid_tags_report(picked))
         if picked.workspace and not is_dir(picked.workspace):
             sys.exit(
                 f"  Workspace for '{picked.instance}' is not a directory: {picked.workspace}\n"
@@ -169,7 +172,7 @@ def compute_resume_flag(inst: Instance) -> list[str]:
     return []
 
 
-def setup_state(inst: Instance, refresh_installs: bool = False) -> list[str]:
+def setup_state(inst: Instance, registry: Registry, refresh_installs: bool = False) -> list[str]:
     """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
     addendum section into its state dir as CLAUDE.md (a single overwrite —
     install_latest_md keys off inst.chain for the addendums), ensure
@@ -189,7 +192,7 @@ def setup_state(inst: Instance, refresh_installs: bool = False) -> list[str]:
     upcoming build."""
     install_latest_md(inst)
     # Policy-conflict TagError → clean exit naming both culprit policies.
-    call_or_exit(install_settings, inst, exceptions=TagError)
+    call_or_exit(install_settings, inst, registry, exceptions=TagError)
     ensure_shared_oauth_files()
     set_container_env(inst, refresh_installs=refresh_installs)
     set_container_mounts(inst)
@@ -226,7 +229,7 @@ def launch() -> None:
     # staging, the {firewall} DNS kickoff); the chain it returns already
     # rides the Instance for everything downstream.
     call_or_exit(apply_tags, inst, exceptions=(ValueError, RuntimeError))
-    cred_names = setup_state(inst, refresh_installs=opts.refresh_installs)
+    cred_names = setup_state(inst, registry, refresh_installs=opts.refresh_installs)
     print_launch_banner(inst, cred_names)
     # Build the image stack here (not inside run_container) so the next
     # step can read the just-built image's failure log before Claude Code's

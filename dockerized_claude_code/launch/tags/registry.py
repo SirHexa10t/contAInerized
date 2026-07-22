@@ -21,6 +21,31 @@ from .policy import Policy
 from .profession import Layer, Profession
 from .specialty import Combo, Specialty, scan_combos
 
+__all__ = ["Registry", "TagProblem", "scan_all"]
+
+
+@dataclass(frozen=True)
+class TagProblem:
+    """A name in an `instances.toml` entry that doesn't resolve to a real tag
+    on its axis — either `unknown` (typo, or a tag renamed/removed since the
+    instance was set up) or `wrong_axis` (a real tag of another kind). Carries
+    the display punctuation of the EXPECTED kind (so `{web}` renders in the
+    profession's brackets even though `web` no longer exists) and the sorted
+    list of valid names of that kind, for the "did you mean one of these"
+    report. Produced by `Registry.resolve_store_build`."""
+    name: str
+    axis: str                       # store key: professions / specialties / policies / engine
+    kind: str                       # expected kind label (profession / specialty / policy / engine)
+    parentheses: tuple[str, str]
+    reason: str                     # "unknown" | "wrong_axis"
+    actual_kind: str | None         # the kind it actually is, when reason == "wrong_axis"
+    options: tuple[str, ...]        # valid names of the expected kind, sorted
+
+    @property
+    def label(self) -> str:
+        o, c = self.parentheses
+        return f"{o}{self.name}{c}"
+
 
 @dataclass
 class Registry:
@@ -59,24 +84,70 @@ class Registry:
                 return kind
         return None
 
-    def validate_build(self, build: AgentBuild, source: Path | str) -> None:
-        """Fail loud if a `.lego` or an instance-store entry names a tag that
-        doesn't exist, or puts a tag on the wrong axis (a profession listed
-        under `specialties`, etc.). `source` names the file (or the store
-        entry, as a plain string like `instances.toml[poet__x]`) in errors."""
-        axis_checks = [
-            (build.engine and [build.engine] or [], "engine", "engine"),
-            (build.professions, "profession", "professions"),
-            (build.specialties, "specialty", "specialties"),
-            (build.policies, "policy", "policies"),
+    # (store axis key, kind class, its member map). The class supplies the
+    # expected kind label (`.root`) and display punctuation (`.parentheses`),
+    # so validate_build / resolve_store_build stay single-sourced off the
+    # kind definitions. Engine is a 0-or-1 axis; the three others are lists.
+    def _axis_specs(self) -> "list[tuple[str, type[Tag], Mapping[str, Tag]]]":
+        return [
+            ("engine", Engine, self.engines),
+            ("professions", Profession, self.professions),
+            ("specialties", Specialty, self.specialties),
+            ("policies", Policy, self.policies),
         ]
-        for names, want_kind, axis in axis_checks:
-            for name in names:
+
+    @staticmethod
+    def _axis_names(build: AgentBuild, axis: str) -> list[str]:
+        if axis == "engine":
+            return [build.engine] if build.engine else []
+        return list(getattr(build, axis))
+
+    def validate_build(self, build: AgentBuild, source: Path | str) -> None:
+        """Fail loud if a `.lego` names a tag that doesn't exist, or puts a
+        tag on the wrong axis (a profession listed under `specialties`, etc.).
+        `source` names the file in errors. Used for SHIPPED `.lego` files,
+        whose correctness is a repo invariant — a fault is a bug, so raising
+        is right. User-editable `instances.toml` entries go through
+        `resolve_store_build` instead, which reports rather than raises."""
+        for axis, cls, _ in self._axis_specs():
+            for name in self._axis_names(build, axis):
                 actual = self.kind_of(name)
                 if actual is None:
                     raise TagError(f"{source}: {axis} references unknown tag '{name}'")
-                if actual != want_kind:
-                    raise TagError(f"{source}: '{name}' is a {actual}, not a {want_kind} — wrong axis")
+                if actual != cls.root:
+                    raise TagError(f"{source}: '{name}' is a {actual}, not a {cls.root} — wrong axis")
+                if getattr(self.get(name), "always_on", False):
+                    raise TagError(f"{source}: '{name}' is always-on — applied to every instance automatically; don't list it")
+
+    def resolve_store_build(self, build: AgentBuild) -> "tuple[AgentBuild, list[TagProblem]]":
+        """Split a stored build (an `instances.toml` entry — user-editable, so
+        possibly stale after a tag rename or a typo) into a CLEANED build
+        keeping only names that resolve to their axis's kind, plus a
+        `TagProblem` for every name dropped. Never raises: a bad stored tag
+        must surface as a blocked, flagged instance in the picker, not a
+        crash. (Shipped `.lego` files use the raising `validate_build`.)"""
+        kept: dict[str, list[str]] = {"professions": [], "specialties": [], "policies": []}
+        kept_engine: str | None = None
+        problems: list[TagProblem] = []
+        for axis, cls, kind_map in self._axis_specs():
+            for name in self._axis_names(build, axis):
+                actual = self.kind_of(name)
+                if actual == cls.root and getattr(self.get(name), "always_on", False):
+                    continue   # static tag in an old/hand-edited entry — applied anyway; drop the mention silently
+                if actual == cls.root:
+                    if axis == "engine":
+                        kept_engine = name
+                    else:
+                        kept[axis].append(name)
+                else:
+                    problems.append(TagProblem(
+                        name=name, axis=axis, kind=cls.root, parentheses=cls.parentheses,
+                        reason="unknown" if actual is None else "wrong_axis",
+                        actual_kind=actual, options=tuple(sorted(kind_map)),
+                    ))
+        cleaned = AgentBuild(engine=kept_engine, professions=tuple(kept["professions"]),
+                             specialties=tuple(kept["specialties"]), policies=tuple(kept["policies"]))
+        return cleaned, problems
 
 
 def _by_name(tags: list, kind_label: str) -> dict:

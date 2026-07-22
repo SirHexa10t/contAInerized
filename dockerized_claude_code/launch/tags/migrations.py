@@ -37,7 +37,7 @@ AGENT_MODES_MAP_FILE = AGENTS_STATE / "agent_modes_map.json"
 # translates to BOTH {auto} and {firewall}, preserving the launch behavior
 # the entry was recorded with.
 _MODE_TRANSLATION: dict[str, list[tuple[str, str]]] = {
-    "web":  [("professions", "web")],
+    "web":  [("professions", "webdev")],
     "auto": [("specialties", "auto"), ("specialties", "firewall")],
     "DooD": [("specialties", "dood")],
     "dood": [("specialties", "dood")],

@@ -21,10 +21,13 @@ run.py import from here; nothing here imports them back.
 
 import json
 
-from .file_access import force_remove, is_dir, iter_subdirs, move_path, path_exists, read_text, write_text
+from .file_access import (
+    force_remove, home_relative, is_dir, iter_subdirs, move_path, path_exists,
+    read_text, write_text,
+)
 from .paths import (
-    AGENTS_DIR, AGENTS_STATE, BASE_SETTINGS_FILE, instance_state_dir_path,
-    state_settings_path,
+    AGENTS_DIR, AGENTS_STATE, BASE_SETTINGS_FILE, INSTANCES_FILE,
+    instance_state_dir_path, state_settings_path,
 )
 from .tags import (
     Agent, Instance, Registry, addendums, load_agent, resolve_build, store,
@@ -32,7 +35,7 @@ from .tags import (
 from .tags.engine import engine_sort_key
 from .tags.identity import SESSION_SEP
 from .tags.policy import merge_fragments
-from .utils import ordering_index_or_end, prompt_keypress
+from .utils import ordering_index_or_end, plural, prompt_keypress
 
 
 def list_all_instances() -> list[str]:
@@ -93,7 +96,7 @@ def modify_instance(old: Instance, new: Instance) -> None:
 # Per-instance state-dir writers
 # ============================================================
 
-def install_settings(inst: Instance) -> None:
+def install_settings(inst: Instance, registry: Registry) -> None:
     """Merge the shared base settings (settings/settings.json) with the
     instance's policy fragments into `<state>/settings.json`, refreshed each
     launch. docker_config.set_container_mounts RO-mounts the result over
@@ -102,10 +105,14 @@ def install_settings(inst: Instance) -> None:
     same path). Policy-vs-policy or policy-vs-base scalar conflicts abort
     the launch via merge_fragments' TagError, naming both culprits.
 
-    Specialties that claim a hidden `policy/_<name>` fragment (e.g. `{ro}`)
-    contribute it here too, alongside the selected policies — same merge, so
-    a specialty fragment that conflicts with a policy is caught the same way."""
+    ALWAYS-ON (static) policies — `always_on = true` in their tag.info, e.g.
+    `<-su>` — merge into EVERY instance, straight from the registry: they're
+    never listed on the instance itself. Then the instance's selected
+    policies, then specialties that claim a hidden `policy/_<name>` fragment
+    (e.g. `{ro}`) — same merge, so any conflict is caught the same way."""
     fragments = [(BASE_SETTINGS_FILE.name + " (base)", json.loads(read_text(BASE_SETTINGS_FILE)))]
+    fragments += [(p.name, p.load_fragment())
+                  for p in sorted(registry.policies.values(), key=lambda p: p.name) if p.always_on]
     fragments += [(p.name, p.load_fragment()) for p in inst.policies]
     fragments += [(s.name, s.load_fragment()) for s in inst.specialties if s.policy_dir]
     merged = merge_fragments(fragments)
@@ -141,24 +148,59 @@ def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], 
 def instance_from_store(instance_id: str, registry: Registry) -> Instance | None:
     """Rehydrate a stored/continuing instance: its store entry (or, for a
     pre-store instance dir, its agent's `.lego` defaults) resolved into tag
-    objects. None when the agent's `.md` is gone (orphan state dir). A store
-    entry referencing an unknown tag fails loud via validate_build — same
-    contract as `.lego` references."""
+    objects. None when the agent's `.md` is gone (orphan state dir).
+
+    A store entry naming a tag that no longer resolves (a typo, or a tag
+    renamed/removed since the instance was set up) does NOT crash: the bad
+    names are collected on `Instance.invalid_tags` (the picker flags them and
+    refuses to start the instance; `invalid_tags_report` explains the fix).
+    Only the resolvable tags become objects — so F2-modify pre-checks the
+    valid ones and drops the rest."""
     agent_name, _, session = instance_id.partition(SESSION_SEP)
     agent = load_agent(agent_name, AGENTS_DIR)
     if agent is None:
         return None
     entry = store.load().get(instance_id)
     build = store.entry_to_build(entry) if entry else agent.build
-    registry.validate_build(build, f"instances.toml[{instance_id}]")
+    clean_build, problems = registry.resolve_store_build(build)
     return Instance(
         agent=agent_name,
         md_path=agent.md_path,
         session=session,
         workspace=entry.get("workspace") if entry else None,
         is_brand_new=False,
-        **resolve_build(build, agent_name, registry),
+        invalid_tags=tuple(problems),
+        **resolve_build(clean_build, agent_name, registry),
     )
+
+
+def invalid_tags_report(inst: Instance) -> str:
+    """The multi-line, user-facing explanation for a blocked instance whose
+    store entry names tags that no longer resolve. Lists, per bad tag, why it
+    failed and the valid names of that kind to choose from, then how to fix
+    it (edit the store file, or F2 in the picker). Callers print it and
+    refuse to start the instance."""
+    n = len(inst.invalid_tags)
+    lines = [
+        f"  Instance '{inst.instance}' can't start — its saved tags include "
+        f"{n} name{plural(n)} that no longer match a known tag:",
+        "",
+    ]
+    for p in inst.invalid_tags:
+        if p.reason == "wrong_axis":
+            why = f"is a {p.actual_kind} tag, so it can't sit under {p.axis}"
+        else:
+            why = "isn't a known tag — a typo, or the toolset changed since this instance was set up"
+        options = ", ".join(p.options) or "(none defined)"
+        lines.append(f"    {p.label}  (listed under {p.axis}) {why}.")
+        lines.append(f"        replace it with one of these {p.kind} tags: {options}")
+        lines.append("")
+    lines.append(
+        f"  Edit {home_relative(INSTANCES_FILE)} to swap each bad name for a valid one "
+        "(or remove it), then relaunch —"
+    )
+    lines.append("  or open the picker and press F2 on this instance to re-pick its tags.")
+    return "\n".join(lines)
 
 
 def resolve_pick(name: str | None, registry: Registry) -> Agent | Instance | None:

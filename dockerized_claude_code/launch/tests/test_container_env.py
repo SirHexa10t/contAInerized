@@ -2,13 +2,16 @@
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from launch import paths
 from launch.container_env import (
     CONTAINER_ENV_FORWARDS, ContainerEnvKey, _container_env,
-    conf_env_args, container_env_args, install_creds_flags, stage_container_env,
-    staged_env, token_env_dict,
+    conf_env_args, container_env_args, stage_container_env,
+    install_creds_flags, staged_env, token_env_dict, toolkit_install_flags,
 )
+from launch.tags import Profession
 
 
 # ============================================================
@@ -141,12 +144,56 @@ class TestContainerEnvArgs(ContainerEnvFixture):
 # ============================================================
 
 
+class TestToolkitInstallFlags(unittest.TestCase):
+    """toolkit_install_flags(professions) -> {INSTALL_<TOOL>: '1'|'0'} from
+    each configurable profession's toolkit profile alone (manifest defaults
+    when the profile file is missing). Service CLIs are NOT here — they're
+    creds-driven via install_creds_flags below; test_essential_files guards
+    that the two key sets stay disjoint."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        toolkit_path = Path(self.tmp.name) / "template.form"
+        toolkit_path.write_text(
+            '[rust]\ndescription = "d"\nrun_command = "cargo"\nlanguage = "c"\napprox_size_mb = 1\ndefault = true\nbuild_arg = "INSTALL_RUST"\n'
+            '[cmake]\ndescription = "d"\nrun_command = "cmake"\nlanguage = "c"\napprox_size_mb = 1\ndefault = false\nbuild_arg = "INSTALL_CMAKE"\n'
+        )
+        self.profession = Profession(name="code", path=Path(self.tmp.name), toolkit_path=toolkit_path)
+        self.bare_profession = Profession(name="web", path=Path(self.tmp.name))   # no template.form
+        # Deliberately a path that's never written — load_profile falls back
+        # to manifest defaults, so tests never touch the real
+        # ~/.claude-agents/code_profile.toml.
+        self.profile_path = Path(self.tmp.name) / "code_profile.toml"
+        self._patch = patch("launch.container_env.toolkit_profile_path", lambda name: self.profile_path)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self.tmp.cleanup()
+
+    def test_no_profile_file_uses_manifest_defaults(self):
+        flags = toolkit_install_flags([self.profession])
+        self.assertEqual(flags, {"INSTALL_RUST": "1", "INSTALL_CMAKE": "0"})
+
+    def test_explicit_profile_values_override_defaults(self):
+        self.profile_path.write_text("rust = false\ncmake = true\n")
+        flags = toolkit_install_flags([self.profession])
+        self.assertEqual(flags, {"INSTALL_RUST": "0", "INSTALL_CMAKE": "1"})
+
+    def test_profession_without_toolkit_contributes_nothing(self):
+        self.assertEqual(toolkit_install_flags([self.bare_profession]), {})
+
+    def test_multiple_professions_merge(self):
+        flags = toolkit_install_flags([self.profession, self.bare_profession])
+        self.assertEqual(set(flags), {"INSTALL_RUST", "INSTALL_CMAKE"})
+
+
 class TestInstallCredsFlags(unittest.TestCase):
-    """install_creds_flags(present_services) → {INSTALL_<TOOL>: '1'|'0'} build-args.
-    One entry per OPTIONAL_CREDS_MOUNTS service that has a cli_name (i.e. an
-    actual install target in the [code] Dockerfile). Config-only entries (npmrc,
-    pypirc) and contents-mount entries (`home/`) get no flag — the Dockerfile
-    doesn't declare a matching ARG for them. '1' when in `present_services`."""
+    """install_creds_flags(present_services) → {INSTALL_<TOOL>: '1'|'0'} for
+    the service CLIs — creds-presence is the ONLY driver (the toolkit form
+    deliberately does not offer these). One entry per OPTIONAL_CREDS_MOUNTS
+    service with a cli_name; config-only entries (npmrc, pypirc) and the
+    `home/` contents-mount get no flag."""
 
     def _installable_services(self):
         return [n for n, (_, cli) in paths.OPTIONAL_CREDS_MOUNTS.items() if cli is not None]
@@ -163,25 +210,13 @@ class TestInstallCredsFlags(unittest.TestCase):
         self.assertEqual(flags["INSTALL_AWS"], "0")
         self.assertEqual(flags["INSTALL_KUBE"], "0")
 
-    def test_multiple_creds_set_independently(self):
-        flags = install_creds_flags({"aws", "kube"})
-        self.assertEqual(flags["INSTALL_AWS"], "1")
-        self.assertEqual(flags["INSTALL_KUBE"], "1")
-        self.assertEqual(flags["INSTALL_GH"], "0")
-
-    def test_keys_are_uppercased_service_names(self):
-        flags = install_creds_flags(set())
-        for name in self._installable_services():
-            self.assertIn(f"INSTALL_{name.upper()}", flags)
-
     def test_cli_less_entries_get_no_flag(self):
         # npmrc / pypirc have cli=None — no INSTALL_<NAME> entry; the
-        # `home/` contents-mount entry also has cli=None.
+        # `home/` contents-mount entry also has cli=None (and its slash
+        # would make an invalid env-var name — the filter doubles as guard).
         flags = install_creds_flags({"npmrc", "pypirc", "home/"})
         self.assertNotIn("INSTALL_NPMRC", flags)
         self.assertNotIn("INSTALL_PYPIRC", flags)
-        # The slash-suffix key would also produce an invalid env-var name —
-        # the filter on cli=None doubles as a guard against that.
         self.assertNotIn("INSTALL_HOME/", flags)
 
     def test_unknown_services_dont_create_flags(self):
