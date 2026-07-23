@@ -24,7 +24,7 @@ from .docker_config import (
 from .file_access import (
     ensure_dir, iter_file_stats, path_exists, remove_path,
 )
-from .network import start_whitelist_resolution
+from .firewall import start_whitelist_resolution
 from .paths import CACHE_MOUNTS, CACHE_ROOT
 from .tags import Instance
 

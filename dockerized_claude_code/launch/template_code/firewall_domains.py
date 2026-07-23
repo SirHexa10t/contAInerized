@@ -9,10 +9,10 @@ template_code/ convention). One table:
       `X`, since typing the `www.` form clearly means the bare apex too.
 
 No IP address ranges live here (or anywhere in the source): the CDN provider
-blocks that drive network.py's widening are fetched from each provider's own
-published list at launch and cached on disk — see network._RANGE_FETCHERS.
+blocks that drive the firewall resolver's widening are fetched from each provider's own
+published list at launch and cached on disk — see firewall.resolver._RANGE_FETCHERS.
 
-Consumed only by launch/network.py."""
+Consumed only by launch/firewall/resolver.py."""
 
 BUILTIN_FIREWALL_DOMAINS = [
     # === Core launcher dependencies ===

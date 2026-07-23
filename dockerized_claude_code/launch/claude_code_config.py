@@ -8,19 +8,23 @@ the launcher controls from the host side.
   - `set_terminal_title(name)` — emits an OSC 0 escape so the terminal
     emulator's window/tab title becomes `Claude Code — <name>`, letting
     the user tell concurrent agent tabs apart at a glance.
+  - `print_launch_banner(inst, cred_names)` — the multi-line pre-build
+    summary (agent definition, engine, per-axis tag lines, creds, firewall
+    whitelist count, unmet-wants warnings) run.py prints before docker
+    builds the image.
 
-These don't fit `docker_config` (which owns docker orchestration — builds,
-runs, mounts, env-var staging) or `menu_picker` (which owns the launcher's
-own picker/prompt UI, before the container starts). They're Claude-Code-side
-display concerns that happen to be staged from the host.
+Everything the launcher renders ABOUT an instance lives here — these don't
+fit `docker_config` (docker orchestration — builds, runs, mounts, env-var
+staging) or `gui/` (the interactive picker/forms, before a launch is
+decided). Small service: imports paths + file_access + utils leaves.
+docker_config calls in from set_container_env (status line) and
+run_container (terminal title); run.py prints the banner; nothing else
+does."""
 
-Leaf-shaped: imports paths (ACCOUNT_FILE) and file_access (read_json_field)
-only. docker_config calls into here from set_container_env (status line) and
-run_container (terminal title); nothing else does."""
-
-from .file_access import read_json_field
-from .paths import ACCOUNT_FILE
+from .file_access import home_dir, read_json_field, user_firewall_whitelist_lines
+from .paths import ACCOUNT_FILE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
 from .tags import Instance, PolicyStance, Tag
+from .utils import plural
 
 # Field-driven tag colors for the status line — same dispatch as the picker's
 # `_tag_style` (menu_picker), in raw ANSI: warn-flagged specialties bright
@@ -77,3 +81,38 @@ def set_terminal_title(name: str) -> None:
     tabs apart. Called by docker_config.run_container just before exec'ing
     the container."""
     print(f"\033]0;Claude Code — {name}\007", end="", flush=True)
+
+
+def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
+    """Print the multi-line summary that appears before docker builds the
+    image — agent definition path, engine, one line per active tag axis, and
+    creds counts when applicable. Each line is conditional on having
+    something to show (no empty 'Professions: ' if there are none). The
+    user-whitelist line counts user_firewall_whitelist_lines() inline —
+    only when {firewall} is active, so other launches don't touch the file
+    at all. Takes the launch's Instance and pulls everything off it directly;
+    kind punctuation comes from each tag's `.label`."""
+    print(f"  Agent definition: {inst.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    if inst.engine:
+        print(f"  Engine:           {inst.engine.label} — {inst.engine.path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    if inst.professions:
+        print(f"  Professions:      {' '.join(p.label for p in inst.professions)}")
+    if inst.specialties:
+        print(f"  Specialties:      {' '.join(s.label for s in inst.specialties)}")
+    if inst.policies:
+        print(f"  Policies:         {' '.join(p.label for p in inst.policies)}")
+    if cred_names:
+        print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
+    if any(s.name == "firewall" for s in inst.specialties):
+        whitelist_count = len(user_firewall_whitelist_lines())
+        display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))
+        print(f"  User whitelist:   {whitelist_count} domain{plural(whitelist_count)} (from {display_path})")
+    # Unmet wants — advisory, never blocking: an active tag requested a
+    # companion that isn't active (e.g. {auto} without {firewall}). The form
+    # shows the same message live; repeating it here catches CLI-named and
+    # store-migrated launches that never pass through the form.
+    RED, RESET = "\033[01;91m", "\033[0m"
+    for wanter, wanted, message in inst.unmet_wants:
+        print(f"  {RED}⚠ '{wanter}' wants '{wanted}' (not active):{RESET}")
+        for line in message.splitlines():
+            print(f"      {RED}{line}{RESET}")

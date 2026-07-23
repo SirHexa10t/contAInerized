@@ -39,7 +39,7 @@ launch/
   docker_config.py      plain-docker orchestration: ensure_image, run_container, tag.docker flag emitters, mount accumulator, docker CLI wrappers, dry-run gate
   tag_handlers.py       apply_tags(instance): stage declarative tag.docker mounts, then dispatch _apply_<name> handlers (code cache prep, dood GID, firewall DNS kickoff); handler-less tags are data-only no-ops
   agents_crud.py        instances.toml CRUD, install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker factories, engine sort keys
-  network.py            {firewall} machinery (~1300 lines): whitelist expansion, live-fetched CDN provider ranges, two-phase DNS cascade, burst-batched iptables updater, 5-min drift-heal refresher, agent-visible status file; criticals widened to Anthropic's registered block + selftest_address() staged for init-firewall.sh's DNS-free `curl --resolve` probe
+  firewall/             {firewall} subsystem (package like tags/, gui/): __init__ facade (5 entry points) + resolver.py (the coupled coordinator: two-phase DNS cascade, live-fetched CDN widening, burst-batched iptables updater, 5-min drift-heal refresher; criticals widened to Anthropic's registered block + selftest_address() for init-firewall.sh's DNS-free `curl --resolve` probe) + whitelist.py (pure entry expansion) + status.py (agent-visible domains_pending_resolve.yml tracker)
   gui/                  the TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py = every form (kind-sectioned tag form, toolkit form, generic checkbox_form) + shared style system (UiClass, stance colors); menu_picker.py = picker + F8 legend + workspace/session prompts + banner + "Edit Toolkits" opener + stale-tag guard (invalid stored tags render red-bg/black-fg on the Cont row and block start — invalid_tags_report explains the fix; F2 re-picks) (imports forms/styles from tag_form, one-way)
   user_additions.py     optional-creds mounts + first-launch template plants
   claude_code_config.py status line + terminal title (host-staged in-container UX)
@@ -67,7 +67,7 @@ Entry: `python3 run.py [target] [--dry-run] [--refresh-installs] [...claude-args
 
 Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/home/claude/.claude` (rw) with the generated `settings.json` RO-file-mounted over `~/.claude/settings.json` (agent can't relax its policies); shared OAuth files; `custom_commands|custom_skills|settings/*` (ro); caches → `/home/claude/<rel>` ([code]); tag.docker mounts ({firewall} scripts, {dood} socket).
 
-`{firewall}` pipeline (`network.py`): Phase 1 resolves critical Anthropic hosts synchronously → `WHITELIST_ADDRESSES` (forwarded via the tag's `env_forward`). Phase 2 streams the rest (~140 curated + user whitelist) to an updater daemon gated on the container AND `/var/run/init-firewall.done` (racing the init script once killed launches), applying ≤100-rule bursts via one `docker exec`. A refresher re-resolves every 5 min, additive-only. CDN-provider ranges (cloudflare/fastly/github/cloudfront/google) are fetched live and cached 3 days; `*.host` wildcards widen to all provider blocks. Status file `domains_pending_resolve.yml` sits in the state dir for the agent to classify ConnectionRefused.
+`{firewall}` pipeline (`firewall/resolver.py`): Phase 1 resolves critical Anthropic hosts synchronously → `WHITELIST_ADDRESSES` (forwarded via the tag's `env_forward`). Phase 2 streams the rest (~140 curated + user whitelist) to an updater daemon gated on the container AND `/var/run/init-firewall.done` (racing the init script once killed launches), applying ≤100-rule bursts via one `docker exec`. A refresher re-resolves every 5 min, additive-only. CDN-provider ranges (cloudflare/fastly/github/cloudfront/google) are fetched live and cached 3 days; `*.host` wildcards widen to all provider blocks. Status file `domains_pending_resolve.yml` sits in the state dir for the agent to classify ConnectionRefused.
 
 ### Conventions and Patterns
 
@@ -77,7 +77,7 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 - Engine conf: nested engine dirs overlay parent conf key-by-key; valueless `KEY` lines are dropped. `CLAUDE_CODE_EFFORT_LEVEL` additionally becomes an explicit `--effort` CLI flag (`effort_args` — the env var alone doesn't pin fresh sessions).
 - Env layering: Dockerfile `ENV` (baked) → engine conf (per-launch `-e`) → `ContainerEnvKey` `container_emit=True` (always-on `-e`: status line, BASH_ENV, cred tokens) → tag `[build] arg_forward` (build-args, `INSTALL_*` glob) → tag `[run] env_forward` (conditional `-e`: WHITELIST_ADDRESSES).
 - Wants vs requires: `requires` (tree-derived) hard-cascade in the form; `[wants]` are advisory — red form/banner warnings only (auto wants firewall).
-- One acknowledged import cycle: `docker_config ↔ network` (lazy imports inside the updater worker). `.claude_dev_guidelines` holds the full role/placement/anti-pattern rules — read it before adding code.
+- One acknowledged import cycle: `docker_config ↔ firewall` (lazy imports inside the updater worker). `.claude_dev_guidelines` holds the full role/placement/anti-pattern rules — read it before adding code.
 
 ### Known Issues
 

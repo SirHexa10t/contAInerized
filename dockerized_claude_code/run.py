@@ -14,9 +14,9 @@ from launch.docker_config import (
     set_container_mounts, set_dry_run,
 )
 from launch.file_access import agent_md_index, ensure_shared_oauth_files, is_dir
+from launch.claude_code_config import print_launch_banner
 from launch.gui import (
-    ask_for_workspace, print_launch_banner, prompt_session, prompt_tags,
-    select_agent,
+    ask_for_workspace, prompt_session, prompt_tags, select_agent,
 )
 from launch.tags.identity import SESSION_SEP
 from launch.paths import AGENTS_DIR, INSTANCES_FILE

@@ -1,8 +1,18 @@
-"""Host-side network helpers — currently the {firewall} whitelist
-resolver. DNS resolution happens here, on the host, before `docker run`
-spins up the container. In-container, init-firewall.sh just writes iptables
-rules from the pre-resolved address list — no DNS calls, no parallel-xargs
-plumbing, no `getent` timeouts to babysit.
+"""The `{firewall}` whitelist resolver's coordinator — the core of the
+`launch.firewall` package. DNS resolution happens here, on the host, before
+`docker run` spins up the container. In-container, init-firewall.sh just
+writes iptables rules from the pre-resolved address list — no DNS calls, no
+parallel-xargs plumbing, no `getent` timeouts to babysit.
+
+Two self-contained concerns live in sibling submodules: `.whitelist` — the
+pure raw-entry → work-item expansion (HostnameEntry, _expand_whitelist,
+_index_by_host); `.status` — the lock-guarded `domains_pending_resolve.yml`
+tracker + its `_status` singleton. What stays here is the coupled core: the
+DNS cascade + cross-launch cache, the live-fetched CDN-range widening, and
+the two-phase + updater + refresher thread orchestration — they share
+sequenced, in-place-mutated module state (no locks; strict phase hand-off)
+that only stays correct as one module. The package's public API is re-
+exported from `launch/firewall/__init__.py`; consumers import from there.
 
 Concurrency model (two-phase, streaming):
   - Phase 1 (critical): api.anthropic.com + console.anthropic.com resolve
@@ -93,20 +103,21 @@ v6 literal in the whitelist lands in the status file's `skipped:` section
 with the reason, instead of burning the full DNS cascade and polluting
 `failed:`.
 
-Imports nothing heavy: file_access for the whitelist/cache files + atomic
-write helper, paths for the status/cache locations, template_code for the
-curated domain list, stdlib for subprocess + threading + ipaddress +
-urllib. tag_handlers._apply_firewall is the entry point caller (calls
-start_whitelist_resolution during apply_tags); docker_config.run_container
-pairs the await + updater-spawn.
+Imports nothing heavy: the .whitelist + .status submodules, file_access
+for the cache files + atomic write helper, paths for
+the cache locations, template_code for the curated domain list, stdlib for
+subprocess + threading + ipaddress + urllib. tag_handlers._apply_firewall is
+the entry point caller (calls start_whitelist_resolution during apply_tags);
+docker_config.run_container pairs the await + updater-spawn.
 
-Cycle note: docker_config imports this module (for is_critical_pending /
-wait_for_critical_addresses / start_firewall_updater), and the updater code
-below needs docker_config's docker-subprocess helpers (wait_for_container_running
-+ docker_exec_root_subprocess) to inject iptables rules into the running container. The
-two functions that need them (_updater_worker, _flush_rules) do lazy
-`from .docker_config import ...` at call time so import-time evaluation
-doesn't hit a half-loaded module."""
+Cycle note: docker_config imports the `launch.firewall` facade (for
+is_critical_pending / wait_for_critical_addresses / start_firewall_updater),
+which imports this module; and the updater code below needs docker_config's
+docker-subprocess helpers (wait_for_container_running +
+docker_exec_root_subprocess) to inject iptables rules into the running
+container. The two functions that need them (_updater_worker, _flush_rules)
+do lazy `from ..docker_config import ...` at call time so import-time
+evaluation doesn't hit a half-loaded module."""
 
 import ipaddress
 import json
@@ -120,20 +131,24 @@ import time
 import urllib.request
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple
 
-from .file_access import (
+from ..file_access import (
     is_file_recent, parse_lines, path_exists, user_firewall_whitelist_lines,
     write_text,
 )
-from .paths import (
-    RESOLVED_DOMAINS_CACHE_FILE, cdn_ranges_cache_path,
-    state_domain_resolve_status_path,
+from ..paths import RESOLVED_DOMAINS_CACHE_FILE, cdn_ranges_cache_path
+from .status import _status
+from .whitelist import (
+    HostnameEntry, _IP_OR_CIDR_RE, _expand_whitelist, _index_by_host,
 )
-from .template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
-from .utils import shell_capture, split_host_port
+# Re-exported (unused here): the test suite treats this module as the firewall
+# namespace it patches/reads, so the two submodules' names stay reachable as
+# `resolver.X` (the package facade re-exports only the public API).
+from .status import _WhitelistResolutionStatus                                # noqa: F401
+from .whitelist import _SKIPPED_IPV6_REASON, _is_ipv6_literal                 # noqa: F401
+from ..template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
+from ..utils import shell_capture, split_host_port
 
 
 # ============================================================
@@ -150,49 +165,19 @@ from .utils import shell_capture, split_host_port
 
 
 # ============================================================
-# DNS resolution + entry shape
+# DNS resolution
 # ============================================================
-# Each whitelist entry can be a hostname, a hostname:port, a literal IPv4
-# address (with/without :port), or a CIDR range (with/without :port).
-# Each resolved (or literal) entry ultimately becomes one or more `<ip>[:port]`
-# / `<cidr>[:port]` strings — Phase 1 collects them for the initial
-# WHITELIST_ADDRESSES env-var (consumed by init-firewall.sh at container
-# start), Phase 2 streams them to the updater for `docker exec iptables -I`
-# into the running container. Literal IPs/CIDRs pass through untouched.
-
-_IP_OR_CIDR_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$")
-
-class HostnameEntry(NamedTuple):
-    """A whitelist entry that needs DNS — the raw entry string, its hostname,
-    the port suffix (`""` when the entry didn't specify one, in which case
-    `_DEFAULT_OPEN_PORTS` is opened instead), and whether the entry carried a
-    `*.` wildcard prefix (which asks for all-provider-blocks widening — see
-    _tokens_for). Carried through both phases of the resolution cascade so a
-    resolved host can be matched back to every entry that shares its
-    hostname."""
-    entry: str
-    host: str
-    port: str
-    wildcard: bool = False
-
-
-class ExpandedWhitelist(NamedTuple):
-    """_expand_whitelist's result: literal IPv4/CIDR entries (straight to
-    iptables, no DNS), hostname entries (need resolution), and skipped
-    entries as (entry, reason) pairs — currently IPv6 literals, which the
-    v4-only pipeline can't honor and shouldn't waste a DNS cascade on."""
-    literals: list[str]
-    hostnames: list[HostnameEntry]
-    skipped: list[tuple[str, str]]
+# Entry parsing (hostname / :port / literal IPv4 / CIDR / `*.` wildcard) lives
+# in .whitelist._expand_whitelist; each resolved-or-literal entry
+# becomes one or more `<ip>[:port]` / `<cidr>[:port]` strings — Phase 1 collects
+# them for the initial WHITELIST_ADDRESSES env-var (consumed by
+# init-firewall.sh at container start), Phase 2 streams them to the updater
+# for `docker exec iptables -I` into the running container.
 
 # Reason string written to the status file's `failed:` section when a host
 # exhausts every cascade stage. One constant so phase 1 + phase 2 emit
 # identical text — the agent / user can grep for it.
 _FAILED_RESOLVE_REASON = "DNS resolution failed after all cascade stages"
-
-# Reason string for the status file's `skipped:` section — IPv6 whitelist
-# entries, which the IPv4-only pipeline can't honor.
-_SKIPPED_IPV6_REASON = "IPv6 entry — the container network and firewall are IPv4-only; whitelist the hostname or its IPv4 range instead"
 
 # Cascade timeouts: a host that fails resolution at pass N is retried at pass
 # N+1 with the next (larger) per-host timeout. The cascade exists to recover
@@ -706,167 +691,6 @@ def _tokens_for(host: str, ips: list[str], port: str, wildcard: bool = False) ->
     return new_tokens + [f"{ip}:{port}" if port else ip for ip in uncovered], provider, False
 
 
-# === Agent-visible whitelist-resolution status ===
-# The `domains_pending_resolve.yml` file (under each instance's state dir,
-# bind-mounted into the container at /home/claude/.claude/) is the runtime
-# surface the agent reads to classify a `ConnectionRefused`: pending vs.
-# failed vs. neither. The Firewall addendum points the agent here.
-#
-# Phase 1, Phase 2, and the docker-exec updater all mutate the same in-memory
-# state and rewrite the file from it — the class below bundles the lock, the
-# dict, and the file path so those invariants stay co-located (lock guards
-# both the dict mutation AND the file write; missing path = no-op write).
-# All public methods take the lock themselves; callers don't.
-
-class _WhitelistResolutionStatus:
-    """Tracks DNS resolution progress for the {firewall} whitelist
-    and mirrors the in-memory state to `domains_pending_resolve.yml`. Single-
-    process singleton (one launcher = one resolution = one tracker)."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._path: Path | None = None
-        self.status: str = "uninit"                  # → "resolving" while host work is in flight, "complete" at end
-        self.resolved: dict[str, list[str]] = {}     # host → [ip, ...]
-        self.pending: list[str] = []                 # hosts still waiting on DNS
-        self.failed: dict[str, str] = {}             # host → reason string
-        self.cdn: dict[str, str] = {}                # host → CDN provider whose block was widened for it
-        self.skipped: dict[str, str] = {}            # entry → why it was never attempted (e.g. IPv6)
-        self.wildcard_gaps: list[str] = []           # `*.` hosts whose subdomains could NOT be covered
-
-    def init(self, state_dir: Path) -> None:
-        """Reset to a clean 'resolving' state and record where to write — wipes
-        any leftover from a previous run on this instance so the agent never
-        observes stale content. Called once at the start of every {firewall} launch
-        from start_whitelist_resolution, gated by that function's idempotency
-        check."""
-        with self._lock:
-            self._path = state_domain_resolve_status_path(state_dir)
-            self.status = "resolving"
-            self.resolved = {}
-            self.pending = []
-            self.failed = {}
-            self.cdn = {}
-            self.skipped = {}
-            self.wildcard_gaps = []
-            self._write()
-
-    def set_pending(self, hosts: Iterable[str]) -> None:
-        """Replace the pending-host list (called once at start_whitelist_resolution
-        after the full whitelist is assembled)."""
-        with self._lock:
-            self.pending = sorted(hosts)
-            self._write()
-
-    def mark_resolved(self, host: str, ips: list[str], cdn: str | None = None) -> None:
-        """Move `host` from pending (or failed — a refresher pass can heal a
-        host that was dead at launch) → resolved; file the IPs. `cdn` names
-        the provider whose published block was widened for this host (None
-        when the IPs were pinned as-is) — surfaced in the status file so a
-        human or agent can see which hosts are rotation-proof."""
-        with self._lock:
-            self.resolved[host] = list(ips)
-            if cdn:
-                self.cdn[host] = cdn
-            if host in self.pending:
-                self.pending.remove(host)
-            self.failed.pop(host, None)
-            self._write()
-
-    def mark_failed(self, host: str, reason: str) -> None:
-        """Move `host` from pending → failed with `reason`."""
-        with self._lock:
-            self.failed[host] = reason
-            if host in self.pending:
-                self.pending.remove(host)
-            self._write()
-
-    def mark_skipped(self, entries: Iterable[tuple[str, str]]) -> None:
-        """Record entries that were never attempted, with their reasons —
-        currently IPv6 literals. Called once, right after expansion."""
-        with self._lock:
-            self.skipped.update(entries)
-            self._write()
-
-    def mark_wildcard_gap(self, host: str) -> None:
-        """Record that `host` came from a `*.` entry whose base doesn't sit on
-        any known CDN provider — only the base host's own IPs are open, so
-        subdomains on other addresses will still be refused. Surfaced so the
-        user learns the wildcard is only half-honored BEFORE chasing ghosts."""
-        with self._lock:
-            if host not in self.wildcard_gaps:
-                self.wildcard_gaps.append(host)
-                self._write()
-
-    def complete(self) -> None:
-        """Flip top-level status to 'complete' — every entry has been
-        resolved or terminally failed; no more updates coming."""
-        with self._lock:
-            self.status = "complete"
-            self._write()
-
-    def _write(self) -> None:
-        """Atomic rewrite of the pending-status file. Caller holds the lock.
-        No-op before init() has set a path — defensive against spurious
-        early calls."""
-        if self._path is None:
-            return
-        write_text(self._path, self._format_yml())
-
-    def _format_yml(self) -> str:
-        """Render the agent-visible YAML body. Caller holds the lock. Sections
-        explicitly commented so the agent can interpret each state correctly
-        without reading the launcher's source."""
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        lines = [
-            "# {firewall} whitelist — pending/failed view",
-            "# Auto-generated by the host launcher; updated as DNS resolution",
-            "# progresses. The agent uses this file to classify a connection",
-            "# refused: still pending vs. terminally failed vs. neither.",
-            "",
-            f"status: {self.status}    # 'resolving' = host still working;  'complete' = every entry resolved or terminally failed",
-            f"last_updated: {now}",
-            "",
-            "# Pending — host is still resolving these. Rule may arrive within seconds;",
-            "# if you can't reach a pending host, retry shortly before surfacing to the user.",
-            "pending:",
-        ]
-        for host in sorted(self.pending):
-            lines.append(f"  - {host}")
-        lines.append("")
-        lines.append("# Failed — DNS resolution failed terminally for these (likely IPv6-only,")
-        lines.append("# dead host, typo, or transient error). Won't be reachable this session;")
-        lines.append("# surface to the user if you need one — a re-launch may succeed.")
-        lines.append("failed:")
-        for host in sorted(self.failed):
-            lines.append(f"  {host}: {self.failed[host]}")
-        lines.append("")
-        lines.append("# Skipped — entries the resolver never attempted, with the reason. Fix the")
-        lines.append("# entry in the user whitelist to cover what it was aiming at.")
-        lines.append("skipped:")
-        for entry in sorted(self.skipped):
-            lines.append(f"  {entry}: {self.skipped[entry]}")
-        lines.append("")
-        lines.append("# Wildcard gaps — `*.` entries whose base host is NOT on a known CDN")
-        lines.append("# provider, so only the base host's own IPs are open; subdomains served")
-        lines.append("# from other addresses will still be refused. Wildcards are only fully")
-        lines.append("# honorable when the provider's published ranges are known.")
-        lines.append("wildcard_gaps:")
-        for host in sorted(self.wildcard_gaps):
-            lines.append(f"  - {host}")
-        lines.append("")
-        lines.append("# CDN-widened — these hosts resolved into a known CDN provider's published")
-        lines.append("# range, so the whole containing block was whitelisted (rotation-proof)")
-        lines.append("# rather than pinning the momentary IPs (wildcard entries widen to ALL the")
-        lines.append("# provider's blocks). Note: a provider block is shared by every customer")
-        lines.append("# of that CDN.")
-        lines.append("cdn:")
-        for host in sorted(self.cdn):
-            lines.append(f"  {host}: {self.cdn[host]}")
-        return "\n".join(lines) + "\n"
-
-
-_status = _WhitelistResolutionStatus()
 
 
 # === Thread/concurrency plumbing — kept as flat module-level globals ===
@@ -910,59 +734,6 @@ _emitted_tokens: set[str] = set()
 # rest), built once per launch in start_whitelist_resolution. The phase
 # workers and the refresher all map a resolved host back to its entries here.
 _all_entries_by_host: dict[str, list[HostnameEntry]] = {}
-
-
-def _is_ipv6_literal(entry: str) -> bool:
-    """True when `entry` is an IPv6 address or CIDR. The v4-only pipeline
-    skips these (surfaced via the status file's `skipped:` section) instead
-    of feeding them to the DNS cascade as if they were hostnames."""
-    try:
-        return ipaddress.ip_network(entry, strict=False).version == 6
-    except ValueError:
-        return False
-
-
-def _expand_whitelist(raw_entries: Iterable[str]) -> ExpandedWhitelist:
-    """Pure expansion of the raw whitelist into work items: set aside IPv6
-    literals as skipped, dedupe, keep `*.` wildcard entries flagged (base
-    host resolves; _tokens_for widens to the whole provider), add the bare
-    apex for every `www.X` entry (typing the `www.` form clearly means the
-    apex too), then split literal IPv4/CIDR entries (pass straight to
-    iptables, no DNS) from hostnames that need resolution. A wildcard and a
-    plain entry for the same (host, port) collapse to the wildcard — it's
-    the superset. All returned lists are sorted for deterministic downstream
-    ordering. Extracted as a pure function so the security-relevant
-    transformation is unit-testable without threads or DNS."""
-    skipped: list[tuple[str, str]] = []
-    candidates: set[str] = set()
-    for raw in set(raw_entries):
-        if _is_ipv6_literal(raw):
-            skipped.append((raw, _SKIPPED_IPV6_REASON))
-        else:
-            candidates.add(raw)
-    candidates |= {c.removeprefix("www.") for c in candidates if c.startswith("www.")}
-    literals: set[str] = set()
-    by_key: dict[tuple[str, str], tuple[str, bool]] = {}
-    for entry in sorted(candidates):
-        wildcard = entry.startswith("*.")
-        host, port = split_host_port(entry.removeprefix("*."))
-        if _IP_OR_CIDR_RE.match(host):
-            literals.add(entry.removeprefix("*."))   # a `*.` on a literal is meaningless — drop it
-        elif wildcard or (host, port) not in by_key:
-            by_key[(host, port)] = (entry, wildcard)
-    hostnames = [HostnameEntry(e, h, p, w) for (h, p), (e, w) in by_key.items()]
-    return ExpandedWhitelist(sorted(literals), sorted(hostnames), sorted(skipped))
-
-
-def _index_by_host(entries: list[HostnameEntry]) -> dict[str, list[HostnameEntry]]:
-    """Group entries by hostname — multiple entries can share a host (the
-    user wrote both `api.anthropic.com:443` and the bare apex, or apex+www
-    stripping produced duplicates). The dict turns the per-resolve scan in
-    each `on_ok` from O(N) into O(1)."""
-    out: dict[str, list[HostnameEntry]] = {}
-    for e in entries:
-        out.setdefault(e.host, []).append(e)
-    return out
 
 
 def _emit_tokens_for_host(host: str, ips: list[str]) -> tuple[list[str], str | None]:
@@ -1182,7 +953,7 @@ def _updater_worker(container_name: str) -> None:
     refresher daemon (_start_refresher), which owns drift healing for the
     rest of the session. Lazy imports break the docker_config↔network
     import cycle (see module-top docstring)."""
-    from .docker_config import wait_for_container_running, wait_for_firewall_applied
+    from ..docker_config import wait_for_container_running, wait_for_firewall_applied
 
     if not wait_for_container_running(container_name):
         # Container never came up; nothing to update. Caller's docker compose
@@ -1321,7 +1092,7 @@ def _flush_rules(container_name: str, tokens: list[str]) -> None:
     — best-effort. Lazy import of
     docker_exec_root_subprocess breaks the docker_config↔network import
     cycle (see module-top docstring)."""
-    from .docker_config import docker_exec_root_subprocess
+    from ..docker_config import docker_exec_root_subprocess
 
     rules = [rule for token in tokens for rule in _iptables_rules_for(token)]
     for i in range(0, len(rules), _UPDATER_BATCH_MAX_RULES):

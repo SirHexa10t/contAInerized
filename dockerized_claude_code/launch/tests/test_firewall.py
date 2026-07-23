@@ -1,4 +1,5 @@
-"""Tests for launch.network — the {auto}-mode firewall's host-side logic.
+"""Tests for launch.firewall — the {firewall} host-side logic (the resolver
+coordinator plus its whitelist/status submodules).
 
 Everything here runs without DNS, docker, or threads-under-test: the pure
 transformations (_expand_whitelist, _cdn_provider_ranges, _tokens_for,
@@ -19,8 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from launch import network
-from launch.network import (
+from launch.firewall import resolver
+from launch.firewall.resolver import (
     HostnameEntry, _cascade, _cdn_provider_ranges, _clean_cidrs,
     _expand_whitelist, _index_by_host, _iptables_rules_for, _is_ipv6_literal,
     _subtract_networks, _tokens_for,
@@ -28,7 +29,7 @@ from launch.network import (
 from launch.template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
 
 # Provider ranges are fetched at launch, never baked — tests seed this stand-in
-# table via network._set_provider_blocks so widening policy is exercised
+# table via resolver._set_provider_blocks so widening policy is exercised
 # against known data. Addresses below sit inside these seeded blocks.
 _TEST_PROVIDER_BLOCKS = {
     "cloudflare": ["104.16.0.0/13", "172.64.0.0/13", "198.41.128.0/17"],
@@ -89,7 +90,7 @@ class TestExpandWhitelist(unittest.TestCase):
             {"2a00:1450:400c:c07::", "2a04:4e42::/32"},
         )
         for _entry, reason in result.skipped:
-            self.assertEqual(reason, network._SKIPPED_IPV6_REASON)
+            self.assertEqual(reason, resolver._SKIPPED_IPV6_REASON)
 
     def test_literal_ip_and_cidr_split_out(self):
         result = _expand_whitelist(["1.2.3.4", "10.0.0.0/8:443", "foo.com"])
@@ -164,28 +165,28 @@ class TestSubtractNetworks(unittest.TestCase):
 
 class TestRangeParsers(unittest.TestCase):
     """Each provider fetcher's parsing, driven by canned payloads — no
-    network involved (_http_get is patched per test)."""
+    resolver involved (_http_get is patched per test)."""
 
     def _with_body(self, fetcher, body):
-        with patch.object(network, "_http_get", return_value=body):
+        with patch.object(resolver, "_http_get", return_value=body):
             return fetcher()
 
     def test_cloudflare_plain_text_lines(self):
         self.assertEqual(
-            self._with_body(network._cloudflare_ranges, "104.16.0.0/13\n172.64.0.0/13\n"),
+            self._with_body(resolver._cloudflare_ranges, "104.16.0.0/13\n172.64.0.0/13\n"),
             ["104.16.0.0/13", "172.64.0.0/13"],
         )
 
     def test_fastly_addresses_key(self):
         body = '{"addresses": ["151.101.0.0/16"], "ipv6_addresses": ["2a04:4e40::/32"]}'
-        self.assertEqual(self._with_body(network._fastly_ranges, body), ["151.101.0.0/16"])
+        self.assertEqual(self._with_body(resolver._fastly_ranges, body), ["151.101.0.0/16"])
 
     def test_github_meta_edge_services_v4_only(self):
         body = ('{"web": ["140.82.112.0/20", "2a0a:a440::/29"], "api": ["140.82.112.0/20"],'
                 ' "git": ["192.30.252.0/22"], "packages": [], "pages": ["185.199.108.0/22"],'
                 ' "actions": ["4.148.0.0/16"]}')   # actions is NOT an edge service — ignored
         self.assertEqual(
-            self._with_body(network._github_ranges, body),
+            self._with_body(resolver._github_ranges, body),
             ["140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22"],
         )
 
@@ -193,7 +194,7 @@ class TestRangeParsers(unittest.TestCase):
         body = ('{"prefixes": ['
                 '{"ip_prefix": "13.32.0.0/15", "service": "CLOUDFRONT"},'
                 '{"ip_prefix": "52.94.76.0/22", "service": "EC2"}]}')
-        self.assertEqual(self._with_body(network._cloudfront_ranges, body), ["13.32.0.0/15"])
+        self.assertEqual(self._with_body(resolver._cloudfront_ranges, body), ["13.32.0.0/15"])
 
     def test_google_subtracts_rentable_cloud_space(self):
         payloads = {
@@ -202,11 +203,11 @@ class TestRangeParsers(unittest.TestCase):
             "https://www.gstatic.com/ipranges/cloud.json":
                 '{"prefixes": [{"ipv4Prefix": "198.51.100.0/25"}]}',
         }
-        with patch.object(network, "_http_get", side_effect=payloads.__getitem__):
-            self.assertEqual(network._google_ranges(), ["192.0.2.0/24", "198.51.100.128/25"])
+        with patch.object(resolver, "_http_get", side_effect=payloads.__getitem__):
+            self.assertEqual(resolver._google_ranges(), ["192.0.2.0/24", "198.51.100.128/25"])
 
     def test_registry_names_match_fetchers(self):
-        self.assertEqual(set(network._RANGE_FETCHERS),
+        self.assertEqual(set(resolver._RANGE_FETCHERS),
                          {"cloudflare", "fastly", "github", "cloudfront", "google"})
 
 
@@ -218,8 +219,8 @@ class TestLoadCdnRanges(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         tmp = Path(self.tmpdir.name)
         self._patches = [
-            patch.object(network, "cdn_ranges_cache_path", lambda p: tmp / f"{p}.txt"),
-            patch.object(network, "_RANGE_FETCHERS", {"good": lambda: ["192.0.2.0/24"],
+            patch.object(resolver, "cdn_ranges_cache_path", lambda p: tmp / f"{p}.txt"),
+            patch.object(resolver, "_RANGE_FETCHERS", {"good": lambda: ["192.0.2.0/24"],
                                                       "bad": self._raise}),
         ]
         for p in self._patches:
@@ -228,7 +229,7 @@ class TestLoadCdnRanges(unittest.TestCase):
     def tearDown(self):
         for p in self._patches:
             p.stop()
-        network._set_provider_blocks({})
+        resolver._set_provider_blocks({})
         self.tmpdir.cleanup()
 
     @staticmethod
@@ -237,31 +238,31 @@ class TestLoadCdnRanges(unittest.TestCase):
 
     def test_fetch_populates_and_saves(self):
         with contextlib.redirect_stderr(io.StringIO()):
-            network._load_cdn_ranges()
-        self.assertEqual(network._provider_blocks["good"], ["192.0.2.0/24"])
-        self.assertEqual(network._read_cached_ranges("good"), ["192.0.2.0/24"])
+            resolver._load_cdn_ranges()
+        self.assertEqual(resolver._provider_blocks["good"], ["192.0.2.0/24"])
+        self.assertEqual(resolver._read_cached_ranges("good"), ["192.0.2.0/24"])
 
     def test_fresh_cache_skips_fetch(self):
-        network._save_cached_ranges("good", ["198.51.100.0/24"])
+        resolver._save_cached_ranges("good", ["198.51.100.0/24"])
         fetchers = {"good": MagicMock()}
-        with patch.object(network, "_RANGE_FETCHERS", fetchers):
-            network._load_cdn_ranges()
+        with patch.object(resolver, "_RANGE_FETCHERS", fetchers):
+            resolver._load_cdn_ranges()
         fetchers["good"].assert_not_called()
-        self.assertEqual(network._provider_blocks["good"], ["198.51.100.0/24"])
+        self.assertEqual(resolver._provider_blocks["good"], ["198.51.100.0/24"])
 
     def test_failed_fetch_falls_back_to_stale_cache(self):
-        network._save_cached_ranges("bad", ["203.0.113.0/24"])
-        with patch.object(network, "is_file_recent", return_value=False), \
+        resolver._save_cached_ranges("bad", ["203.0.113.0/24"])
+        with patch.object(resolver, "is_file_recent", return_value=False), \
              contextlib.redirect_stderr(io.StringIO()) as err:
-            network._load_cdn_ranges()
-        self.assertEqual(network._provider_blocks["bad"], ["203.0.113.0/24"])
+            resolver._load_cdn_ranges()
+        self.assertEqual(resolver._provider_blocks["bad"], ["203.0.113.0/24"])
         self.assertIn("stale", err.getvalue())
 
     def test_failed_fetch_without_cache_skips_provider_only(self):
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            network._load_cdn_ranges()
-        self.assertNotIn("bad", network._provider_blocks)
-        self.assertIn("good", network._provider_blocks)   # one dead provider can't sink the rest
+            resolver._load_cdn_ranges()
+        self.assertNotIn("bad", resolver._provider_blocks)
+        self.assertIn("good", resolver._provider_blocks)   # one dead provider can't sink the rest
         self.assertIn("no ranges for bad", err.getvalue())
 
 
@@ -269,12 +270,12 @@ class _SeededProvidersMixin(unittest.TestCase):
     """Install the stand-in provider table around each widening-policy test."""
 
     def setUp(self):
-        network._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
-        network._seen_cdn_ranges.clear()
+        resolver._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
+        resolver._seen_cdn_ranges.clear()
 
     def tearDown(self):
-        network._set_provider_blocks({})
-        network._seen_cdn_ranges.clear()
+        resolver._set_provider_blocks({})
+        resolver._seen_cdn_ranges.clear()
 
 
 class TestCdnProviderRanges(_SeededProvidersMixin):
@@ -401,7 +402,7 @@ class TestCascade(unittest.TestCase):
 
         resolved = {}
         failed = []
-        with patch.object(network, "_resolve_a_records", side_effect=fake_resolver):
+        with patch.object(resolver, "_resolve_a_records", side_effect=fake_resolver):
             _cascade(list(schedules), resolved.__setitem__, failed.append)
         return resolved, failed, calls
 
@@ -422,7 +423,7 @@ class TestCascade(unittest.TestCase):
         resolved, failed, calls = self._run({"dead.com": []})
         self.assertEqual(resolved, {})
         self.assertEqual(failed, ["dead.com"])
-        self.assertEqual(calls["dead.com"], len(network._RESOLVE_TIMEOUT_STAGES))
+        self.assertEqual(calls["dead.com"], len(resolver._RESOLVE_TIMEOUT_STAGES))
 
     def test_resolved_host_not_requeried_while_others_retry(self):
         resolved, failed, calls = self._run({
@@ -436,7 +437,7 @@ class TestCascade(unittest.TestCase):
 
     def test_duplicate_hosts_share_one_lookup(self):
         _, _, calls = self._run({"a.com": [["1.1.1.1"]]})
-        with patch.object(network, "_resolve_a_records", return_value=["1.1.1.1"]) as res:
+        with patch.object(resolver, "_resolve_a_records", return_value=["1.1.1.1"]) as res:
             _cascade(["a.com", "a.com", "a.com"], lambda *a: None, lambda *a: None)
         self.assertEqual(res.call_count, 1)
 
@@ -448,39 +449,39 @@ class TestResolutionCacheRoundtrip(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.cache_file = Path(self.tmpdir.name) / "resolved_domains.txt"
-        self._patch = patch.object(network, "RESOLVED_DOMAINS_CACHE_FILE", self.cache_file)
+        self._patch = patch.object(resolver, "RESOLVED_DOMAINS_CACHE_FILE", self.cache_file)
         self._patch.start()
-        self._saved_cache = dict(network._resolution_cache)
-        network._resolution_cache.clear()
-        network._fresh_resolutions.clear()
+        self._saved_cache = dict(resolver._resolution_cache)
+        resolver._resolution_cache.clear()
+        resolver._fresh_resolutions.clear()
 
     def tearDown(self):
         self._patch.stop()
-        network._resolution_cache.clear()
-        network._resolution_cache.update(self._saved_cache)
-        network._fresh_resolutions.clear()
+        resolver._resolution_cache.clear()
+        resolver._resolution_cache.update(self._saved_cache)
+        resolver._fresh_resolutions.clear()
         self.tmpdir.cleanup()
 
     def test_roundtrip(self):
-        network._save_resolution_cache({"a.com": ["1.1.1.1", "2.2.2.2"], "b.com": ["3.3.3.3"]})
-        network._load_resolution_cache()
-        self.assertEqual(network._resolution_cache,
+        resolver._save_resolution_cache({"a.com": ["1.1.1.1", "2.2.2.2"], "b.com": ["3.3.3.3"]})
+        resolver._load_resolution_cache()
+        self.assertEqual(resolver._resolution_cache,
                          {"a.com": ["1.1.1.1", "2.2.2.2"], "b.com": ["3.3.3.3"]})
 
     def test_failed_hosts_not_persisted(self):
-        network._save_resolution_cache({"a.com": ["1.1.1.1"], "dead.com": []})
-        network._load_resolution_cache()
-        self.assertNotIn("dead.com", network._resolution_cache)
+        resolver._save_resolution_cache({"a.com": ["1.1.1.1"], "dead.com": []})
+        resolver._load_resolution_cache()
+        self.assertNotIn("dead.com", resolver._resolution_cache)
 
     def test_stale_file_ignored(self):
-        network._save_resolution_cache({"a.com": ["1.1.1.1"]})
-        with patch.object(network, "is_file_recent", return_value=False):
-            network._load_resolution_cache()
-        self.assertEqual(network._resolution_cache, {})
+        resolver._save_resolution_cache({"a.com": ["1.1.1.1"]})
+        with patch.object(resolver, "is_file_recent", return_value=False):
+            resolver._load_resolution_cache()
+        self.assertEqual(resolver._resolution_cache, {})
 
     def test_missing_file_yields_empty_cache(self):
-        network._load_resolution_cache()
-        self.assertEqual(network._resolution_cache, {})
+        resolver._load_resolution_cache()
+        self.assertEqual(resolver._resolution_cache, {})
 
 
 class TestResolveARecords(unittest.TestCase):
@@ -488,14 +489,14 @@ class TestResolveARecords(unittest.TestCase):
     cross-launch cache only unions in and rescues outright failures."""
 
     def setUp(self):
-        self._saved_cache = dict(network._resolution_cache)
-        network._resolution_cache.clear()
-        network._fresh_resolutions.clear()
+        self._saved_cache = dict(resolver._resolution_cache)
+        resolver._resolution_cache.clear()
+        resolver._fresh_resolutions.clear()
 
     def tearDown(self):
-        network._resolution_cache.clear()
-        network._resolution_cache.update(self._saved_cache)
-        network._fresh_resolutions.clear()
+        resolver._resolution_cache.clear()
+        resolver._resolution_cache.update(self._saved_cache)
+        resolver._fresh_resolutions.clear()
 
     def _fake(self, stdout, returncode=0):
         return SimpleNamespace(returncode=returncode, stdout=stdout)
@@ -505,39 +506,39 @@ class TestResolveARecords(unittest.TestCase):
         # pipeline — anything not shaped like a plain IPv4 must not survive
         # (it would otherwise reach the batched `sh -c` script).
         fake = self._fake("1.2.3.4 STREAM x\nevil; rm -rf / STREAM x\n5.6.7.8 DGRAM x\n")
-        with patch.object(network, "shell_capture", return_value=fake):
-            ips = network._resolve_a_records("x.com", timeout=1)
+        with patch.object(resolver, "shell_capture", return_value=fake):
+            ips = resolver._resolve_a_records("x.com", timeout=1)
         self.assertEqual(ips, ["1.2.3.4", "5.6.7.8"])
 
     def test_cached_host_still_queries_dns_and_unions(self):
         # A cached answer must never suppress the live lookup — the fresh IP
         # joins the cached one so both resolver views stay reachable.
-        network._resolution_cache["hit.com"] = ["9.9.9.9"]
-        with patch.object(network, "shell_capture",
+        resolver._resolution_cache["hit.com"] = ["9.9.9.9"]
+        with patch.object(resolver, "shell_capture",
                           return_value=self._fake("1.1.1.1 STREAM x\n")) as cap:
-            ips = network._resolve_a_records("hit.com", timeout=1)
+            ips = resolver._resolve_a_records("hit.com", timeout=1)
         cap.assert_called_once()
         self.assertEqual(ips, ["1.1.1.1", "9.9.9.9"])
 
     def test_dns_failure_falls_back_to_cache(self):
-        network._resolution_cache["flaky.com"] = ["9.9.9.9"]
-        with patch.object(network, "shell_capture", return_value=self._fake("", returncode=2)):
-            ips = network._resolve_a_records("flaky.com", timeout=1)
+        resolver._resolution_cache["flaky.com"] = ["9.9.9.9"]
+        with patch.object(resolver, "shell_capture", return_value=self._fake("", returncode=2)):
+            ips = resolver._resolve_a_records("flaky.com", timeout=1)
         self.assertEqual(ips, ["9.9.9.9"])
 
     def test_dns_failure_without_cache_is_empty(self):
-        with patch.object(network, "shell_capture", return_value=self._fake("", returncode=2)):
-            self.assertEqual(network._resolve_a_records("dead.com", timeout=1), [])
+        with patch.object(resolver, "shell_capture", return_value=self._fake("", returncode=2)):
+            self.assertEqual(resolver._resolve_a_records("dead.com", timeout=1), [])
 
     def test_only_fresh_answers_recorded_for_cache_save(self):
         # The persisted cache must hold live DNS results only — unioned
         # carryover would re-save itself forever (mtime refresh = rolling
         # TTL) and immortalize dead IPs.
-        network._resolution_cache["hit.com"] = ["9.9.9.9"]
-        with patch.object(network, "shell_capture",
+        resolver._resolution_cache["hit.com"] = ["9.9.9.9"]
+        with patch.object(resolver, "shell_capture",
                           return_value=self._fake("1.1.1.1 STREAM x\n")):
-            network._resolve_a_records("hit.com", timeout=1)
-        self.assertEqual(network._fresh_resolutions, {"hit.com": ["1.1.1.1"]})
+            resolver._resolve_a_records("hit.com", timeout=1)
+        self.assertEqual(resolver._fresh_resolutions, {"hit.com": ["1.1.1.1"]})
 
 
 class TestIptablesRulesFor(unittest.TestCase):
@@ -583,7 +584,7 @@ class TestFlushRules(unittest.TestCase):
             return SimpleNamespace(returncode=next(codes, 0), stdout="", stderr="boom")
 
         with patch("launch.docker_config.docker_exec_root_subprocess", side_effect=fake_exec):
-            network._flush_rules("c", tokens)
+            resolver._flush_rules("c", tokens)
         return scripts
 
     def test_burst_becomes_single_exec(self):
@@ -620,19 +621,19 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
         q = queue.Queue()
         for t in tokens:
             q.put(t)
-        q.put(network._phase2_done)
+        q.put(resolver._phase2_done)
         exec_calls = []
 
         def fake_exec(container, *cmd):
             exec_calls.append(cmd[-1])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        with patch.object(network, "_phase2_queue", q), \
-             patch.object(network, "_start_refresher") as start_refresher, \
+        with patch.object(resolver, "_phase2_queue", q), \
+             patch.object(resolver, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=True), \
              patch("launch.docker_config.wait_for_firewall_applied", return_value=True), \
              patch("launch.docker_config.docker_exec_root_subprocess", side_effect=fake_exec):
-            network._updater_worker("claude-code_test")
+            resolver._updater_worker("claude-code_test")
         return exec_calls, start_refresher
 
     def test_prequeued_burst_flushes_in_one_exec(self):
@@ -656,12 +657,12 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
     def test_container_never_up_skips_all_work(self):
         q = queue.Queue()
         q.put("1.2.3.4")
-        with patch.object(network, "_phase2_queue", q), \
-             patch.object(network, "_start_refresher") as start_refresher, \
+        with patch.object(resolver, "_phase2_queue", q), \
+             patch.object(resolver, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=False), \
              patch("launch.docker_config.wait_for_firewall_applied") as gate, \
              patch("launch.docker_config.docker_exec_root_subprocess") as ex:
-            network._updater_worker("claude-code_test")
+            resolver._updater_worker("claude-code_test")
         ex.assert_not_called()
         gate.assert_not_called()
         start_refresher.assert_not_called()
@@ -672,12 +673,12 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
         # no refresher.
         q = queue.Queue()
         q.put("1.2.3.4")
-        with patch.object(network, "_phase2_queue", q), \
-             patch.object(network, "_start_refresher") as start_refresher, \
+        with patch.object(resolver, "_phase2_queue", q), \
+             patch.object(resolver, "_start_refresher") as start_refresher, \
              patch("launch.docker_config.wait_for_container_running", return_value=True), \
              patch("launch.docker_config.wait_for_firewall_applied", return_value=False), \
              patch("launch.docker_config.docker_exec_root_subprocess") as ex:
-            network._updater_worker("claude-code_test")
+            resolver._updater_worker("claude-code_test")
         ex.assert_not_called()
         start_refresher.assert_not_called()
 
@@ -689,7 +690,7 @@ class TestWhitelistResolutionStatus(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmpdir.name)
-        self.status = network._WhitelistResolutionStatus()
+        self.status = resolver._WhitelistResolutionStatus()
         self.status.init(self.state_dir)
 
     def tearDown(self):
@@ -749,10 +750,10 @@ class TestWhitelistResolutionStatus(unittest.TestCase):
         self.assertIn("status: resolving", self._file_text())
 
     def test_skipped_entries_rendered_with_reason(self):
-        self.status.mark_skipped([("2a04:4e42::/32", network._SKIPPED_IPV6_REASON)])
+        self.status.mark_skipped([("2a04:4e42::/32", resolver._SKIPPED_IPV6_REASON)])
         text = self._file_text()
         self.assertIn("skipped:", text)
-        self.assertIn(f"2a04:4e42::/32: {network._SKIPPED_IPV6_REASON}", text)
+        self.assertIn(f"2a04:4e42::/32: {resolver._SKIPPED_IPV6_REASON}", text)
 
     def test_wildcard_gap_rendered_once(self):
         self.status.mark_wildcard_gap("foo.com")
@@ -778,30 +779,30 @@ class _EmitterStateMixin(unittest.TestCase):
     empty emission ledgers, and a hand-built _all_entries_by_host."""
 
     def setUp(self):
-        network._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
-        network._seen_cdn_ranges.clear()
-        network._emitted_tokens.clear()
-        network._fresh_resolutions.clear()
-        self._saved_entries = dict(network._all_entries_by_host)
-        network._all_entries_by_host.clear()
-        self._status_patch = patch.object(network, "_status", network._WhitelistResolutionStatus())
+        resolver._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
+        resolver._seen_cdn_ranges.clear()
+        resolver._emitted_tokens.clear()
+        resolver._fresh_resolutions.clear()
+        self._saved_entries = dict(resolver._all_entries_by_host)
+        resolver._all_entries_by_host.clear()
+        self._status_patch = patch.object(resolver, "_status", resolver._WhitelistResolutionStatus())
         self.status = self._status_patch.start()
 
     def tearDown(self):
         self._status_patch.stop()
-        network._set_provider_blocks({})
-        network._seen_cdn_ranges.clear()
-        network._emitted_tokens.clear()
-        network._fresh_resolutions.clear()
-        network._all_entries_by_host.clear()
-        network._all_entries_by_host.update(self._saved_entries)
+        resolver._set_provider_blocks({})
+        resolver._seen_cdn_ranges.clear()
+        resolver._emitted_tokens.clear()
+        resolver._fresh_resolutions.clear()
+        resolver._all_entries_by_host.clear()
+        resolver._all_entries_by_host.update(self._saved_entries)
 
     @staticmethod
     def _entries(*specs):
         """Populate _all_entries_by_host from (host, port, wildcard) triples."""
         for host, port, wildcard in specs:
             entry = ("*." if wildcard else "") + host + (f":{port}" if port else "")
-            network._all_entries_by_host.setdefault(host, []).append(
+            resolver._all_entries_by_host.setdefault(host, []).append(
                 HostnameEntry(entry, host, port, wildcard))
 
 
@@ -811,22 +812,22 @@ class TestEmitTokensForHost(_EmitterStateMixin):
 
     def test_multiple_entries_of_one_host_all_emit(self):
         self._entries(("foo.com", "", False), ("foo.com", "8443", False))
-        tokens, label = network._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
+        tokens, label = resolver._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
         self.assertEqual(tokens, [_NON_CDN_IP, f"{_NON_CDN_IP}:8443"])
         self.assertIsNone(label)
 
     def test_already_emitted_tokens_are_suppressed(self):
         self._entries(("foo.com", "", False))
-        first, _ = network._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
-        second, _ = network._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
+        first, _ = resolver._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
+        second, _ = resolver._emit_tokens_for_host("foo.com", [_NON_CDN_IP])
         self.assertEqual(first, [_NON_CDN_IP])
         self.assertEqual(second, [])   # the refresher's steady-state no-op
 
     def test_wildcard_annotation_and_gap_filing(self):
         self._entries(("edge.com", "", True), ("plain.com", "", True))
-        _, label = network._emit_tokens_for_host("edge.com", [_MULTI_IP])
+        _, label = resolver._emit_tokens_for_host("edge.com", [_MULTI_IP])
         self.assertEqual(label, "multi (all blocks — wildcard)")
-        network._emit_tokens_for_host("plain.com", [_NON_CDN_IP])
+        resolver._emit_tokens_for_host("plain.com", [_NON_CDN_IP])
         self.assertEqual(self.status.wildcard_gaps, ["plain.com"])
 
 
@@ -839,18 +840,18 @@ class TestRefreshPass(_EmitterStateMixin):
         """Drive one pass with a scripted resolver; returns (flushed token
         batches, cache-save count)."""
         flushed, saves = [], []
-        with patch.object(network, "_resolve_a_records",
+        with patch.object(resolver, "_resolve_a_records",
                           side_effect=lambda h, timeout: resolutions.get(h, [])), \
-             patch.object(network, "_flush_rules",
+             patch.object(resolver, "_flush_rules",
                           side_effect=lambda c, tokens: flushed.append(tokens)), \
-             patch.object(network, "_save_resolution_cache",
+             patch.object(resolver, "_save_resolution_cache",
                           side_effect=lambda m: saves.append(m)):
-            network._refresh_pass("claude-code_test")
+            resolver._refresh_pass("claude-code_test")
         return flushed, saves
 
     def test_new_address_is_flushed_and_cache_saved(self):
         self._entries(("foo.com", "", False))
-        network._emitted_tokens.add("1.1.1.1")   # what launch already opened
+        resolver._emitted_tokens.add("1.1.1.1")   # what launch already opened
         flushed, saves = self._run({"foo.com": ["1.1.1.1", "2.2.2.2"]})
         self.assertEqual(flushed, [["2.2.2.2"]])
         self.assertEqual(len(saves), 1)
@@ -859,7 +860,7 @@ class TestRefreshPass(_EmitterStateMixin):
         # Steady state must be write-free: no exec, no cache rewrite, no
         # status churn.
         self._entries(("foo.com", "", False))
-        network._emitted_tokens.add("1.1.1.1")
+        resolver._emitted_tokens.add("1.1.1.1")
         flushed, saves = self._run({"foo.com": ["1.1.1.1"]})
         self.assertEqual((flushed, saves), ([], []))
         self.assertEqual(self.status.resolved, {})
@@ -902,20 +903,20 @@ class TestPhase1CriticalWidening(_EmitterStateMixin):
         def fake_cascade(hosts, on_ok, on_fail):
             for host in sorted(hosts):
                 on_ok(host, resolved[host])
-        entries = [network.HostnameEntry(h, h, "") for h in resolved]
+        entries = [resolver.HostnameEntry(h, h, "") for h in resolved]
         self._entries(*[(h, "", False) for h in resolved])
-        with patch.object(network, "_cascade", side_effect=fake_cascade), \
-             patch.object(network, "_load_cdn_ranges"), \
-             patch.object(network.threading, "Thread") as thread_cls:
-            network._selftest_addr = None
-            tokens = network._phase1_worker(entries, [], [])
+        with patch.object(resolver, "_cascade", side_effect=fake_cascade), \
+             patch.object(resolver, "_load_cdn_ranges"), \
+             patch.object(resolver.threading, "Thread") as thread_cls:
+            resolver._selftest_addr = None
+            tokens = resolver._phase1_worker(entries, [], [])
         thread_cls.return_value.start.assert_called_once()   # phase 2 handed off
         return tokens
 
     def test_critical_pin_widened_to_anthropic_block(self):
         tokens = self._run_phase1({"api.anthropic.com": ["160.79.104.10"]})
         self.assertIn("160.79.104.10", tokens)
-        for block in network._ANTHROPIC_BLOCKS:
+        for block in resolver._ANTHROPIC_BLOCKS:
             self.assertIn(block, tokens)
 
     def test_block_emitted_once_across_both_criticals(self):
@@ -923,7 +924,7 @@ class TestPhase1CriticalWidening(_EmitterStateMixin):
             "api.anthropic.com": ["160.79.104.10"],
             "console.anthropic.com": ["160.79.104.20"],
         })
-        for block in network._ANTHROPIC_BLOCKS:
+        for block in resolver._ANTHROPIC_BLOCKS:
             self.assertEqual(tokens.count(block), 1)
 
     def test_selftest_address_records_primary_critical_ip(self):
@@ -931,15 +932,15 @@ class TestPhase1CriticalWidening(_EmitterStateMixin):
             "api.anthropic.com": ["160.79.104.10"],
             "console.anthropic.com": ["160.79.104.20"],
         })
-        self.assertEqual(network.selftest_address(), "160.79.104.10")
+        self.assertEqual(resolver.selftest_address(), "160.79.104.10")
 
     def test_status_annotates_the_widening(self):
         self._run_phase1({"api.anthropic.com": ["160.79.104.10"]})
         self.assertEqual(self.status.cdn.get("api.anthropic.com"),
-                         network._ANTHROPIC_WIDEN_LABEL)
+                         resolver._ANTHROPIC_WIDEN_LABEL)
 
     def test_anthropic_blocks_are_valid_ipv4_networks(self):
         # Static registered space kept as data — a typo here must fail in CI,
         # not at iptables time inside a container.
-        for block in network._ANTHROPIC_BLOCKS:
+        for block in resolver._ANTHROPIC_BLOCKS:
             ipaddress.IPv4Network(block)   # raises on malformed / host bits

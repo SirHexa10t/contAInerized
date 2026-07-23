@@ -32,12 +32,8 @@ Public API:
       Inline [y/N] prompt.
       -> bool
 
-  print_launch_banner(inst, cred_names)
-      Print the multi-line "about to launch" summary (agent definition, engine,
-      per-axis tag lines, creds, user whitelist count) before docker builds
-      the image. Conditional lines — only shown when applicable; everything
-      comes off the Instance. The user-whitelist line counts
-      user_firewall_whitelist_lines() on demand only when {firewall} is active.
+(The pre-launch banner lives in claude_code_config.print_launch_banner —
+launch-stage output, not picker UI.)
 
 Generic-picker entry shape (pick_with_preview):
     {
@@ -79,14 +75,10 @@ from ..agents_crud import (
     list_all_instances, modify_instance,
 )
 from ..file_access import (
-    expand_user_path, home_dir, is_dir,
-    path_exists, read_text, resolved_cwd, resolved_path,
-    tab_complete_paths, user_firewall_whitelist_lines,
+    expand_user_path, is_dir, path_exists, read_text, resolved_cwd,
+    resolved_path, tab_complete_paths,
 )
-from ..paths import (
-    DEFAULT_WORKSPACE, DEFAULTING_DIRS, DOCKERIZED_CLAUDE_ROOT,
-    FIREWALL_WHITELIST_FILE, instance_state_dir_path,
-)
+from ..paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS, instance_state_dir_path
 from .tag_form import (
     RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _normalize, _plain,
     edit_toolkits_menu, prompt_tags, tag_style,
@@ -94,7 +86,7 @@ from .tag_form import (
 from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
 from ..tags.engine import engine_sort_key, sorted_engines
 from ..tags.identity import SESSION_SEP
-from ..utils import ordering_index_or_end, plural, relative_time
+from ..utils import ordering_index_or_end, relative_time
 
 
 # ============================================================
@@ -888,38 +880,3 @@ def _delete_submenu(registry: Registry, legend_text: str) -> None:
             return
         if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
             delete_instance(value)
-
-
-def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
-    """Print the multi-line summary that appears before docker builds the
-    image — agent definition path, engine, one line per active tag axis, and
-    creds counts when applicable. Each line is conditional on having
-    something to show (no empty 'Professions: ' if there are none). The
-    user-whitelist line counts user_firewall_whitelist_lines() inline —
-    only when {firewall} is active, so other launches don't touch the file
-    at all. Takes the launch's Instance and pulls everything off it directly;
-    kind punctuation comes from each tag's `.label`."""
-    print(f"  Agent definition: {inst.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
-    if inst.engine:
-        print(f"  Engine:           {inst.engine.label} — {inst.engine.path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
-    if inst.professions:
-        print(f"  Professions:      {' '.join(p.label for p in inst.professions)}")
-    if inst.specialties:
-        print(f"  Specialties:      {' '.join(s.label for s in inst.specialties)}")
-    if inst.policies:
-        print(f"  Policies:         {' '.join(p.label for p in inst.policies)}")
-    if cred_names:
-        print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
-    if any(s.name == "firewall" for s in inst.specialties):
-        whitelist_count = len(user_firewall_whitelist_lines())
-        display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))
-        print(f"  User whitelist:   {whitelist_count} domain{plural(whitelist_count)} (from {display_path})")
-    # Unmet wants — advisory, never blocking: an active tag requested a
-    # companion that isn't active (e.g. {auto} without {firewall}). The form
-    # shows the same message live; repeating it here catches CLI-named and
-    # store-migrated launches that never pass through the form.
-    RED, RESET = "\033[01;91m", "\033[0m"
-    for wanter, wanted, message in inst.unmet_wants:
-        print(f"  {RED}⚠ '{wanter}' wants '{wanted}' (not active):{RESET}")
-        for line in message.splitlines():
-            print(f"      {RED}{line}{RESET}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Benchmark: firewall-updater pacing — per-rule docker execs (the old
-scheme) vs the shipped burst-batched updater (`network._updater_worker` +
+scheme) vs the shipped burst-batched updater (`resolver._updater_worker` +
 `_flush_rules`).
 
 No docker required: `docker_exec_root_subprocess` and
@@ -30,7 +30,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from .. import network
+from ..firewall import resolver
 from ..template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
 
 EXEC_LATENCY_S = 0.05   # simulated docker-exec round-trip (real: ~0.05-0.15s)
@@ -51,7 +51,7 @@ def _bench_per_rule(tokens: list[str]) -> tuple[int, float]:
     fake_exec = _fake_exec_factory(counter)
     t0 = time.perf_counter()
     for token in tokens:
-        for rule in network._iptables_rules_for(token):
+        for rule in resolver._iptables_rules_for(token):
             fake_exec("container", "sh", "-c", rule)
     return counter[0], time.perf_counter() - t0
 
@@ -67,13 +67,13 @@ def _bench_batched(tokens: list[str]) -> tuple[int, float]:
     for i in range(0, len(tokens), per_burst):
         for t in tokens[i:i + per_burst]:
             q.put(t)
-    q.put(network._phase2_done)
+    q.put(resolver._phase2_done)
 
     t0 = time.perf_counter()
-    with patch.object(network, "_phase2_queue", q), \
+    with patch.object(resolver, "_phase2_queue", q), \
          patch("launch.docker_config.wait_for_container_running", return_value=True), \
          patch("launch.docker_config.docker_exec_root_subprocess", side_effect=_fake_exec_factory(counter)):
-        network._updater_worker("bench-container")
+        resolver._updater_worker("bench-container")
     return counter[0], time.perf_counter() - t0
 
 
@@ -81,7 +81,7 @@ def main() -> None:
     # Realistic shape: every builtin domain resolved to one default-port
     # address token (real launches add user entries + apex duplicates).
     tokens = [f"192.0.2.{i % 250}" for i in range(len(BUILTIN_FIREWALL_DOMAINS))]
-    n_rules = sum(len(network._iptables_rules_for(t)) for t in tokens)
+    n_rules = sum(len(resolver._iptables_rules_for(t)) for t in tokens)
     print(f"Simulating {len(tokens)} resolved tokens → {n_rules} iptables rules "
           f"(exec latency {EXEC_LATENCY_S * 1000:.0f} ms, {BURST_COUNT} resolution bursts).")
     print()

@@ -225,7 +225,7 @@ class TestParseLinesBadInput(unittest.TestCase):
         self.assertEqual(list(file_access.parse_lines(self.path)), ["foo.com", "bar.com"])
 
     def test_duplicate_entries_returned_as_given(self):
-        # parse_lines doesn't dedupe — that's network.py's job (it dedupes
+        # parse_lines doesn't dedupe — that's the firewall resolver's job (it dedupes
         # across BUILTIN + user lists into a single set).
         self.path.write_text("foo.com\nfoo.com\nbar.com\n")
         self.assertEqual(

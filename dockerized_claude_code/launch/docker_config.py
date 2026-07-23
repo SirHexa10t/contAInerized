@@ -41,7 +41,7 @@ from .container_env import (
     ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
     staged_env,
 )
-from .network import (
+from .firewall import (
     is_critical_pending, selftest_address, start_firewall_updater,
     wait_for_critical_addresses,
 )
@@ -199,7 +199,7 @@ def wait_for_container_running(container_name: str, timeout_seconds: float = 10)
     `timeout_seconds` passes. Returns True if the container came up in time,
     False on timeout. `docker run` creates the container almost immediately
     but `docker inspect` returns 'not found' for a small window after —
-    hence the poll. Used by the {firewall} updater (in network._updater_worker)
+    hence the poll. Used by the {firewall} updater (in firewall.resolver._updater_worker)
     before it starts issuing `docker exec` calls.
 
     The walrus in the while-condition reads as "while within deadline and not
@@ -231,7 +231,7 @@ def wait_for_firewall_applied(container_name: str, timeout_seconds: float = 90) 
     script — inserts landing before its `iptables -F` were silently wiped,
     and inserts landing mid-self-test could open provider blocks that made
     the enforcement probe's target reachable, killing perfectly healthy
-    launches. Used by network._updater_worker between
+    launches. Used by firewall.resolver._updater_worker between
     wait_for_container_running and the first rule flush."""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -251,7 +251,7 @@ def docker_exec_root_subprocess(container_name: str, *cmd: str) -> subprocess.Co
     The `--user root` flag is the privileged-operation pattern: it grants
     root inside the container *from outside the container's namespace*,
     bypassing whatever sudoers restrictions are in place for the in-container
-    user. Used by the {firewall} updater (in network._insert_iptables_accept)
+    user. Used by the {firewall} updater (in firewall.resolver._flush_rules)
     to inject iptables ACCEPT rules into the running container as Phase 2 DNS
     resolutions complete. Centralised here so privileged docker-exec calls
     have a single audit point."""

@@ -15,7 +15,7 @@ Grouped by layer, top of the dependency graph last.
 
 - `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split, user prompts).
 - `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined. Constants + path-builder lambdas only — no disk listings (those are file_access work).
-- `launch/template_code/` — pure data, no logic: docker-side strings (`docker_prompts.py`), the curated firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; network.py fetches them live).
+- `launch/template_code/` — pure data, no logic: docker-side strings (`docker_prompts.py`), the curated firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; the firewall resolver fetches them live).
 
 ### Disk — depends only on leaves
 
@@ -35,8 +35,11 @@ Grouped by layer, top of the dependency graph last.
 
 ### Small services — depend on disk + tags
 
-- `launch/claude_code_config.py` — Claude-Code-side display setup the launcher stages from the host (status line + terminal title).
-- `launch/network.py` — `{firewall}` coordination: whitelist expansion (wildcard + IPv6-skip aware) + CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift. Critical Anthropic pins are widened to the registered `160.79.104.0/21` block, and `selftest_address()` feeds init-firewall.sh's DNS-free self-test (`$1` → `curl --resolve`); the script also probes/reorders dead-first nameservers in resolv.conf at startup.
+- `launch/claude_code_config.py` — everything the launcher RENDERS about an instance: the in-container status line + terminal title, and the pre-build launch banner (`print_launch_banner`, printed by run.py).
+- `launch/firewall/` — the `{firewall}` outbound-whitelist subsystem, packaged (like `tags/` and `gui/`); `__init__.py` is the public facade (five entry points), and consumers import from `launch.firewall`, never the submodules:
+  - `resolver.py` — the coordinator: the coupled core that stays one module because it shares sequenced, in-place-mutated, lock-free state — CDN-range widening, host-side DNS cascade, cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift. Critical Anthropic pins are widened to the registered `160.79.104.0/21` block, and `selftest_address()` feeds init-firewall.sh's DNS-free self-test (`$1` → `curl --resolve`); the script also probes/reorders dead-first nameservers in resolv.conf at startup. The test suite (`test_firewall.py`) patches/reads this module directly — it's the single namespace the coordinator reads its collaborators from.
+  - `whitelist.py` — the pure raw-entry → work-item expansion (wildcard + IPv6-skip aware; `HostnameEntry` / `_expand_whitelist` / `_index_by_host`); no DNS, threads, or disk, so the security-relevant parsing is unit-testable in isolation.
+  - `status.py` — the lock-guarded `domains_pending_resolve.yml` tracker (`_WhitelistResolutionStatus` + the process-wide `_status` singleton) that mirrors DNS-resolution progress to the agent-visible status file.
 
 ### Orchestration — depend on services
 
@@ -54,7 +57,7 @@ prompt_toolkit; run.py drives everything through `launch/gui/__init__.py`'s
 re-exports.
 
 - `launch/gui/tag_form.py` — every form: the kind-sectioned tag form (`prompt_tags`: engine radio, requires-cascade, combos + wants warnings, context preamble), the per-profession toolkit form (`edit_toolkits_menu`), and the generic `checkbox_form` primitive behind both — plus the shared TUI style system (`UiClass`, `tag_style`, the stance colors) both surfaces use.
-- `launch/gui/menu_picker.py` — prompt_toolkit picker + F8 legend + line prompts (workspace, session) + pre-launch banner + the "Edit Toolkits" opener row; imports the forms and styles from tag_form (one-way: tag_form never imports the picker).
+- `launch/gui/menu_picker.py` — prompt_toolkit picker + F8 legend + line prompts (workspace, session) + the "Edit Toolkits" opener row; imports the forms and styles from tag_form (one-way: tag_form never imports the picker). (Launch-stage output like the pre-build banner is NOT here — that's claude_code_config, which owns everything the launcher renders about an instance.)
 
 ### Entry
 
@@ -80,7 +83,7 @@ leaves: utils, paths, template_code/   (independent — none imports in-project)
                   │
                   ▼
             file_access ──► tags/ ──┐
-                                    ├─► small services (claude_code_config, network)
+                                    ├─► small services (claude_code_config, firewall/)
                                     │
                   small services ──► orchestration (container_env, docker_config, tag_handlers,
                                                     agents_crud, user_additions, audit)
@@ -92,10 +95,11 @@ leaves: utils, paths, template_code/   (independent — none imports in-project)
                                              entry (run.py)
 ```
 
-**One acknowledged cycle:** `docker_config ↔ network`. `docker_config` imports
+**One acknowledged cycle:** `docker_config ↔ firewall`. `docker_config` imports
 `network` at module level (for `is_critical_pending` / `start_firewall_updater` /
-`wait_for_critical_addresses`); `network._updater_worker` and
-`network._insert_iptables_accept` lazy-import `docker_config.wait_for_container_running`
+`wait_for_critical_addresses`) via the `launch.firewall` facade;
+`firewall.resolver._updater_worker` and `_flush_rules` lazy-import
+`docker_config.wait_for_container_running`
 and `docker_config.docker_exec_root_subprocess` from inside the function body. Both
 docstrings call this out. Don't add new lazy imports without good reason —
 prefer to push the shared logic to a leaf-er module first.

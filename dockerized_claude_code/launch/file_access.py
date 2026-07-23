@@ -267,7 +267,7 @@ def is_file_recent(path: Path | str, max_age_seconds: float) -> bool:
     """True iff `path` exists and its mtime is within the last `max_age_seconds`.
     Missing / unreadable / stale all → False, so callers can use this as a
     single truthy 'use this cache?' gate. Backs the {firewall} resolved-domains
-    cache TTL gate in network.py."""
+    cache TTL gate in the firewall resolver."""
     mtime = file_mtime(path)
     return mtime is not None and time.time() - mtime <= max_age_seconds
 

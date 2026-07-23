@@ -51,7 +51,7 @@ INSTANCES_FILE = AGENTS_STATE / "instances.toml"                 # per-instance 
 CACHE_ROOT = AGENTS_STATE / "cache"
 
 # {firewall} cross-launch DNS cache. While fresh (the TTL gate
-# lives with the cache logic in network.py), a host's cached IPs are unioned
+# lives with the cache logic in firewall/resolver.py), a host's cached IPs are unioned
 # into its fresh resolution and rescue an outright DNS failure — never a
 # substitute for the live lookup. Rewritten with each launch's fresh answers.
 # The per-instance "still resolving / failed" status file is built by
@@ -60,7 +60,7 @@ RESOLVED_DOMAINS_CACHE_FILE = AGENTS_STATE / "resolved_domains.txt"
 
 # {firewall} cached CDN-provider IPv4 ranges, one file per provider
 # (per-file mtime = per-provider freshness; the builder lambda lives in the
-# Path-builders section below). network.py fetches each provider's published
+# Path-builders section below). firewall/resolver.py fetches each provider's published
 # range list when its cache goes stale and falls back to a stale file when
 # the fetch fails — no range data is baked into the source.
 CDN_RANGES_CACHE_DIR = AGENTS_STATE / "cdn_ranges"
@@ -308,7 +308,7 @@ state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: sta
 state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / "history.jsonl"
 
 # Per-provider CDN-range cache file under CDN_RANGES_CACHE_DIR (see the
-# constant's comment further up) — provider names come from network.py's
+# constant's comment further up) — provider names come from firewall/resolver.py's
 # fetcher registry.
 cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: CDN_RANGES_CACHE_DIR / f"{provider}.txt"
 
