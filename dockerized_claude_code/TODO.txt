@@ -341,20 +341,10 @@ Add key for deleting session's chat-history (and any kind of history), as if it'
 
 
 When the user has no credentials, the bottom banner says: None<instancename> instead of <instancename>
+    Don't remember if resolved
 
 in menu, add last message (if available) to preview of session
     Or use the "recap" feature?
-
-let the firewall do 'dig' on CDN'd addresses, to find their multiple addresses
-    if not done already
-    see if these resolve properly:  index.crates.io, static.crates.io, and crates.io
-
-Create an agent that's RO, for general quick questions (Opus; not Fable)
-    example: "how do you call <something>"
-    example: "when did <thing> happen and who <was invloved in some specific way>"
-    example: "explain <programming language> <specific feature>"
-    Call it "Informant" - the trivia / quick-question / secretarial agent
-        It can have [auto], no firewall. Obviously should have RO.
 
 
 

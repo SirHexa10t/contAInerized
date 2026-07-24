@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from .claude_code_config import set_terminal_title
@@ -276,6 +277,24 @@ def docker_subprocess(args: list[str]) -> None:
         sys.exit(ret)
 
 
+def docker_stream_subprocess(args: list[str], on_lines: Callable[[Iterable[str]], None]) -> None:
+    """Run `docker <args>` with stdout piped line-by-line into `on_lines`
+    (quickie's stream-json renderer). stderr inherits the terminal; stdin is
+    /dev/null so a stream-mode `claude` doesn't stall waiting for input. Exits
+    with the container's return code on failure, mirroring docker_subprocess;
+    dry-run prints the would-be invocation and skips it (the renderer never
+    runs, matching docker_subprocess's no-op)."""
+    if _dry_run:
+        print(f"  (dry-run: would invoke `docker {' '.join(args)}`)")
+        return
+    with subprocess.Popen(["docker", *args], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, text=True) as proc:
+        assert proc.stdout is not None
+        on_lines(proc.stdout)
+    if proc.returncode:
+        sys.exit(proc.returncode)
+
+
 def docker_check_any_agent_running_subprocess() -> bool:
     """True if any container whose name starts with CONTAINER_NAME_PREFIX is
     currently running, OR if `docker ps` failed (conservative — treat the
@@ -458,7 +477,9 @@ def effort_args(conf: dict[str, str], claude_args: list[str]) -> list[str]:
     return ["--effort", effort]
 
 
-def run_container(inst: Instance, image: str, claude_args: list[str], resume_flag: list[str]) -> None:
+def run_container(inst: Instance, image: str, claude_args: list[str], resume_flag: list[str],
+                  *, interactive: bool = True, print_prompt: str | None = None,
+                  stream_renderer: Callable[[Iterable[str]], None] | None = None) -> None:
     """Assemble and exec the final `docker run`. By the time we get here
     every bind-mount has been staged via add_docker_mount (base set,
     per-instance workspace/state, tag.docker mounts, [code] caches, skills,
@@ -469,6 +490,19 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     on zero, returns normally and the __main__ unwind exits 0. The image
     itself is built upstream by ensure_image (called from run.py:launch
     before this).
+
+    `interactive` (default True) allocates a TTY (`-it`) for the normal
+    interactive Claude Code session. The quickie tool passes
+    `interactive=False` + `print_prompt="<question>"` to run one-shot print
+    mode (`claude -p "<question>"`): no TTY (so it works piped / from a
+    script), the container exits after the answer. `-p` leads the claude argv
+    so it reads as `claude -p "<q>" [flags]`.
+
+    `stream_renderer`, when given (quickie's stream-json path), pipes docker's
+    stdout line-by-line through it instead of inheriting the terminal, so the
+    renderer can show progress and stream the answer; without it, docker keeps
+    the terminal as before. The caller supplies the matching claude flags
+    (`--output-format stream-json …`) via `claude_args`.
 
     {firewall} coordination: block on Phase 1 (critical Anthropic DNS) to
     get the initial WHITELIST_ADDRESSES — exiting with the worker's one-line
@@ -500,7 +534,7 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     # container's lifetime). No-op for non-{firewall} launches.
     start_firewall_updater(container_name)
     args = (
-        ["run", "--rm", "-it", "--name", container_name, "-e", "TERM"]
+        ["run", "--rm", *(["-it"] if interactive else []), "--name", container_name, "-e", "TERM"]
         + [f"--cap-add={cap}" for c in contributions for cap in c.cap_add]
         + entrypoint_flags(contributions)
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
@@ -508,9 +542,13 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
         + conf_env_args(inst.conf)         # -e flags setting each engine-conf key=value in the container
         + env_forward_flags(contributions)  # tag-conditional -e flags (WHITELIST_ADDRESSES)
         + [image]
+        + (["-p", print_prompt] if print_prompt is not None else [])   # one-shot print mode (quickie)
         + effort_args(inst.conf, claude_args)  # explicit --effort from the conf — see effort_args for why the env var isn't enough
         + resume_flag                      # present if a resumed session
         + list(inst.claude_args)           # specialty-contributed flags ({auto}'s --dangerously-skip-permissions)
         + claude_args                      # leftover argv (unrecognised flags + unresolved positional) → claude
     )
-    docker_subprocess(args)
+    if stream_renderer is not None:
+        docker_stream_subprocess(args, stream_renderer)
+    else:
+        docker_subprocess(args)

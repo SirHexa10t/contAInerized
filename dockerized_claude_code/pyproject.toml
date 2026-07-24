@@ -30,6 +30,15 @@ line-length = 200
 skip-magic-trailing-comma = true
 
 [tool.ruff.lint]
+# Pin the rule set to pyflakes + the pycodestyle error groups — the contract
+# this codebase has always been kept clean against. Without an explicit
+# `select`, ruff falls back to its built-in default, which broadened across
+# versions (0.16 pulls in isort `I`, bugbear `B`, comprehensions `C4`) and
+# started flagging deliberate choices here — hand-grouped-by-layer imports
+# (not isort order), frozen-dataclass arg defaults, `dict(...)` in tests. Those
+# aren't bugs and aren't the style we enforce, so we name the contract rather
+# than inherit a moving default. Add a group here to adopt more, deliberately.
+select = ["E4", "E7", "E9", "F"]
 # E731 (no-lambda-assignments): paths.py uses lambdas as a documented idiom
 # for the per-call path builders — compact, aligned, single source of truth
 # for every dynamic path. See the "Path builders" docstring in paths.py.

@@ -46,7 +46,7 @@ Grouped by layer, top of the dependency graph last.
 - `launch/container_env.py` — env staging (`ContainerEnvKey` taxonomy, the staged-value accumulator, `-e`/build-arg formatters, `set_container_env` orchestrator, `toolkit_install_flags` — profile-driven toolchain INSTALL_<TOOL> flags — and `install_creds_flags` — creds-driven CLI flags; disjoint key sets).
 - `launch/docker_config.py` — plain-docker orchestration: `ensure_image` (base + per-layer `docker build`), `run_container` (`docker run` assembly), tag.docker flag emitters, bind-mount accumulator, docker CLI wrappers, the dry-run gate.
 - `launch/tag_handlers.py` — `apply_tags(instance)`: stages declarative tag.docker mounts, then dispatches per-tag `_apply_<name>` handlers (dynamic-only side effects; data-only tags have no handler).
-- `launch/agents_crud.py` — instance state CRUD (instances.toml writers), state-dir installs (`install_latest_md`, `install_settings`), `resolve_pick`, picker-entry factories.
+- `launch/agents_crud.py` — instance state CRUD (instances.toml writers), state-dir installs (`install_latest_md`, `install_settings`), `resolve_pick`, `compute_resume_flag` (Instance → `["--continue"]` | `[]`, shared by run.py + quickie), picker-entry factories.
 - `launch/user_additions.py` — user-side contributions to the container (optional-creds mounts + first-launch template plants).
 - `launch/audit.py` — read-only state-correctness checker, runnable as `python -m launch.audit`.
 
@@ -62,6 +62,8 @@ re-exports.
 ### Entry
 
 - `run.py` — staged `launch()` orchestrator (scan tags → migrate store → input → fs-validate → resume → persist → apply tags → setup → build → run).
+- `quick_question.py` — thin repo-root entry for the quickie tool (the `q` alias target): hands argv to `launch.quickie.main` (argparse, so `q -h` is quickie's own help, not claude's).
+- `launch/quickie/` — the `q` one-shot-question tool: a LEAF CONSUMER of the launcher core (imports `launch/` helpers; nothing in `launch/` imports it back). Layers: `cli.py` = the argparse front end (a question, `--explain`/`--research` to pick the agent, `--history`/`--answer <id>`/`--resume <id>` thread ops) dispatching to → `ask.py`, a lean cousin of `run.py`'s `launch()` (no picker/form/store) that builds an Instance from a `QuickieAgent` spec — QUICK (`_quickie`, quick/Sonnet, default), TRIVIA (`_trivia`, reliable/Opus, `--explain`), RESEARCH (`researcher.md` + `_research.lego`, researcher engine, base image, `--research`) — under `quickie/<gibberish>/` (via `Instance.state_dir_override`) with the shared `quickie/communal/` workspace and runs `claude -p` in stream-json mode (via `run_container(interactive=False, print_prompt=…, stream_renderer=render_stream)`), reusing the core's `compute_resume_flag` for `--resume`'s `--continue`; `render.py` = `render_stream`, which turns Claude Code's stream-json events into a live `⋯ thinking…` stderr ticker + a streamed stdout answer (reasoning TEXT is redacted by current models — `display: omitted` — so only elapsed time is shown, never the chain-of-thought); and `history.py` = `--history` (grey timestamp + id + last question, ascending) and `--answer <id>` (reprint the saved answer), via `file_access.last_prompt_in_state` / `last_answer_in_state`. Shared mechanisms it needs live in the core (the override field, run_container print mode + its `stream_renderer` hook / `docker_stream_subprocess`, compute_resume_flag, the transcript reads), never in quickie.
 
 ### Other directories
 

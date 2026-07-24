@@ -15,7 +15,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from launch.audit import _check_json_file, _load_store, _store_entry_issues
+from launch.audit import (
+    _check_json_file, _load_store, _store_entry_issues, _stray_root_instances,
+)
 from launch.paths import AGENTS_DIR
 from launch.tags import scan_all
 
@@ -162,6 +164,34 @@ class TestStoreEntryIssues(unittest.TestCase):
             "a__typo":  "bad_tags",
         })
         self.assertNotIn("a__valid", kinds_by_target)
+
+
+class TestStrayRootInstances(unittest.TestCase):
+    """_stray_root_instances flags `<agent>__<session>` dirs left at the old
+    ~/.claude-agents/ root (instances now live under instances/). The sibling
+    root dirs — cache/, user_extras/, instances/ itself — carry no `__` and
+    must not be flagged."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_missing_root_is_clean(self):
+        self.assertEqual(_stray_root_instances(self.root / "nope"), [])
+
+    def test_flags_only_dunder_dirs(self):
+        for name in ("poet__a", "refactorer__b", "instances", "cache", "user_extras"):
+            (self.root / name).mkdir()
+        (self.root / "instances" / "researcher__c").mkdir()   # correctly-placed — not a root stray
+        strays = _stray_root_instances(self.root)
+        self.assertEqual([target for _, target, _ in strays], ["poet__a", "refactorer__b"])
+        self.assertTrue(all(kind == "stray" for kind, _, _ in strays))
+
+    def test_all_relocated_is_clean(self):
+        (self.root / "instances").mkdir()
+        (self.root / "instances" / "poet__a").mkdir()
+        self.assertEqual(_stray_root_instances(self.root), [])
 
 
 class TestLoadStore(unittest.TestCase):

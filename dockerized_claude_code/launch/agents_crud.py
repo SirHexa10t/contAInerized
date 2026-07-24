@@ -3,11 +3,12 @@ persistent per-instance state, plus the factories that turn on-disk state into
 the identity shapes the picker and run.py consume.
 
 Sections:
-  - list_all_instances — scan AGENTS_STATE for `<agent>__<session>` dirs
+  - list_all_instances — scan ~/.claude-agents/instances/ for `<agent>__<session>` dirs
   - persist_instance / delete_instance / modify_instance — instances.toml
     writers (load → mutate → save over tags.store) + state-dir lifecycle
   - install_latest_md — source `.md` + chain-keyed addendum section →
     state-dir CLAUDE.md in one overwrite (tags.addendums supplies the text)
+  - compute_resume_flag — Instance → claude resume args (["--continue"] | [])
   - resolve_pick — name string → Agent (create) | Instance (cont) factory
     used by run.py's CLI parsing
   - creatable_agents / instance_from_store — picker-entry factories
@@ -26,8 +27,8 @@ from .file_access import (
     read_text, write_text,
 )
 from .paths import (
-    AGENTS_DIR, AGENTS_STATE, BASE_SETTINGS_FILE, INSTANCES_FILE,
-    instance_state_dir_path, state_settings_path,
+    AGENTS_DIR, BASE_SETTINGS_FILE, INSTANCES_FILE, instance_state_dir_path,
+    instances_dir, state_settings_path,
 )
 from .tags import (
     Agent, Instance, Registry, addendums, load_agent, resolve_build, store,
@@ -39,11 +40,12 @@ from .utils import ordering_index_or_end, plural, prompt_keypress
 
 
 def list_all_instances() -> list[str]:
-    """Every `{agent}__{session}` dir under AGENTS_STATE (filesystem order;
-    callers that need a specific order sort themselves). Empty list on a fresh
-    install — iter_subdirs is None-safe so the missing-AGENTS_STATE case
-    folds through naturally."""
-    return [d.name for d in iter_subdirs(AGENTS_STATE) if SESSION_SEP in d.name]
+    """Every `{agent}__{session}` dir under ~/.claude-agents/instances/
+    (filesystem order; callers that need a specific order sort themselves).
+    Empty list on a fresh install — or before the user has moved pre-existing
+    instances into instances/ (audit's `stray` check flags those); iter_subdirs
+    is None-safe, so a missing instances/ dir folds through as empty."""
+    return [d.name for d in iter_subdirs(instances_dir()) if SESSION_SEP in d.name]
 
 
 # ============================================================
@@ -128,6 +130,20 @@ def install_latest_md(inst: Instance) -> None:
     body = read_text(inst.md_path)
     addendum = addendums.compose(inst.active_tags)
     write_text(inst.state_md, f"{body}\n\n{addendum}" if addendum else body)
+
+
+def compute_resume_flag(inst: Instance) -> list[str]:
+    """The claude args to resume an existing conversation (`["--continue"]`) or
+    `[]` for a fresh session — shared by run.py's launch and quickie's
+    `--resume`. A continuing instance with no transcript prints a notice and
+    starts fresh, because `--continue` against history-only state crashes
+    claude with 'No conversation found'."""
+    if inst.is_brand_new:
+        return []
+    if inst.has_continuable_history:
+        return ["--continue"]
+    print(f"  (Instance '{inst.instance}' has no prior conversation; starting fresh.)")
+    return []
 
 
 def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], tuple[int, tuple[int, int]], str]:

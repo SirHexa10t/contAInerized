@@ -4,6 +4,9 @@ Reports:
   - tags issues (the agents/ tag tree itself fails to scan — malformed
     tag.info, strict-rule violations, dangling requires; reported once,
     non-fatally, and per-entry tag validation is skipped)
+  - stray root instances (a `<agent>__<session>` dir still at the old
+    ~/.claude-agents/ root — instances now live under instances/, so the
+    launcher no longer sees one left at the root)
   - orphan state dirs (instance dir present but no matching agent .md)
   - no_history (state dir has no history.jsonl — the last-used signal we rely on)
   - ghost store entries (instances.toml entry without a corresponding state dir)
@@ -24,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .agents_crud import list_all_instances
-from .file_access import agent_md_index, is_dir, path_exists, read_text
+from .file_access import agent_md_index, is_dir, iter_subdirs, path_exists, read_text
 from .paths import (
     ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE, INSTANCES_FILE,
     instance_state_dir_path, state_history_path,
@@ -34,6 +37,19 @@ from .tags.identity import SESSION_SEP
 from .tags.store import entry_to_build
 
 Issue = tuple[str, str, str]   # (kind, target, message)
+
+
+def _stray_root_instances(state_root: Path) -> list[Issue]:
+    """Instance dirs still sitting at the ~/.claude-agents/ ROOT — instances
+    now live under instances/, and the launcher only looks there, so a
+    `<agent>__<session>` dir left at the root is silently ignored (its history
+    and tags are invisible). Report each so the user relocates it. The
+    `SESSION_SEP in name` filter is the same one list_all_instances uses, so
+    the sibling root dirs (cache/, cdn_ranges/, user_extras/, instances/
+    itself) are naturally skipped."""
+    return [("stray", d.name, "instance dir at the ~/.claude-agents/ root — move it into instances/")
+            for d in sorted(iter_subdirs(state_root), key=lambda p: p.name)
+            if SESSION_SEP in d.name]
 
 
 def _load_store(path: Path) -> tuple[dict[str, Any], list[Issue]]:
@@ -113,6 +129,8 @@ def main() -> None:
         msg = _check_json_file(path)
         if msg is not None:
             issues.append(("oauth", path.name.lstrip("."), msg))
+
+    issues.extend(_stray_root_instances(AGENTS_STATE))
 
     instances = list_all_instances()
     actual = set(instances)

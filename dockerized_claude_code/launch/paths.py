@@ -320,8 +320,23 @@ cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: CDN_RA
 # yields an empty iterator, so no existence-check needed at the call site.
 state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / "projects" / "-workspace").glob("*.jsonl")
 
-# Per-instance state directory itself (one level up from the per-state-dir files)
-instance_state_dir_path: Callable[[str], Path]         = lambda instance: AGENTS_STATE / instance
+# Instances live under ~/.claude-agents/instances/ — their own subdir keeps the
+# AGENTS_STATE root uncluttered (cache/, cdn_ranges/, user_extras/, the store
+# file, and the OAuth files all sit at the root alongside it). No-arg builder
+# so it reads AGENTS_STATE at call time — tests patch `paths.AGENTS_STATE`, and
+# a constant computed at import wouldn't follow that patch.
+instances_dir:           Callable[[], Path]            = lambda: AGENTS_STATE / "instances"
+# Per-instance state directory itself (one level down = instances_dir() / id).
+instance_state_dir_path: Callable[[str], Path]         = lambda instance: instances_dir() / instance
+
+# Quickie ("q") — the one-shot direct-question tool. Its state lives in its own
+# segregated subtree (own audit checks; never in the main picker / instances/):
+# `communal/` is a single shared workspace the user drops files into, and each
+# question's conversation thread gets a gibberish-named dir beside it. All
+# call-time builders (patchable via paths.AGENTS_STATE), like instances_dir.
+quickie_dir:                Callable[[], Path]         = lambda: AGENTS_STATE / "quickie"
+quickie_communal_workspace: Callable[[], Path]         = lambda: quickie_dir() / "communal"
+quickie_state_dir_path:     Callable[[str], Path]      = lambda session: quickie_dir() / session
 
 # Per-profession toolkit profile — the user's install toggles for a
 # configurable profession's optional tools (tags/toolkit_profile.py). Global,

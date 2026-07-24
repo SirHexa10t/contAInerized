@@ -4,8 +4,10 @@ ensure step, and the small helpers in this module.
 Filesystem-touching tests use tmpdir + targeted patches so they don't depend
 on the host's actual launcher state."""
 
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +38,12 @@ class TestAgentMdIndex(unittest.TestCase):
         index = self._index(["golem.md", "golem.lego", "notes.txt"])
         self.assertEqual(set(index), {"golem"})
 
+    def test_underscore_prefixed_agents_excluded(self):
+        # `_`-prefixed agents (e.g. _quickie) are hidden — driven by their own
+        # entry point, never surfaced in the picker / CLI resolve / audit.
+        index = self._index(["golem.md", "_quickie.md"])
+        self.assertEqual(set(index), {"golem"})
+
     def test_empty_dir_yields_empty_index(self):
         self.assertEqual(self._index([]), {})
 
@@ -44,11 +52,12 @@ class TestAgentMdIndex(unittest.TestCase):
         # one disk scan) per process.
         self.assertIs(file_access.agent_md_index(), file_access.agent_md_index())
 
-    def test_real_agents_dir_indexes_every_md(self):
-        # The repo's shipped agents/ must all be well-formed — the cached
-        # index should have one entry per .md file, no skips.
+    def test_real_agents_dir_indexes_every_visible_md(self):
+        # The repo's shipped agents/ must all be well-formed — one index entry
+        # per .md file, minus the `_`-prefixed hidden agents (e.g. _quickie).
         from launch.paths import AGENTS_DIR
-        self.assertEqual(len(file_access.agent_md_index()), len(list(AGENTS_DIR.glob("*.md"))))
+        visible = [p for p in AGENTS_DIR.glob("*.md") if not p.stem.startswith("_")]
+        self.assertEqual(len(file_access.agent_md_index()), len(visible))
 
 
 # ============================================================
@@ -422,6 +431,120 @@ class TestEnforceSshDirPerms(unittest.TestCase):
         subdir.mkdir(mode=0o755)
         file_access.enforce_ssh_dir_perms(self.ssh)
         self.assertEqual(self._mode(subdir), 0o755)   # unchanged
+
+
+# ============================================================
+# last_prompt_in_state — most-recent human question in a transcript
+# ============================================================
+
+
+class TestLastPromptInState(unittest.TestCase):
+    """last_prompt_in_state pulls the most-recent human question (plus its
+    epoch time) out of a state dir's projects/-workspace transcript, skipping
+    assistant turns, tool-result echoes, sidechains, and junk lines."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmpdir.name)
+        self.tx = self.state / "projects" / "-workspace"
+        self.tx.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write(self, name, events):
+        (self.tx / name).write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    def _user(self, content, ts, **extra):
+        return {"type": "user", "message": {"role": "user", "content": content},
+                "timestamp": ts, **extra}
+
+    def test_returns_latest_user_prompt_and_epoch(self):
+        self._write("s.jsonl", [
+            self._user("first question", "2026-01-01T00:00:00.000Z"),
+            {"type": "assistant", "message": {"role": "assistant", "content": "an answer"},
+             "timestamp": "2026-01-01T00:00:01.000Z"},
+            self._user("second question", "2026-01-02T00:00:00.000Z"),
+        ])
+        prompt, when = file_access.last_prompt_in_state(self.state)
+        self.assertEqual(prompt, "second question")
+        self.assertEqual(when, datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp())
+
+    def test_latest_is_by_timestamp_not_file_order(self):
+        # A tool_result echo carries a later timestamp than the real question;
+        # it must not win (it isn't a human prompt), and a sidechain is ignored.
+        self._write("s.jsonl", [
+            self._user("real question", "2026-01-01T00:00:00.000Z"),
+            self._user([{"type": "tool_result", "content": "x"}], "2026-06-01T00:00:00.000Z"),
+            self._user("sidechain noise", "2026-07-01T00:00:00.000Z", isSidechain=True),
+        ])
+        prompt, _ = file_access.last_prompt_in_state(self.state)
+        self.assertEqual(prompt, "real question")
+
+    def test_text_block_list_content_joined(self):
+        self._write("s.jsonl", [self._user(
+            [{"type": "text", "text": "block one"}, {"type": "text", "text": "block two"}],
+            "2026-01-01T00:00:00.000Z")])
+        prompt, _ = file_access.last_prompt_in_state(self.state)
+        self.assertEqual(prompt, "block one block two")
+
+    def test_malformed_and_promptless_lines_skipped(self):
+        (self.tx / "s.jsonl").write_text(
+            'not json\n{"type": "user"}\n'
+            + json.dumps(self._user("survivor", "2026-01-01T00:00:00.000Z")) + "\n")
+        prompt, _ = file_access.last_prompt_in_state(self.state)
+        self.assertEqual(prompt, "survivor")
+
+    def test_scans_across_multiple_transcript_files(self):
+        self._write("a.jsonl", [self._user("older", "2026-01-01T00:00:00.000Z")])
+        self._write("b.jsonl", [self._user("newer", "2026-03-01T00:00:00.000Z")])
+        prompt, _ = file_access.last_prompt_in_state(self.state)
+        self.assertEqual(prompt, "newer")
+
+    def test_no_transcript_dir_returns_none(self):
+        bare = Path(self.tmpdir.name) / "bare"
+        bare.mkdir()
+        self.assertIsNone(file_access.last_prompt_in_state(bare))
+
+    def test_no_human_prompt_returns_none(self):
+        self._write("s.jsonl", [{"type": "assistant",
+                                  "message": {"role": "assistant", "content": "hi"},
+                                  "timestamp": "2026-01-01T00:00:00.000Z"}])
+        self.assertIsNone(file_access.last_prompt_in_state(self.state))
+
+
+class TestLastAnswerInState(unittest.TestCase):
+    """last_answer_in_state pulls the latest ASSISTANT text turn (the answer),
+    ignoring the user's questions and the assistant's redacted thinking blocks."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmpdir.name)
+        self.tx = self.state / "projects" / "-workspace"
+        self.tx.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write(self, events):
+        (self.tx / "s.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    def test_returns_latest_assistant_text_not_the_question(self):
+        self._write([
+            {"type": "user", "message": {"role": "user", "content": "the question"},
+             "timestamp": "2026-01-01T00:00:00.000Z"},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": ""},          # redacted — no readable text
+                {"type": "text", "text": "the answer"}]},
+             "timestamp": "2026-01-01T00:00:05.000Z"},
+        ])
+        found = file_access.last_answer_in_state(self.state)
+        self.assertEqual(found[0], "the answer")
+
+    def test_none_when_only_a_question(self):
+        self._write([{"type": "user", "message": {"role": "user", "content": "q"},
+                      "timestamp": "2026-01-01T00:00:00.000Z"}])
+        self.assertIsNone(file_access.last_answer_in_state(self.state))
 
 
 if __name__ == "__main__":

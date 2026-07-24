@@ -1,0 +1,5 @@
+# Lean research build for `q --research`: the researcher engine + web-research,
+# but no professions → base image (fast first run). Reuses the researcher
+# persona (agents/researcher.md); this file only shifts the build.
+engine = "researcher"
+policies = ["web-research"]

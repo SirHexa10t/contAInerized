@@ -5,8 +5,8 @@ import sys
 from typing import NamedTuple
 
 from launch.agents_crud import (
-    install_latest_md, install_settings, invalid_tags_report, persist_instance,
-    resolve_pick,
+    compute_resume_flag, install_latest_md, install_settings, invalid_tags_report,
+    persist_instance, resolve_pick,
 )
 from launch.container_env import set_container_env
 from launch.docker_config import (
@@ -157,19 +157,6 @@ def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
     return Instance(agent=picked.name, md_path=picked.md_path, session=session,
                     workspace=workspace, is_brand_new=True,
                     **resolve_build(build, picked.name, registry))
-
-
-def compute_resume_flag(inst: Instance) -> list[str]:
-    """Stage 3 — Resume detection. Returns the claude args needed to resume an
-    existing conversation (`["--continue"]`) or `[]` for a fresh session. Cont
-    with no transcript prints a notice and starts fresh — `--continue` against
-    history-only state crashes claude with 'No conversation found'."""
-    if inst.is_brand_new:
-        return []
-    if inst.has_continuable_history:
-        return ["--continue"]
-    print(f"  (Instance '{inst.instance}' has no prior conversation; starting fresh.)")
-    return []
 
 
 def setup_state(inst: Instance, registry: Registry, refresh_installs: bool = False) -> list[str]:

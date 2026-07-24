@@ -106,12 +106,14 @@ class TestTagTreeDiscovery(unittest.TestCase):
 
     def test_engines_discovered(self):
         self.assertLessEqual(
-            {"default", "golem", "poet", "thinker", "researcher", "breakthrough"},
+            {"default", "golem", "poet", "thinker", "researcher", "breakthrough", "reliable", "quick"},
             set(self.reg.engines),
         )
 
     def test_engine_conf_resolves_through_new_tree(self):
         self.assertIn("haiku", self.reg.engines["golem"].conf_map.get("ANTHROPIC_MODEL", ""))
+        self.assertIn("opus", self.reg.engines["reliable"].conf_map.get("ANTHROPIC_MODEL", ""))
+        self.assertIn("sonnet", self.reg.engines["quick"].conf_map.get("ANTHROPIC_MODEL", ""))
         self.assertTrue(self.reg.engines["breakthrough"].conf_map.get("ANTHROPIC_MODEL"))
 
     def test_professions_discovered_with_nesting_requires(self):

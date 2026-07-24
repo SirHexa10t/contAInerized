@@ -1,0 +1,3 @@
+shortname         = "🔨"
+short_description = "dependable (Opus)"
+full_description  = "Opus-backed max-effort tier — extended thinking on Anthropic's Opus model at the same resource budget as the thinker tier. Reach for it when you want a dependable answer from a different model family."

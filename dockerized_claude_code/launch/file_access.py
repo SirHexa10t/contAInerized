@@ -38,6 +38,7 @@ import os
 import shutil
 import time
 from collections.abc import Iterator
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -348,9 +349,13 @@ def read_json_field(path: Path | str, *keys: str) -> Any:
 
 
 def _agent_md_index(agents_dir: Path) -> dict[str, Path]:
-    """Build the {agent name: md path} index for `agents_dir` — a plain
-    sorted glob; the stem IS the agent name (axes live in `<name>.lego`)."""
-    return {p.stem: p for p in sorted(agents_dir.glob("*.md"))}
+    """Build the {agent name: md path} index for `agents_dir` — a sorted glob
+    where the stem IS the agent name (axes live in `<name>.lego`). `_`-prefixed
+    stems are EXCLUDED: they're hidden agents (e.g. `_quickie`, driven by their
+    own entry point) that shouldn't surface in the picker, CLI target
+    resolution, or the audit's orphan check. A hidden agent's own launcher
+    loads its `.md` by path, not through this index."""
+    return {p.stem: p for p in sorted(agents_dir.glob("*.md")) if not p.stem.startswith("_")}
 
 
 @lru_cache(maxsize=None)
@@ -408,6 +413,74 @@ def last_history_mtime(state_dir: Path) -> float | None:
     (same reason as above)."""
     history = state_history_path(state_dir)
     return history.stat().st_mtime if history.is_file() else None
+
+
+def last_prompt_in_state(state_dir: Path) -> tuple[str, float] | None:
+    """The most recent human prompt in a state dir's conversation transcript,
+    paired with its time as epoch seconds — or None if the dir holds no prompt
+    yet. Reads the session JSONLs under `projects/-workspace/` (the same
+    records `claude --continue` loads, so a dir yields a prompt here iff it is
+    resumable). A transcript "user" turn counts as a human prompt only when its
+    `message.content` is text — a plain string or `text` blocks — never a
+    `tool_result` echo (those are also typed "user" but aren't something the
+    person asked). Malformed / schema-drifted lines are skipped, so a truncated
+    or format-changed transcript degrades to "no prompt" rather than crashing
+    the caller (e.g. quickie's `--history` listing)."""
+    return _last_text_turn(state_dir, "user")
+
+
+def last_answer_in_state(state_dir: Path) -> tuple[str, float] | None:
+    """The most recent assistant answer in a state dir's transcript, paired with
+    its time as epoch seconds — or None if there's no answer yet. Same source
+    and same graceful-degrade rules as last_prompt_in_state; the assistant's
+    `text` blocks are the answer (redacted `thinking` and `tool_use` blocks
+    carry no readable text, so `_content_text` skips them). Powers quickie's
+    `q --answer <id>`."""
+    return _last_text_turn(state_dir, "assistant")
+
+
+def _last_text_turn(state_dir: Path, event_type: str) -> tuple[str, float] | None:
+    """(text, epoch-seconds) of the latest transcript turn of `event_type`
+    ("user" | "assistant") that carries readable text, scanning every session
+    JSONL under `projects/-workspace/`."""
+    latest: tuple[str, float] | None = None
+    for jsonl in state_workspace_jsonls(state_dir):
+        for line in read_text(jsonl).splitlines():
+            found = _transcript_turn(line, event_type)
+            if found is not None and (latest is None or found[1] > latest[1]):
+                latest = found
+    return latest
+
+
+def _transcript_turn(line: str, event_type: str) -> tuple[str, float] | None:
+    """(text, epoch-seconds) for a transcript JSONL line of `event_type` that
+    carries readable text, else None — other turn types, tool-result echoes,
+    sidechains, and unparseable lines all return None."""
+    try:
+        event = json.loads(line)
+        if event.get("type") != event_type or event.get("isSidechain"):
+            return None
+        text = _content_text(event.get("message", {}).get("content"))
+        if not text:
+            return None
+        return text, datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError, AttributeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _content_text(content: object) -> str:
+    """The human-typed text of a user message's `content`: the string itself,
+    or the joined `text` blocks of a block list; "" for a tool_result-only list
+    (or any other shape), which marks 'not a human prompt'."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return " ".join(
+            block["text"] for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ).strip()
+    return ""
 
 
 # ============================================================

@@ -1,13 +1,16 @@
 #!/bin/sh
-# alias_launcher.sh — install an `ai` alias into $HOME/.bashrc that launches run.py.
+# install_bashrc_alias.sh — install the launcher aliases into $HOME/.bashrc:
 #
-# Run once: `sh alias_launcher.sh` (or `./alias_launcher.sh` if executable).
-# Idempotent-by-refusal: if the alias already exists in .bashrc, the script
-# bails rather than duplicate it. POSIX-compliant; fails loudly on every check.
+#     ai  ->  run.py             (the interactive launcher: picker + instances)
+#     q   ->  quick_question.py  (the quickie one-shot-question tool)
+#
+# Run once: `sh install_bashrc_alias.sh` (or `./install_bashrc_alias.sh` if
+# executable). Per-alias idempotency: an alias already present in .bashrc is
+# left untouched and reported as skipped rather than duplicated, so re-running
+# (or running after an older version that installed only `ai`) safely tops up
+# whatever's missing. POSIX-compliant; fails loudly on every environment check.
 
 set -eu
-
-ALIAS_NAME="ai"
 
 # --- Failure helper ---------------------------------------------------------
 
@@ -27,17 +30,21 @@ BASHRC="$HOME/.bashrc"
 [ -f "$BASHRC" ] || die "$BASHRC exists but is not a regular file."
 [ -w "$BASHRC" ] || die "$BASHRC is not writable by the current user."
 
-# --- 3. Locate run.py relative to this script -------------------------------
+# --- 3. Locate the launchers relative to this script ------------------------
 
 # POSIX-portable: cd to the script's directory then pwd to get an absolute path.
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)" || die "Could not resolve this script's directory."
 RUN_PY="$SCRIPT_DIR/run.py"
-[ -f "$RUN_PY" ] || die "run.py not found next to this script (expected at $RUN_PY). Place alias_launcher.sh alongside run.py."
+Q_PY="$SCRIPT_DIR/quick_question.py"
+[ -f "$RUN_PY" ] || die "run.py not found next to this script (expected at $RUN_PY). Place install_bashrc_alias.sh alongside run.py."
 [ -r "$RUN_PY" ] || die "run.py exists at $RUN_PY but is not readable."
+[ -f "$Q_PY" ] || die "quick_question.py not found next to this script (expected at $Q_PY). Place install_bashrc_alias.sh alongside quick_question.py."
+[ -r "$Q_PY" ] || die "quick_question.py exists at $Q_PY but is not readable."
 
-# Sanity-guard against pathological characters in the path that would corrupt the alias.
-case "$RUN_PY" in
-    *\'*) die "Path to run.py contains a single quote ($RUN_PY); aliases use single-quoted strings and would be broken. Move the project to a path without single quotes." ;;
+# Sanity-guard against pathological characters in the path that would corrupt
+# the aliases (both derive from SCRIPT_DIR, so one check covers both).
+case "$SCRIPT_DIR" in
+    *\'*) die "Project path contains a single quote ($SCRIPT_DIR); aliases use single-quoted strings and would be broken. Move the project to a path without single quotes." ;;
 esac
 
 # --- 4. Required software checks (mirroring README) -------------------------
@@ -52,32 +59,55 @@ PY_VERSION_OK="$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 10) 
 python3 -c 'import prompt_toolkit, dotenv' >/dev/null 2>&1 \
     || die "Python deps missing: 'prompt_toolkit' and/or 'python-dotenv'. Install them (e.g. 'pip3 install prompt_toolkit python-dotenv'; see README for the recommended venv path)."
 
-# --- 5. Alias must not already exist in .bashrc -----------------------------
+# --- 5. Install each alias (skipping any already present) -------------------
 
-# Match: optional leading whitespace, then 'alias <NAME>='.
-if grep -E "^[[:space:]]*alias[[:space:]]+$ALIAS_NAME=" "$BASHRC" >/dev/null 2>&1; then
-    die "An '$ALIAS_NAME' alias already exists in $BASHRC. Remove it manually first, or change ALIAS_NAME at the top of this script."
+ADDED=""     # space-separated names we appended this run
+SKIPPED=""   # space-separated names already present, left untouched
+
+# install_alias NAME TARGET_PY — append `alias NAME='python3 "TARGET_PY" '` to
+# .bashrc unless a `NAME=` alias already lives there. The trailing space inside
+# the quotes lets `NAME arg` forward arg through as a positional. Updates the
+# ADDED / SKIPPED accumulators for the closing summary.
+install_alias() {
+    name="$1"
+    target_py="$2"
+    # Match: optional leading whitespace, then 'alias <NAME>='.
+    if grep -E "^[[:space:]]*alias[[:space:]]+$name=" "$BASHRC" >/dev/null 2>&1; then
+        SKIPPED="$SKIPPED $name"
+        return
+    fi
+    alias_line="alias $name='python3 \"$target_py\" '"
+    {
+        printf '\n\n'
+        printf '%s\n' "$alias_line"
+        printf '\n\n'
+    } >> "$BASHRC" || die "Failed to append the '$name' alias to $BASHRC."
+    ADDED="$ADDED $name"
+    printf 'Added:  %s\n' "$alias_line"
+}
+
+printf '\n'
+install_alias "ai" "$RUN_PY"
+install_alias "q"  "$Q_PY"
+
+# --- 6. Confirmation summary ------------------------------------------------
+
+if [ -n "$SKIPPED" ]; then
+    printf 'Skipped (already present in %s):%s\n' "$BASHRC" "$SKIPPED"
 fi
 
-# --- 6. Append the alias with two surrounding blank lines on each side ------
+if [ -z "$ADDED" ]; then
+    printf '\nNothing to do — both aliases were already present. Remove them from\n'
+    printf '%s first if you want this script to re-add them.\n' "$BASHRC"
+    exit 0
+fi
 
-ALIAS_LINE="alias $ALIAS_NAME='python3 \"$RUN_PY\" '"
-
-{
-    printf '\n\n'
-    printf '%s\n' "$ALIAS_LINE"
-    printf '\n\n'
-} >> "$BASHRC" || die "Failed to append to $BASHRC."
-
-# --- 7. Confirmation message ------------------------------------------------
-
+printf '\n%s\n' "Open a new shell, or run:  source \"$BASHRC\""
+printf '%s\n' "to activate the new alias(es) in this session. Usage:"
 printf '\n'
-printf '%s\n' "Added the following line to $BASHRC:"
-printf '\n    %s\n\n' "$ALIAS_LINE"
-printf '%s\n' "Open a new shell, or run:  source \"$BASHRC\""
-printf '%s\n' "to activate the alias in this session. After that:"
-printf '\n    %s            # opens the picker\n' "$ALIAS_NAME"
-printf '    %s poet           # skip picker; new instance of poet\n' "$ALIAS_NAME"
-printf '    %s poet__myproj   # continue an existing instance\n' "$ALIAS_NAME"
+printf '    %s\n' "ai                                    # opens the picker"
+printf '    %s\n' "ai poet                               # skip picker; new instance of poet"
+printf '    %s\n' "ai poet__myproj                       # continue an existing instance"
+printf '    %s\n' "q \"why do elephants have big ears?\"   # one-shot question (quote it)"
 printf '\n'
-printf '%s\n' "You may rename or remove the alias in $BASHRC at any time."
+printf '%s\n' "You may rename or remove the aliases in $BASHRC at any time."

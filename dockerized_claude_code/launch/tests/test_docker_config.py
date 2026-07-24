@@ -5,10 +5,12 @@ loop, and set_container_mounts (workspace fallback).
 Env-formatter tests (toolkit_install_flags, token_env_dict, etc.) live in
 test_container_env.py alongside the accumulator they feed."""
 
+import contextlib
+import io
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from launch import docker_config, paths
 from launch.container_env import ContainerEnvKey, _container_env, stage_container_env
@@ -24,6 +26,48 @@ def _run_inst(**over):
     defaults = dict(docker_contributions=[], conf={}, claude_args=[], instance="poet__x")
     defaults.update(over)
     return SimpleNamespace(**defaults)
+
+
+class TestRunContainerModes(unittest.TestCase):
+    """Interactive (default) allocates a TTY (`-it`); the quickie tool's
+    print mode drops it and injects `claude -p "<question>"` right after the
+    image. The firewall await no-ops (no resolution started), so we only
+    capture the assembled `docker run` argv."""
+
+    def _capture(self, **run_kw):
+        with patch.object(docker_config, "set_terminal_title"), \
+             patch.object(docker_config, "is_critical_pending", return_value=False), \
+             patch.object(docker_config, "wait_for_critical_addresses", return_value=None), \
+             patch.object(docker_config, "start_firewall_updater"), \
+             patch.object(docker_config, "docker_subprocess") as run:
+            docker_config.run_container(_run_inst(), "claude-agents:base", [], [], **run_kw)
+        return run.call_args.args[0]
+
+    def test_interactive_default_allocates_tty(self):
+        self.assertIn("-it", self._capture())
+
+    def test_print_mode_drops_tty_and_injects_prompt(self):
+        argv = self._capture(interactive=False, print_prompt="why do elephants have big ears?")
+        self.assertNotIn("-it", argv)
+        # `-p "<question>"` sits immediately after the image name.
+        img = argv.index("claude-agents:base")
+        self.assertEqual(argv[img + 1:img + 3], ["-p", "why do elephants have big ears?"])
+
+    def test_stream_renderer_routes_to_streaming_subprocess(self):
+        # quickie's path: a renderer → docker_stream_subprocess (pipe), never
+        # the plain docker_subprocess (inherit-terminal) path.
+        renderer = Mock()
+        with patch.object(docker_config, "set_terminal_title"), \
+             patch.object(docker_config, "is_critical_pending", return_value=False), \
+             patch.object(docker_config, "wait_for_critical_addresses", return_value=None), \
+             patch.object(docker_config, "start_firewall_updater"), \
+             patch.object(docker_config, "docker_stream_subprocess") as stream, \
+             patch.object(docker_config, "docker_subprocess") as plain:
+            docker_config.run_container(_run_inst(), "claude-agents:base", ["--output-format", "stream-json"],
+                                        [], interactive=False, print_prompt="q", stream_renderer=renderer)
+        stream.assert_called_once()
+        plain.assert_not_called()
+        self.assertIs(stream.call_args.args[1], renderer)
 
 
 class TestRunContainerCriticalDnsFailure(unittest.TestCase):
@@ -47,6 +91,23 @@ class TestRunContainerCriticalDnsFailure(unittest.TestCase):
         self.assertIn("Critical Anthropic domains", str(ctx.exception))
         updater.assert_not_called()
         run.assert_not_called()
+
+
+class TestDockerStreamSubprocess(unittest.TestCase):
+    """docker_stream_subprocess pipes docker stdout through the renderer; on
+    dry-run it prints the would-be invocation and spawns neither docker nor the
+    renderer (parity with docker_subprocess's no-op)."""
+
+    def test_dry_run_skips_popen_and_renderer(self):
+        renderer = Mock()
+        docker_config.set_dry_run(True)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                docker_config.docker_stream_subprocess(["run", "--rm", "img"], renderer)
+        finally:
+            docker_config.set_dry_run(False)
+        renderer.assert_not_called()
+        self.assertIn("dry-run", out.getvalue())
 
 
 class TestEffortArgs(unittest.TestCase):

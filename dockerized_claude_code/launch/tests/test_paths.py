@@ -159,10 +159,18 @@ class TestPathBuilderLambdas(unittest.TestCase):
             Path("/home/claude/.claude/domains_pending_resolve.yml"),
         )
 
+    def test_instances_dir(self):
+        self.assertEqual(paths.instances_dir(), paths.AGENTS_STATE / "instances")
+
+    def test_quickie_dirs(self):
+        self.assertEqual(paths.quickie_dir(), paths.AGENTS_STATE / "quickie")
+        self.assertEqual(paths.quickie_communal_workspace(), paths.AGENTS_STATE / "quickie" / "communal")
+        self.assertEqual(paths.quickie_state_dir_path("abc"), paths.AGENTS_STATE / "quickie" / "abc")
+
     def test_instance_state_dir_path(self):
         self.assertEqual(
             paths.instance_state_dir_path("poet__draft"),
-            paths.AGENTS_STATE / "poet__draft",
+            paths.AGENTS_STATE / "instances" / "poet__draft",
         )
 
     def test_optional_creds_service_path(self):

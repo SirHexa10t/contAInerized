@@ -17,6 +17,23 @@ isolated Docker container with persistent per-instance state.
 - **CLI shortcuts** — `python3 run.py poet` skips the picker and sets up a
   fresh `poet` instance; `python3 run.py poet__myproject` continues that
   specific instance directly.
+- **`q` — one-shot quick questions** — a separate launcher (`quick_question.py`; run
+  `install_bashrc_alias.sh` to install the `q` alias) for asking a single
+  direct question without the picker or tag form:
+  `q "why do elephants have big ears?"` (quote the whole question). It runs a
+  hidden, fixed-build agent in print mode (`claude -p`): a live `⋯ thinking…`
+  timer runs while it reasons, then the answer streams in as it's generated.
+  (The model's own reasoning *text* isn't shown — current models redact it in
+  headless mode — so the timer is the progress signal during long thinks.) The
+  default uses the `quick` (Sonnet) engine; **`--explain`** answers with a
+  `trivia` agent that draws out connections and related tidbits (Opus), and
+  **`--research`** uses a source-checking research agent (mutually exclusive
+  with `--explain`). Each question's thread is saved under
+  `~/.claude-agents/quickie/`, sharing one `communal/` workspace you can drop
+  files into. **`q --history`** lists past threads (grey timestamp, id, last
+  question; oldest first); **`q --answer <id>`** reprints a thread's saved
+  answer; **`q --resume <id> "follow-up"`** continues one; **`q -h`** prints
+  the tool's own help (a real arg-parser, so flags don't reach `claude`).
 - **Interactive picker** — full-screen TUI with type-to-filter, Del to
   delete an instance, F2 to modify its session name and/or workspace.
 - **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is in
@@ -133,8 +150,9 @@ isolated Docker container with persistent per-instance state.
   tag set.
 - **State auditor** — `python3 -m launch.audit` reports tag-tree faults,
   orphaned state dirs, ghost `instances.toml` entries, bad workspaces,
-  entries referencing unknown tags, missing or empty OAuth files, and
-  instances without a `history.jsonl` trace.
+  entries referencing unknown tags, missing or empty OAuth files, instances
+  without a `history.jsonl` trace, and stray instance dirs still at the old
+  `~/.claude-agents/` root (they belong under `instances/`).
 
 ## Tech Stack & Setup
 
@@ -221,6 +239,32 @@ If either errors out, fix it before proceeding — `run.py` exits early with a
 clear message if `docker` isn't on `$PATH`, but the Python packages will only
 fail at the picker step.
 
+### Shortcut aliases (`ai` and `q`)
+
+Optional, but ergonomic. With the toolchain in place, install the launcher
+aliases into your `~/.bashrc`:
+
+```bash
+bash install_bashrc_alias.sh
+```
+
+It adds `ai` → `run.py` (the interactive launcher) and `q` → `quick_question.py` (the
+one-shot question tool), then prints the `source ~/.bashrc` line to activate
+them. Any alias you already have is left untouched and reported as skipped, so
+it's safe to re-run — or to run after an earlier version that set up only
+`ai`. Once activated:
+
+```bash
+ai                                    # opens the picker
+ai poet                               # new instance of poet, no picker
+q "why do elephants have big ears?"   # one-shot question (quote it)
+q --explain "how do rainbows form?"   # answer + connections & related tidbits (trivia, Opus)
+q --research "latest on <topic>?"     # deeper, source-checked (research agent)
+q --history                           # list past question threads (grey timestamp, id, question)
+q --answer <id>                       # reprint a past thread's answer
+q --resume <id> "and their trunks?"   # continue a thread (id from --history)
+```
+
 ### Workspace location
 
 Every container bind-mounts a host directory at `/workspace`. By default:
@@ -250,6 +294,9 @@ python3 run.py poet__myproject --refresh-installs       # force-retry every opti
 
 (`run.py` has a shebang; `chmod +x run.py` once and you can run `./run.py …`
 directly.)
+
+If you installed the shortcut aliases (see *Shortcut aliases* above), `ai …`
+is equivalent to `python3 run.py …`, and `q "…"` runs the quick-question tool.
 
 On first launch, Claude Code walks you through OAuth onboarding inside the
 container; the resulting `~/.claude-agents/.claude.json` and
@@ -302,8 +349,9 @@ python3 -m launch.audit
 ```
 
 Reports tag-tree faults (malformed `tag.info`, dangling references),
-orphans (state dirs without an agent .md), ghost `instances.toml` entries
-(entry without a state dir), bad workspaces (entry points nowhere),
+orphans (state dirs without an agent .md), stray instance dirs still at the
+`~/.claude-agents/` root (they now live under `instances/`), ghost
+`instances.toml` entries (entry without a state dir), bad workspaces (entry points nowhere),
 entries referencing unknown tags or the wrong axis, missing/empty OAuth
 files, and instances with no `history.jsonl` (the file the picker uses for
 the "Last used" hint). Prints `All clear. N instance(s)…` when nothing is
@@ -391,12 +439,20 @@ syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
   user_extras/                       # hand-edited, non-project-specific user configuration
     firewall_whitelist.txt           # user-managed extra domains for {firewall} (auto-created with a template preamble; comments + one domain per line)
     optional_creds/                  # opt-in passthrough creds; see "Optional Host Mounts" below
-  <agent>__<session>/                # one per instance
-    CLAUDE.md                        # rewritten each launch: source agent .md + active-tag addendums (project summary pointer, privacy rules, credentials notice, {firewall} guidance — composed by tags/addendums.py)
-    settings.json                    # rewritten each launch: settings/settings.json + the instance's policy fragments; mounted READ-ONLY over ~/.claude/settings.json in-container
-    projects/-workspace/memory/MEMORY.md   # Claude Code's auto-memory file, agent-owned (the launcher doesn't touch it)
-    projects/-workspace/...          # claude's per-project state, incl. history.jsonl
+  quickie/                           # the `q` tool's state (segregated from the main instances/)
+    communal/                        # one shared workspace for quick questions — drop files here
+    <gibberish>/                     # one throwaway conversation thread per question
+  instances/                         # all instance state dirs live here (keeps the root uncluttered)
+    <agent>__<session>/              # one per instance
+      CLAUDE.md                      # rewritten each launch: source agent .md + active-tag addendums (project summary pointer, privacy rules, credentials notice, {firewall} guidance — composed by tags/addendums.py)
+      settings.json                  # rewritten each launch: settings/settings.json + the instance's policy fragments; mounted READ-ONLY over ~/.claude/settings.json in-container
+      projects/-workspace/memory/MEMORY.md   # Claude Code's auto-memory file, agent-owned (the launcher doesn't touch it)
+      projects/-workspace/...        # claude's per-project state, incl. history.jsonl
 ```
+
+(A `<agent>__<session>` dir found directly at the `~/.claude-agents/` root is a
+leftover from the pre-`instances/` layout — the launcher only looks in
+`instances/` now, so move it there; `python -m launch.audit` flags any stray.)
 
 (Upgrading from the pre-tags layout? The first launch folds
 `agent_workspace_map.json` + `agent_modes_map.json` into `instances.toml`

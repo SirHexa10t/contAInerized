@@ -75,16 +75,17 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertEqual({o.key for o in engine_rows if o.checked}, {"poet"})
 
     def test_engines_ordered_by_model_then_output_budget(self):
-        # Model first (fable → sonnet → haiku); among the fable tiers,
+        # Model family first (fable → opus → sonnet → haiku); within a family,
         # CLAUDE_CODE_MAX_OUTPUT_TOKENS descending, then name. breakthrough +
-        # researcher set 40000 (→ ahead, name-tiebroken); thinker sits at
-        # 36000 (its premium bump over default); default inherits the 32000
-        # default. golem (haiku) last; poet (sonnet) second-last.
+        # researcher set 40000 (→ ahead, name-tiebroken); thinker sits at 36000
+        # (its premium bump over default); default inherits the 32000 default.
+        # reliable (opus) sorts after the whole fable block; then the sonnet
+        # pair — quick (21600) ahead of poet (18000) — then golem (haiku).
         rows = _tag_form_options(REGISTRY, AgentBuild())
         engine_keys = [o.key for o in rows if o.key in REGISTRY.engines]
         self.assertEqual(
             engine_keys,
-            ["breakthrough", "researcher", "thinker", "default", "poet", "golem"],
+            ["breakthrough", "researcher", "thinker", "default", "reliable", "quick", "poet", "golem"],
         )
 
     def test_non_engine_rows_are_not_grouped(self):

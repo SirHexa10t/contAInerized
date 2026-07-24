@@ -91,6 +91,7 @@ class Instance:
     specialties: tuple[Specialty, ...] = ()
     policies: tuple[Policy, ...] = ()
     invalid_tags: tuple[TagProblem, ...] = ()   # store names that no longer resolve (see resolve_store_build); block start, flagged in the picker
+    state_dir_override: Path | None = None      # when set, the state dir lives HERE instead of under instances/ — quickie parks its throwaway threads under quickie/ (default None = the normal instances/ home)
 
     @property
     def instance(self) -> str:
@@ -99,7 +100,11 @@ class Instance:
 
     @property
     def state_dir(self) -> Path:
-        return instance_state_dir_path(self.instance)
+        """Where this instance's launcher-owned state lives (CLAUDE.md,
+        settings.json, the mounted ~/.claude). Normally `instances/<id>`;
+        `state_dir_override` redirects it (the quickie tool parks its threads
+        under `quickie/` rather than cluttering the main instances/ list)."""
+        return self.state_dir_override or instance_state_dir_path(self.instance)
 
     @property
     def state_md(self) -> Path:
