@@ -18,8 +18,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="q",
         description='Ask one direct question, answered in one shot. Put your prompt in quotes.'
-                    'If you needs to work with files, ask-for/reference them in '
-                    '~/.claude-agents/quickie/communal/',
+                    ' If you needs to work with files, ask-for/reference them in'
+                    ' ~/.claude-agents/quickie/communal/',
     )
     agent = parser.add_mutually_exclusive_group()
     agent.add_argument(
