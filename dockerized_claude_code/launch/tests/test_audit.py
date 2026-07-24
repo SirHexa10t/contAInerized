@@ -10,6 +10,8 @@ exercises the same primitives plus a great deal of file system access.
 Tag validation runs against the real shipped agents/ tree (scan_all), the
 same registry the launcher itself uses."""
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ from pathlib import Path
 
 from launch.audit import (
     _check_json_file, _load_store, _store_entry_issues, _stray_root_instances,
+    build_parser,
 )
 from launch.paths import AGENTS_DIR
 from launch.tags import scan_all
@@ -231,6 +234,28 @@ class TestLoadStore(unittest.TestCase):
         mapping, issues = _load_store(self.path)
         self.assertEqual(mapping, {})
         self.assertEqual(issues, [])
+
+
+class TestAuditCli(unittest.TestCase):
+    """The audit's only CLI surface is -h/--help (it takes no other args); the
+    help text is the module docstring, so it lists every check."""
+
+    def test_help_exits_zero_and_explains_the_checks(self):
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(buf):
+            build_parser().parse_args(["-h"])
+        self.assertEqual(cm.exception.code, 0)
+        out = buf.getvalue()
+        self.assertIn("python -m launch.audit", out)   # prog + how-to-run
+        self.assertIn("bad_tags", out)                 # representative checks from the docstring
+        self.assertIn("oauth", out)
+
+    def test_no_args_parses_clean(self):
+        self.assertEqual(vars(build_parser().parse_args([])), {})
+
+    def test_unknown_flag_is_rejected(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            build_parser().parse_args(["--bogus"])
 
 
 if __name__ == "__main__":

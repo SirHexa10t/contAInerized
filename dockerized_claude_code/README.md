@@ -355,7 +355,7 @@ orphans (state dirs without an agent .md), stray instance dirs still at the
 entries referencing unknown tags or the wrong axis, missing/empty OAuth
 files, and instances with no `history.jsonl` (the file the picker uses for
 the "Last used" hint). Prints `All clear. N instance(s)…` when nothing is
-wrong.
+wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
 
 ## Adding an Agent
 

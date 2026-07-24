@@ -21,6 +21,7 @@ Run from the project root:
   python -m launch.audit
 """
 
+import argparse
 import json
 import tomllib
 from pathlib import Path
@@ -108,7 +109,21 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
     return out
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """The audit CLI. It takes no arguments of its own — the parser exists so
+    `-h`/`--help` prints this module's docstring (the full list of checks and
+    how to run it) instead of the audit silently ignoring the flag. Using
+    `__doc__` as the description keeps that help in one place. Split from main()
+    so the help text is unit-testable without running a scan."""
+    return argparse.ArgumentParser(
+        prog="python -m launch.audit",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+
 def main() -> None:
+    build_parser().parse_args()   # no args of our own; this is what serves -h/--help
     issues: list[Issue] = []
 
     # The tag tree is the taxonomy every entry validates against; if it fails

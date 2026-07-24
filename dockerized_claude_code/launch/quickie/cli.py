@@ -17,8 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
     without dispatching."""
     parser = argparse.ArgumentParser(
         prog="q",
-        description='Ask one direct question, answered in one shot. Quote the whole '
-                    'question:  q "why do elephants have big ears?"',
+        description='Ask one direct question, answered in one shot. Put your prompt in quotes.'
+                    'If you needs to work with files, ask-for/reference them in '
+                    '~/.claude-agents/quickie/communal/',
     )
     agent = parser.add_mutually_exclusive_group()
     agent.add_argument(
