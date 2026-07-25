@@ -107,6 +107,23 @@ elif [[ "$OS" == "macos" ]]; then
     fi
 fi
 
+# Docker version floor — newer is better (the installs above pull the latest),
+# but block clearly on an ancient pre-existing engine that would fail later.
+MIN_DOCKER="20.10"
+if command -v docker >/dev/null 2>&1; then
+    DOCKER_VER="$(docker --version 2>/dev/null | sed -n 's/.*[Vv]ersion \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')"
+    if [[ -n "$DOCKER_VER" ]]; then
+        have_maj="${DOCKER_VER%%.*}"; have_min="${DOCKER_VER#*.}"; have_min="${have_min%%.*}"
+        min_maj="${MIN_DOCKER%%.*}"; min_min="${MIN_DOCKER#*.}"
+        if (( have_maj < min_maj || (have_maj == min_maj && have_min < min_min) )); then
+            err "Docker $DOCKER_VER is below the required $MIN_DOCKER. Update Docker (Desktop: check for updates; Linux: re-run https://get.docker.com), then re-run."
+        fi
+        log "Docker version OK: $DOCKER_VER (>= $MIN_DOCKER floor)"
+    else
+        log "Note: couldn't parse the Docker version; skipping the >= $MIN_DOCKER floor check."
+    fi
+fi
+
 # Wrap-up ----------------------------------------------------------------------
 
 echo

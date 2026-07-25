@@ -50,20 +50,23 @@ CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"             # shared API c
 INSTANCES_FILE = AGENTS_STATE / "instances.toml"                 # per-instance axis store — one table per instance id: {workspace, engine, professions[], specialties[], policies[]} (tags/store.py; retired-format conversions live in tags/migrations.py)
 CACHE_ROOT = AGENTS_STATE / "cache"
 
-# {firewall} cross-launch DNS cache. While fresh (the TTL gate
-# lives with the cache logic in firewall/resolver.py), a host's cached IPs are unioned
-# into its fresh resolution and rescue an outright DNS failure — never a
-# substitute for the live lookup. Rewritten with each launch's fresh answers.
-# The per-instance "still resolving / failed" status file is built by
-# state_domain_resolve_status_path further down.
-RESOLVED_DOMAINS_CACHE_FILE = AGENTS_STATE / "resolved_domains.txt"
+# {firewall} host-side caches — grouped in one dir, host-only (NOT mounted into
+# containers, unlike CACHE_ROOT above). Both are TTL'd and cheaply rebuildable.
+FIREWALL_CACHE_DIR = AGENTS_STATE / "firewall_cache"
 
-# {firewall} cached CDN-provider IPv4 ranges, one file per provider
+# Cross-launch DNS cache. While fresh (the TTL gate lives with the cache logic
+# in firewall/resolver.py), a host's cached IPs are unioned into its fresh
+# resolution and rescue an outright DNS failure — never a substitute for the
+# live lookup. Rewritten with each launch's fresh answers. The per-instance
+# "still resolving / failed" status file is built by
+# state_domain_resolve_status_path further down.
+RESOLVED_DOMAINS_CACHE_FILE = FIREWALL_CACHE_DIR / "resolved_domains.txt"
+
+# Cached CDN-provider IPv4 ranges, one file per provider under FIREWALL_CACHE_DIR
 # (per-file mtime = per-provider freshness; the builder lambda lives in the
-# Path-builders section below). firewall/resolver.py fetches each provider's published
-# range list when its cache goes stale and falls back to a stale file when
-# the fetch fails — no range data is baked into the source.
-CDN_RANGES_CACHE_DIR = AGENTS_STATE / "cdn_ranges"
+# Path-builders section below). firewall/resolver.py fetches each provider's
+# published range list when its cache goes stale and falls back to a stale file
+# when the fetch fails — no range data is baked into the source.
 
 # Everything under user_extras/ is for the user to populate with
 # non-project-specific configuration: extra firewall whitelist entries,
@@ -307,10 +310,9 @@ state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: sta
 # treats absence as "instance never started".
 state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / "history.jsonl"
 
-# Per-provider CDN-range cache file under CDN_RANGES_CACHE_DIR (see the
-# constant's comment further up) — provider names come from firewall/resolver.py's
-# fetcher registry.
-cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: CDN_RANGES_CACHE_DIR / f"{provider}.txt"
+# Per-provider CDN-range cache file under FIREWALL_CACHE_DIR (see its comment
+# further up) — provider names come from firewall/resolver.py's fetcher registry.
+cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: FIREWALL_CACHE_DIR / f"{provider}.txt"
 
 # JSONLs Claude Code writes for the /workspace project — sits at the only
 # subdir Claude Code ever creates under projects/ inside this launcher
@@ -321,7 +323,7 @@ cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: CDN_RA
 state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / "projects" / "-workspace").glob("*.jsonl")
 
 # Instances live under ~/.claude-agents/instances/ — their own subdir keeps the
-# AGENTS_STATE root uncluttered (cache/, cdn_ranges/, user_extras/, the store
+# AGENTS_STATE root uncluttered (cache/, firewall_cache/, user_extras/, the store
 # file, and the OAuth files all sit at the root alongside it). No-arg builder
 # so it reads AGENTS_STATE at call time — tests patch `paths.AGENTS_STATE`, and
 # a constant computed at import wouldn't follow that patch.

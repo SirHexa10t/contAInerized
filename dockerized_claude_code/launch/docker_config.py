@@ -164,10 +164,35 @@ def set_dry_run(value: bool) -> None:
 
 
 def require_docker() -> None:
-    """Exit early with a clean message if `docker` isn't on PATH. Run.py calls this
-    at startup so a missing daemon surfaces as a one-liner instead of a deeper-down
-    docker traceback later."""
-    exit_if_missing(shutil.which("docker"), "docker is required but was not found in PATH.")
+    """Exit early with a clean, verbose message when docker isn't usable — either
+    not on PATH, or installed but the daemon isn't responding. On the daemon
+    case the message carries the client version (and flags the server as
+    unreachable) so a docker problem surfaces with concrete version numbers here
+    at startup, instead of a deeper docker traceback mid-launch. Called on every
+    launch (dry-run included — a faithful projection needs a live daemon just as
+    a real run does)."""
+    exit_if_missing(
+        shutil.which("docker"),
+        "docker is required but was not found in PATH. Install Docker "
+        "(Desktop on macOS, Engine >= 20.10 on Linux; see README) and retry.",
+    )
+    probe = shell_capture("docker", "version")
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout).strip().splitlines()
+        sys.exit(
+            "docker is installed but not responding — the daemon looks down.\n"
+            f"  client version: {_docker_client_version() or 'unknown'}\n"
+            "  server version: unreachable (is Docker Desktop / the daemon running?)\n"
+            f"  docker said: {detail[-1] if detail else 'docker version exited non-zero'}\n"
+            "Start Docker and retry."
+        )
+
+
+def _docker_client_version() -> str | None:
+    """The docker CLIENT version string (readable without a running daemon), or
+    None if it can't be determined."""
+    r = shell_capture("docker", "version", "--format", "{{.Client.Version}}")
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
 def detect_docker_gid() -> str | None:

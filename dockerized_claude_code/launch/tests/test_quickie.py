@@ -162,7 +162,8 @@ class TestCli(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
         self.assertIn("--explain", buf.getvalue())
         self.assertIn("--answer", buf.getvalue())
-        self.assertIn("~/.claude-agents/quickie/communal/", buf.getvalue())   # the files/workspace remark
+        # argparse may hyphen-wrap the path across lines; compare whitespace-stripped.
+        self.assertIn("~/.claude-agents/quickie/communal/", "".join(buf.getvalue().split()))
 
 
 class TestHistoryOneLine(unittest.TestCase):

@@ -10,7 +10,7 @@ Docker-based launcher for pre-made Claude Code agents. Each persona ships a `CLA
 
 - Python 3.12+ host launcher; deps (canonical list: `pyproject.toml` `[project]`): `prompt_toolkit` (picker TUI), `python-dotenv` (`engine.conf` parsing), `rich` (markdown previews); stdlib elsewhere (`tomllib` for every launcher-authored config, `urllib` for CDN-range fetches).
 - Plain **`docker build` / `docker run`** — no compose. Base image (root `Dockerfile`) = debian:trixie-slim + Claude Code + jq/yq/fd/ripgrep + iptables/sudo ({firewall} prerequisites, inert otherwise); per-layer Dockerfiles live in the tag tree.
-- `unittest` suite (~600 tests, <1s: `python3 -m unittest discover -s launch/tests`); `mypy launch/ run.py` (`disallow_untyped_defs` for source; tests exempt) + `ruff check .` both clean. No CI gate.
+- `unittest` suite (~750 tests, <1s: `python3 -m unittest discover -s launch/tests`); `mypy launch/ run.py quick_question.py` (`disallow_untyped_defs` for source; tests exempt) + `ruff check .` both clean. No CI gate.
 
 ### The tag system
 
@@ -31,16 +31,17 @@ Four kinds (closed set — classes in `launch/tags/`), members open (folders und
 run.py                  entry point — staged launch(); --dry-run prints docker invocations instead of executing; --refresh-installs busts install caches
 quick_question.py       entry point for the `q` quickie tool → launch.quickie.main (argparse, `-h` is q's own help not claude's: `q "question"` one-shot [quick/Sonnet], `--explain` [trivia/Opus], `--research` [lean researcher], `--history` lists threads, `--answer <id>` reprints a saved answer, `--resume <id>` continues one; no picker/form; print mode; threads under ~/.claude-agents/quickie/, shared communal/ workspace)
 Dockerfile              base image (built with --network=host: BuildKit-bridge DNS workaround)
+install_dependencies.sh host setup (uv → ~/pydev venv + Docker; Linux/macOS-aware; Docker >=20.10 floor). install_rc_alias.sh writes the `ai`/`q` aliases into ~/.bashrc + ~/.zshrc using the venv python by absolute path
 launch/
   paths.py              every host+container path constant / mount dict / builder lambda — leaf, declarations only
   utils.py              domain-neutral pure helpers — leaf, no disk
   file_access.py        sole disk-I/O chokepoint (atomic writes, sudo-fallback removal, agent_md_index)
   tags/                 the tag system: base (Tag/DockerContribution/parsers/strict rule), 4 kind modules (engine also owns the model-family sort keys; profession also owns optional template.form parsing — ToolkitEntry/load_toolkit), registry (scan_all + Registry.resolve_store_build — non-raising partition of a stored build into valid tags + TagProblem list for stale/typo'd names), lego (AgentBuild), identity (Agent + Instance; invalid_tags + is_startable), store (instances.toml; tomllib in, small emitter out), toolkit_profile (per-profession ~/.claude-agents/<profession>_profile.toml — install toggles, same tomllib-in/small-emitter-out shape as store), migrations (ISOLATED retired-format conversions), addendums (composer + placeholder registry; per-tag copy lives in tag.info [addendum] tables)
   container_env.py      env staging: ContainerEnvKey enum + accumulator + -e/build-arg formatters; toolkit_install_flags (profile-driven toolchains) + install_creds_flags (creds-driven CLIs; disjoint key sets)
-  docker_config.py      plain-docker orchestration: ensure_image, run_container (opt. stream_renderer hook → docker_stream_subprocess pipes stdout for quickie), tag.docker flag emitters, mount accumulator, docker CLI wrappers, dry-run gate
+  docker_config.py      plain-docker orchestration: require_docker (PATH + daemon probe → verbose, version-bearing fail-fast), ensure_image, run_container (opt. stream_renderer hook → docker_stream_subprocess pipes stdout for quickie), tag.docker flag emitters, mount accumulator, docker CLI wrappers, dry-run gate
   tag_handlers.py       apply_tags(instance): stage declarative tag.docker mounts, then dispatch _apply_<name> handlers (code cache prep, dood GID, firewall DNS kickoff); handler-less tags are data-only no-ops
   agents_crud.py        instances.toml CRUD, install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, compute_resume_flag (Instance → --continue|[]; shared by run.py + quickie), picker factories, engine sort keys
-  firewall/             {firewall} subsystem (package like tags/, gui/): __init__ facade (5 entry points) + resolver.py (the coupled coordinator: two-phase DNS cascade, live-fetched CDN widening, burst-batched iptables updater, 5-min drift-heal refresher; criticals widened to Anthropic's registered block + selftest_address() for init-firewall.sh's DNS-free `curl --resolve` probe) + whitelist.py (pure entry expansion) + status.py (agent-visible domains_pending_resolve.yml tracker)
+  firewall/             {firewall} subsystem (package like tags/, gui/): __init__ facade (5 entry points) + resolver.py (the coupled coordinator: two-phase DNS cascade [getent on Linux, socket.getaddrinfo fallback on macOS], live-fetched CDN widening, burst-batched iptables updater, 5-min drift-heal refresher; criticals widened to Anthropic's registered block + selftest_address() for init-firewall.sh's DNS-free `curl --resolve` probe) + whitelist.py (pure entry expansion) + status.py (agent-visible domains_pending_resolve.yml tracker)
   gui/                  the TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py = every form (kind-sectioned tag form, toolkit form, generic checkbox_form) + shared style system (UiClass, stance colors); menu_picker.py = picker + F8 legend + workspace/session prompts + banner + "Edit Toolkits" opener + stale-tag guard (invalid stored tags render red-bg/black-fg on the Cont row and block start — invalid_tags_report explains the fix; F2 re-picks) (imports forms/styles from tag_form, one-way)
   quickie/              the `q` one-shot-question tool — leaf consumer of the core (cli.py = argparse front end [question / --explain / --research / --history / --answer / --resume] → ask.py [lean launch() cousin: QuickieAgent specs QUICK(_quickie, quick/Sonnet) | TRIVIA(_trivia, reliable/Opus, --explain) | RESEARCH(researcher.md + _research.lego, researcher engine, base image, --research); thread under quickie/<gibberish> via Instance.state_dir_override, communal/ workspace, run_container(interactive=False, print_prompt, stream_renderer) stream-json mode; --resume reuses core compute_resume_flag for --continue] + render.py [render_stream: stream-json events → live '⋯ thinking… (Ns)' stderr ticker + streamed stdout answer; reasoning TEXT redacted by current models (display:omitted), so only elapsed time shows] + history.py [--history: grey timestamp + id + last question, ascending; --answer <id>: reprints last answer; via file_access.last_prompt_in_state / last_answer_in_state])
   user_additions.py     optional-creds mounts + first-launch template plants
@@ -48,7 +49,7 @@ launch/
   audit.py              read-only state checker (python -m launch.audit)
   template_code/        pure data: docker_prompts (UI copy), firewall_domains (curated whitelist; CDN ranges fetched live, never baked)
   template_files/       first-launch user-side templates
-  tests/                ~600 tests; test_env_coverage cross-checks tag.docker arg_forwards vs Dockerfile ARGs; test_essential_files validates the real tree via scan_all
+  tests/                ~750 tests; test_env_coverage cross-checks tag.docker arg_forwards vs Dockerfile ARGs; test_essential_files validates the real tree via scan_all
 agents/                 personas (<name>.md + <name>.lego) + the tag tree (engine/ profession/ specialty/ policy/)
 custom_commands/, custom_skills/, settings/, tips/   bundled commands/skills, mounted settings, human notes
 ```
@@ -69,7 +70,7 @@ Entry: `python3 run.py [target] [--dry-run] [--refresh-installs] [...claude-args
 
 Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/home/claude/.claude` (rw) with the generated `settings.json` RO-file-mounted over `~/.claude/settings.json` (agent can't relax its policies); shared OAuth files; `custom_commands|custom_skills|settings/*` (ro); caches → `/home/claude/<rel>` ([code]); tag.docker mounts ({firewall} scripts, {dood} socket).
 
-`{firewall}` pipeline (`firewall/resolver.py`): Phase 1 resolves critical Anthropic hosts synchronously → `WHITELIST_ADDRESSES` (forwarded via the tag's `env_forward`). Phase 2 streams the rest (~140 curated + user whitelist) to an updater daemon gated on the container AND `/var/run/init-firewall.done` (racing the init script once killed launches), applying ≤100-rule bursts via one `docker exec`. A refresher re-resolves every 5 min, additive-only. CDN-provider ranges (cloudflare/fastly/github/cloudfront/google) are fetched live and cached 3 days; `*.host` wildcards widen to all provider blocks. Status file `domains_pending_resolve.yml` sits in the state dir for the agent to classify ConnectionRefused.
+`{firewall}` pipeline (`firewall/resolver.py`): Phase 1 resolves critical Anthropic hosts synchronously → `WHITELIST_ADDRESSES` (forwarded via the tag's `env_forward`). Phase 2 streams the rest (~140 curated + user whitelist) to an updater daemon gated on the container AND `/var/run/init-firewall.done` (racing the init script once killed launches), applying ≤100-rule bursts via one `docker exec`. A refresher re-resolves every 5 min, additive-only. CDN-provider ranges (cloudflare/fastly/github/cloudfront/google) are fetched live and cached 3 days; `*.host` wildcards widen to all provider blocks. Status file `domains_pending_resolve.yml` sits in the state dir for the agent to classify ConnectionRefused. Host-side caches (resolved DNS + per-provider CDN ranges) live under `~/.claude-agents/firewall_cache/` (host-only, TTL'd, rebuilt when stale).
 
 ### Conventions and Patterns
 
@@ -88,127 +89,160 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 - `install_latest_md` / `install_settings` overwrite their state-dir files every launch — in-container edits are silently discarded (intentional: launcher owns them).
 - `--network=host` on builds — permanent workaround for BuildKit bridge DNS issues.
 - Dry-run only: an intermittent `Exception in thread phase2-cascade` line can print at exit (daemon DNS thread reaped at interpreter shutdown; real runs block on the container so it can't occur).
+- macOS is theoretically supported but UNVERIFIED on real hardware. Host code avoids Linux-only deps (getent→`socket.getaddrinfo` fallback in `firewall/resolver.py`; zsh `~/.zshrc` aliasing; Docker Desktop version floor), but two things are untested/unsupported: `docker build --network=host` under Docker Desktop, and `{dood}` — which hard-fails on macOS (`_apply_dood` needs a host `docker` group, absent under Docker Desktop — `tag_handlers.py`).
 
 ### Current State
 
-- The tags rewrite (design: `refactoring-replan.md`) is COMPLETE and launch-verified: tree migration, `.lego` files, code flip, plain-docker flip with the auto/firewall split, policy RO-mounts, TOML store with isolated migrations, terminology sweep, docs refresh. Replan §14/§15 are all resolved (see the doc's status banner); `refactoring_plan.md` + `TODO.txt` are older idea archives.
-- First launch on a pre-rewrite state dir auto-folds the legacy `agent_workspace_map.json` + `agent_modes_map.json` into `instances.toml` (renaming them `*.pre-rewrite.bak`); legacy `auto` translates to `auto`+`firewall` (it used to bundle the firewall).
-- `ISSUES.md` is the live tracker (currently: no open decisions).
+- Two automatic first-launch migrations a fresh session should expect: (1) a pre-rewrite state dir folds legacy `agent_workspace_map.json` + `agent_modes_map.json` into `instances.toml` (backed up as `*.pre-rewrite.bak`; legacy `auto` → `auto`+`firewall`); (2) the first `{firewall}` launch removes the old root-level `resolved_domains.txt` + `cdn_ranges/` and rebuilds those caches under `firewall_cache/` (`_remove_legacy_cache_locations`).
+- Archive docs, NOT live plans: `refactoring-replan.md`, `refactoring_plan.md`, `TODO.txt` describe the completed, launch-verified tags rewrite. `ISSUES.md` is the live tracker.
 
 ### File Manifest
 
 <!-- manifest:begin -->
+1784936767 TODO.txt
+1784936547 launch/audit.py
+1784936508 launch/tests/test_firewall.py
+1784936485 launch/tests/test_paths.py
+1784936466 launch/firewall/resolver.py
+1784936399 launch/paths.py
+1784933818 launch/tests/test_docker_config.py
+1784933775 README.md
+1784933766 quick_question.py
+1784933758 install_rc_alias.sh
+1784933746 launch/docker_config.py
+1784927226 .claude_dev_guidelines
+1784927161 launch/tests/test_quickie.py
+1784927028 install_dependencies.sh
+1784875605 launch/quickie/cli.py
+1784872950 launch/tests/test_audit.py
+1784870833 launch/quickie/ask.py
+1784869416 launch/tests/test_file_access.py
+1784869252 launch/tests/test_tag_form.py
+1784869243 launch/tests/test_essential_files.py
+1784869212 launch/quickie/history.py
+1784869049 launch/file_access.py
+1784869029 agents/_quickie.lego
+1784868973 agents/_research.lego
+1784868968 agents/_trivia.lego
+1784868964 agents/_trivia.md
+1784868954 agents/engine/quick/engine.conf
+1784868949 agents/engine/quick/tag.info
+1784867887 launch/quickie/render.py
+1784863523 launch/quickie/__init__.py
+1784863437 run.py
+1784863426 launch/agents_crud.py
+1784858363 agents/engine/reliable/engine.conf
+1784858358 agents/engine/reliable/tag.info
+1784855600 agents/_quickie.md
+1784855541 launch/tags/identity.py
+1784852256 pyproject.toml
+1784833065 launch/benchmark/bench_firewall_updater.py
+1784833065 launch/template_code/firewall_domains.py
+1784833045 launch/firewall/whitelist.py
+1784832974 launch/firewall/status.py
+1784832821 launch/firewall/__init__.py
+1784832821 launch/tag_handlers.py
+1784766788 launch/gui/menu_picker.py
+1784766752 launch/claude_code_config.py
+1784766752 launch/gui/__init__.py
+1784762260 launch/tests/test_tags.py
+1784762199 launch/tests/test_agents_crud.py
+1784762164 launch/gui/tag_form.py
+1784762133 agents/bug-investigator.lego
+1784762133 agents/policy/no-sudo/tag.info
+1784762133 agents/policy/vcs-safe/tag.info
+1784762133 agents/project-starter.lego
+1784762133 agents/refactorer.lego
+1784762133 launch/tags/policy.py
+1784762133 launch/tags/registry.py
+1784760100 agents/feature-identifier.lego
+1784760100 agents/medical-investigator.lego
+1784758465 launch/tests/test_menu_picker.py
+1784758385 launch/tests/test_container_env.py
+1784758385 launch/tests/test_env_coverage.py
+1784758385 launch/tests/test_toolkit_profile.py
+1784758099 agents/profession/code/template.form
+1784758078 launch/container_env.py
+1784758072 launch/tags/toolkit_profile.py
+1784758048 launch/tags/profession.py
+1784757837 launch/tags/__init__.py
+1784757768 agents/profession/code/webdev/tag.info
+1784757768 launch/tags/base.py
+1784757768 launch/tags/migrations.py
+1784754130 agents/profession/code/Dockerfile
+1784753834 agents/researcher.lego
+1784594233 agents/specialty/firewall/init-firewall.sh
+1784593902 Dockerfile
+1784593902 agents/specialty/firewall/firewall-entrypoint.sh
+1784593902 agents/specialty/firewall/tag.docker
+1784546113 agents/profession/code/tag.info
+1784427571 agents/policy/plan-first/tag.info
+1784427571 launch/tests/test_claude_code_config.py
+1784319171 agents/specialty/read-only/tag.info
+1784319122 launch/tags/specialty.py
+1784317587 agents/engine/researcher/engine.conf
+1784317333 agents/engine/thinker/engine.conf
+1784316802 agents/engine/researcher/tag.info
+1784316504 launch/tags/engine.py
+1784313978 agents/engine/poet/tag.info
+1784313978 agents/policy/web-research/tag.info
+1784313978 agents/specialty/dood/tag.info
+1784313637 agents/engine/breakthrough/tag.info
+1784313637 agents/engine/default/tag.info
+1784313637 agents/engine/golem/tag.info
+1784313637 agents/engine/thinker/tag.info
+1784313637 agents/policy/_read-only/policy.json
+1784313637 agents/policy/free-bash/policy.json
+1784313637 agents/policy/free-bash/tag.info
+1784313637 agents/policy/no-net/policy.json
+1784313637 agents/policy/no-net/tag.info
+1784313637 agents/policy/plan-first/policy.json
+1784313637 agents/policy/vcs-safe/policy.json
+1784313637 agents/specialty/auto/tag.info
+1784313637 agents/specialty/firewall/tag.info
+1784313637 launch/tags/addendums.py
+1784304099 custom_commands/refactor.md
 1784303936 .claude/commands/test-project.md
-1784303936 install_dependencies.sh
 1784303936 tips/caching_docker.md
-1784303912 .claude_dev_guidelines
-1784303749 README.md
-1784303570 launch/menu_picker.py
-1784303570 launch/network.py
-1784303549 launch/paths.py
-1784303549 launch/template_code/firewall_domains.py
 1784303549 launch/utils.py
-1784303549 pyproject.toml
-1784303107 Dockerfile
 1784303107 agents/profession/code/_dood/tag.docker
 1784303107 agents/profession/code/tag.docker
-1784303107 agents/profession/code/web/tag.docker
-1784303107 agents/specialty/auto/tag.info
-1784303107 agents/specialty/firewall/firewall-entrypoint.sh
-1784303107 agents/specialty/firewall/init-firewall.sh
-1784303107 agents/specialty/firewall/tag.docker
-1784303107 agents/specialty/firewall/tag.info
-1784303107 launch/agents_crud.py
-1784303107 launch/audit.py
-1784303107 launch/claude_code_config.py
-1784303107 launch/container_env.py
-1784303107 launch/docker_config.py
-1784303107 launch/file_access.py
-1784303107 launch/tag_handlers.py
-1784303107 launch/tags/__init__.py
-1784303107 launch/tags/addendums.py
-1784303107 launch/tags/base.py
-1784303107 launch/tags/identity.py
-1784303107 launch/tags/migrations.py
-1784303107 launch/tags/registry.py
+1784303107 agents/profession/code/webdev/tag.docker
 1784303107 launch/tags/store.py
 1784303107 launch/template_code/docker_prompts.py
-1784303107 launch/tests/test_agents_crud.py
-1784303107 launch/tests/test_audit.py
 1784303107 launch/tests/test_cache.py
-1784303107 launch/tests/test_container_env.py
-1784303107 launch/tests/test_docker_config.py
-1784303107 launch/tests/test_env_coverage.py
-1784303107 launch/tests/test_essential_files.py
-1784303107 launch/tests/test_paths.py
 1784303107 launch/tests/test_run.py
 1784303107 launch/tests/test_tag_handlers.py
-1784303107 launch/tests/test_tags.py
 1784303107 launch/user_additions.py
-1784303107 run.py
-1784303106 agents/bug-investigator.lego
 1784303106 agents/bug-investigator.md
 1784303106 agents/engine/breakthrough/engine.conf
-1784303106 agents/engine/breakthrough/tag.info
 1784303106 agents/engine/default/engine.conf
-1784303106 agents/engine/default/tag.info
 1784303106 agents/engine/golem/engine.conf
-1784303106 agents/engine/golem/tag.info
 1784303106 agents/engine/poet/engine.conf
-1784303106 agents/engine/poet/tag.info
-1784303106 agents/engine/researcher/engine.conf
-1784303106 agents/engine/researcher/tag.info
-1784303106 agents/engine/thinker/engine.conf
-1784303106 agents/engine/thinker/tag.info
-1784303106 agents/feature-identifier.lego
 1784303106 agents/feature-identifier.md
 1784303106 agents/golem.lego
 1784303106 agents/mathematician.lego
 1784303106 agents/mathematician.md
-1784303106 agents/medical-investigator.lego
 1784303106 agents/medical-investigator.md
 1784303106 agents/poet.lego
 1784303106 agents/policy/no-sudo/policy.json
-1784303106 agents/policy/no-sudo/tag.info
 1784303106 agents/policy/web-research/policy.json
-1784303106 agents/policy/web-research/tag.info
-1784303106 agents/profession/code/Dockerfile
 1784303106 agents/profession/code/_dood/Dockerfile
-1784303106 agents/profession/code/tag.info
-1784303106 agents/profession/code/web/Dockerfile
-1784303106 agents/profession/code/web/tag.info
-1784303106 agents/project-starter.lego
+1784303106 agents/profession/code/webdev/Dockerfile
 1784303106 agents/project-starter.md
-1784303106 agents/refactorer.lego
 1784303106 agents/refactorer.md
-1784303106 agents/researcher.lego
 1784303106 agents/researcher.md
 1784303106 agents/specialty/combos.info
-1784303106 agents/specialty/dood/tag.info
 1784303106 agents/strict-reviewer.lego
 1784303106 agents/strict-reviewer.md
-1784303106 launch/tests/test_claude_code_config.py
-1784303106 launch/tests/test_file_access.py
-1784303106 launch/tests/test_menu_picker.py
 1784303106 launch/tests/test_utils.py
-1784244362 refactoring-replan.md
-1784244259 launch/tags/policy.py
-1784244257 launch/tags/specialty.py
-1784244254 launch/tags/profession.py
 1784240247 launch/tags/lego.py
-1784240084 launch/tags/engine.py
-1784216887 TODO.txt
-1784016803 ISSUES.md
-1784012135 launch/benchmark/bench_firewall_updater.py
 1784004163 custom_commands/file-message.md
-1783906398 launch/tests/test_network.py
 1783902718 launch/template_files/firewall_whitelist.txt
 1783902611 tips/evaluate_addresses.sh
 1783781503 agents/poet.md
 1783681586 launch/tests/test_summary_helper.py
 1783680790 launch/benchmark/bench_md_cache_vs_read.py
-1780519763 refactoring_plan.md
-1779986699 custom_commands/refactor.md
 1779909388 launch/tests/test_user_additions.py
 1779907129 launch/template_files/optional_creds_readme.txt
 1779889053 custom_commands/unspaghettify.md
@@ -232,7 +266,6 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 1779834868 tips/token_usage_stats.md
 1778085365 settings/keybindings.json
 1778052996 settings/bashrc.sh
-1777429255 install_bashrc_alias.sh
 1776636360 settings/statusline.sh
 1776566569 settings/settings.json
 1774196909 .dockerignore

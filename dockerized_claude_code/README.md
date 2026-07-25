@@ -18,7 +18,7 @@ isolated Docker container with persistent per-instance state.
   fresh `poet` instance; `python3 run.py poet__myproject` continues that
   specific instance directly.
 - **`q` — one-shot quick questions** — a separate launcher (`quick_question.py`; run
-  `install_bashrc_alias.sh` to install the `q` alias) for asking a single
+  `install_rc_alias.sh` to install the `q` alias) for asking a single
   direct question without the picker or tag form:
   `q "why do elephants have big ears?"` (quote the whole question). It runs a
   hidden, fixed-build agent in print mode (`claude -p`): a live `⋯ thinking…`
@@ -158,7 +158,9 @@ isolated Docker container with persistent per-instance state.
 
 Host requirements:
 
-- **Docker Engine** (plain `docker build` / `docker run` — no compose)
+- **Docker Engine ≥ 20.10** (plain `docker build` / `docker run` — no compose;
+  the install script enforces the floor, and newer is better). On macOS this is
+  Docker Desktop (which bundles a recent engine).
 - **Python 3.12+**
 - Three Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
   (`engine.conf` parsing), **`rich`** (markdown rendering for agent previews)
@@ -241,18 +243,20 @@ fail at the picker step.
 
 ### Shortcut aliases (`ai` and `q`)
 
-Optional, but ergonomic. With the toolchain in place, install the launcher
-aliases into your `~/.bashrc`:
+Optional, but ergonomic. With the toolchain in place (`install_dependencies.sh`
+must have created the `~/pydev` venv first), install the launcher aliases:
 
 ```bash
-bash install_bashrc_alias.sh
+bash install_rc_alias.sh
 ```
 
-It adds `ai` → `run.py` (the interactive launcher) and `q` → `quick_question.py` (the
-one-shot question tool), then prints the `source ~/.bashrc` line to activate
-them. Any alias you already have is left untouched and reported as skipped, so
-it's safe to re-run — or to run after an earlier version that set up only
-`ai`. Once activated:
+It adds `ai` → `run.py` (the interactive launcher) and `q` → `quick_question.py`
+(the one-shot question tool), writing them into **every shell rc that exists
+among `~/.bashrc` and `~/.zshrc`** (macOS defaults to zsh; if neither exists it
+creates the one for your login shell). Both aliases call the `~/pydev` venv
+python by absolute path, so they work with no venv activation. Any alias you
+already have is left untouched and reported as skipped, so it's safe to re-run.
+Once activated (open a new shell, or `source` the rc it printed):
 
 ```bash
 ai                                    # opens the picker
@@ -436,6 +440,7 @@ syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
   .credentials.json                  # shared API credentials
   instances.toml                     # per-instance tag selections + workspace — one table per <agent>__<session> (launcher-owned; the picker's F2 form is the supported editor)
   cache/                             # shared toolchain caches (cargo, npm, …); mounted into [code] agents only
+  firewall_cache/                    # {firewall} host-side caches — resolved DNS + per-provider CDN ranges (host-only, TTL'd, rebuilt when stale)
   user_extras/                       # hand-edited, non-project-specific user configuration
     firewall_whitelist.txt           # user-managed extra domains for {firewall} (auto-created with a template preamble; comments + one domain per line)
     optional_creds/                  # opt-in passthrough creds; see "Optional Host Mounts" below
@@ -561,6 +566,7 @@ from the failure log so the warning clears once a retry actually works.
 
 ```
 run.py                               # entry point + staged launch() orchestrator (scan tags → migrate store → resolve → resume? → persist → apply tags → setup → build → run)
+quick_question.py                    # entry point for the `q` quickie tool → launch.quickie.main (argparse; --explain/--research/--history/--answer/--resume; print-mode one-shot)
 Dockerfile                           # base image — Claude Code + uv + ripgrep + iptables/sudo ({firewall} prerequisites); built with `network: host` to dodge BuildKit DNS issues
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), bind-mount dicts (DOCKER_BASE_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
@@ -574,28 +580,30 @@ launch/
     lego.py                          #   AgentBuild + `.lego` loading (an agent's default tag selections)
     identity.py                      #   Agent (pickable) + Instance (fully-resolved launch: chain, build_steps, docker_contributions, conf, claude_args, unmet_wants)
     store.py                         #   instances.toml load/save (stdlib tomllib in; small TOML emitter out)
+    toolkit_profile.py               #   per-profession <profession>_profile.toml — "Edit Toolkits" install toggles ([code]); same tomllib-in / emitter-out shape as store
     migrations.py                    #   ISOLATED one-shot conversions from retired on-disk formats (legacy two-map JSON → instances.toml)
     addendums.py                     #   chain-keyed CLAUDE.md addendum copy + compose()
   container_env.py                   # env staging — ContainerEnvKey enum, the staged-value accumulator, `-e`/build-arg formatters, set_container_env orchestrator.
   docker_config.py                   # plain-docker orchestration — ensure_image (base + per-layer `docker build`), run_container (`docker run` assembly), tag.docker flag emitters (build_arg_flags / env_forward_flags / entrypoint_flags), bind-mount accumulator, docker CLI wrappers, dry-run gate, prompt_install_failures.
   tag_handlers.py                    # apply_tags(instance): stages declarative tag.docker mounts, then dispatches per-tag `_apply_<name>` handlers (code cache prep/prune, dood GID staging, firewall DNS kickoff). Tags without a handler are data-only no-ops.
-  firewall/                          # {firewall} subsystem (package): __init__ facade + resolver.py (two-phase DNS resolution — sync Phase 1 → streaming Phase 2 via docker exec iptables -I, CDN widening, cross-launch resolved-IP cache) + whitelist.py (entry expansion) + status.py (agent-visible domains_pending_resolve.yml). Curated domain list lives in template_code/firewall_domains.py.
+  firewall/                          # {firewall} subsystem (package): __init__ facade + resolver.py (two-phase DNS resolution — sync Phase 1 → streaming Phase 2 via docker exec iptables -I, CDN widening, cross-launch resolved-IP cache; getent on Linux, socket.getaddrinfo fallback where absent e.g. macOS) + whitelist.py (entry expansion) + status.py (agent-visible domains_pending_resolve.yml). Host caches live in ~/.claude-agents/firewall_cache/; curated domain list in template_code/firewall_domains.py.
   agents_crud.py                     # instance-state CRUD — instances.toml writers (persist/delete/modify), install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker-entry factories, engine sort keys.
   user_additions.py                  # optional_creds mounts + plant_user_extras (readme always; firewall_whitelist.txt under {firewall}).
-  menu_picker.py                     # prompt_toolkit picker UI + the tag checkbox form (requires-cascade, combos + wants warnings) + F8 legend + workspace/session prompts + launch banner.
+  gui/                               # TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py (kind-sectioned tag form + toolkit form + generic checkbox_form + shared style system) + menu_picker.py (picker + F8 legend + workspace/session prompts + banner + "Edit Toolkits" opener + stale-tag guard).
+  quickie/                           # the `q` one-shot-question tool — leaf consumer of the core: cli.py (argparse dispatch) → ask.py (fixed-build Instance under quickie/<gibberish>, stream-json run) + render.py (thinking ticker + streamed answer) + history.py (--history listing / --answer replay). quick_question.py at the repo root is its thin entry.
   claude_code_config.py              # Claude-Code-side UX — build_status_line(instance) + set_terminal_title(name). Leaf-shaped.
   audit.py                           # state-correctness checker (run as `python -m launch.audit`).
   template_code/                     # user-facing copy / data. Pure data, no logic.
     docker_prompts.py                #   docker-side strings — build-step progress, {firewall} waiting line, install-failure prompt copy
     firewall_domains.py              #   the curated built-in whitelist domains (~135 entries)
   template_files/                    # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/.
-  tests/                             # unittest suite — ~600 tests, <1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
+  tests/                             # unittest suite — ~750 tests, <1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
 agents/                              # agent definitions + the tag tree
   <name>.md, <name>.lego             #   persona + default tag selections, per agent
   engine/<name>/                     #   (engine) members — tag.info + engine.conf (nested folders overlay parent conf)
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
-  specialty/{auto,dood,firewall}/    #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
-  policy/{web-research,no-sudo}/     #   <policy> members — tag.info + policy.json settings fragment
+  specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
+  policy/{web-research,no-sudo,plan-first,…}/ #   <policy> members — tag.info + policy.json settings fragment (also no-net, vcs-safe, free-bash, hidden _read-only)
 custom_commands/                     # launcher-bundled slash commands (mounted into every container)
 custom_skills/                       # launcher-bundled skills (mounted into every container)
 .claude/commands/                    # workspace-local slash commands for THIS project — auto-discovered when launched here; no mount.

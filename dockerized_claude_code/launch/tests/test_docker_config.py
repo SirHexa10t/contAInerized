@@ -518,6 +518,37 @@ class TestEnsureImage(unittest.TestCase):
             _container_env.update(snapshot)
 
 
+class TestRequireDocker(unittest.TestCase):
+    """require_docker gates the launch: exits (verbosely, with the client
+    version) when docker is absent or the daemon is unreachable, else returns."""
+
+    def test_missing_from_path_exits(self):
+        with patch.object(docker_config.shutil, "which", return_value=None), \
+             self.assertRaises(SystemExit) as cm:
+            docker_config.require_docker()
+        self.assertIn("PATH", str(cm.exception))
+
+    def test_daemon_down_exits_with_client_version(self):
+        def fake_capture(*cmd, **kw):
+            if cmd == ("docker", "version"):   # the daemon probe
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr="Cannot connect to the Docker daemon.")
+            return SimpleNamespace(returncode=0, stdout="24.0.7\n", stderr="")   # --format client
+        with patch.object(docker_config.shutil, "which", return_value="/usr/bin/docker"), \
+             patch.object(docker_config, "shell_capture", side_effect=fake_capture), \
+             self.assertRaises(SystemExit) as cm:
+            docker_config.require_docker()
+        msg = str(cm.exception)
+        self.assertIn("24.0.7", msg)            # concrete version number in the message
+        self.assertIn("not responding", msg)
+
+    def test_healthy_docker_returns(self):
+        with patch.object(docker_config.shutil, "which", return_value="/usr/bin/docker"), \
+             patch.object(docker_config, "shell_capture",
+                          return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+            docker_config.require_docker()      # no raise
+
+
 if __name__ == "__main__":
     unittest.main()
 

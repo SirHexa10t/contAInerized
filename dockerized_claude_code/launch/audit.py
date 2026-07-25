@@ -46,7 +46,7 @@ def _stray_root_instances(state_root: Path) -> list[Issue]:
     `<agent>__<session>` dir left at the root is silently ignored (its history
     and tags are invisible). Report each so the user relocates it. The
     `SESSION_SEP in name` filter is the same one list_all_instances uses, so
-    the sibling root dirs (cache/, cdn_ranges/, user_extras/, instances/
+    the sibling root dirs (cache/, firewall_cache/, user_extras/, instances/
     itself) are naturally skipped."""
     return [("stray", d.name, "instance dir at the ~/.claude-agents/ root — move it into instances/")
             for d in sorted(iter_subdirs(state_root), key=lambda p: p.name)

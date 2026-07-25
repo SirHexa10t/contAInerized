@@ -40,8 +40,8 @@ the per-instance state dir (bind-mounted into the container at
 the Firewall addendum points the agent here for "I hit a connection refused"
 classification. Rewritten atomically as the picture changes.
 
-Cross-launch DNS cache: RESOLVED_DOMAINS_CACHE_FILE (at the AGENTS_STATE
-root). The cache never REPLACES a lookup — every host gets fresh DNS every
+Cross-launch DNS cache: RESOLVED_DOMAINS_CACHE_FILE (in firewall_cache/ under
+AGENTS_STATE). The cache never REPLACES a lookup — every host gets fresh DNS every
 launch (a cached answer can go stale the moment the user's VPN exit or the
 CDN's steering changes, and a relaunch must pick up the new truth). While
 fresh (mtime gated by is_file_recent in utils) it contributes two things:
@@ -124,6 +124,8 @@ import json
 import os
 import queue
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -134,10 +136,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from ..file_access import (
-    is_file_recent, parse_lines, path_exists, user_firewall_whitelist_lines,
-    write_text,
+    force_remove, is_file_recent, parse_lines, path_exists,
+    user_firewall_whitelist_lines, write_text,
 )
-from ..paths import RESOLVED_DOMAINS_CACHE_FILE, cdn_ranges_cache_path
+from ..paths import AGENTS_STATE, RESOLVED_DOMAINS_CACHE_FILE, cdn_ranges_cache_path
 from .status import _status
 from .whitelist import (
     HostnameEntry, _IP_OR_CIDR_RE, _expand_whitelist, _index_by_host,
@@ -194,8 +196,8 @@ _RESOLVE_TIMEOUT_STAGES = (3, 5, 8, 13, 21)
 _RESOLVE_PARALLELISM = (os.cpu_count() or 1) * 8
 
 # Shared TTL for both cross-launch caches: the resolved-domains file
-# (RESOLVED_DOMAINS_CACHE_FILE) and the per-provider CDN-range files
-# (CDN_RANGES_CACHE_DIR). Three days is safe on both fronts because neither
+# (RESOLVED_DOMAINS_CACHE_FILE) and the per-provider CDN-range files, both in
+# firewall_cache/. Three days is safe on both fronts because neither
 # cache ever substitutes for live data: resolutions always run fresh DNS
 # (cached IPs only union in and rescue failures — stale entries can only ADD
 # rules, never mask a new address), and provider ranges change on the order
@@ -221,34 +223,58 @@ _resolution_cache: dict[str, list[str]] = {}
 _fresh_resolutions: dict[str, list[str]] = {}
 
 
+# `getent` is glibc-only; on hosts without it (notably macOS) fall back to the
+# stdlib resolver. Detected once — it's a static property of the host.
+_HAVE_GETENT = shutil.which("getent") is not None
+
+
 def _resolve_a_records(host: str, timeout: float) -> list[str]:
-    """Resolve `host` to its IPv4 A records via `getent ahostsv4` (the host's
-    resolver chain), ALWAYS querying live DNS — the cross-launch cache never
-    substitutes for a lookup. On success, returns
-    the fresh IPs unioned with the cached ones (host resolver and container
-    resolver can disagree; rules for both answers keep either path open). On
-    timeout / NXDOMAIN / IPv6-only, falls back to the cached IPs — [] only
-    when the cache has nothing either, which lets _cascade retry. Fresh
-    answers are recorded in _fresh_resolutions for the end-of-phase cache
-    save. subprocess + timeout gives cleaner cancellation than
-    socket.getaddrinfo, which has no kwarg timeout. Output tokens are
-    validated against _IPV4_RE — resolver output is the one
-    externally-controlled string in this pipeline, and everything downstream
-    (WHITELIST_ADDRESSES, the batched `sh -c` iptables script) must only
-    ever see well-formed addresses."""
+    """Resolve `host` to its IPv4 A records, ALWAYS querying live DNS — the
+    cross-launch cache never substitutes for a lookup. On success, returns the
+    fresh IPs unioned with the cached ones (host resolver and container resolver
+    can disagree; rules for both answers keep either path open) and records the
+    fresh answer in _fresh_resolutions for the end-of-phase cache save. On
+    timeout / NXDOMAIN / IPv6-only / lookup error, falls back to the cached IPs
+    — [] only when the cache has nothing either, which lets _cascade retry.
+
+    Linux resolves via `getent ahostsv4` (subprocess with a real timeout —
+    cleaner cancellation than socket.getaddrinfo, which has no kwarg timeout).
+    Hosts without getent (macOS) fall back to socket.getaddrinfo, whose wait is
+    bounded by the OS resolver. Either way, tokens are validated against
+    _IPV4_RE — resolver output is the one externally-controlled string in this
+    pipeline, and everything downstream (WHITELIST_ADDRESSES, the batched
+    `sh -c` iptables script) must only ever see well-formed addresses."""
     cached = _resolution_cache.get(host, [])
-    try:
-        r = shell_capture("getent", "ahostsv4", host, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return list(cached)
-    if r.returncode != 0:
-        return list(cached)
-    tokens = {line.split()[0] for line in r.stdout.splitlines() if line.strip()}
-    fresh = sorted(t for t in tokens if _IPV4_RE.match(t))
+    fresh = _getent_a_records(host, timeout) if _HAVE_GETENT else _socket_a_records(host)
     if not fresh:
         return list(cached)
     _fresh_resolutions[host] = fresh
     return sorted({*fresh, *cached})
+
+
+def _getent_a_records(host: str, timeout: float) -> list[str]:
+    """Fresh IPv4 A records via `getent ahostsv4` (Linux); [] on timeout,
+    non-zero exit, or no A record. Tokens validated against _IPV4_RE."""
+    try:
+        r = shell_capture("getent", "ahostsv4", host, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return []
+    if r.returncode != 0:
+        return []
+    tokens = {line.split()[0] for line in r.stdout.splitlines() if line.strip()}
+    return sorted(t for t in tokens if _IPV4_RE.match(t))
+
+
+def _socket_a_records(host: str) -> list[str]:
+    """Fresh IPv4 A records via socket.getaddrinfo — the cross-platform fallback
+    for hosts without `getent` (macOS). No kwarg timeout; the wait is bounded by
+    the OS resolver. Tokens validated against _IPV4_RE."""
+    try:
+        infos = socket.getaddrinfo(host, None, family=socket.AF_INET)
+    except OSError:
+        return []
+    tokens = {str(info[4][0]) for info in infos}   # sockaddr[0] is the IP; str() also satisfies the type checker
+    return sorted(t for t in tokens if _IPV4_RE.match(t))
 
 
 def _load_resolution_cache() -> None:
@@ -361,7 +387,7 @@ def _cascade(hosts: Iterable[str], on_resolved: Callable[[str, list[str]], None]
 #
 # Per-resolution progress lands on the agent-visible status surface — see the
 # `_WhitelistResolutionStatus` section below. Cross-launch DNS results land
-# in RESOLVED_DOMAINS_CACHE_FILE at AGENTS_STATE root (host-side, not mounted).
+# in RESOLVED_DOMAINS_CACHE_FILE under firewall_cache/ (host-side, not mounted).
 #
 # Security model: the host-side `docker exec` route bypasses the container's
 # sudoers (claude can't sudo iptables, but the launcher running outside the
@@ -413,7 +439,7 @@ _IPV4_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 # host behind a stale pin.
 #
 # The blocks come from each provider's own published range list, fetched over
-# HTTPS on the host and cached per provider under CDN_RANGES_CACHE_DIR
+# HTTPS on the host and cached per provider under FIREWALL_CACHE_DIR
 # (per-file mtime = per-provider freshness, _CACHE_TTL_SECONDS). Per launch,
 # each provider resolves through a graceful chain: fresh cache → live fetch
 # (saved back) → stale cache (with a warning) → provider skipped for this
@@ -842,6 +868,16 @@ def _phase2_worker(rest_hostnames: list[HostnameEntry]) -> None:
     q.put(_phase2_done)
 
 
+def _remove_legacy_cache_locations() -> None:
+    """One-time tidy-up of the pre-firewall_cache/ layout: the loose
+    resolved_domains.txt at the AGENTS_STATE root and the old cdn_ranges/ dir.
+    Both now live under firewall_cache/; these are stale caches, rebuilt at the
+    new paths this run. force_remove is a silent no-op once they're gone, so
+    after the first post-upgrade launch this costs only two stats."""
+    force_remove(AGENTS_STATE / "resolved_domains.txt", name="pre-firewall_cache DNS cache")
+    force_remove(AGENTS_STATE / "cdn_ranges", name="pre-firewall_cache CDN-range cache")
+
+
 def start_whitelist_resolution(state_dir: Path) -> None:
     """Reset the agent-visible status surface to a clean 'resolving' state,
     then fire Phase 1 (critical Anthropic — synchronous from the caller's
@@ -863,6 +899,7 @@ def start_whitelist_resolution(state_dir: Path) -> None:
     if _phase1_future is not None:
         return   # idempotent
 
+    _remove_legacy_cache_locations()   # one-time tidy of the pre-firewall_cache/ layout
     _selftest_addr = None
     _status.init(state_dir)
     _load_resolution_cache()

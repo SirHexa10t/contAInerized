@@ -14,6 +14,7 @@ import contextlib
 import io
 import ipaddress
 import queue
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -484,6 +485,29 @@ class TestResolutionCacheRoundtrip(unittest.TestCase):
         self.assertEqual(resolver._resolution_cache, {})
 
 
+class TestLegacyCacheCleanup(unittest.TestCase):
+    """_remove_legacy_cache_locations deletes the pre-firewall_cache/ layout
+    (root resolved_domains.txt + cdn_ranges/ dir); a silent no-op when absent."""
+
+    def test_removes_old_file_and_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "resolved_domains.txt").write_text("1.2.3.4\n")
+            (root / "cdn_ranges").mkdir()
+            (root / "cdn_ranges" / "cloudflare.txt").write_text("1.1.1.0/24\n")
+            with patch.object(resolver, "AGENTS_STATE", root), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                resolver._remove_legacy_cache_locations()
+            self.assertFalse((root / "resolved_domains.txt").exists())
+            self.assertFalse((root / "cdn_ranges").exists())
+
+    def test_noop_when_already_absent(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(resolver, "AGENTS_STATE", Path(d)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            resolver._remove_legacy_cache_locations()   # must not raise
+
+
 class TestResolveARecords(unittest.TestCase):
     """Fresh DNS is mandatory (stale pins were the whole disease); the
     cross-launch cache only unions in and rescues outright failures."""
@@ -529,6 +553,23 @@ class TestResolveARecords(unittest.TestCase):
     def test_dns_failure_without_cache_is_empty(self):
         with patch.object(resolver, "shell_capture", return_value=self._fake("", returncode=2)):
             self.assertEqual(resolver._resolve_a_records("dead.com", timeout=1), [])
+
+    def test_socket_getaddrinfo_fallback_when_no_getent(self):
+        # Hosts without getent (macOS) resolve via socket.getaddrinfo instead;
+        # the union + _IPV4_RE validation contract is identical to the getent path.
+        infos = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.2.3.4", 0)),
+                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("5.6.7.8", 0))]
+        with patch.object(resolver, "_HAVE_GETENT", False), \
+             patch.object(resolver.socket, "getaddrinfo", return_value=infos) as gai:
+            ips = resolver._resolve_a_records("mac.com", timeout=1)
+        gai.assert_called_once()
+        self.assertEqual(ips, ["1.2.3.4", "5.6.7.8"])
+
+    def test_socket_fallback_failure_falls_back_to_cache(self):
+        resolver._resolution_cache["flaky.com"] = ["9.9.9.9"]
+        with patch.object(resolver, "_HAVE_GETENT", False), \
+             patch.object(resolver.socket, "getaddrinfo", side_effect=OSError("no dns")):
+            self.assertEqual(resolver._resolve_a_records("flaky.com", timeout=1), ["9.9.9.9"])
 
     def test_only_fresh_answers_recorded_for_cache_save(self):
         # The persisted cache must hold live DNS results only — unioned

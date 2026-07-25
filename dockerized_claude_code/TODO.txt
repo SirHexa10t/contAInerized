@@ -327,11 +327,14 @@ get ALL addresses for CDN'd domain-names rather than just resolve one for the fi
 /document-last : skills that runs a command which fatches the content of the last message(s) and maye writes into new file in /workspace (maybe that part would not be part of the command, but determined by the AI)
 
 
-mac compatibility:
+needs to be verified on mac:
     check if ~/.zshrc exists (and alias there if applicable)
     fix alias ("ai") to always use the pydev env
     Set minimum requirements for Docker (some mac version didn't work)
-    Fix networking for Mac (getent isn't in MacOS?)
+    Fix network handling for Mac (getent isn't in MacOS?)
+
+needs to be handled on mac:
+    {DooD}
 
 
 

@@ -29,9 +29,14 @@ class TestHomeDerivedConstants(unittest.TestCase):
     def test_firewall_whitelist_file_location(self):
         self.assertEqual(paths.FIREWALL_WHITELIST_FILE, paths.USER_EXTRAS_DIR / "firewall_whitelist.txt")
 
-    def test_resolved_domains_cache_at_agents_state_root(self):
-        # The DNS cache lives at the AGENTS_STATE root (not under user_extras/).
-        self.assertEqual(paths.RESOLVED_DOMAINS_CACHE_FILE, paths.AGENTS_STATE / "resolved_domains.txt")
+    def test_firewall_caches_grouped_under_firewall_cache_dir(self):
+        # Both {firewall} host caches live in firewall_cache/ (flat), not loose
+        # at the AGENTS_STATE root.
+        self.assertEqual(paths.FIREWALL_CACHE_DIR, paths.AGENTS_STATE / "firewall_cache")
+        self.assertEqual(paths.RESOLVED_DOMAINS_CACHE_FILE,
+                         paths.FIREWALL_CACHE_DIR / "resolved_domains.txt")
+        self.assertEqual(paths.cdn_ranges_cache_path("cloudflare"),
+                         paths.FIREWALL_CACHE_DIR / "cloudflare.txt")
 
 
 class TestRepoDerivedConstants(unittest.TestCase):
