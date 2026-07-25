@@ -518,6 +518,69 @@ class TestEnsureImage(unittest.TestCase):
             _container_env.update(snapshot)
 
 
+class TestDockerRunningInstances(unittest.TestCase):
+    """docker_running_instances_subprocess maps `docker ps` output back to
+    instance ids. The prefix check is done in Python (docker's name filter is
+    only a cheap pre-narrow), and 'couldn't determine' is None — distinct from
+    'nothing running' — because the two callers want opposite failure behaviour."""
+
+    def _probe(self, stdout="", returncode=0, exc=None):
+        target = SimpleNamespace(returncode=returncode, stdout=stdout)
+        kw = {"side_effect": exc} if exc else {"return_value": target}
+        with patch.object(docker_config, "shell_capture", **kw):
+            return docker_config.docker_running_instances_subprocess()
+
+    def test_prefix_stripped_to_instance_ids(self):
+        out = "claude-code_poet__draft\nclaude-code_golem__notes\n"
+        self.assertEqual(self._probe(out), frozenset({"poet__draft", "golem__notes"}))
+
+    def test_unrelated_containers_ignored(self):
+        # docker's `--filter name=` is a substring match, so a user's own
+        # container can appear in the listing — only true prefixes count.
+        out = "claude-code_poet__draft\nmy-claude-code_sidecar\nredis\n"
+        self.assertEqual(self._probe(out), frozenset({"poet__draft"}))
+
+    def test_no_containers_is_empty_set_not_none(self):
+        self.assertEqual(self._probe(""), frozenset())
+
+    def test_failed_probe_is_none(self):
+        self.assertIsNone(self._probe("", returncode=1))
+
+    def test_docker_missing_from_path_is_none(self):
+        # subprocess raises rather than returning non-zero when the binary is absent.
+        self.assertIsNone(self._probe(exc=FileNotFoundError("docker")))
+
+    def test_any_agent_running_stays_conservative_on_failure(self):
+        # The cache-pruning guard must assume "might be running" when unknown.
+        with patch.object(docker_config, "docker_running_instances_subprocess", return_value=None):
+            self.assertTrue(docker_config.docker_check_any_agent_running_subprocess())
+        with patch.object(docker_config, "docker_running_instances_subprocess", return_value=frozenset()):
+            self.assertFalse(docker_config.docker_check_any_agent_running_subprocess())
+
+
+class TestRunningInstanceReport(unittest.TestCase):
+    """The single launch guard: refuses an instance that already has a live
+    container, naming both the instance and the container."""
+
+    def _report(self, running):
+        with patch.object(docker_config, "docker_running_instances_subprocess", return_value=running):
+            return docker_config.running_instance_report(_run_inst())
+
+    def test_running_instance_reported(self):
+        inst = _run_inst()
+        report = self._report(frozenset({inst.instance}))
+        self.assertIsNotNone(report)
+        self.assertIn(inst.instance, report)
+        self.assertIn(f"{docker_config.CONTAINER_NAME_PREFIX}{inst.instance}", report)
+
+    def test_idle_instance_passes(self):
+        self.assertIsNone(self._report(frozenset({"someone__else"})))
+
+    def test_undeterminable_state_passes(self):
+        # Can't tell → don't block; docker itself still refuses a name clash.
+        self.assertIsNone(self._report(None))
+
+
 class TestRequireDocker(unittest.TestCase):
     """require_docker gates the launch: exits (verbosely, with the client
     version) when docker is absent or the daemon is unreachable, else returns."""

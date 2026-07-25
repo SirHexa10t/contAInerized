@@ -11,7 +11,7 @@ from launch.agents_crud import (
 from launch.container_env import set_container_env
 from launch.docker_config import (
     ensure_image, prompt_install_failures, require_docker, run_container,
-    set_container_mounts, set_dry_run,
+    running_instance_report, set_container_mounts, set_dry_run,
 )
 from launch.file_access import agent_md_index, ensure_shared_oauth_files, is_dir
 from launch.claude_code_config import print_launch_banner
@@ -208,6 +208,12 @@ def launch() -> None:
     assert opts.picked is not None   # gather_input exits on picker cancel — narrows for the type checker
     set_dry_run(opts.dry_run)
     inst = resolve_target(opts.picked, registry)
+    # Refuse a second container for an already-running instance. Placed on the
+    # resolved identity so ONE check covers a CLI target, a picker row whose
+    # running-snapshot went stale, and a fresh session name that collides with
+    # a live container — and before persist/build, so nothing is half-done.
+    if (running_report := running_instance_report(inst)) is not None:
+        sys.exit(running_report)
     resume_flag = compute_resume_flag(inst)
     # Persist BOTH new and cont launches — the store entry always reflects the
     # last-launched configuration (idempotent rewrite on unchanged cont).

@@ -324,8 +324,6 @@ get ALL addresses for CDN'd domain-names rather than just resolve one for the fi
     done
 
 
-/document-last : skills that runs a command which fatches the content of the last message(s) and maye writes into new file in /workspace (maybe that part would not be part of the command, but determined by the AI)
-
 
 needs to be verified on mac:
     check if ~/.zshrc exists (and alias there if applicable)
@@ -335,6 +333,9 @@ needs to be verified on mac:
 
 needs to be handled on mac:
     {DooD}
+
+
+add a hotkey that "resets"/"wipes" an instance
 
 
 

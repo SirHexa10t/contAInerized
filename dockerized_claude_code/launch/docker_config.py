@@ -4,7 +4,8 @@ accumulator that flattens into `-v` flags (set_container_mounts +
 add_docker_mount + mount_target_is_staged), small `docker` CLI wrappers
 (require_docker, detect_docker_gid, docker_check_running_subprocess,
 wait_for_container_running, docker_exec_root_subprocess,
-docker_check_any_agent_running_subprocess, docker_subprocess), the
+docker_running_instances_subprocess, docker_check_any_agent_running_subprocess,
+docker_subprocess), the
 image-naming helper (image_tag), the tag.docker flag emitters
 (build_arg_flags / env_forward_flags / entrypoint_flags), the post-build
 install-failure surfacing (prompt_install_failures), and the container
@@ -127,15 +128,17 @@ def image_tag(layer_names: list[str]) -> str:
 # presence check (require_docker), the read-only probes used by firewall
 # coordination + cache pruning (detect_docker_gid,
 # docker_check_running_subprocess, wait_for_container_running,
-# docker_exec_root_subprocess, docker_check_any_agent_running_subprocess),
+# docker_exec_root_subprocess, docker_running_instances_subprocess,
+# docker_check_any_agent_running_subprocess),
 # and the `docker` invocation wrapper (docker_subprocess) used by
 # ensure_image / run_container below in the orchestration section.
 # CONTAINER_NAME_PREFIX is the one place the per-launch container name format
 # is defined — run_container builds container names from it, and
-# docker_check_any_agent_running_subprocess filters `docker ps` by the same
-# prefix; keeping them consistent is a one-line change here.
+# docker_running_instances_subprocess both filters `docker ps` by it and strips
+# it back off to recover instance ids; keeping them consistent is a one-line
+# change here.
 
-CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_container) and the filter used to detect a running agent (docker_check_any_agent_running_subprocess)
+CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_container) and the filter/strip used to map containers back to instance ids (docker_running_instances_subprocess)
 
 
 # ============================================================
@@ -320,16 +323,60 @@ def docker_stream_subprocess(args: list[str], on_lines: Callable[[Iterable[str]]
         sys.exit(proc.returncode)
 
 
+def docker_running_instances_subprocess() -> frozenset[str] | None:
+    """The instance ids (`<agent>__<session>`) whose containers are running
+    right now — one `docker ps` for all of them — or None when the state
+    couldn't be determined (`docker ps` failed / daemon unreachable).
+
+    None is a distinct third state, not an empty set, because the two callers
+    want OPPOSITE failure behaviour: prune_caches must assume "something might
+    be running" and skip deleting, while the picker must assume "mark nothing"
+    rather than flag every row. Returning the unknown separately lets one
+    docker call serve both.
+
+    `--filter name=` is a substring/regex match against docker's own names
+    (stored with a leading `/`), so it only NARROWS the listing cheaply — the
+    authoritative check is `startswith(CONTAINER_NAME_PREFIX)` here, keeping
+    CONTAINER_NAME_PREFIX the single source of truth for the name format and
+    making the parse unit-testable without a daemon."""
+    try:
+        r = shell_capture("docker", "ps", "--filter", f"name={CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}")
+    except OSError:
+        return None      # docker not on PATH at all — same "can't tell" as a failed probe
+    if r.returncode != 0:
+        return None
+    return frozenset(name.removeprefix(CONTAINER_NAME_PREFIX)
+                     for line in r.stdout.splitlines()
+                     if (name := line.strip()).startswith(CONTAINER_NAME_PREFIX))
+
+
 def docker_check_any_agent_running_subprocess() -> bool:
-    """True if any container whose name starts with CONTAINER_NAME_PREFIX is
-    currently running, OR if `docker ps` failed (conservative — treat the
-    unknown state as 'might be running' so caller skips its cleanup). Used
-    by tag_handlers.prune_caches as the 'is it safe to delete cache files'
-    guard. Uses `bool(stdout.strip())` rather than `== "true"` because
-    `--format={{.Names}}` outputs container names (one per line) — any
-    non-empty output means matching containers exist."""
-    r = shell_capture("docker", "ps", "--filter", f"name={CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}")
-    return r.returncode != 0 or bool(r.stdout.strip())
+    """True if any agent container is currently running, OR if the running
+    state couldn't be determined (conservative — treat the unknown as 'might
+    be running' so the caller skips its cleanup). Used by
+    tag_handlers.prune_caches as the 'is it safe to delete cache files' guard."""
+    running = docker_running_instances_subprocess()
+    return running is None or bool(running)
+
+
+def running_instance_report(inst: Instance) -> str | None:
+    """A one-line refusal message when `inst` already has a live container,
+    else None — same shape as agents_crud.invalid_tags_report so run.py's two
+    launch guards read alike.
+
+    One check covers every route to a launch: a CLI target, a picker row whose
+    running-snapshot went stale while the menu sat open, and a brand-new
+    session name that happens to collide with a live container. It runs on the
+    fully-resolved identity before anything is persisted or built, because
+    `docker run --name` would refuse the duplicate anyway — this turns that
+    late, raw daemon error into an early, readable one. Re-probes rather than
+    reusing the picker's snapshot: freshness at launch time is the whole point."""
+    running = docker_running_instances_subprocess()
+    if running is None or inst.instance not in running:
+        return None
+    return (f"  Instance '{inst.instance}' is already running "
+            f"(container {CONTAINER_NAME_PREFIX}{inst.instance}).\n"
+            f"  Stop that container, or switch to the terminal that's running it.")
 
 
 # ============================================================

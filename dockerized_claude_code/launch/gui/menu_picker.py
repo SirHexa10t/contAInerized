@@ -74,6 +74,7 @@ from ..agents_crud import (
     creatable_agents, delete_instance, instance_from_store, invalid_tags_report,
     list_all_instances, modify_instance,
 )
+from ..docker_config import docker_running_instances_subprocess
 from ..file_access import (
     expand_user_path, is_dir, path_exists, read_text, resolved_cwd,
     resolved_path, tab_complete_paths,
@@ -151,6 +152,13 @@ STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
 
+# A running instance's row is information-only (see PickerEntry.selectable):
+# the name greys out to read as unavailable, and the red tag is what draws the
+# eye. Emitted conditionally like the PickerCwdHint labels — no reserved
+# column, so non-running rows keep their tighter spacing.
+STYLE_RUNNING_NAME   = "fg:ansibrightblack"                      # grey — this instance can't be launched right now
+RUNNING_HINT         = ("bold fg:ansibrightred", "(RUNNING) ")   # (style, label) fragment, same shape as PickerCwdHint.fragment
+
 
 class PickerAction(Enum):
     """Closed set of actions pick_with_preview returns alongside the selected
@@ -225,7 +233,10 @@ class ContEntry:
     on selection; the *_display strings are pre-rendered for the agent-name
     column / hint area; the is_*_dir booleans drive the
     CURRENT/DEFAULT/INVALID workspace tags (only one can be True per row —
-    invalid implies ws_resolved is None, which makes the other two False)."""
+    invalid implies ws_resolved is None, which makes the other two False).
+    `is_running` means a container for this instance is up right now, so the
+    row renders greyed with the RUNNING tag and is information-only — docker
+    would refuse a second container on the same `--name` anyway."""
     identity: Instance
     tags_display: str
     workspace_display: str
@@ -233,6 +244,7 @@ class ContEntry:
     is_default_dir: bool
     is_invalid_dir: bool
     last_used_display: str
+    is_running: bool = False
 
     @property
     def preview(self) -> str:
@@ -264,13 +276,16 @@ class PickerEntry:
     for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
     for Back rows). `deletable` / `modifiable` default True; the producer
     sets them False to disable Del / F2 on the row (Create / Back / opener).
-    `display` defaults to a fresh empty list per instance to keep the
-    dataclass safe — never shared across rows."""
+    `selectable=False` makes the row INFORMATION-ONLY: still rendered, but the
+    cursor never lands on it, so Enter / Del / F2 can't target it (a running
+    instance — see RUNNING_HINT). `display` defaults to a fresh empty list per
+    instance to keep the dataclass safe — never shared across rows."""
     display: list[tuple[str, str]] = field(default_factory=list)
     preview: str = ""
     value: Any = None
     deletable: bool = True
     modifiable: bool = True
+    selectable: bool = True
 
 
 # Sentinel entry values signalling "open the delete submenu" / "open the
@@ -293,13 +308,21 @@ def continuable_instances(registry: Registry) -> list[ContEntry]:
     in so the modify flow's pre-fill reads straight off the identity.
     A store entry naming an unknown tag fails fast here (validate_build
     raises) — `python -m launch.audit` reports the same defect non-fatally
-    when the picker is the wrong place to crash on a typo."""
+    when the picker is the wrong place to crash on a typo.
+
+    Also flags which instances are running right now (`is_running`) from ONE
+    `docker ps`, taken per menu build rather than per render — so the marks
+    refresh whenever the menu is rebuilt (including on return from the delete /
+    toolkits submenus) without costing a subprocess per keystroke. An
+    undeterminable docker state marks nothing, deliberately: over-flagging
+    would wrongly lock rows the user can actually launch."""
     # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
     # when one symlinks to the other. Subdirs deliberately don't count — being in a
     # project under $HOME doesn't make /ai_workspace your "default" workspace.
     cwd = resolved_cwd()
     defaulting_dir_active = cwd in {resolved_path(d) for d in DEFAULTING_DIRS}
     default_workspace_resolved = resolved_path(DEFAULT_WORKSPACE)
+    running = docker_running_instances_subprocess() or frozenset()   # None (can't tell) → flag nothing
 
     out = []
     for dir_name in list_all_instances():
@@ -318,6 +341,7 @@ def continuable_instances(registry: Registry) -> list[ContEntry]:
             is_default_dir=defaulting_dir_active and ws_resolved == default_workspace_resolved,      # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)`
             is_invalid_dir=bool(ws) and ws_resolved is None,                                         # ws set but path doesn't exist / isn't a directory — tagged `(INVALID DIR)`
             last_used_display=relative_time(last_mtime) if last_mtime is not None else "(never)",
+            is_running=dir_name in running,
         ))
 
     spec_order, prof_order = list(registry.specialties), list(registry.professions)
@@ -436,6 +460,27 @@ def _cont_tags_column(inst: Instance) -> tuple[list[tuple[str, str]], int]:
     return fragments, width
 
 
+def _focusable_indices(entries: list[PickerEntry], shown: list[int]) -> list[int]:
+    """Row indices the cursor may land on: visible after filtering AND
+    selectable. Information-only rows (a running instance) are rendered but
+    never focusable, which is what blocks Enter / Del / F2 on them."""
+    return [i for i in shown if entries[i].selectable]
+
+
+def _cursor_step(entries: list[PickerEntry], shown: list[int], cursor: int, delta: int) -> int:
+    """Where the cursor lands after moving `delta` rows — stepping over
+    information-only rows and wrapping at the ends. `cursor` unchanged when
+    nothing is focusable; snaps to the first focusable row when the cursor
+    isn't on one. Module-level and pure so the skip behaviour is unit-testable
+    without driving a live prompt_toolkit Application."""
+    landable = _focusable_indices(entries, shown)
+    if not landable:
+        return cursor
+    if cursor not in landable:
+        return landable[0]
+    return landable[(landable.index(cursor) + delta) % len(landable)]
+
+
 def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
     """Render a full-screen picker; block until the user picks or cancels.
 
@@ -446,21 +491,28 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         raise ValueError("entries must be non-empty")
 
     state: dict[str, Any] = {
-        "cursor": 0,
+        # First selectable row, not blindly 0 — entries[0] can be
+        # information-only (a running instance heading the delete submenu).
+        "cursor": next((i for i, e in enumerate(entries) if e.selectable), 0),
         "filter": "",
         "shown": list(range(len(entries))),
         "result": (None, None),
         "legend_open": False,
     }
 
+    def focusable() -> list[int]:
+        return _focusable_indices(entries, state["shown"])
+
     def refilter() -> None:
         q = state["filter"].lower()
         state["shown"] = [i for i in range(len(entries))
                           if q in _plain(entries[i].display).lower()]
-        if state["shown"] and state["cursor"] not in state["shown"]:
-            state["cursor"] = state["shown"][0]
-        elif not state["shown"]:
-            state["cursor"] = 0
+        if state["cursor"] in state["shown"] and entries[state["cursor"]].selectable:
+            return                                    # current row survived the filter
+        landable = focusable()
+        # Fall back to the first visible row when nothing is focusable, so the
+        # cursor stays inside `shown` for rendering (Enter is guarded anyway).
+        state["cursor"] = landable[0] if landable else (state["shown"][0] if state["shown"] else 0)
 
     def list_fragments() -> list[tuple[str, str]]:
         if not state["shown"]:
@@ -514,11 +566,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
     kb = KeyBindings()
 
     def move(delta: int) -> None:
-        if not state["shown"]:
-            return
-        n = len(state["shown"])
-        i = state["shown"].index(state["cursor"])
-        state["cursor"] = state["shown"][(i + delta) % n]
+        state["cursor"] = _cursor_step(entries, state["shown"], state["cursor"], delta)
 
     @kb.add("up")
     def _(event: KeyPressEvent) -> None: move(-1)
@@ -534,17 +582,20 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     @kb.add("home")
     def _(event: KeyPressEvent) -> None:
-        if state["shown"]:
-            state["cursor"] = state["shown"][0]
+        if landable := focusable():
+            state["cursor"] = landable[0]
 
     @kb.add("end")
     def _(event: KeyPressEvent) -> None:
-        if state["shown"]:
-            state["cursor"] = state["shown"][-1]
+        if landable := focusable():
+            state["cursor"] = landable[-1]
 
     @kb.add("enter")
     def _(event: KeyPressEvent) -> None:
-        if state["shown"]:
+        # The selectable check is belt-and-braces: move()/refilter() keep the
+        # cursor off information-only rows, but it also covers the
+        # nothing-focusable case (every visible row is information-only).
+        if state["shown"] and entries[state["cursor"]].selectable:
             state["result"] = (PickerAction.SELECT, entries[state["cursor"]].value)
             event.app.exit()
 
@@ -763,9 +814,12 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                     PickerRowMarker.CONT.fragment("      "),
                     *cont_frags,
                     ("", " " * (cont_col_width - cont_len)),
-                    (STYLE_AGENT_NAME, f"{identity.instance:<{instance_name_width}}"),
+                    (STYLE_RUNNING_NAME if inst.is_running else STYLE_AGENT_NAME,
+                     f"{identity.instance:<{instance_name_width}}"),
                     ("", "    "),
                 ]
+                if inst.is_running:
+                    cont_display.append(RUNNING_HINT)
                 if inst.is_current_dir:
                     cont_display.append(PickerCwdHint.CURRENT.fragment)
                 elif inst.is_default_dir:
@@ -777,6 +831,14 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                     display=cont_display,
                     preview=inst.preview,
                     value=identity,
+                    # A live container owns the name (Enter would hit a docker
+                    # name conflict) and owns the state dir rw (Del would delete
+                    # under it), so the row is information-only. selectable=False
+                    # is what actually blocks all three keys; the other two are
+                    # explicit belt-and-braces.
+                    selectable=not inst.is_running,
+                    deletable=not inst.is_running,
+                    modifiable=not inst.is_running,
                 ))
 
         if any(p.toolkit_path for p in registry.professions.values()):
@@ -860,13 +922,20 @@ def _delete_submenu(registry: Registry, legend_text: str) -> None:
         entries: list[PickerEntry] = []
         for inst in instances:
             identity = inst.identity
+            row = [PickerRowMarker.DLET.fragment("  "),
+                   (STYLE_RUNNING_NAME if inst.is_running else STYLE_DEL_NAME, identity.instance)]
+            if inst.is_running:
+                row.append(("", "  "))
+                row.append(RUNNING_HINT)
             entries.append(PickerEntry(
-                display=[
-                    PickerRowMarker.DLET.fragment("  "),
-                    (STYLE_DEL_NAME, identity.instance),
-                ],
+                display=row,
                 preview=inst.preview,
                 value=identity,
+                # Deleting a live container's state dir (bind-mounted rw) could
+                # corrupt the running session — information-only here too.
+                selectable=not inst.is_running,
+                deletable=not inst.is_running,
+                modifiable=not inst.is_running,
             ))
         entries.append(PickerEntry(
             display=[PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],

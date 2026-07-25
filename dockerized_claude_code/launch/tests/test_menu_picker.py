@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from launch.gui import menu_picker
 from launch.gui.menu_picker import (
-    _agent_description, _cont_tags_column, _tags_column,
+    RUNNING_HINT, STYLE_RUNNING_NAME, PickerEntry, _agent_description,
+    _cont_tags_column, _cursor_step, _focusable_indices, _tags_column,
     continuable_instances, prompt_session,
 )
 from launch.gui.tag_form import STYLE_TAG_SAFE, STYLE_TAG_WARN
@@ -106,11 +107,15 @@ class TestContinuableInstances(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _entries(self, insts, cwd=None):
+    def _entries(self, insts, cwd=None, running=None):
+        # `running` mirrors docker_running_instances_subprocess: a frozenset of
+        # running instance ids, or None for "couldn't determine". Default None
+        # keeps every other test docker-free.
         by_id = {i.instance: i for i in insts}
         with patch.object(menu_picker, "list_all_instances", return_value=list(by_id) + ["ghost__x"]), \
              patch.object(menu_picker, "instance_from_store",
                           side_effect=lambda name, registry: by_id.get(name)), \
+             patch.object(menu_picker, "docker_running_instances_subprocess", return_value=running), \
              patch.object(menu_picker, "resolved_cwd", return_value=cwd or Path("/nowhere")):
             return continuable_instances(REGISTRY)
 
@@ -211,6 +216,81 @@ class TestContTagsColumn(unittest.TestCase):
         inst = self._inst_with_invalid(AgentBuild(professions=("code", "web")))
         frags, width = _cont_tags_column(inst)
         self.assertEqual(width, sum(len(text) for _, text in frags))
+
+
+class TestFocusableRows(unittest.TestCase):
+    """`selectable=False` rows are rendered but never focusable, which is what
+    blocks Enter / Del / F2 on a running instance. _cursor_step is the pure
+    core of the picker's arrow-key movement."""
+
+    def _rows(self, *selectable_flags):
+        return [PickerEntry(value=i, selectable=s) for i, s in enumerate(selectable_flags)]
+
+    def test_non_selectable_rows_excluded_from_focus(self):
+        rows = self._rows(True, False, True)
+        self.assertEqual(_focusable_indices(rows, [0, 1, 2]), [0, 2])
+
+    def test_down_skips_over_non_selectable(self):
+        rows = self._rows(True, False, True)
+        self.assertEqual(_cursor_step(rows, [0, 1, 2], 0, 1), 2)     # 1 is skipped entirely
+
+    def test_up_skips_over_non_selectable(self):
+        rows = self._rows(True, False, True)
+        self.assertEqual(_cursor_step(rows, [0, 1, 2], 2, -1), 0)
+
+    def test_movement_wraps_across_focusable_only(self):
+        rows = self._rows(True, False, True)
+        self.assertEqual(_cursor_step(rows, [0, 1, 2], 2, 1), 0)     # wraps past the trailing skip
+
+    def test_consecutive_non_selectable_all_skipped(self):
+        rows = self._rows(True, False, False, False, True)
+        self.assertEqual(_cursor_step(rows, [0, 1, 2, 3, 4], 0, 1), 4)
+
+    def test_cursor_snaps_onto_a_focusable_row(self):
+        # Cursor parked on an information-only row (e.g. it started running
+        # while the menu was open) — any movement rescues it.
+        rows = self._rows(False, True)
+        self.assertEqual(_cursor_step(rows, [0, 1], 0, 1), 1)
+
+    def test_nothing_focusable_leaves_cursor_put(self):
+        # Every visible row is information-only: no crash, no move (Enter is
+        # separately guarded, so the row still can't be picked).
+        rows = self._rows(False, False)
+        self.assertEqual(_cursor_step(rows, [0, 1], 0, 1), 0)
+
+    def test_filtered_out_rows_are_not_focusable(self):
+        rows = self._rows(True, True, True)
+        self.assertEqual(_cursor_step(rows, [2], 2, 1), 2)           # only row 2 survived the filter
+
+
+class TestRunningFlag(TestContinuableInstances):
+    """continuable_instances marks which instances have a live container, and
+    the picker renders those rows greyed + tagged instead of blue."""
+
+    def test_running_instance_flagged(self):
+        entries = self._entries([make_inst("golem", "a", self.ws), make_inst("poet", "b", self.ws)],
+                                running=frozenset({"golem__a"}))
+        flags = {e.identity.instance: e.is_running for e in entries}
+        self.assertTrue(flags["golem__a"])
+        self.assertFalse(flags["poet__b"])
+
+    def test_nothing_running_flags_nothing(self):
+        entries = self._entries([make_inst("golem", "a", self.ws)], running=frozenset())
+        self.assertFalse(entries[0].is_running)
+
+    def test_undeterminable_docker_state_flags_nothing(self):
+        # None = `docker ps` failed / docker absent. Marking every row RUNNING
+        # would wrongly lock instances the user can actually launch.
+        entries = self._entries([make_inst("golem", "a", self.ws)], running=None)
+        self.assertFalse(entries[0].is_running)
+
+    def test_running_row_greyed_and_tagged_and_locked(self):
+        (entry,) = self._entries([make_inst("golem", "a", self.ws)], running=frozenset({"golem__a"}))
+        self.assertTrue(entry.is_running)
+        self.assertEqual(STYLE_RUNNING_NAME, "fg:ansibrightblack")   # grey, not STYLE_AGENT_NAME blue
+        self.assertEqual(RUNNING_HINT[1].strip(), "(RUNNING)")
+        self.assertIn("red", RUNNING_HINT[0])                        # the tag itself is the red part
+
 
 if __name__ == "__main__":
     unittest.main()
