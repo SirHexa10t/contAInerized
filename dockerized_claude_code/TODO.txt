@@ -264,10 +264,6 @@ phone notifications when AI is done ( {auto} mode only? )
     check access to sites
     see if all intended mounts are active
 
-/test-project
-    run tests
-    run `ruff check .`
-    run mypy on all files
 
 skill that draws a dependency graph
 
@@ -349,6 +345,43 @@ When the user has no credentials, the bottom banner says: None<instancename> ins
 
 in menu, add last message (if available) to preview of session
     Or use the "recap" feature?
+
+
+<+instl> - allow installation of programs (it's not covered by <+bash>)
+    get a proper list of allow-able actions
+
+add another setup script/form (within Picker, like [code]'s definitions?) for the CLIs
+    let the user see which ones are installed, and decide what to add. A script would then guide the user with interactive shell (authenticating via browser login and such)
+        the script would move/copy (depending on whether user wants it on their system too)
+            use a specialized agent for that, which has writing-privileges to that dir (~/.claude-agents/user_extras/optional_creds)? It'd keep the user's environment from installation-pollution
+                regular users might not like Claude-Code's broken links on multiple lines of non-absurdly large terminal windows
+        include the credentials for Claude Code?
+            Move those credentials to the user-s folder?
+            
+    
+After exiting a form, add a confirmation-prompt in case nothing was changed:
+    "You didn't change anything. Be aware that [SPACE] fills the form; [ENTER] finalizes it. Are you sure that you want to exit? [Y/n]"
+
+<-git> tag ; no push, no commit, no stage, no fetch; nothing. As if it's not a git remo
+    Inherit from <-gpush> ?
+
+
+future professions (require extra tooling); list above is more comrehensive:
+    2dimg
+        2D image editor; should have tools (inluding AI tools?) that identify patterns/objects in images, edit them, transform them (ffmpeg), create them...
+    3dmodel
+        3D model creator/tweaker. Needs Blender, CAD, slicing software...
+    Audio
+        sound editor; should have tools (inluding AI tools?) that can identify/create/remove speech, create music, remix songs / tune them
+    
+
+Maybe indent the form items in inheritence after-all...
+
+A dumping-area (all have access), where files can be copied into.
+    Can we restrict execution in that dir?
+
+
+
 
 
 

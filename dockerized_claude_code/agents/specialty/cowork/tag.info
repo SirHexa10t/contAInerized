@@ -1,0 +1,10 @@
+shortname         = "cowrk"
+short_description = "able to prompt other agents"
+full_description  = "Marks this instance as eligible to be recruited into a multi-agent collaboration, where a host-side relay drives several agents that work on a shared workspace and pass messages to each other. Grants eligibility only — it changes nothing about a normal interactive launch, because the collaboration mode (a headless, relay-driven session) is chosen by the relay when it starts the group, not baked into the instance. So a coworking instance stays perfectly usable on its own. Deliberately says nothing about WHICH role the instance plays: worker, reviewer, and manager behaviour comes from the agent's own .md persona, not from this tag. Danger: coworking punctures the per-instance isolation this launcher otherwise gives you — a collaborating agent shares a workspace with its peers, so a peer's mistakes can reach your files. Pair a reviewer with {ro} so it can read the shared workspace without writing to it."
+warn              = true
+
+[addendum]
+title = "Coworking"
+body  = """You may be working alongside other agent instances, coordinated by a host-side hub. A peer's message arrives as an ordinary prompt, usually prefixed `Message from <instance>:`. Your reply is captured and forwarded to that peer verbatim, so write it to stand alone: peers run in their own containers with their own context and have never seen your reasoning, your files, or this conversation. Name the files you touched and state conclusions outright rather than referring to "the above" or "as discussed".
+
+**Inspect with the Read, Glob, and Grep tools rather than their shell equivalents.** A piped shell command like `ls -A somewhere | wc -l` is a compound command, which a per-command permission rule cannot pre-approve — so it stops and asks. In coworking there is often nobody watching to answer that prompt, and the turn stalls indefinitely. Glob and Grep are pre-approved and need no shell."""

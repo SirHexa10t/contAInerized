@@ -39,17 +39,20 @@ Public API:
 
 Also home to the style system both TUI surfaces share — `UiClass` (the
 prompt_toolkit CSS classes + STYLE_DICT), the field-driven tag colors
-(`tag_style`, `STYLE_TAG_*`, `RICH_BY_STYLE`), and the display coercers
-(`_normalize` / `_plain`). menu_picker imports these from here (one-way:
-this module never imports the picker).
+(`tag_style`, `STYLE_TAG_*`, `RICH_BY_STYLE`), the display coercers
+(`_normalize` / `_plain`), and `_fragment_source` (the typing-only adapter
+every FormattedTextControl call site passes its fragment builder through).
+menu_picker imports these from here (one-way: this module never imports the
+picker).
 """
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, cast
 
 from prompt_toolkit import Application                                     # dep — declared in pyproject.toml [project]
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text import AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.layout import HSplit, Layout, Window
@@ -176,6 +179,24 @@ def _normalize(display: str | Iterable[tuple[str, str]]) -> list[tuple[str, str]
 def _plain(display: str | Iterable[tuple[str, str]]) -> str:
     """Plain-text view of a display, used for filter matching."""
     return "".join(text for _, text in _normalize(display))
+
+
+def _fragment_source(build: Callable[[], list[tuple[str, str]]]) -> AnyFormattedText:
+    """Hand one of our fragment builders to a prompt_toolkit FormattedTextControl.
+
+    Purely a typing adapter — it returns `build` unchanged, so there is no
+    runtime effect whatsoever. It exists because prompt_toolkit's
+    `AnyFormattedText` accepts `list[tuple[str, str] | tuple[str, str,
+    MouseHandler]]`, while our builders return the narrower `list[tuple[str,
+    str]]`. `list` is invariant, so the two are not assignable even though every
+    value we produce is valid — the mismatch is at the library boundary, not in
+    our code.
+
+    Fixing it here rather than by widening our own annotations keeps our
+    contracts honest: this codebase never emits the 3-tuple mouse-handler form,
+    so declaring that it might would make every fragment helper less precise.
+    One cast in one place beats ten scattered suppressions."""
+    return cast("AnyFormattedText", build)
 
 
 # ============================================================
@@ -446,24 +467,24 @@ def checkbox_form(title: str, options: list[FormOption],
     @kb.add("c-c")
     def _(event: KeyPressEvent) -> None: event.app.exit()
 
-    header_windows = [Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT)]
+    header_windows = [Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT)]
     if preamble_lines:
-        header_windows.append(Window(FormattedTextControl(preamble_fragments),
+        header_windows.append(Window(FormattedTextControl(_fragment_source(preamble_fragments)),
                                      height=len(preamble_lines)))
     body_layout = HSplit([
         *header_windows,
         Window(height=1, char=" "),
-        Window(FormattedTextControl(option_fragments,
+        Window(FormattedTextControl(_fragment_source(option_fragments),
                                     get_cursor_position=cursor_pos,
                                     focusable=True,
                                     show_cursor=False),
                wrap_lines=False, dont_extend_height=True),
         Window(height=1, char=" "),
-        Window(FormattedTextControl(body_fragments), wrap_lines=True),   # flexible filler — focused option's explanation
-        Window(FormattedTextControl(warning_fragments), wrap_lines=True, dont_extend_height=True),
+        Window(FormattedTextControl(_fragment_source(body_fragments)), wrap_lines=True),   # flexible filler — focused option's explanation
+        Window(FormattedTextControl(_fragment_source(warning_fragments)), wrap_lines=True, dont_extend_height=True),
         Window(height=1, char=" "),
-        Window(FormattedTextControl(confirm_fragments), height=1),
-        Window(FormattedTextControl(hint_fragments), height=STATUS_HEIGHT),
+        Window(FormattedTextControl(_fragment_source(confirm_fragments)), height=1),
+        Window(FormattedTextControl(_fragment_source(hint_fragments)), height=STATUS_HEIGHT),
     ])
 
     Application(

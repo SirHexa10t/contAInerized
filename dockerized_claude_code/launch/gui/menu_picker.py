@@ -42,6 +42,8 @@ Generic-picker entry shape (pick_with_preview):
         'value':      any,    # opaque; returned to the caller on selection
         'deletable':  bool,   # optional; defaults True. When False, Del is a no-op on this row.
         'modifiable': bool,   # optional; defaults True. When False, F2 is a no-op on this row.
+        'selectable': bool,   # optional; defaults True. When False the row is information-only:
+                              # rendered, but the cursor skips it, so Enter/Del/F2 can't target it.
     }
 """
 
@@ -81,7 +83,8 @@ from ..file_access import (
 )
 from ..paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS, instance_state_dir_path
 from .tag_form import (
-    RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _normalize, _plain,
+    RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _fragment_source,
+    _normalize, _plain,
     edit_toolkits_menu, prompt_tags, tag_style,
 )
 from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
@@ -666,10 +669,10 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         return UiClass.DIVIDER.css
 
     body = HSplit([
-        Window(FormattedTextControl(title_fragments), height=TITLE_HEIGHT),
+        Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT),
         VSplit([
             Window(
-                FormattedTextControl(list_fragments,
+                FormattedTextControl(_fragment_source(list_fragments),
                                      get_cursor_position=cursor_pos,
                                      focusable=True,
                                      show_cursor=False),
@@ -685,7 +688,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
                 style=UiClass.PREVIEW.css,
             ),
         ]),
-        Window(FormattedTextControl(status_fragments), height=STATUS_HEIGHT),
+        Window(FormattedTextControl(_fragment_source(status_fragments)), height=STATUS_HEIGHT),
     ])
 
     Application(
