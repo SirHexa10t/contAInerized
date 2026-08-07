@@ -4,6 +4,7 @@ tag display), and the shared session prompt. The tag form's tests live in
 test_tag_form.py; the prompt_toolkit Applications themselves are
 interactive and stay out of unit scope."""
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ from launch.gui.menu_picker import (
 from launch.gui.tag_form import STYLE_TAG_SAFE, STYLE_TAG_WARN
 from launch.paths import AGENTS_DIR
 from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+from launch.tags.base import SQUASH_AT
 from launch.gui.tag_form import STYLE_TAG_INVALID
 
 REGISTRY = scan_all(AGENTS_DIR)
@@ -79,6 +81,85 @@ class TestTagsColumn(unittest.TestCase):
         self.assertEqual(width, len(text))
 
 
+def _six_tags() -> list:
+    """SQUASH_AT real tags — the smallest crowded row."""
+    reg = REGISTRY
+    tags = [reg.professions["code"], reg.professions["webdev"],
+            reg.specialties["auto"], reg.specialties["cowork"],
+            reg.specialties["manager"], reg.policies["no-sudo"]]
+    assert len(tags) == SQUASH_AT
+    return tags
+
+
+class TestTagsColumnSquashed(unittest.TestCase):
+    """At SQUASH_AT tags a row's column stops showing labels: each tag becomes
+    its one-char glyph on a chip of its usual color (black glyph, color
+    background), one space between chips. The full names move to the preview
+    pane."""
+
+    def test_below_the_threshold_labels_survive(self):
+        fragments, _ = _tags_column(_six_tags()[:SQUASH_AT - 1])
+        self.assertIn("[code]", "".join(t for _, t in fragments))
+
+    def test_at_the_threshold_each_tag_is_one_char(self):
+        fragments, width = _tags_column(_six_tags())
+        text = "".join(t for _, t in fragments)
+        # code→c webdev→w auto→a cowork(cowrk)→c manager(mngr)→m no-sudo(-su)→s,
+        # one space between chips so same-colored neighbours read as two tags.
+        self.assertEqual(text, "c w a c m s ")
+        self.assertEqual(width, 2 * SQUASH_AT)   # chips + separators + trailing space
+
+    def test_chips_carry_the_color_as_background_with_a_black_glyph(self):
+        fragments, _ = _tags_column(_six_tags())
+        chip_styles = [style for style, text in fragments if text != " "]
+        self.assertEqual(len(chip_styles), SQUASH_AT)
+        for style in chip_styles:
+            self.assertIn("fg:ansiblack", style)
+            self.assertIn("bg:", style)
+
+    def test_a_warn_tags_chip_keeps_its_warning_color(self):
+        fragments, _ = _tags_column(_six_tags())
+        auto_chip = next(style for style, text in fragments if text == "a")
+        self.assertIn("bg:ansibrightred", auto_chip)
+
+    def test_the_glyph_skips_punctuation_and_stance_symbols(self):
+        # no-sudo's label is <-su>: the glyph must be 's', never '-' or '<'.
+        chips = [t for _, t in _tags_column(_six_tags())[0] if t != " "]
+        self.assertIn("s", chips)
+        self.assertNotIn("-", chips)
+        self.assertNotIn("<", chips)
+
+
+class TestContTagsColumnSquashed(unittest.TestCase):
+    """The Cont-row variant counts active AND invalid tags against the
+    threshold, and squashes both — a half-squashed row would make the invalid
+    alert look like a different feature."""
+
+    def _inst_with_invalid(self, valid_count: int) -> Instance:
+        from launch.tags.registry import TagProblem
+        specialties = ["auto", "cowork", "manager", "dood", "firewall"][:valid_count]
+        problem = TagProblem(name="typo", axis="specialties", kind="specialty",
+                             parentheses=("{", "}"), reason="unknown",
+                             actual_kind=None, options=())
+        return dataclasses.replace(make_inst(specialties=specialties),
+                                   invalid_tags=(problem,))
+
+    def test_invalid_tags_count_toward_the_threshold(self):
+        inst = self._inst_with_invalid(SQUASH_AT - 1)        # 5 valid + 1 invalid
+        fragments, _ = _cont_tags_column(inst)
+        self.assertNotIn("{auto}", "".join(t for _, t in fragments))
+
+    def test_a_squashed_invalid_tag_keeps_the_alert_style(self):
+        inst = self._inst_with_invalid(SQUASH_AT - 1)
+        fragments, _ = _cont_tags_column(inst)
+        self.assertIn((STYLE_TAG_INVALID, "t"), fragments)   # 'typo' → 't', black-on-red
+
+    def test_below_the_threshold_the_full_alert_label_survives(self):
+        inst = self._inst_with_invalid(1)                    # 1 valid + 1 invalid = 2
+        fragments, _ = _cont_tags_column(inst)
+        self.assertIn((STYLE_TAG_INVALID, "{typo}"), fragments)
+
+
 class TestInstanceBuild(unittest.TestCase):
     def test_round_trips_axis_names(self):
         inst = make_inst(professions=["code", "webdev"], specialties=["auto"],
@@ -124,9 +205,19 @@ class TestContinuableInstances(unittest.TestCase):
         entries = self._entries([make_inst("golem", "a", self.ws)])
         self.assertEqual([e.identity.instance for e in entries], ["golem__a"])
 
-    def test_tags_display_names(self):
+    def test_preview_expands_the_tags(self):
+        # The row column may show one-char chips; the preview is where a tag
+        # can be READ — label plus description, not just the name.
         entries = self._entries([make_inst("golem", "a", self.ws, specialties=["auto"])])
-        self.assertEqual(entries[0].tags_display, "auto")
+        preview = entries[0].preview
+        self.assertIn("{auto}", preview)
+        self.assertIn(REGISTRY.specialties["auto"].short_description, preview)
+
+    def test_preview_without_history_has_no_last_prompt_field(self):
+        # The field drops out entirely rather than showing an empty label.
+        entries = self._entries([make_inst("golem", "a", self.ws)])
+        self.assertNotIn("Last prompt", entries[0].preview)
+
 
     def test_tagless_sorts_before_tagged_and_family_orders_within(self):
         # poet (sonnet) outranks golem (haiku); golem__b carries a specialty
@@ -261,6 +352,91 @@ class TestFocusableRows(unittest.TestCase):
     def test_filtered_out_rows_are_not_focusable(self):
         rows = self._rows(True, True, True)
         self.assertEqual(_cursor_step(rows, [2], 2, 1), 2)           # only row 2 survived the filter
+
+
+class TestLastPromptDisplay(unittest.TestCase):
+    """The preview's `Last prompt` value: the transcript's newest human prompt,
+    condensed for a metadata pane — collapsed whitespace (it sits inside the
+    preview's YAML fence, which a raw ``` line would close early) and an
+    ellipsis past 250 chars (the field recognises a conversation, it does not
+    replay one)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.state_dir = Path(self.tmpdir.name)
+
+    def _write_prompt(self, text: str) -> None:
+        import json
+        transcript = self.state_dir / "projects" / "-workspace" / "s.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(json.dumps({
+            "type": "user", "timestamp": "2026-08-07T10:00:00Z",
+            "message": {"role": "user", "content": text}}) + "\n")
+
+    def test_no_transcript_yields_none(self):
+        self.assertIsNone(menu_picker._last_prompt_display(self.state_dir))
+
+    def test_short_prompt_passes_through(self):
+        self._write_prompt("fix the retry loop")
+        self.assertEqual(menu_picker._last_prompt_display(self.state_dir),
+                         "fix the retry loop")
+
+    def test_a_long_prompt_is_cut_at_the_limit_with_an_ellipsis(self):
+        self._write_prompt("x" * 400)
+        shown = menu_picker._last_prompt_display(self.state_dir)
+        self.assertEqual(len(shown), menu_picker.LAST_PROMPT_PREVIEW_CHARS + 1)
+        self.assertTrue(shown.endswith("…"))
+
+    def test_a_prompt_at_the_limit_is_not_touched(self):
+        self._write_prompt("y" * menu_picker.LAST_PROMPT_PREVIEW_CHARS)
+        self.assertEqual(menu_picker._last_prompt_display(self.state_dir),
+                         "y" * menu_picker.LAST_PROMPT_PREVIEW_CHARS)
+
+    def test_newlines_collapse_so_the_yaml_fence_survives(self):
+        # A prompt containing a code fence must not close the preview's own.
+        self._write_prompt("first line\n```\ncode\n```\nlast line")
+        shown = menu_picker._last_prompt_display(self.state_dir)
+        self.assertNotIn("\n", shown)
+        self.assertEqual(shown, "first line ``` code ``` last line")
+
+    def test_the_transcript_is_read_once_per_screen_session(self):
+        # The buffering contract: nothing is read at menu build, one read on
+        # first highlight, and every later render of the row reuses it — a
+        # preview cannot change mid-session, and holding an arrow key cannot
+        # re-walk a multi-megabyte transcript per keystroke. The cache resets
+        # only when select_agent's loop rebuilds the entries (after a pick,
+        # a delete, or a toolkits edit), which is when disk state may have
+        # legitimately changed.
+        self._write_prompt("the prompt")
+        entry = menu_picker.ContEntry(
+            identity=dataclasses.replace(make_inst(), state_dir_override=self.state_dir),
+            workspace_display="/w", is_current_dir=False, is_default_dir=False,
+            is_invalid_dir=False, last_used_display="now")
+        row = menu_picker.PickerEntry(preview=menu_picker._deferred_preview(entry))
+        reads = {"count": 0}
+        real = menu_picker.last_prompt_in_state
+
+        def counting(state_dir):
+            reads["count"] += 1
+            return real(state_dir)
+
+        with patch.object(menu_picker, "last_prompt_in_state", side_effect=counting):
+            self.assertEqual(reads["count"], 0)      # deferred: menu build reads nothing
+            first = row.preview_ansi()
+            for _ in range(50):                      # re-renders while browsing
+                self.assertEqual(row.preview_ansi(), first)
+        self.assertEqual(reads["count"], 1)
+
+    def test_the_preview_field_appears_when_a_prompt_exists(self):
+        self._write_prompt("the question I asked")
+        inst = make_inst("golem", "a", "/tmp")
+        entry = menu_picker.ContEntry(
+            identity=dataclasses.replace(inst, state_dir_override=self.state_dir),
+            workspace_display="/tmp", is_current_dir=False, is_default_dir=False,
+            is_invalid_dir=False, last_used_display="(never)")
+        self.assertIn("Last prompt", entry.preview)
+        self.assertIn("the question I asked", entry.preview)
 
 
 class TestRunningFlag(TestContinuableInstances):

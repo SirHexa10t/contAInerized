@@ -376,10 +376,16 @@ future professions (require extra tooling); list above is more comrehensive:
     
 
 Maybe indent the form items in inheritence after-all...
+    
 
 A dumping-area (all have access), where files can be copied into.
     Can we restrict execution in that dir?
 
+
+Add command that'd apply only to this ai project:
+    /print-own-files - prints the MEMORY.md and CLAUDE.md files (and maybe others) + credential-dirs
+        maybe it'd be better as a plain command (`! cmd`) - the paths are constant...
+        
 
 
 

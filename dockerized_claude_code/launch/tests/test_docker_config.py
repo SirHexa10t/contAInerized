@@ -242,30 +242,41 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
     workspace. If inst_id.workspace is None (stale workspace-map entry that
     slipped past resolve_target's re-prompt), fall back to DEFAULT_WORKSPACE."""
 
+    @staticmethod
+    def _inst(**overrides):
+        """Stand-in for Instance carrying only what set_container_mounts reads.
+        Centralised so a new field on the real Instance costs one line here
+        rather than one per test."""
+        fields = {"workspace": "/w", "state_dir": Path("/tmp/state"),
+                  "workspace_readonly": False, "is_cowork": False,
+                  "instance": "poet__s"}
+        return SimpleNamespace(**{**fields, **overrides})
+
     def _capture_mounts(self, inst_id):
         """Drive set_container_mounts through a patched add_docker_mount that
         records every (source, target) pair. Returns the list of pairs in
-        call order."""
+        call order. ensure_dir is patched out so no real directory is created."""
         recorded = []
-        with patch("launch.docker_config.add_docker_mount", side_effect=lambda s, t: recorded.append((str(s), str(t)))):
+        with patch("launch.docker_config.add_docker_mount", side_effect=lambda s, t: recorded.append((str(s), str(t)))), \
+             patch("launch.docker_config.ensure_dir"):
             set_container_mounts(inst_id)
         return recorded
 
     def test_workspace_set_uses_provided_path(self):
-        inst_id = SimpleNamespace(workspace="/some/host/path", state_dir=Path("/tmp/state"), workspace_readonly=False)
+        inst_id = self._inst(workspace="/some/host/path")
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], "/some/host/path")
 
     def test_workspace_none_falls_back_to_default(self):
-        inst_id = SimpleNamespace(workspace=None, state_dir=Path("/tmp/state"), workspace_readonly=False)
+        inst_id = self._inst(workspace=None)
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
     def test_workspace_empty_string_falls_back_to_default(self):
         # `or` covers None AND empty string — both treated as "no workspace".
-        inst_id = SimpleNamespace(workspace="", state_dir=Path("/tmp/state"), workspace_readonly=False)
+        inst_id = self._inst(workspace="")
         mounts = self._capture_mounts(inst_id)
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
@@ -273,7 +284,7 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
     def test_generated_settings_mounted_read_only(self):
         # The launcher-generated settings file shadows the state-dir's rw
         # view of ~/.claude/settings.json — the leash the agent can't undo.
-        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"), workspace_readonly=False)
+        inst_id = self._inst()
         mounts = self._capture_mounts(inst_id)
         settings_pair = next(p for p in mounts if "settings.json" in p[1])
         self.assertEqual(settings_pair[0], "/tmp/state/settings.json")
@@ -282,7 +293,7 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
     def test_readonly_specialty_mounts_workspace_ro(self):
         # A workspace_readonly specialty ({ro}) makes the /workspace mount
         # :ro; the state dir stays writable (Claude Code writes history there).
-        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"), workspace_readonly=True)
+        inst_id = self._inst(workspace_readonly=True)
         mounts = self._capture_mounts(inst_id)
         ws = next(p for p in mounts if p[1].startswith("/workspace"))
         self.assertEqual(ws, ("/w", "/workspace:ro"))
@@ -290,9 +301,100 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         self.assertFalse(state[1].endswith(":ro"))
 
     def test_workspace_read_write_by_default(self):
-        inst_id = SimpleNamespace(workspace="/w", state_dir=Path("/tmp/state"), workspace_readonly=False)
+        inst_id = self._inst()
         mounts = self._capture_mounts(inst_id)
         self.assertIn(("/w", "/workspace"), mounts)
+
+
+class TestCoworkMount(unittest.TestCase):
+    """{cowork} bind-mounts the instance's group-hosting dir at /cowork. The
+    mount and the `_cowork` Stop hook's hardcoded path are one mechanism: a hook
+    writing to /cowork/outbox with no mount would write into the container's
+    ephemeral layer instead of host-visible storage."""
+
+    def _mounts(self, **overrides):
+        recorded = []
+        inst_id = TestSetContainerMountsWorkspaceFallback._inst(**overrides)
+        with patch("launch.docker_config.add_docker_mount", side_effect=lambda s, t: recorded.append((str(s), str(t)))), \
+             patch("launch.docker_config.ensure_dir"):
+            set_container_mounts(inst_id)
+        return recorded
+
+    def test_cowork_instance_gets_the_mount(self):
+        mounts = self._mounts(is_cowork=True, instance="poet__draft")
+        pair = next(p for p in mounts if p[1] == str(paths.COWORK_IN_CONTAINER))
+        self.assertEqual(pair[0], str(paths.cowork_dir_path("poet__draft")))
+
+    def test_plain_instance_gets_no_cowork_mount(self):
+        mounts = self._mounts(is_cowork=False)
+        self.assertNotIn(str(paths.COWORK_IN_CONTAINER), [t for _, t in mounts])
+
+    def test_cowork_mount_is_read_write(self):
+        # The Stop hook writes captures there, so :ro would break capture.
+        mounts = self._mounts(is_cowork=True)
+        pair = next(p for p in mounts if p[1].startswith(str(paths.COWORK_IN_CONTAINER)))
+        self.assertFalse(pair[1].endswith(":ro"))
+
+    def test_source_dir_is_created_before_mounting(self):
+        # docker would otherwise create a missing source as a root-owned dir
+        # the container's unprivileged user could not write.
+        inst_id = TestSetContainerMountsWorkspaceFallback._inst(is_cowork=True, instance="poet__x")
+        with patch("launch.docker_config.add_docker_mount"), \
+             patch("launch.docker_config.ensure_dir") as ensure:
+            set_container_mounts(inst_id)
+        ensure.assert_called_once_with(paths.cowork_dir_path("poet__x"))
+
+
+class TestCoworkMountRealInstance(unittest.TestCase):
+    """The same mount, driven by a REAL Instance rather than a stand-in — so
+    `Instance.is_cowork` itself is under test, not just the branch it gates.
+    Also pins the invariant that binds this mount to the `_cowork` fragment:
+    the Stop-hook command's hardcoded path must sit under the mount target, or
+    captures land in the container's ephemeral layer and vanish on exit."""
+
+    @staticmethod
+    def _instance(specialties):
+        from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+        registry = scan_all(paths.AGENTS_DIR)
+        build = AgentBuild(engine=None, professions=(), specialties=tuple(specialties), policies=())
+        return Instance(agent="poet", md_path=Path("/fake/poet.md"), session="grp",
+                        workspace="/w", is_brand_new=False,
+                        **resolve_build(build, "poet", registry))
+
+    def _mounts(self, specialties):
+        recorded = []
+        with patch("launch.docker_config.add_docker_mount", side_effect=lambda s, t: recorded.append((str(s), str(t)))), \
+             patch("launch.docker_config.ensure_dir"):
+            set_container_mounts(self._instance(specialties))
+        return recorded
+
+    def test_real_cowork_instance_reports_is_cowork(self):
+        self.assertTrue(self._instance(["cowork"]).is_cowork)
+        self.assertFalse(self._instance([]).is_cowork)
+
+    def test_real_cowork_instance_gets_the_mount(self):
+        targets = [t for _, t in self._mounts(["cowork"])]
+        self.assertIn(str(paths.COWORK_IN_CONTAINER), targets)
+
+    def test_real_plain_instance_does_not(self):
+        targets = [t for _, t in self._mounts([])]
+        self.assertNotIn(str(paths.COWORK_IN_CONTAINER), targets)
+
+    def test_stop_hook_writes_under_the_mount_target(self):
+        # The mount and the hook path are one mechanism; if this drifts,
+        # captures are written somewhere the hub will never read.
+        from launch.tags import scan_all
+        frag = scan_all(paths.AGENTS_DIR).specialties["cowork"].load_fragment()
+        command = frag["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertIn(f"{paths.COWORK_IN_CONTAINER}/outbox", command)
+
+    def test_fragment_permits_writing(self):
+        # dontAsk makes `allow` exhaustive, so a manager that cannot Write
+        # cannot merge an inbox — the flow would be impossible.
+        from launch.tags import scan_all
+        perms = scan_all(paths.AGENTS_DIR).specialties["cowork"].load_fragment()["permissions"]
+        self.assertEqual(perms["defaultMode"], "dontAsk")
+        self.assertLessEqual({"Write", "Edit"}, set(perms["allow"]))
 
 
 class TestAddDockerMountCollisions(unittest.TestCase):

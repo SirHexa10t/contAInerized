@@ -5,6 +5,7 @@ Filesystem-touching tests use tmpdir + targeted patches so they don't depend
 on the host's actual launcher state."""
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -545,6 +546,147 @@ class TestLastAnswerInState(unittest.TestCase):
         self._write([{"type": "user", "message": {"role": "user", "content": "q"},
                       "timestamp": "2026-01-01T00:00:00.000Z"}])
         self.assertIsNone(file_access.last_answer_in_state(self.state))
+
+
+class TestAppendText(unittest.TestCase):
+    """append_text backs the {cowork} conversation log: it must extend a file
+    rather than replace it, and must not need the caller to pre-create dirs."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_creates_file_and_parents(self):
+        target = self.dir / "deep" / "nested" / "log.md"
+        file_access.append_text(target, "first\n")
+        self.assertEqual(target.read_text(), "first\n")
+
+    def test_appends_rather_than_replacing(self):
+        target = self.dir / "log.md"
+        file_access.append_text(target, "one\n")
+        file_access.append_text(target, "two\n")
+        self.assertEqual(target.read_text(), "one\ntwo\n")
+
+    def test_leaves_no_temp_files_behind(self):
+        # Unlike write_text, there is no temp-and-replace step to leak.
+        target = self.dir / "log.md"
+        file_access.append_text(target, "x")
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["log.md"])
+
+
+class TestIterFiles(unittest.TestCase):
+    """iter_files is the wrapper spool readers use; sorted, files only."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_missing_parent_yields_nothing(self):
+        self.assertEqual(list(file_access.iter_files(self.dir / "absent")), [])
+
+    def test_yields_files_sorted_and_skips_dirs(self):
+        (self.dir / "b.json").write_text("{}")
+        (self.dir / "a.json").write_text("{}")
+        (self.dir / "subdir").mkdir()
+        self.assertEqual([p.name for p in file_access.iter_files(self.dir)],
+                         ["a.json", "b.json"])
+
+    def test_suffix_filter(self):
+        (self.dir / "keep.json").write_text("{}")
+        (self.dir / "skip.txt").write_text("x")
+        self.assertEqual([p.name for p in file_access.iter_files(self.dir, suffix=".json")],
+                         ["keep.json"])
+
+
+class TestIterTreeFiles(unittest.TestCase):
+    """iter_tree_files is the recursive walk {cowork}'s sync copies trees with —
+    relative paths, so a caller can rebase onto a second tree."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _plant(self, relative: str) -> None:
+        path = self.dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+
+    def test_missing_parent_yields_nothing(self):
+        self.assertEqual(list(file_access.iter_tree_files(self.dir / "absent")), [])
+
+    def test_empty_dir_yields_nothing(self):
+        self.assertEqual(list(file_access.iter_tree_files(self.dir)), [])
+
+    def test_paths_are_relative_to_the_parent(self):
+        self._plant("pkg/deep/mod.py")
+        self.assertEqual(list(file_access.iter_tree_files(self.dir)),
+                         [Path("pkg/deep/mod.py")])
+
+    def test_yields_nested_and_top_level_together_sorted(self):
+        self._plant("b.py")
+        self._plant("a/inner.py")
+        self.assertEqual(list(file_access.iter_tree_files(self.dir)),
+                         [Path("a/inner.py"), Path("b.py")])
+
+    def test_directories_are_not_yielded(self):
+        (self.dir / "empty_subdir").mkdir()
+        self.assertEqual(list(file_access.iter_tree_files(self.dir)), [])
+
+    def test_dotfiles_are_included(self):
+        # rglob("*") skips nothing by name; a dotfile is still work product.
+        self._plant(".hidden_config")
+        self.assertEqual(list(file_access.iter_tree_files(self.dir)),
+                         [Path(".hidden_config")])
+
+
+class TestFilesDiffer(unittest.TestCase):
+    """files_differ answers the question copy_file's overwrite_if_changed asks,
+    without performing the copy."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.left = self.dir / "left"
+        self.right = self.dir / "right"
+
+    def test_identical_content_does_not_differ(self):
+        self.left.write_text("same")
+        self.right.write_text("same")
+        self.assertFalse(file_access.files_differ(self.left, self.right))
+
+    def test_different_content_differs(self):
+        self.left.write_text("one")
+        self.right.write_text("two")
+        self.assertTrue(file_access.files_differ(self.left, self.right))
+
+    def test_a_missing_counterpart_differs(self):
+        self.left.write_text("only here")
+        self.assertTrue(file_access.files_differ(self.left, self.right))
+
+    def test_two_missing_paths_differ_rather_than_raise(self):
+        self.assertTrue(file_access.files_differ(self.left, self.right))
+
+    def test_a_directory_differs_rather_than_raising(self):
+        self.left.write_text("x")
+        self.right.mkdir()
+        self.assertTrue(file_access.files_differ(self.left, self.right))
+
+    def test_compares_content_not_mtime(self):
+        # A file rewritten with the same bytes must read as unchanged, or every
+        # sync round would report the whole tree as changed.
+        self.left.write_text("same")
+        self.right.write_text("same")
+        os.utime(self.right, (0, 0))
+        self.assertFalse(file_access.files_differ(self.left, self.right))
+
+    def test_two_empty_files_do_not_differ(self):
+        self.left.write_text("")
+        self.right.write_text("")
+        self.assertFalse(file_access.files_differ(self.left, self.right))
 
 
 if __name__ == "__main__":

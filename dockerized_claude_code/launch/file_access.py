@@ -158,6 +158,19 @@ def write_text(path: Path, content: str) -> None:
         raise
 
 
+def append_text(path: Path, content: str) -> None:
+    """Append `content` to `path`, creating the file and its parents if missing.
+
+    Deliberately NOT the write_text temp-and-replace dance: an append-only log
+    must not be rewritten wholesale, and a single small append in "a" mode is
+    written at the current end-of-file, so a concurrent reader (`tail -f`, or an
+    agent reading through a bind-mount) sees whole lines rather than a truncated
+    file. Used for the {cowork} per-group conversation log."""
+    ensure_dir(path.parent)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(content)
+
+
 def copy_file(src: Path, dest: Path, overwrite_if_changed: bool = False) -> None:
     """Copy `src` to `dest` (content + permissions + metadata, via shutil.copy2).
     Default behaviour: no-op when `dest` already exists — preserves user edits.
@@ -170,6 +183,45 @@ def copy_file(src: Path, dest: Path, overwrite_if_changed: bool = False) -> None
         return
     ensure_dir(dest.parent)
     shutil.copy2(src, dest)
+
+
+def create_exclusive(path: Path, content: str) -> bool:
+    """Create `path` holding `content`, but ONLY if it does not already exist.
+    True when we created it, False when someone else got there first.
+
+    The opposite of write_text's replace-what's-there: this is an atomic *claim*.
+    `O_EXCL` makes create-or-fail a single syscall, so two processes racing for the
+    same lock cannot both believe they won — which a `path_exists()` check followed
+    by a write cannot promise, however small the window looks.
+
+    Used for the {cowork} hub's singleton pidfile, where two hubs draining the same
+    outboxes would each consume half the captures."""
+    ensure_dir(path.parent)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as handle:
+        handle.write(content)
+    return True
+
+
+def files_differ(left: Path, right: Path) -> bool:
+    """True when the two paths do not hold identical bytes.
+
+    A missing (or unreadable) side counts as differing, because absence is
+    exactly the difference callers care about — a file one tree has and the other
+    doesn't. Compares content rather than size/mtime, so a file rewritten with
+    the same bytes reads as unchanged.
+
+    Sits next to copy_file because it is the predicate copy_file's
+    `overwrite_if_changed` describes; kept separate so a caller can ask the
+    question without performing the copy ({cowork}'s sync reports which of a
+    coworker's submitted files actually differ from the manager's copy)."""
+    try:
+        return left.read_bytes() != right.read_bytes()
+    except OSError:
+        return True
 
 
 def enforce_ssh_dir_perms(ssh_dir: Path) -> None:
@@ -231,6 +283,38 @@ def iter_subdirs(parent: Path) -> Iterator[Path]:
     for entry in parent.iterdir():
         if entry.is_dir():
             yield entry
+
+
+def iter_files(parent: Path, suffix: str | None = None) -> Iterator[Path]:
+    """Yield immediate *files* of `parent`, name-sorted, optionally filtered to
+    one suffix. Sister to iter_subdirs (which yields dirs, unsorted): sorted here
+    because every caller so far reads a spool directory whose filenames encode
+    their order. No-op on a missing parent, same "missing dir == empty listing"
+    intent."""
+    if not parent.exists():
+        return
+    for entry in sorted(parent.iterdir(), key=lambda p: p.name):
+        if entry.is_file() and (suffix is None or entry.suffix == suffix):
+            yield entry
+
+
+def iter_tree_files(parent: Path) -> Iterator[Path]:
+    """Yield every regular file anywhere under `parent`, as paths RELATIVE to it,
+    depth-first and sorted.
+
+    Relative rather than absolute because both callers of a recursive walk want
+    to rebase onto a second tree (`destination / relative`) or report a name a
+    human recognises — an absolute path would just be split apart again. Sorted
+    so a copy manifest reads the same on every run. No-op on a missing parent,
+    same "missing dir == empty listing" intent as its siblings above.
+
+    Distinct from iter_file_stats, which is also recursive but yields absolute
+    paths bundled with size + mtime for the cache-pruning walk."""
+    if not parent.exists():
+        return
+    for entry in sorted(parent.rglob("*")):
+        if entry.is_file():
+            yield entry.relative_to(parent)
 
 
 def tab_complete_paths(text_prefix: str) -> list[str]:

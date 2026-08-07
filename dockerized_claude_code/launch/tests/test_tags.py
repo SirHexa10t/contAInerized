@@ -362,6 +362,40 @@ class TestSpecialty(TagTreeTestCase):
         self.assertIsNone(auto.layer)
         self.assertEqual(auto.requires, frozenset())
 
+    def test_squash_glyph_skips_stance_symbols_and_punctuation(self):
+        # The one-char form for crowded rows: first letter/digit of what the
+        # label shows — never the policy stance symbol, never the brackets.
+        self.assertEqual(Policy(name="vcs-safe", path=Path("/x"), shortname="-gpush").squash_glyph, "g")
+        self.assertEqual(Specialty(name="cowork", path=Path("/x"), shortname="cowrk").squash_glyph, "c")
+        self.assertEqual(Profession(name="code", path=Path("/x")).squash_glyph, "c")
+
+    def test_squash_glyph_of_a_symbol_only_name_is_a_placeholder(self):
+        self.assertEqual(Policy(name="x", path=Path("/x"), shortname="!!").squash_glyph, "?")
+
+    def test_nested_specialty_requires_its_ancestors(self):
+        # The specialty tree nests like the profession tree: {manager} inside
+        # cowork/ requires {cowork}, and the form's check-cascade comes free.
+        root = self.tree({
+            "specialty/cowork/tag.info": 'full_description = "recruitable"\n',
+            "specialty/cowork/manager/tag.info": 'full_description = "hosts groups"\n',
+        })
+        specs = self._specialties(root)
+        self.assertEqual(specs["manager"].requires, frozenset({"cowork"}))
+        self.assertEqual(specs["cowork"].requires, frozenset())
+
+    def test_nesting_and_layer_claim_requires_merge(self):
+        # Two sources, two shapes: tree ancestors (specialties) and a claimed
+        # layer's ancestors (professions). Neither may shadow the other.
+        root = self.tree({
+            "profession/code/tag.info": 'full_description = "code"\n',
+            "profession/code/Dockerfile": "FROM base\n",
+            "profession/code/_inner/Dockerfile": "FROM code\n",
+            "specialty/outer/tag.info": 'full_description = "outer"\n',
+            "specialty/outer/inner/tag.info": 'full_description = "claims a layer"\n',
+        })
+        self.assertEqual(self._specialties(root)["inner"].requires,
+                         frozenset({"outer", "code"}))
+
     def test_combos_parse(self):
         (combo,) = tags.scan_combos(self.full_tree())
         self.assertEqual(combo.tags, frozenset({"dood", "auto"}))
@@ -661,6 +695,17 @@ class TestImageChain(TagTreeTestCase):
         auto, dood = self.reg.specialties["auto"], self.reg.specialties["dood"]
         self.assertEqual(image_chain((), (dood, auto)), ["base", "auto", "dood"])
 
+    def test_a_nested_specialty_follows_its_ancestor_despite_the_alphabet(self):
+        # 'a_child' < 'z_parent' alphabetically — the topo order must win, or a
+        # nested specialty's addendum would compose before the one it extends.
+        reg = scan_all(self.tree({
+            "specialty/z_parent/tag.info": 'full_description = "parent"\n',
+            "specialty/z_parent/a_child/tag.info": 'full_description = "child"\n',
+        }))
+        child, parent = reg.specialties["a_child"], reg.specialties["z_parent"]
+        self.assertEqual(image_chain((), (child, parent)),
+                         ["base", "z_parent", "a_child"])
+
 
 class TestInstance(TagTreeTestCase):
     def setUp(self):
@@ -688,6 +733,23 @@ class TestInstance(TagTreeTestCase):
     def test_claude_args_from_specialties(self):
         i = self._inst(specialties=(self.reg.specialties["auto"],))
         self.assertIn("--dangerously-skip-permissions", i.claude_args)
+
+    def test_is_cowork_and_is_manager_match_by_name(self):
+        # The two launcher-recognised specialties; both matched by NAME (see
+        # identity.py's constants for why), so a fixture with those names is
+        # exactly what the real tree provides.
+        reg = scan_all(self.tree({
+            "specialty/cowork/tag.info": 'full_description = "recruitable"\n',
+            "specialty/cowork/manager/tag.info": 'full_description = "hosts"\n',
+        }))
+        plain = self._inst()
+        coworker = self._inst(specialties=(reg.specialties["cowork"],))
+        manager = self._inst(specialties=(reg.specialties["cowork"],
+                                          reg.specialties["manager"]))
+        self.assertFalse(plain.is_cowork or plain.is_manager)
+        self.assertTrue(coworker.is_cowork)
+        self.assertFalse(coworker.is_manager)     # recruitable, but cannot command the hub
+        self.assertTrue(manager.is_cowork and manager.is_manager)
 
 
 class TestResolveBuild(TagTreeTestCase):

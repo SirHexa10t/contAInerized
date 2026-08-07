@@ -43,6 +43,21 @@ from typing import Any, ClassVar
 INFO_FILE = "tag.info"       # per-tag manifest (TOML) — presence marks a dir as an offered tag
 DOCKER_FILE = "tag.docker"   # per-tag container contribution (TOML) — optional
 HIDDEN_PREFIX = "_"          # a `_`-prefixed dir is a hidden asset dir, not an offered tag
+# From this many tags in ONE display row, label rendering gives way to
+# one-character color chips (`Tag.squash_glyph`). Shared by every consumer —
+# the picker's tag columns and the status line's tag chain — so "crowded"
+# means the same thing everywhere.
+SQUASH_AT = 6
+
+
+def first_glyph(text: str) -> str:
+    """The first letter or digit of `text`, or `?` when it has none.
+
+    The character an entire tag collapses to in squashed displays, so it skips
+    anything that is not identity: kind punctuation, a policy's stance symbol,
+    dashes. Also applied to a TagProblem's label, which is why it takes a
+    string rather than living only on Tag."""
+    return next((c for c in text if c.isalnum()), "?")
 
 
 class TagError(Exception):
@@ -148,6 +163,16 @@ class Tag:
         `+query` → `<+query>`."""
         opener, closer = self.parentheses
         return f"{opener}{self.shortname or self.name}{closer}"
+
+    @property
+    def squash_glyph(self) -> str:
+        """The one-character form of this tag, for displays too crowded for
+        labels (SQUASH_AT or more tags on one row): the first letter or digit
+        of what the label shows, skipping the kind punctuation and a policy's
+        stance symbol — `{cowrk}` → `c`, `<-gpush>` → `g`. Rendered by the
+        consumers as a color chip (the tag's usual color as BACKGROUND, black
+        glyph), since with the name gone the color carries the kind."""
+        return first_glyph(self.shortname or self.name)
 
     @property
     def wants_map(self) -> dict[str, str]:

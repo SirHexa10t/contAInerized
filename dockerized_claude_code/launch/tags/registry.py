@@ -183,7 +183,9 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
     first fault):
       - names unique across ALL kinds (one namespace);
       - every hidden layer / policy fragment is claimed by exactly one specialty;
-      - `requires` (tree-derived) resolve to real professions;
+      - `requires` (tree-derived) resolve to real tags of the right kind:
+        professions require professions; specialties additionally require
+        specialties (their own tree nests too — `{manager}` inside `cowork/`);
       - `wants` and combo references resolve to real tags (any kind)."""
     # Global name uniqueness across kinds.
     seen: dict[str, str] = {}
@@ -201,12 +203,19 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
         if fragment_name not in reg.specialties:
             raise TagError(f"hidden policy fragment 'policy/_{fragment_name}' has no matching specialty '{fragment_name}'")
 
-    # requires resolve to professions (professions nest under professions;
-    # specialties inherit their layer's profession ancestors).
-    for tag in [*reg.professions.values(), *reg.specialties.values()]:
-        for req in tag.requires:
+    # requires resolve per kind. A profession's come only from its own tree
+    # (professions nest under professions). A specialty's come from two
+    # sources with two shapes: tree ancestors (specialties — its own tree
+    # nests too) and a claimed layer's ancestors (professions).
+    for prof in reg.professions.values():
+        for req in prof.requires:
             if req not in reg.professions:
-                raise TagError(f"{tag.path}: requires unknown profession '{req}'")
+                raise TagError(f"{prof.path}: requires unknown profession '{req}'")
+    for spec in reg.specialties.values():
+        for req in spec.requires:
+            if req not in reg.professions and req not in reg.specialties:
+                raise TagError(f"{spec.path}: requires unknown tag '{req}' "
+                               f"(not a profession or specialty)")
 
     # wants + combos reference any real tag.
     known = reg.all_names()

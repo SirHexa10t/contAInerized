@@ -8,16 +8,17 @@ per-instance store (a continue), with the create-form editing them in
 between.
 
 `image_chain` computes the active-tag chain — `["base", <professions…>,
-<specialties…>]`. Professions are ordered so a required profession precedes
-its dependents (code before web); specialties follow all professions (their
-`requires` reference professions, satisfied by the whole profession group
-being ahead).
+<specialties…>]`. Both groups are ordered so a required tag precedes its
+dependents (code before web; cowork before manager); specialties follow all
+professions, so a specialty's profession requirements are satisfied by the
+whole profession group being ahead.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from ..file_access import agent_md_index, has_continuable_jsonl, last_history_mtime
 from ..paths import instance_state_dir_path, state_md_path
@@ -30,39 +31,66 @@ from .registry import Registry, TagProblem
 from .specialty import Specialty
 
 SESSION_SEP = "__"
+# The two specialties the launcher recognises by NAME (see Instance.is_cowork /
+# is_manager for why): `{cowork}` makes an instance eligible for multi-agent
+# group hosting (the launcher bind-mounts its group dir), and `{manager}` — the
+# specialty nested inside cowork/ — makes the hub honour its control requests.
+# Both are launcher/hub behaviours with nothing for a tag manifest to declare.
+# Renaming either tag dir means changing its constant here.
+COWORK_SPECIALTY = "cowork"
+MANAGER_SPECIALTY = "manager"
 
 
-def _topo_professions(professions: tuple[Profession, ...]) -> list[Profession]:
-    """Order professions so each follows the professions it requires (code
-    before web). Ties broken by name for determinism. A selection with an
-    unmet requirement (prevented by the form, but guarded here) appends the
+_TagT = TypeVar("_TagT", bound=Tag)
+
+
+def _topo_by_requires(tags: tuple[_TagT, ...], satisfied: set[str]) -> list[_TagT]:
+    """Order `tags` so each follows the tags it requires, ignoring requirements
+    already in `satisfied` (a later group treats every earlier group's names as
+    given). Ties broken by name for determinism. A selection with an unmet
+    requirement (prevented by the form, but guarded here) appends the
     stragglers rather than looping forever."""
-    placed: list[Profession] = []
-    placed_names: set[str] = set()
-    remaining = sorted(professions, key=lambda p: p.name)
+    placed: list[_TagT] = []
+    placed_names = set(satisfied)
+    remaining = sorted(tags, key=lambda t: t.name)
     while remaining:
-        ready = [p for p in remaining if p.requires <= placed_names]
+        ready = [t for t in remaining if t.requires <= placed_names]
         if not ready:
             placed.extend(remaining)   # unsatisfiable requires — shouldn't happen post-validation
             break
-        for p in ready:
-            placed.append(p)
-            placed_names.add(p.name)
-            remaining.remove(p)
+        for t in ready:
+            placed.append(t)
+            placed_names.add(t.name)
+            remaining.remove(t)
     return placed
+
+
+def _ordered_groups(professions: tuple[Profession, ...],
+                    specialties: tuple[Specialty, ...],
+                    ) -> tuple[list[Profession], list[Specialty]]:
+    """Professions and specialties in chain order — the ONE ordering every
+    chain-shaped view derives from (image_chain, active_tags, build_steps,
+    docker_contributions). A specialty's profession requirements are satisfied
+    by the whole profession group being ahead; its specialty requirements (the
+    tree nests: `{manager}` inside `cowork/`) by the topo order within its own
+    group. One helper rather than four inline sorts, because the addendum
+    composition and the image chain drifting apart would be a subtle bug."""
+    profs = _topo_by_requires(professions, set())
+    specs = _topo_by_requires(specialties, {p.name for p in profs})
+    return profs, specs
 
 
 def image_chain(professions: tuple[Profession, ...],
                 specialties: tuple[Specialty, ...]) -> list[str]:
-    """The active-tag chain: `["base", <professions…>, <specialties…>]`.
-    Professions topologically ordered (requirements first); specialties
-    alphabetical after all professions. Drives handler dispatch and the
-    addendum composition. (Image naming/building uses `Instance.build_steps`
-    — the layer-bearing subset — since run-only specialties like {firewall}
+    """The active-tag chain: `["base", <professions…>, <specialties…>]`, in
+    `_ordered_groups` order — see that helper for why the ordering is shared.
+    Drives handler dispatch and the addendum composition, which is why order
+    matters at all: a nested specialty's addendum should read after the one it
+    extends. (Image naming/building uses `Instance.build_steps` — the
+    layer-bearing subset — since run-only specialties like {firewall}
     contribute container config but no image content.)"""
-    profs = _topo_professions(professions)
-    specs = sorted(specialties, key=lambda s: s.name)
-    return ["base", *(p.name for p in profs), *(s.name for s in specs)]
+    profs, specs = _ordered_groups(professions, specialties)
+    return ["base", *(t.name for t in profs), *(t.name for t in specs)]
 
 
 @dataclass(frozen=True)
@@ -116,15 +144,11 @@ class Instance:
 
     @property
     def active_tags(self) -> list[Tag]:
-        """Every active tag as objects, in chain order — professions
-        (requirement order), specialties (alphabetical), then policies.
-        Drives the addendum composition; anything wanting 'all my tags,
-        ordered' reads this instead of re-deriving."""
-        return [
-            *_topo_professions(self.professions),
-            *sorted(self.specialties, key=lambda s: s.name),
-            *self.policies,
-        ]
+        """Every active tag as objects, in chain order (`_ordered_groups`),
+        then policies. Drives the addendum composition; anything wanting 'all
+        my tags, ordered' reads this instead of re-deriving."""
+        profs, specs = _ordered_groups(self.professions, self.specialties)
+        return [*profs, *specs, *self.policies]
 
     @property
     def build(self) -> AgentBuild:
@@ -139,27 +163,28 @@ class Instance:
 
     @property
     def build_steps(self) -> list[tuple[str, Path, DockerContribution | None]]:
-        """(name, dockerfile, contribution) per image layer in chain order:
-        professions (requirement order), then layer-bearing specialties
-        (alphabetical — dood's `_dood` dir). The contribution supplies the
-        layer's `[build] arg_forward`. Run-only specialties (auto, firewall)
-        don't appear: they contribute container config, not image content.
-        Empty for a bare agent (base image only)."""
+        """(name, dockerfile, contribution) per image layer in chain order
+        (`_ordered_groups`): professions, then layer-bearing specialties
+        (dood's `_dood` dir). The contribution supplies the layer's `[build]
+        arg_forward`. Run-only specialties (auto, firewall) don't appear: they
+        contribute container config, not image content. Empty for a bare agent
+        (base image only)."""
+        profs, specs = _ordered_groups(self.professions, self.specialties)
         out: list[tuple[str, Path, DockerContribution | None]] = [
-            (p.name, p.path / "Dockerfile", p.docker)
-            for p in _topo_professions(self.professions)
+            (p.name, p.path / "Dockerfile", p.docker) for p in profs
         ]
         out += [(s.name, s.layer.path / "Dockerfile", s.layer.docker)
-                for s in sorted(self.specialties, key=lambda s: s.name) if s.layer]
+                for s in specs if s.layer]
         return out
 
     @property
     def docker_contributions(self) -> list[DockerContribution]:
-        """Active tags' `tag.docker` records in chain order — professions
-        first, then each specialty's own record + (if any) its claimed
-        layer's. docker_config folds these into build/run flags."""
-        out = [p.docker for p in _topo_professions(self.professions) if p.docker]
-        for s in sorted(self.specialties, key=lambda s: s.name):
+        """Active tags' `tag.docker` records in chain order (`_ordered_groups`)
+        — professions first, then each specialty's own record + (if any) its
+        claimed layer's. docker_config folds these into build/run flags."""
+        profs, specs = _ordered_groups(self.professions, self.specialties)
+        out = [p.docker for p in profs if p.docker]
+        for s in specs:
             if s.docker:
                 out.append(s.docker)
             if s.layer and s.layer.docker:
@@ -192,6 +217,28 @@ class Instance:
         cannot write to the project). docker_config.set_container_mounts reads
         this to pick the `/workspace` mount's access mode."""
         return any(s.workspace_readonly for s in self.specialties)
+
+    @property
+    def is_cowork(self) -> bool:
+        """True when `{cowork}` is active, i.e. this instance may be recruited
+        into a multi-agent group. Matched BY NAME rather than by a tag.info
+        field — a deliberate exception to the otherwise field-driven design,
+        because the capability is a launcher-side behaviour (mounting the
+        group-hosting dir) with nothing for a tag manifest to declare.
+        Renaming the tag therefore means editing this constant too.
+        docker_config.set_container_mounts reads this to decide whether to
+        bind-mount `cowork_dir_path(...)` at COWORK_IN_CONTAINER."""
+        return any(s.name == COWORK_SPECIALTY for s in self.specialties)
+
+    @property
+    def is_manager(self) -> bool:
+        """True when `{manager}` is active, i.e. the hub honours this
+        instance's control requests (roster / recruit / send / release /
+        done). Same by-name exception as `is_cowork`, for the same reason:
+        the gate is hub-side behaviour, not something a manifest can declare.
+        The tag nests inside cowork/, so `is_manager` implies `is_cowork` on
+        any validly-built instance — cowork.control checks only this one."""
+        return any(s.name == MANAGER_SPECIALTY for s in self.specialties)
 
     @property
     def claude_args(self) -> list[str]:

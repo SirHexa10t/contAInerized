@@ -155,6 +155,18 @@ RICH_BY_STYLE = {
 }
 
 
+def squashed_tag_style(style: str) -> str:
+    """The chip form of a tag style: the tag's usual foreground color turned
+    into the BACKGROUND, with a black glyph on top. Used wherever SQUASH_AT or
+    more tags share a row and each collapses to `Tag.squash_glyph` — with the
+    name gone, the color block is what still says "specialty, dangerous" or
+    "policy, deny" at a glance. Derived from the style string rather than
+    listed per-constant so a new tag color cannot be forgotten here."""
+    color = next((token.removeprefix("fg:") for token in style.split()
+                  if token.startswith("fg:")), "ansiwhite")
+    return f"fg:ansiblack bg:{color}"
+
+
 def tag_style(tag: Tag) -> str:
     """The style for one tag's label — dispatched on the kind-specific fields
     (duck-typed: only specialties carry `warn`, only policies carry `stance`,

@@ -74,6 +74,9 @@ RESOLVED_DOMAINS_CACHE_FILE = FIREWALL_CACHE_DIR / "resolved_domains.txt"
 # launcher-managed state at the AGENTS_STATE root (OAuth, workspace map,
 # instance dirs) doesn't mix with hand-edited files.
 USER_EXTRAS_DIR = AGENTS_STATE / "user_extras"
+
+# The {cowork} group-hosting root and everything under it are call-time BUILDERS,
+# not constants — see `group_hosting_dir` in the builders section below.
 OPTIONAL_CREDS_DIR = USER_EXTRAS_DIR / "optional_creds"
 FIREWALL_WHITELIST_FILE = USER_EXTRAS_DIR / "firewall_whitelist.txt"
 
@@ -134,6 +137,11 @@ if not Path(DEFAULT_WORKSPACE).is_dir():
 CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
 CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
+# {cowork}'s per-instance group-hosting dir inside the container. Deliberately at
+# the root rather than under CLAUDE_CONFIG_IN_CONTAINER: that path is Claude Code's
+# own namespace (projects/, skills/, commands/, todos/), and the `_cowork` policy
+# fragment's Stop-hook command hardcodes this path — the two must agree.
+COWORK_IN_CONTAINER = Path("/cowork")
 WORKSPACE_IN_CONTAINER = Path("/workspace")                        # bind-mount target for the picked workspace — the project dir every agent sees
 CLAUDE_SUMMARY_IN_CONTAINER = WORKSPACE_IN_CONTAINER / ".claude_summary"   # project summary file the agent reads on demand (lives at the workspace mount root)
 BASHRC_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".bashrc"         # bind-mount target for settings/bashrc.sh; also the value BASH_ENV points at so non-interactive bash sources it
@@ -309,6 +317,53 @@ state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: sta
 # uses its mtime as the "last launched" signal; audit's `no_history` check
 # treats absence as "instance never started".
 state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / "history.jsonl"
+
+# {cowork} group-hosting builders. `group_hosting_dir` is the root: one subdir per
+# participating instance, each bind-mounted into that instance's container as
+# COWORK_IN_CONTAINER, so the host-side hub and the agent exchange files through
+# plain filesystem IO rather than `docker cp` / `docker exec`. A group's canonical
+# state (session.json + conversation.md) lives in its MANAGER's copy of the group
+# dir — discovery is a scan for dirs containing session.json, so there is no
+# separate registry. `hub_state_path` sits at the root, deliberately outside every
+# mount: agents may read their own session.json, never the hub's own bookkeeping.
+#
+# The root is a no-arg BUILDER rather than a constant, like `instances_dir` and for
+# the same reason — but here it earns its keep twice over. Several modules outside
+# this file need the root itself (to scan it, or to check containment), and a
+# module that imports a CONSTANT binds it at import time: patching
+# `paths.AGENTS_STATE` in a test would then redirect this file's builders while
+# leaving that module pointed at the real state dir, silently. Composing every
+# builder below from `group_hosting_dir()` means one patch moves the whole feature.
+#
+# `group_key` composes the one string that names a group in EVERY participant's
+# tree — `<manager-instance>-<project-title>` — so a coworker taking part in
+# several groups keeps them in sibling dirs that never collide.
+#
+# Every participant's tree has the same two shapes: `<group>/` is the dir that
+# participant writes, and `<group>@<sender>/` is an inbox — what someone sent it,
+# written only by the hub. So `cowork_inbox_path` serves BOTH directions: the
+# manager's inbox holding a coworker's submission, and the coworker's inbox
+# holding what the manager handed over. Its args are (owner, group, sender), not
+# (manager, ...) — the owner is whoever's tree the inbox sits in.
+#
+# INBOX_SEPARATOR is `@` rather than `-` on purpose: a group name is
+# `<manager>-<project>`, so `-` made an inbox name ambiguous with the group dir
+# of a project whose title happened to end in `-<sender>`. `@` cannot occur in a
+# group name (nothing composes one with it), so no inbox name can ever collide
+# with a group name — which matters because both are siblings in the same dir.
+# Group discovery still keys on `session.json` presence rather than on the name;
+# an inbox legitimately has none.
+INBOX_SEPARATOR = "@"
+group_hosting_dir:       Callable[[], Path]           = lambda: AGENTS_STATE / "group_hosting"
+hub_state_path:          Callable[[], Path]           = lambda: group_hosting_dir() / "hub.state.json"
+hub_pid_path:            Callable[[], Path]           = lambda: group_hosting_dir() / "hub.pid"
+cowork_dir_path:         Callable[[str], Path]         = lambda instance: group_hosting_dir() / instance
+cowork_outbox_path:      Callable[[str], Path]         = lambda instance: group_hosting_dir() / instance / "outbox"
+group_key:               Callable[[str, str], str]     = lambda manager, project: f"{manager}-{project}"
+cowork_group_path:       Callable[[str, str], Path]    = lambda instance, group: group_hosting_dir() / instance / group
+cowork_inbox_path:       Callable[[str, str, str], Path] = lambda owner, group, sender: group_hosting_dir() / owner / f"{group}{INBOX_SEPARATOR}{sender}"
+group_session_path:      Callable[[Path], Path]        = lambda group_dir: group_dir / "session.json"   # its presence is what marks a dir as a group (and its parent as the manager)
+group_conversation_path: Callable[[Path], Path]        = lambda group_dir: group_dir / "conversation.md"
 
 # Per-provider CDN-range cache file under FIREWALL_CACHE_DIR (see its comment
 # further up) — provider names come from firewall/resolver.py's fetcher registry.

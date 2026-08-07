@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .base import Tag, TagError, common_fields, is_hidden_asset_dir, read_toml
+from .base import Tag, TagError, common_fields, read_toml, walk_tag_tree
 from .policy import POLICY_FILE, read_fragment
 from .profession import Layer
 
@@ -60,32 +60,30 @@ class Specialty(Tag):
     @classmethod
     def scan(cls, agents_dir: Path, layers: dict[str, Layer],
              policy_fragments: dict[str, Path]) -> list["Specialty"]:
-        """Discover every specialty (a dir with `tag.info` directly under
-        `agents/specialty/`). Kind-specific keys: `warn` (bool), `claude_args`
-        (list), `workspace_readonly` (bool — mount the workspace `:ro`). A
-        specialty named the same as a discovered hidden layer claims that
-        layer (inheriting its `requires` + image contribution); one named the
-        same as a hidden policy fragment (`policy/_<name>/`) claims that
+        """Discover every specialty (a tag dir under `agents/specialty/`,
+        `_`-dirs excluded), nested like professions: a specialty inside another
+        specialty's dir requires its ancestors (`{manager}` inside `cowork/`
+        requires `{cowork}` — the form's check-cascade then comes free). Those
+        tree ancestors merge with a claimed layer's profession ancestors, since
+        the two say different things: what tags must be active vs what image
+        layers must be beneath.
+
+        Kind-specific keys: `warn` (bool), `claude_args` (list),
+        `workspace_readonly` (bool — mount the workspace `:ro`). A specialty
+        named the same as a discovered hidden layer claims that layer; one named
+        the same as a hidden policy fragment (`policy/_<name>/`) claims that
         settings fragment."""
-        root = agents_dir / cls.root
         out: list[Specialty] = []
-        if not root.is_dir():
-            return out
-        for tag_dir in sorted(root.iterdir(), key=lambda p: p.name):
-            if not tag_dir.is_dir() or is_hidden_asset_dir(tag_dir):
-                continue   # `_`-dir → skip; a stray non-tag dir raises inside is_hidden_asset_dir
+        for tag_dir, ancestors in walk_tag_tree(agents_dir / cls.root):
             fields = common_fields(tag_dir)
             info: dict[str, Any] = fields.pop("_info")
-            warn = bool(info.get("warn", False))
-            claude_args = tuple(info.get("claude_args", []))
-            workspace_readonly = bool(info.get("workspace_readonly", False))
             layer = layers.get(tag_dir.name)
             out.append(cls(
                 **fields,
-                requires=(layer.requires if layer else frozenset()),
-                warn=warn,
-                claude_args=claude_args,
-                workspace_readonly=workspace_readonly,
+                requires=frozenset(ancestors) | (layer.requires if layer else frozenset()),
+                warn=bool(info.get("warn", False)),
+                claude_args=tuple(info.get("claude_args", [])),
+                workspace_readonly=bool(info.get("workspace_readonly", False)),
                 layer=layer,
                 policy_dir=policy_fragments.get(tag_dir.name),
             ))

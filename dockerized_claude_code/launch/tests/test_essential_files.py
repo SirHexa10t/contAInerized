@@ -125,6 +125,26 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertEqual(self.reg.specialties["dood"].requires, frozenset({"code"}))  # via _dood layer
         self.assertTrue(self.reg.specialties["auto"].warn)
 
+    def test_manager_nests_inside_cowork(self):
+        # The role tag: shipped inside cowork/, so recruiting power implies
+        # recruitability, and the form auto-ticks {cowork} under {manager}.
+        self.assertLessEqual({"cowork", "manager"}, set(self.reg.specialties))
+        self.assertEqual(self.reg.specialties["manager"].requires,
+                         frozenset({"cowork"}))
+        self.assertTrue(self.reg.specialties["manager"].warn)
+
+    def test_manager_addendum_teaches_the_control_channel(self):
+        # The addendum IS the protocol documentation an agent gets; if the
+        # control dir or a verb is renamed, this must fail.
+        from launch.cowork.control import CONTROL_SUBDIR, REPLIES_SUBDIR, _VERBS
+        addendum = self.reg.specialties["manager"].addendum
+        self.assertIsNotNone(addendum)
+        _, body = addendum
+        self.assertIn(f"/cowork/{CONTROL_SUBDIR}/", body)
+        self.assertIn(f"{CONTROL_SUBDIR}/{REPLIES_SUBDIR}/", body)
+        for verb in _VERBS:
+            self.assertIn(f"`{verb}", body)
+
     def test_professions_have_dockerfile(self):
         for name in ("code", "webdev"):
             self.assertTrue((self.reg.professions[name].path / "Dockerfile").is_file())

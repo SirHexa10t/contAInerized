@@ -24,12 +24,16 @@ does."""
 from .file_access import home_dir, read_json_field, user_firewall_whitelist_lines
 from .paths import ACCOUNT_FILE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
 from .tags import Instance, PolicyStance, Tag
+from .tags.base import SQUASH_AT
 from .utils import plural
 
 # Field-driven tag colors for the status line — same dispatch as the picker's
-# `_tag_style` (menu_picker), in raw ANSI: warn-flagged specialties bright
+# `tag_style` (gui.tag_form), in raw ANSI: warn-flagged specialties bright
 # red; policies by stance (DENY blue, ALLOW orange, DEMAND bold white);
-# everything else bright green.
+# everything else bright green. Each color exists in two forms: the label
+# foreground, and the chip BACKGROUND (black glyph on the tag's color) that
+# the squashed chain uses — kept as a parallel table because ANSI encodes
+# fg and bg as unrelated numbers, so one cannot be derived from the other.
 _WARN_ANSI = "\033[01;91m"
 _SAFE_ANSI = "\033[22;92m"
 _RESET_ANSI = "\033[0m"
@@ -37,6 +41,13 @@ _STANCE_ANSI = {
     PolicyStance.ALLOW:      "\033[38;5;208m",
     PolicyStance.DENY:       "\033[01;94m",
     PolicyStance.DEMAND:     "\033[01;97m",
+}
+_WARN_CHIP_ANSI = "\033[30;101m"
+_SAFE_CHIP_ANSI = "\033[30;102m"
+_STANCE_CHIP_ANSI = {
+    PolicyStance.ALLOW:      "\033[30;48;5;208m",
+    PolicyStance.DENY:       "\033[30;104m",
+    PolicyStance.DEMAND:     "\033[30;107m",
 }
 
 
@@ -49,9 +60,29 @@ def _tag_ansi(tag: Tag) -> str:
     return _SAFE_ANSI
 
 
+def _tag_chip_ansi(tag: Tag) -> str:
+    """The squashed form's style: black glyph on the tag's usual color."""
+    if getattr(tag, "warn", False):
+        return _WARN_CHIP_ANSI
+    stance = getattr(tag, "stance", None)
+    if stance is not None:
+        return _STANCE_CHIP_ANSI[stance]
+    return _SAFE_CHIP_ANSI
+
+
 def colored_tag_chain(tags: tuple[Tag, ...]) -> str:
-    """Space-separated ANSI-colored tag labels (see _tag_ansi for the color
-    dispatch). Each label self-resets so consecutive labels don't bleed."""
+    """The active tags as one ANSI-colored run for the status line.
+
+    Below SQUASH_AT tags: space-separated full labels in each tag's color. At
+    SQUASH_AT or more, the labels would crowd out the line's actual content
+    (agent, workspace, instance id), so each tag collapses to its
+    `squash_glyph` on a chip of its color — same rule, same one-char form, and
+    same one-space separation as the picker's tag columns, so the two displays
+    teach each other (and two same-colored neighbours read as two tags rather
+    than one block). Every piece self-resets so styles don't bleed."""
+    if len(tags) >= SQUASH_AT:
+        return " ".join(f"{_tag_chip_ansi(t)}{t.squash_glyph}{_RESET_ANSI}"
+                        for t in tags)
     return " ".join(f"{_tag_ansi(t)}{t.label}{_RESET_ANSI}" for t in tags)
 
 

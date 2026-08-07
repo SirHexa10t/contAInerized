@@ -1,0 +1,22 @@
+shortname         = "mngr"
+short_description = "can host cowork groups"
+full_description  = "Makes this instance the HOST of multi-agent cowork groups: it may ask the hub for a roster of recruitable peers, convene them into named groups, hand work out, review what comes back, and close the group. Nested inside cowork — a manager is itself a coworker, so recruiting it into someone else's group stays possible — and the hub honours control requests ONLY from instances carrying this tag; a plain cowork peer writing the same request file is ignored. Grants coordination power, not extra access: the manager still sees only its own /cowork dir, and every exchange still flows through the hub. Danger: a manager spends other instances' turns — every message it sends wakes a peer and consumes that peer's tokens — so give it a round budget you can afford and a persona that delegates deliberately."
+warn              = true
+
+[addendum]
+title = "Hosting cowork groups"
+body  = """You can convene other agent instances into working groups. You talk to the HUB (the host-side router) by writing request files; it answers by pointing you at a reply file. Everything below happens inside /cowork/, the only directory you and the hub share.
+
+**Issuing a request:** write a file (any name) into /cowork/control/. The first line is the command; every line after it is the body. One request per file. The hub polls every few seconds, consumes the file, and injects a prompt naming the reply file under /cowork/control/replies/ — read it before deciding your next step. Commands:
+
+- `roster` — list recruitable peers: who is running, what they are, and how committed they already are. Body ignored.
+- `recruit <project> <peer-id> ...` — create the group `<your-id>-<project>` (or extend it) with the named peers. `<project>` is your space-free label for the job; the body states the task. Re-issuing is safe — it never resets progress.
+- `send <group-key> <peer-id>` — deliver the body as a message to that peer and wake it. Append ` +files` to the command line to also copy your working copy into the peer's inbox first. Each send to a peer consumes one round from the group's budget; when it runs out the group closes.
+- `release <group-key> <peer-id>` — drop a peer from the group.
+- `done <group-key>` — close the group. Its files and conversation log are kept.
+
+**Your working copy is /cowork/<group-key>/.** What you put there is exactly what `+files` hands over, so scope a handover by what the directory contains. Do not edit session.json or conversation.md — those are the hub's records (conversation.md is worth READING after a restart: it is the whole discussion).
+
+**Replies arrive as prompts.** When a peer answers, the hub injects the reply text plus a list of submitted files and the exact diff command to review them. Submissions land in /cowork/<group-key>@<peer-id>/ — an inbox the hub writes and you read. Merge what you accept into your working copy yourself, then CLEAR the inbox: a stale inbox is indistinguishable from a fresh submission next round.
+
+**Sequence handovers.** Never send a peer new material while you still owe it a review — a fresh hand-over lands in the same inbox. And never do a peer's task yourself while it is working on it; wait for the submission, review, then decide."""

@@ -30,11 +30,19 @@ docker_check_any_agent_running_subprocess + detect_docker_gid from here;
 run.py is the top-level consumer.
 """
 
+import fcntl
 import fnmatch
+import os
+import pty
+import re
+import select
 import shutil
+import struct
 import subprocess
 import sys
+import termios
 import time
+import tty
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -43,14 +51,16 @@ from .container_env import (
     ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
     staged_env,
 )
+from .file_access import ensure_dir
 from .firewall import (
     is_critical_pending, selftest_address, start_firewall_updater,
     wait_for_critical_addresses,
 )
 from .paths import (
-    BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, DEFAULT_WORKSPACE,
-    DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT, FIREWALL_DONE_IN_CONTAINER,
-    INSTALL_FAILURES_LOG_IN_CONTAINER, LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION,
+    BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, COWORK_IN_CONTAINER,
+    DEFAULT_WORKSPACE, DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT,
+    FIREWALL_DONE_IN_CONTAINER, INSTALL_FAILURES_LOG_IN_CONTAINER,
+    LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION, cowork_dir_path,
     state_settings_path,
 )
 from .tags import DockerContribution, Instance
@@ -65,7 +75,8 @@ from .utils import call_or_exit, exit_if_missing, prompt_keypress, shell_capture
 # ============================================================
 # Every bind-mount for `docker run` flows through this dict. set_container_mounts
 # stages the always-on set (paths.DOCKER_BASE_MOUNTS + the per-instance
-# workspace/state dirs); tag_handlers stages each active tag's declarative
+# workspace/state dirs, plus the {cowork} group-hosting dir when that tag is
+# active); tag_handlers stages each active tag's declarative
 # `tag.docker` mounts plus the [code] cache mounts; user_additions stages
 # skills + optional creds. Mirror of container_env's `_container_env` /
 # stage_container_env pattern — declarations flow one way, emission stays in
@@ -380,6 +391,134 @@ def running_instance_report(inst: Instance) -> str | None:
 
 
 # ============================================================
+# Injection — typing a prompt into a live session's TTY
+# ============================================================
+# The one thing group hosting needs docker for beyond launching: waking a
+# running instance. Every byte of {cowork} DATA moves as ordinary files through
+# the per-participant mount; this is only the doorbell.
+#
+# It has to be a pty rather than a pipe. The launcher starts instances with `-t`,
+# and the docker CLI refuses to attach non-TTY stdin to a TTY container — it
+# exits at once, and the first write then dies with EPIPE. Two further details
+# were each found the hard way and are load-bearing, so they are commented where
+# they happen: raw mode (below) and window size (`_match_container_winsize`).
+
+ENTER_KEY = "\r"                    # what the TUI reads as Enter; "\n" is swallowed by the input widget
+INJECT_ENTER_DELAY = 0.4            # settle time between the text and Enter, so the TUI registers a full line
+INJECT_ATTACH_PROBE = 1.0           # how long to watch for docker refusing the attach before typing
+FALLBACK_TTY_SIZE = (24, 80)        # conventional terminal, used only when the container's size is unreadable
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Z0-9]|\x1b[=>]|\r")
+
+
+def docker_attach_inject(instance: str, prompt: str,
+                         *, enter_delay: float = INJECT_ENTER_DELAY) -> bool:
+    """Type `prompt` into `instance`'s live session and press Enter. True if it
+    landed.
+
+    Deliberately no liveness pre-check: callers polling several participants
+    already hold a `docker_running_instances_subprocess` snapshot, and a second
+    probe per injection would buy nothing — attaching to a container that is gone
+    fails cleanly and reports docker's own complaint.
+
+    `--sig-proxy=false` keeps a Ctrl-C in the hub's terminal out of the agent's
+    session. The attach is terminated rather than having its stdin closed: with a
+    TTY the other attachers hold the master open, so `claude` never sees an EOF
+    and the human's own session is left untouched.
+
+    A single line only — `prompt` is TYPED, so an embedded newline reads as Enter
+    and submits a fragment. Callers send a pointer to a file for anything longer
+    (see cowork.mailbox.pointer_prompt)."""
+    container = f"{CONTAINER_NAME_PREFIX}{instance}"
+    master, slave = pty.openpty()
+    _match_container_winsize(master, container)
+    # Raw mode so the line discipline leaves our bytes alone: without it ICRNL
+    # rewrites the Enter (\r -> \n) and ECHO bounces the prompt back into the
+    # stream we read. Real docker sets raw itself; doing it here makes the
+    # injection behave the same whether or not it gets that far.
+    tty.setraw(master)
+    proc = subprocess.Popen(["docker", "attach", "--sig-proxy=false", container],
+                            stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+    os.close(slave)                          # the child owns it now
+    try:
+        # A rejected attach dies within moments and complains onto the pty, so
+        # surface that rather than letting the first write fail with a bare EPIPE.
+        early = _drain_pty(master, INJECT_ATTACH_PROBE)
+        if proc.poll() is not None:
+            detail = _ANSI_RE.sub("", early).strip() or "(docker printed nothing)"
+            print(f"  Injection into '{instance}' failed: {detail}")
+            return False
+        os.write(master, prompt.encode())
+        time.sleep(enter_delay)              # let the TUI register the line before Enter
+        os.write(master, ENTER_KEY.encode())
+        return True
+    except OSError as e:
+        print(f"  Injection into '{instance}' failed writing to the attach stream: {e}")
+        return False
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        os.close(master)
+
+
+def container_tty_size(container: str) -> tuple[int, int] | None:
+    """(rows, cols) of `container`'s OWN terminal, or None if unknowable.
+
+    pid 1 in the container is `claude` (the image's ENTRYPOINT), so its fd 0 is
+    the pty we are about to attach to, and `stty size` reports that pty's
+    winsize. Run without `-t` so the exec doesn't allocate a pty of its own."""
+    try:
+        r = shell_capture("docker", "exec", container, "sh", "-c",
+                          "stty size < /proc/1/fd/0", timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = r.stdout.split()
+    if r.returncode != 0 or len(parts) != 2:
+        return None
+    try:
+        rows, cols = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    return (rows, cols) if rows > 0 and cols > 0 else None
+
+
+def _match_container_winsize(fd: int, container: str) -> None:
+    """Stamp the container's current window size onto our pty.
+
+    `docker attach` PROPAGATES the client terminal's size to the container, so
+    without this the pty's default (often 0x0) resizes the agent's terminal and
+    its TUI redraws into nothing until the human resizes and triggers SIGWINCH.
+    Matching the container's size makes the propagated resize a no-op.
+
+    Read fresh on every injection, because the human may have resized or moved
+    their window since the last prompt — a stale size is exactly what blanks the
+    display."""
+    size = container_tty_size(container) or FALLBACK_TTY_SIZE
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
+
+
+def _drain_pty(master: int, seconds: float) -> str:
+    """Read whatever the attach stream emits for `seconds`, as text. Used to
+    catch docker's own refusal before anything is typed."""
+    chunks: list[bytes] = []
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if not ready:
+            continue
+        try:
+            data = os.read(master, 65536)
+        except OSError:                      # slave side closed — nothing more coming
+            break
+        if not data:
+            break
+        chunks.append(data)
+    return b"".join(chunks).decode(errors="replace")
+
+
+# ============================================================
 # tag.docker flag emitters
 # ============================================================
 
@@ -436,7 +575,8 @@ def set_container_mounts(inst_id: Instance) -> None:
     (bind-mounts vs env vars); both run sequentially in setup_state. Two layers:
     the per-instance pair (workspace → /workspace, state dir → /home/claude/.claude)
     derived from inst_id, plus the always-on DOCKER_BASE_MOUNTS from paths.py
-    (whose target strings already carry any `:ro` suffix).
+    (whose target strings already carry any `:ro` suffix). A `{cowork}` instance
+    additionally gets its group-hosting dir at COWORK_IN_CONTAINER — see below.
 
     The launcher-generated settings file (base settings + policy fragments,
     written by agents_crud.install_settings) mounts READ-ONLY over
@@ -456,6 +596,16 @@ def set_container_mounts(inst_id: Instance) -> None:
     workspace_target = "/workspace" + (f":{RO_MOUNT_OPTION}" if inst_id.workspace_readonly else "")
     add_docker_mount(inst_id.workspace or DEFAULT_WORKSPACE, workspace_target)
     add_docker_mount(inst_id.state_dir, CLAUDE_CONFIG_IN_CONTAINER)
+    if inst_id.is_cowork:
+        # {cowork}: this instance's group-hosting dir, read-write. Created here
+        # rather than by the hub because docker fixes mounts at container
+        # creation — a missing source would be created by docker as a
+        # root-owned dir the container's `claude` user could not write.
+        # The `_cowork` Stop hook writes captures under this mount, which is
+        # what makes them outlive the container.
+        cowork_dir = cowork_dir_path(inst_id.instance)
+        ensure_dir(cowork_dir)
+        add_docker_mount(cowork_dir, str(COWORK_IN_CONTAINER))
     add_docker_mount(state_settings_path(inst_id.state_dir),
                      f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}")
     for source, target in DOCKER_BASE_MOUNTS.items():

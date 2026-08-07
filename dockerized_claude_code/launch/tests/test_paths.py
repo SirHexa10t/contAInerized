@@ -6,6 +6,7 @@ host's home directory and the repo's checkout location."""
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from launch import paths
 
@@ -183,6 +184,86 @@ class TestPathBuilderLambdas(unittest.TestCase):
             paths.optional_creds_service_path("aws"),
             paths.OPTIONAL_CREDS_DIR / "aws",
         )
+
+class TestGroupHostingPaths(unittest.TestCase):
+    """The {cowork} group-hosting builders. `group_key` is the one string that
+    names a group in EVERY participant's tree, so its shape is load-bearing:
+    the manager's own dir, each coworker's copy, and the inbox all derive from
+    it, and group discovery scans for `session.json` rather than parsing names."""
+
+    def test_the_root_follows_a_patched_state_dir(self):
+        # The reason it is a builder rather than a constant: a module that imported
+        # a constant would keep writing to the real state dir under test, silently.
+        with patch.object(paths, "AGENTS_STATE", Path("/tmp/elsewhere")):
+            self.assertEqual(paths.group_hosting_dir(), Path("/tmp/elsewhere/group_hosting"))
+            self.assertEqual(paths.cowork_dir_path("poet__a").parent,
+                             Path("/tmp/elsewhere/group_hosting"))
+
+    def test_root_sits_under_agents_state(self):
+        # Derived, not literal: a rename of the leaf still passes, while moving
+        # the root out of the launcher's state dir still fails.
+        self.assertEqual(paths.group_hosting_dir().parent, paths.AGENTS_STATE)
+
+    def test_hub_state_is_outside_every_participant_dir(self):
+        # Deliberate: agents may read their own session.json, never hub state.
+        self.assertEqual(paths.hub_state_path().parent, paths.group_hosting_dir())
+
+    def test_per_instance_dir_and_outbox(self):
+        self.assertEqual(paths.cowork_dir_path("poet__a").parent, paths.group_hosting_dir())
+        self.assertEqual(paths.cowork_outbox_path("poet__a").parent,
+                         paths.cowork_dir_path("poet__a"))
+
+    def test_group_key_composition(self):
+        # The one assertion that SHOULD be literal: the `<manager>-<project>`
+        # shape is load-bearing, because a manager identifies the groups it hosts
+        # by its own id prefixing the dir name. Changing it must fail loudly.
+        self.assertEqual(paths.group_key("planner__x", "edge_case_tests"),
+                         "planner__x-edge_case_tests")
+
+    def test_same_key_names_the_group_in_every_participant_tree(self):
+        key = paths.group_key("planner__x", "edge_case_tests")
+        self.assertEqual(paths.cowork_group_path("planner__x", key).name,
+                         paths.cowork_group_path("golem__b", key).name)
+
+    def test_inbox_is_a_sibling_of_the_group_dir(self):
+        # Shares the group dir's prefix — which is why discovery keys on
+        # session.json's presence instead of on the directory name.
+        key = paths.group_key("planner__x", "proj")
+        inbox = paths.cowork_inbox_path("planner__x", key, "golem__b")
+        self.assertEqual(inbox.parent, paths.cowork_group_path("planner__x", key).parent)
+        self.assertEqual(inbox.name, f"{key}{paths.INBOX_SEPARATOR}golem__b")
+
+    def test_an_inbox_name_can_never_equal_a_group_name(self):
+        # The two are siblings in one directory, so a collision would merge a
+        # participant's own working copy with something it was sent. Group keys
+        # are composed without the separator, inbox names always carry it —
+        # which makes the collision structurally impossible rather than unlikely.
+        key = paths.group_key("planner__x", "proj")
+        self.assertNotIn(paths.INBOX_SEPARATOR, key)
+        self.assertIn(paths.INBOX_SEPARATOR,
+                      paths.cowork_inbox_path("planner__x", key, "golem__b").name)
+
+    def test_the_same_builder_serves_both_directions(self):
+        # Args are (owner, group, sender): the owner is whoever's tree the inbox
+        # sits in, so one builder covers the manager's and the coworker's.
+        key = paths.group_key("planner__x", "proj")
+        to_manager = paths.cowork_inbox_path("planner__x", key, "golem__b")
+        to_coworker = paths.cowork_inbox_path("golem__b", key, "planner__x")
+        self.assertNotEqual(to_manager, to_coworker)
+        self.assertEqual(to_manager.parent.name, "planner__x")
+        self.assertEqual(to_coworker.parent.name, "golem__b")
+
+    def test_group_state_files_live_in_the_group_dir(self):
+        group_dir = paths.cowork_group_path("planner__x", paths.group_key("planner__x", "proj"))
+        self.assertEqual(paths.group_session_path(group_dir).parent, group_dir)
+        self.assertEqual(paths.group_conversation_path(group_dir).parent, group_dir)
+
+    def test_container_target_is_outside_claude_config(self):
+        # The design decision, not the spelling: the group dir must not squat
+        # Claude Code's own ~/.claude namespace (projects/, skills/, todos/).
+        self.assertTrue(paths.COWORK_IN_CONTAINER.is_absolute())
+        self.assertNotIn(str(paths.CLAUDE_CONFIG_IN_CONTAINER), str(paths.COWORK_IN_CONTAINER))
+
 
 if __name__ == "__main__":
     unittest.main()

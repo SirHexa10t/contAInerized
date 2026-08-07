@@ -50,8 +50,9 @@ Generic-picker entry shape (pick_with_preview):
 import dataclasses
 import io
 import readline
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from functools import cached_property
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -78,16 +79,17 @@ from ..agents_crud import (
 )
 from ..docker_config import docker_running_instances_subprocess
 from ..file_access import (
-    expand_user_path, is_dir, path_exists, read_text, resolved_cwd,
-    resolved_path, tab_complete_paths,
+    expand_user_path, is_dir, last_prompt_in_state, path_exists, read_text,
+    resolved_cwd, resolved_path, tab_complete_paths,
 )
 from ..paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS, instance_state_dir_path
 from .tag_form import (
     RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _fragment_source,
     _normalize, _plain,
-    edit_toolkits_menu, prompt_tags, tag_style,
+    edit_toolkits_menu, prompt_tags, squashed_tag_style, tag_style,
 )
 from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
+from ..tags.base import SQUASH_AT, first_glyph
 from ..tags.engine import engine_sort_key, sorted_engines
 from ..tags.identity import SESSION_SEP
 from ..utils import ordering_index_or_end, relative_time
@@ -241,7 +243,6 @@ class ContEntry:
     row renders greyed with the RUNNING tag and is information-only — docker
     would refuse a second container on the same `--name` anyway."""
     identity: Instance
-    tags_display: str
     workspace_display: str
     is_current_dir: bool
     is_default_dir: bool
@@ -249,12 +250,24 @@ class ContEntry:
     last_used_display: str
     is_running: bool = False
 
-    @property
+    @cached_property
     def preview(self) -> str:
         """Cont-row preview markdown rendered to ANSI. Italic lead-in,
-        horizontal rule, then a YAML-fenced metadata block (rich syntax-colors
-        keys/values)."""
+        horizontal rule, a YAML-fenced metadata block (rich syntax-colors
+        keys/values), then the full tag list — every active tag expanded to
+        its colored label, full name, and one-line description. The preview is
+        where the tags can be READ: the row's column shows one-char chips once
+        it holds SQUASH_AT of them, so this list is the lookup, not a bonus.
+
+        A cached_property, and the picker defers it until the row is first
+        HIGHLIGHTED (PickerEntry.preview takes a callable): the `Last prompt`
+        line below reads the instance's session transcripts, which can run to
+        megabytes — paying that per instance at menu open would make the
+        picker's startup scale with everyone's conversation history.
+        (cached_property assigns via `__dict__`, which a frozen dataclass
+        permits — only `__setattr__` is blocked.)"""
         inst = self.identity
+        prompt = _last_prompt_display(inst.state_dir)
         return _render_md(
             f"*Continue session `{inst.instance}`.*\n\n"
             f"---\n\n"
@@ -263,18 +276,22 @@ class ContEntry:
             f"Session:   {inst.session}\n"
             f"Workspace: {self.workspace_display}\n"
             f"Engine:    {inst.engine.name if inst.engine else '(default)'}\n"
-            f"Tags:      {self.tags_display}\n"
             f"State:     {inst.state_dir}\n"
             f"Last used: {self.last_used_display}\n"
-            f"```\n"
-        )
+            + (f"\nLast prompt:\n  {prompt}\n" if prompt else "")
+            + "```\n"
+        ) + _tags_preview(inst)
 
 
 @dataclass(frozen=True)
 class PickerEntry:
     """One row in `pick_with_preview`. `display` is the prompt_toolkit
     FormattedText fragment list (list of (style, text) tuples), `preview` is
-    the right-pane markdown rendered to ANSI, `value` is what the picker
+    the right-pane ANSI text — either the string itself, or a zero-arg callable
+    producing it, resolved when the row is first highlighted (Cont rows pass a
+    callable: their preview reads the instance's transcripts for the `Last
+    prompt` line, and paying that per instance at menu OPEN would make startup
+    scale with everyone's conversation history). `value` is what the picker
     hands back on selection (Agent for Create rows, Instance
     for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
     for Back rows). `deletable` / `modifiable` default True; the producer
@@ -284,11 +301,18 @@ class PickerEntry:
     instance — see RUNNING_HINT). `display` defaults to a fresh empty list per
     instance to keep the dataclass safe — never shared across rows."""
     display: list[tuple[str, str]] = field(default_factory=list)
-    preview: str = ""
+    preview: str | Callable[[], str] = ""
     value: Any = None
     deletable: bool = True
     modifiable: bool = True
     selectable: bool = True
+
+    def preview_ansi(self) -> str:
+        """The rendered preview, resolving a deferred one. No cache HERE: the
+        deferred form is ContEntry's `preview`, itself a cached_property, so
+        repeated calls (the picker re-renders per keystroke) cost a dict
+        lookup after the first."""
+        return self.preview() if callable(self.preview) else self.preview
 
 
 # Sentinel entry values signalling "open the delete submenu" / "open the
@@ -335,10 +359,8 @@ def continuable_instances(registry: Registry) -> list[ContEntry]:
         ws = inst.workspace
         ws_resolved = resolved_path(ws) if ws and is_dir(ws) else None
         last_mtime = inst.last_used_mtime
-        active = (*inst.professions, *inst.specialties, *inst.policies)
         out.append(ContEntry(
             identity=inst,
-            tags_display=", ".join(t.name for t in active) or "(none)",
             workspace_display=ws if ws else NO_WORKSPACE_DISPLAY,                                    # show stored value even when invalid; `?` sentinel only when no entry at all
             is_current_dir=ws_resolved == cwd,
             is_default_dir=defaulting_dir_active and ws_resolved == default_workspace_resolved,      # cwd ∈ DEFAULTING_DIRS and ws matches DEFAULT_WORKSPACE — tagged `(DEFAULT DIR)`
@@ -371,6 +393,72 @@ def _render_md(text: str) -> str:
     Console(
         file=buf, force_terminal=True, color_system="truecolor", width=80,
     ).print(Markdown(text))
+    return buf.getvalue()
+
+
+LAST_PROMPT_PREVIEW_CHARS = 250   # enough to recognise a conversation; not a transcript viewer
+
+
+def _last_prompt_display(state_dir: Path) -> str | None:
+    """The last human prompt this instance received, condensed for the preview
+    pane — or None when it has none yet (the field then drops out entirely,
+    rather than showing an empty label).
+
+    Condensed two ways, each for a reason: whitespace runs (including
+    newlines) collapse to single spaces, because the value sits inside the
+    preview's YAML fence and a raw line starting ``` would close the fence
+    around the rest of the metadata; and anything past
+    LAST_PROMPT_PREVIEW_CHARS is cut at an ellipsis, because the field exists
+    to recognise the conversation, not to reread it."""
+    found = last_prompt_in_state(state_dir)
+    if found is None:
+        return None
+    condensed = " ".join(found[0].split())
+    if len(condensed) > LAST_PROMPT_PREVIEW_CHARS:
+        condensed = condensed[:LAST_PROMPT_PREVIEW_CHARS] + "…"
+    return condensed or None
+
+
+def _deferred_preview(entry: "ContEntry") -> Callable[[], str]:
+    """A zero-arg producer of `entry`'s preview, for PickerEntry's deferred
+    form. A named closure rather than an inline lambda at the two call sites:
+    the loop variable must be bound NOW (a bare lambda would render whichever
+    row the loop finished on), and the binding-by-default-arg idiom is exactly
+    the kind of trap this spells out instead."""
+    return lambda: entry.preview
+
+
+def _tags_preview(inst: Instance) -> str:
+    """The Cont preview's expanded tag list, ANSI-rendered: one line per
+    active tag — colored label, underlined full name, one-line description —
+    plus an alert line per invalid tag with what to do about it.
+
+    Built with rich Text (like the F8 legend, same RICH_BY_STYLE colors)
+    rather than inside the markdown, because per-tag coloring is the point:
+    the legend taught these colors, the row may be showing them as bare chips,
+    and this list is what maps a chip back to a name."""
+    labels = [t.label for t in inst.active_tags] + [p.label for p in inst.invalid_tags]
+    pad = max((len(label) for label in labels), default=0)
+    lines = Text("Tags:\n", style="bold")
+    # Padding sits OUTSIDE each styled span: the invalid style paints a red
+    # background, and a red bar of trailing spaces would read as more alert.
+    for tag in inst.active_tags:
+        lines.append("  ")
+        lines.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
+        lines.append(" " * (pad - len(tag.label)) + "  ")
+        lines.append(tag.fullname or tag.name, style="underline")
+        lines.append(f" — {tag.short_description}\n")
+    if not inst.active_tags:
+        lines.append("  (none)\n")
+    for problem in inst.invalid_tags:
+        lines.append("  ")
+        lines.append(problem.label, style="black on red")
+        lines.append(" " * (pad - len(problem.label)) + "  ")
+        lines.append(f"{problem.reason.replace('_', ' ')} {problem.kind} — "
+                     f"fix it via F2 before this instance can start\n")
+    buf = io.StringIO()
+    Console(file=buf, force_terminal=True, color_system="truecolor", width=80,
+            ).print(lines, end="")
     return buf.getvalue()
 
 
@@ -426,38 +514,67 @@ def _create_preview(agent: Agent) -> str:
 
 def _tags_column(tags: Iterable[Tag]) -> tuple[list[tuple[str, str]], int]:
     """Render a tag set for cont-row / Create-row display as prompt_toolkit
-    `(style, text)` fragments — each tag's kind-punctuated label in its
-    warn-aware color, space-separated. Returns (fragments, visible width).
-    Empty input → ([], 0). A trailing space fragment is appended to non-empty
-    output so the widest row in the column gets a built-in separator before
-    its right neighbor (the agent / instance name)."""
+    `(style, text)` fragments. Returns (fragments, visible width); empty input
+    → ([], 0). A trailing space fragment is appended to non-empty output so
+    the widest row in the column gets a built-in separator before its right
+    neighbor (the agent / instance name).
+
+    Two forms, chosen by how crowded the row is. Below SQUASH_AT tags: each
+    tag's kind-punctuated label in its warn-aware color. At SQUASH_AT or more,
+    the labels stop fitting anything, so each tag collapses to its
+    one-character `squash_glyph` on a chip of its usual color
+    (`squashed_tag_style`) — the full names move to the row's preview pane,
+    which lists every tag expanded. Both forms space-separate, so two adjacent
+    chips of the same color read as two tags rather than one block."""
+    tag_list = list(tags)
+    if not tag_list:
+        return [], 0
+    squash = len(tag_list) >= SQUASH_AT
     fragments: list[tuple[str, str]] = []
-    for tag in tags:
+    for tag in tag_list:
         if fragments:
             fragments.append(("", " "))
-        fragments.append((tag_style(tag), tag.label))
-    if not fragments:
-        return [], 0
+        fragments.append((squashed_tag_style(tag_style(tag)), tag.squash_glyph)
+                         if squash else (tag_style(tag), tag.label))
     fragments.append(("", " "))   # trailing separator — bakes into the column width
     visible = sum(len(text) for _, text in fragments)
     return fragments, visible
 
 
 def _cont_tags_column(inst: Instance) -> tuple[list[tuple[str, str]], int]:
-    """A Cont row's tag column: the resolved tags (warn-aware colored, via
-    `_tags_column`) followed by any `invalid_tags` — stored names that no
-    longer resolve — rendered in the expected kind's punctuation with a
-    red-background/black-foreground alert style so a stale/typo'd tag is
-    impossible to miss. The invalid tags also block the instance from
-    starting (see select_agent / resolve_target)."""
+    """A Cont row's tag column: the resolved tags (via `_tags_column`)
+    followed by any `invalid_tags` — stored names that no longer resolve —
+    in the red-background/black-foreground alert style so a stale/typo'd tag
+    is impossible to miss. The invalid tags also block the instance from
+    starting (see select_agent / resolve_target).
+
+    The SQUASH_AT threshold counts BOTH parts: six tags where one is invalid
+    are exactly as crowded as six valid ones, and mixing one squashed part
+    with one labelled part would make the alert look like a different feature
+    rather than one of the row's tags. A squashed invalid tag stays visible
+    for the same reason the labelled form does — its chip is the alert red no
+    valid tag uses."""
+    problems = inst.invalid_tags
+    if len(inst.active_tags) + len(problems) >= SQUASH_AT:
+        chips = [(squashed_tag_style(tag_style(tag)), tag.squash_glyph)
+                 for tag in inst.active_tags]
+        chips += [(STYLE_TAG_INVALID, first_glyph(problem.name))
+                  for problem in problems]
+        fragments: list[tuple[str, str]] = []
+        for chip in chips:
+            if fragments:
+                fragments.append(("", " "))
+            fragments.append(chip)
+        fragments.append(("", " "))
+        return fragments, sum(len(text) for _, text in fragments)
     fragments, width = _tags_column(inst.active_tags)
-    for problem in inst.invalid_tags:
+    for problem in problems:
         if fragments:
             fragments.append(("", " "))
             width += 1
         fragments.append((STYLE_TAG_INVALID, problem.label))
         width += len(problem.label)
-    if inst.invalid_tags:
+    if problems:
         fragments.append(("", " "))   # trailing separator, matching _tags_column
         width += 1
     return fragments, width
@@ -538,8 +655,8 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         if not state["shown"]:
             return ""
         # Wrap in ANSI(...) so rich-rendered escape codes in Create-row previews show
-        # as styled text. Plain previews (Cont rows, etc.) pass through unchanged.
-        return ANSI(entries[state["cursor"]].preview)
+        # as styled text. Plain previews (Back rows, etc.) pass through unchanged.
+        return ANSI(entries[state["cursor"]].preview_ansi())
 
     def title_fragments() -> list[tuple[str, str]]:
         return [(UiClass.TITLE.css, title)]
@@ -832,7 +949,7 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                 cont_display.append((STYLE_WORKSPACE_HINT, inst.workspace_display))
                 entries.append(PickerEntry(
                     display=cont_display,
-                    preview=inst.preview,
+                    preview=_deferred_preview(inst),   # reads transcripts on first highlight, not at menu open
                     value=identity,
                     # A live container owns the name (Enter would hit a docker
                     # name conflict) and owns the state dir rw (Del would delete
@@ -932,7 +1049,7 @@ def _delete_submenu(registry: Registry, legend_text: str) -> None:
                 row.append(RUNNING_HINT)
             entries.append(PickerEntry(
                 display=row,
-                preview=inst.preview,
+                preview=_deferred_preview(inst),       # deferred, as in the main picker
                 value=identity,
                 # Deleting a live container's state dir (bind-mounted rw) could
                 # corrupt the running session — information-only here too.
