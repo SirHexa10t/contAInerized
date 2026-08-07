@@ -354,6 +354,153 @@ class TestFocusableRows(unittest.TestCase):
         self.assertEqual(_cursor_step(rows, [2], 2, 1), 2)           # only row 2 survived the filter
 
 
+class TestPromptOffload(unittest.TestCase):
+    """_read_last_prompt is the GIL escape hatch: the transcript parse runs in
+    a child process (a CPU-bound thread convoys the render loop — measured at
+    an 803 ms UI stall on a 155 MB state dir; see
+    benchmark/bench_preview_gil.py), with an in-process fallback when a pool
+    cannot serve, because degraded beats broken."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.state_dir = Path(self.tmpdir.name)
+        transcript = self.state_dir / "projects" / "-workspace" / "s.jsonl"
+        transcript.parent.mkdir(parents=True)
+        import json
+        transcript.write_text(json.dumps({
+            "type": "user", "timestamp": "2026-08-07T10:00:00Z",
+            "message": {"role": "user", "content": "offloaded prompt"}}) + "\n")
+
+    def test_falls_back_in_process_when_the_pool_cannot_serve(self):
+        class BrokenPool:
+            def submit(self, *args, **kwargs):
+                raise RuntimeError("no subprocesses here")
+
+        with patch.object(menu_picker, "_PROMPT_POOL", BrokenPool()):
+            found = menu_picker._read_last_prompt(self.state_dir)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0], "offloaded prompt")
+
+    def test_the_child_process_reads_the_same_answer(self):
+        # The one integration test of the real mechanism. Skipped where child
+        # processes are forbidden — the fallback test above covers that world.
+        try:
+            import multiprocessing
+            multiprocessing.get_context("spawn")
+        except (ImportError, ValueError) as error:      # pragma: no cover
+            self.skipTest(f"spawn unavailable: {error}")
+        with patch.object(menu_picker, "_PROMPT_POOL", None):
+            try:
+                found = menu_picker._read_last_prompt(self.state_dir)
+            finally:
+                pool, menu_picker._PROMPT_POOL = menu_picker._PROMPT_POOL, None
+                if pool is not None:
+                    pool.shutdown(wait=False, cancel_futures=True)
+        self.assertEqual(found[0], "offloaded prompt")
+
+
+class TestPreviewLoader(unittest.TestCase):
+    """The non-blocking contract: a slow preview yields a placeholder and the
+    UI thread returns immediately; the resolution runs on the worker, pokes
+    invalidate once, and the next render serves the real pane. Timing is
+    controlled with events — no sleeps, no flakes."""
+
+    def setUp(self):
+        self.invalidations = []
+        self.loader = menu_picker._PreviewLoader(
+            invalidate=lambda: self.invalidations.append(True))
+        self.addCleanup(self.loader.shutdown)
+
+    def test_a_ready_preview_is_served_at_once_with_no_scheduling(self):
+        entry = PickerEntry(preview="already rendered")
+        self.assertEqual(self.loader.text(0, entry), "already rendered")
+        self.assertEqual(self.invalidations, [])
+
+    def test_a_slow_preview_yields_the_placeholder_without_blocking(self):
+        import threading
+        started, release, calls = threading.Event(), threading.Event(), []
+
+        def slow() -> str:
+            calls.append(True)
+            started.set()
+            release.wait(5)
+            return "RESOLVED"
+
+        entry = PickerEntry(preview=slow)
+        # The UI thread gets the placeholder back IMMEDIATELY — this very
+        # assertion runs while the resolution is still blocked on `release`.
+        self.assertEqual(self.loader.text(3, entry), menu_picker.PREVIEW_LOADING_TEXT)
+        self.assertTrue(started.wait(5))
+        # Re-renders while it loads: still the placeholder, and NOT a second job.
+        self.assertEqual(self.loader.text(3, entry), menu_picker.PREVIEW_LOADING_TEXT)
+        release.set()
+        self.loader._executor.shutdown(wait=True)      # deterministic: worker done
+        self.assertEqual(self.loader.text(3, entry), "RESOLVED")
+        self.assertEqual(len(calls), 1)                # one resolution, ever
+        self.assertEqual(len(self.invalidations), 1)   # one repaint poke
+
+    def test_the_quick_form_is_served_while_the_full_one_resolves(self):
+        import threading
+        release = threading.Event()
+
+        def slow_full() -> str:
+            release.wait(5)
+            return "FULL"
+
+        entry = PickerEntry(preview=slow_full, preview_quick=lambda: "QUICK")
+        self.assertEqual(self.loader.text(0, entry), "QUICK")   # not the bare placeholder
+        release.set()
+        self.loader._executor.shutdown(wait=True)
+        self.assertEqual(self.loader.text(0, entry), "FULL")
+
+    def test_a_failing_preview_becomes_a_visible_error_not_eternal_loading(self):
+        def broken() -> str:
+            raise RuntimeError("transcript unreadable")
+
+        entry = PickerEntry(preview=broken)
+        self.assertEqual(self.loader.text(0, entry), menu_picker.PREVIEW_LOADING_TEXT)
+        self.loader._executor.shutdown(wait=True)
+        self.assertIn("preview failed", self.loader.text(0, entry))
+        self.assertIn("transcript unreadable", self.loader.text(0, entry))
+        self.assertEqual(len(self.invalidations), 1)   # the error pane still repaints
+
+    def test_two_rows_resolve_independently(self):
+        first = PickerEntry(preview=lambda: "ONE")
+        second = PickerEntry(preview=lambda: "TWO")
+        self.loader.text(0, first)
+        self.loader.text(1, second)
+        self.loader._executor.shutdown(wait=True)
+        self.assertEqual(self.loader.text(0, first), "ONE")
+        self.assertEqual(self.loader.text(1, second), "TWO")
+
+
+class TestPickerEntryPreviewState(unittest.TestCase):
+    def test_a_plain_string_is_born_ready(self):
+        self.assertTrue(PickerEntry(preview="x").preview_ready)
+
+    def test_a_deferred_preview_is_not_ready_until_resolved(self):
+        entry = PickerEntry(preview=lambda: "made")
+        self.assertFalse(entry.preview_ready)
+        self.assertEqual(entry.preview_ansi(), "made")
+        self.assertTrue(entry.preview_ready)           # resolution is recorded on the entry
+
+    def test_resolution_happens_once(self):
+        calls = []
+        entry = PickerEntry(preview=lambda: (calls.append(True), "made")[1])
+        entry.preview_ansi()
+        entry.preview_ansi()
+        self.assertEqual(len(calls), 1)
+
+
+def _plain_text(ansi: str) -> str:
+    """`ansi` with the escape codes stripped — rich's YAML highlighting splits
+    even `[loading…]` into separately-styled tokens, so substring assertions
+    must run on the visible text, not the raw stream."""
+    import re
+    return re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+
+
 class TestLastPromptDisplay(unittest.TestCase):
     """The preview's `Last prompt` value: the transcript's newest human prompt,
     condensed for a metadata pane — collapsed whitespace (it sits inside the
@@ -365,6 +512,13 @@ class TestLastPromptDisplay(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.state_dir = Path(self.tmpdir.name)
+        # In-process read: these tests exercise the DISPLAY logic, and the
+        # offload pool (tested in TestPromptOffload) must not spawn children
+        # inside unit tests — a sandboxed CI may forbid subprocesses entirely.
+        seam = patch.object(menu_picker, "_read_last_prompt",
+                            menu_picker.last_prompt_in_state)
+        seam.start()
+        self.addCleanup(seam.stop)
 
     def _write_prompt(self, text: str) -> None:
         import json
@@ -421,12 +575,52 @@ class TestLastPromptDisplay(unittest.TestCase):
             reads["count"] += 1
             return real(state_dir)
 
-        with patch.object(menu_picker, "last_prompt_in_state", side_effect=counting):
+        with patch.object(menu_picker, "_read_last_prompt", side_effect=counting):
             self.assertEqual(reads["count"], 0)      # deferred: menu build reads nothing
             first = row.preview_ansi()
             for _ in range(50):                      # re-renders while browsing
                 self.assertEqual(row.preview_ansi(), first)
         self.assertEqual(reads["count"], 1)
+
+    def test_quick_preview_stands_in_for_the_prompt_without_reading(self):
+        # The benchmark's conclusion, enforced: 99.9% of a heavy preview is the
+        # transcript read, so the quick form must carry everything EXCEPT that
+        # — metadata, tags, and a [loading…] stand-in — and never touch a file.
+        self._write_prompt("the real prompt")
+        entry = self._entry()
+        reads = {"count": 0}
+        real = menu_picker.last_prompt_in_state
+
+        def counting(state_dir):
+            reads["count"] += 1
+            return real(state_dir)
+
+        with patch.object(menu_picker, "_read_last_prompt", side_effect=counting):
+            quick = _plain_text(entry.preview_quick)
+        self.assertEqual(reads["count"], 0)
+        self.assertIn(menu_picker.LAST_PROMPT_LOADING, quick)
+        self.assertNotIn("the real prompt", quick)
+        self.assertIn("Agent:", quick)          # the metadata is already there
+        self.assertIn("Tags:", quick)           # and so is the tag list
+
+    def test_quick_preview_shows_no_stand_in_for_a_fresh_instance(self):
+        # No history → no Last prompt field ever → no flashing loading line.
+        quick = _plain_text(self._entry().preview_quick)
+        self.assertNotIn("Last prompt", quick)
+        self.assertNotIn(menu_picker.LAST_PROMPT_LOADING, quick)
+
+    def test_full_preview_replaces_the_stand_in_with_the_value(self):
+        self._write_prompt("the real prompt")
+        entry = self._entry()
+        self.assertIn(menu_picker.LAST_PROMPT_LOADING, _plain_text(entry.preview_quick))
+        self.assertIn("the real prompt", _plain_text(entry.preview))
+        self.assertNotIn(menu_picker.LAST_PROMPT_LOADING, _plain_text(entry.preview))
+
+    def _entry(self) -> menu_picker.ContEntry:
+        return menu_picker.ContEntry(
+            identity=dataclasses.replace(make_inst(), state_dir_override=self.state_dir),
+            workspace_display="/w", is_current_dir=False, is_default_dir=False,
+            is_invalid_dir=False, last_used_display="now")
 
     def test_the_preview_field_appears_when_a_prompt_exists(self):
         self._write_prompt("the question I asked")

@@ -47,15 +47,18 @@ Generic-picker entry shape (pick_with_preview):
     }
 """
 
+import atexit
 import dataclasses
 import io
+import multiprocessing
 import readline
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import cached_property
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from prompt_toolkit import Application                                     # dep — declared in pyproject.toml [project]
 from prompt_toolkit.data_structures import Point
@@ -106,6 +109,8 @@ HINT_LEGEND_SUFFIX   = "  •  F8 legend"
 HINT_LEGEND_OPEN     = "F8 / Esc close legend"
 FILTER_LABEL         = "filter: "
 EMPTY_FILTER_MESSAGE = "(no matches)"
+PREVIEW_LOADING_TEXT = "… loading preview (keep browsing)"
+LAST_PROMPT_LOADING  = "[loading…]"   # stands in for the Last prompt value while transcripts are read
 DIVIDER_CHAR         = "│"
 CONFIRM_PROMPT_FMT   = "{message}  [y/N]: "
 CONFIRM_YES_ANSWERS  = ("y", "yes")
@@ -252,22 +257,40 @@ class ContEntry:
 
     @cached_property
     def preview(self) -> str:
-        """Cont-row preview markdown rendered to ANSI. Italic lead-in,
-        horizontal rule, a YAML-fenced metadata block (rich syntax-colors
-        keys/values), then the full tag list — every active tag expanded to
-        its colored label, full name, and one-line description. The preview is
-        where the tags can be READ: the row's column shows one-char chips once
-        it holds SQUASH_AT of them, so this list is the lookup, not a bonus.
+        """The full Cont-row preview — `_compose` with the real `Last prompt`
+        value, which is the expensive part: benchmarked at 99.9% of the build
+        on a 155 MB state dir (3.9 s of a 3.9 s total; metadata + tags are
+        ~5 ms — see benchmark/bench_preview_segments.py). The picker therefore
+        never computes THIS on the UI thread: it shows `preview_quick` and
+        resolves this form on the loader's worker.
 
-        A cached_property, and the picker defers it until the row is first
-        HIGHLIGHTED (PickerEntry.preview takes a callable): the `Last prompt`
-        line below reads the instance's session transcripts, which can run to
-        megabytes — paying that per instance at menu open would make the
-        picker's startup scale with everyone's conversation history.
-        (cached_property assigns via `__dict__`, which a frozen dataclass
-        permits — only `__setattr__` is blocked.)"""
+        A cached_property, so the read happens once per screen-session however
+        often the row is re-rendered. (cached_property assigns via `__dict__`,
+        which a frozen dataclass permits — only `__setattr__` is blocked.)"""
+        return self._compose(_last_prompt_display(self.identity.state_dir))
+
+    @cached_property
+    def preview_quick(self) -> str:
+        """The instant form: identical to `preview` except the `Last prompt`
+        value reads `[loading…]` — the ~5 ms of metadata + tags the UI thread
+        CAN afford, shown while the worker reads the transcripts. The stand-in
+        appears only when the instance has any session history at all
+        (a cheap glob+stat), so a fresh instance never flashes a loading line
+        for a field it will not get. The rare inverse — history whose turns
+        are all tool echoes, so no prompt ever resolves — shows the stand-in
+        once, then loses the field when the full form lands: honest, brief."""
+        return self._compose(LAST_PROMPT_LOADING
+                             if self.identity.has_continuable_history else None)
+
+    def _compose(self, prompt: str | None) -> str:
+        """The preview markdown rendered to ANSI: italic lead-in, horizontal
+        rule, a YAML-fenced metadata block (rich syntax-colors keys/values) —
+        with a `Last prompt` field iff `prompt` is given — then the full tag
+        list, every active tag expanded to its colored label, full name, and
+        one-line description. The preview is where the tags can be READ: the
+        row's column shows one-char chips once it holds SQUASH_AT of them, so
+        the list is the lookup, not a bonus."""
         inst = self.identity
-        prompt = _last_prompt_display(inst.state_dir)
         return _render_md(
             f"*Continue session `{inst.instance}`.*\n\n"
             f"---\n\n"
@@ -302,17 +325,42 @@ class PickerEntry:
     instance to keep the dataclass safe — never shared across rows."""
     display: list[tuple[str, str]] = field(default_factory=list)
     preview: str | Callable[[], str] = ""
+    preview_quick: str | Callable[[], str] | None = None   # cheap stand-in pane shown while `preview` resolves
     value: Any = None
     deletable: bool = True
     modifiable: bool = True
     selectable: bool = True
 
+    @property
+    def preview_ready(self) -> bool:
+        """True once `preview` holds the rendered string — the signal the
+        picker's render path uses to decide between showing it and showing a
+        loading placeholder while a worker resolves it. A plain-string preview
+        (Create / Back rows) is born ready."""
+        return not callable(self.preview)
+
     def preview_ansi(self) -> str:
-        """The rendered preview, resolving a deferred one. No cache HERE: the
-        deferred form is ContEntry's `preview`, itself a cached_property, so
-        repeated calls (the picker re-renders per keystroke) cost a dict
-        lookup after the first."""
-        return self.preview() if callable(self.preview) else self.preview
+        """The rendered preview, resolving a deferred one.
+
+        Resolution REPLACES `preview` with the produced string (via
+        `object.__setattr__` — the one mutation this frozen dataclass permits
+        itself), and that is not an optimisation: it is what makes
+        `preview_ready` answer without computing anything, which the render
+        path depends on to stay non-blocking. The heavy work is cached on
+        ContEntry's side too (`cached_property`), so re-resolving after a
+        rebuild costs a dict lookup."""
+        if callable(self.preview):
+            object.__setattr__(self, "preview", self.preview())
+        return cast(str, self.preview)
+
+    def quick_ansi(self) -> str:
+        """The stand-in pane, resolved the same way. Cheap by contract —
+        everything in it except the transcript-fed field, ~5 ms — so the UI
+        thread calls this directly while the loader's worker builds the real
+        one. Callers check `preview_quick is not None` first."""
+        if callable(self.preview_quick):
+            object.__setattr__(self, "preview_quick", self.preview_quick())
+        return cast(str, self.preview_quick)
 
 
 # Sentinel entry values signalling "open the delete submenu" / "open the
@@ -398,6 +446,42 @@ def _render_md(text: str) -> str:
 
 LAST_PROMPT_PREVIEW_CHARS = 250   # enough to recognise a conversation; not a transcript viewer
 
+# The child process that parses transcripts — created on first use, kept for
+# the launcher's lifetime (one warm child serves every preview of every menu),
+# torn down at exit. See _read_last_prompt for why it exists at all.
+_PROMPT_POOL: ProcessPoolExecutor | None = None
+
+
+def _read_last_prompt(state_dir: Path) -> tuple[str, float] | None:
+    """`last_prompt_in_state`, run in a CHILD PROCESS — because a thread is not
+    background enough. Parsing a large transcript is CPU-bound (~500k
+    `json.loads` calls, plus one `.splitlines()` holding the GIL for the whole
+    68 MB string), and a CPU-bound thread convoys the GIL: measured on a real
+    155 MB state dir, the render thread's 5 ms tick stalled up to 803 ms while
+    a worker THREAD read it, versus 3.5 ms worst-case with the read in a child
+    process (launch/benchmark/bench_preview_gil.py reproduces this). The
+    worker thread that calls this blocks in `.result()`, which waits GIL-FREE.
+
+    Spawn, not fork: the parent runs prompt_toolkit with live threads by the
+    time this fires, and forking a threaded process copies lock state mid-use.
+    The child imports only `launch.file_access` (the pickled target), so the
+    one-time warmup is ~0.2 s — paid on the worker, never on the UI thread.
+
+    Falls back to the in-process read when the pool cannot serve (a sandbox
+    forbidding subprocesses, a killed child): the GIL stutter returns, but the
+    preview still resolves — degraded beats broken. The fallback also makes
+    this the test seam: a patched-in fake is unpicklable, so tests exercising
+    the display logic stay in-process without special-casing."""
+    global _PROMPT_POOL
+    try:
+        if _PROMPT_POOL is None:
+            _PROMPT_POOL = ProcessPoolExecutor(
+                max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+            atexit.register(_PROMPT_POOL.shutdown, wait=False, cancel_futures=True)
+        return _PROMPT_POOL.submit(last_prompt_in_state, state_dir).result()
+    except Exception:                          # noqa: BLE001 — any pool failure degrades, none may break the picker
+        return last_prompt_in_state(state_dir)
+
 
 def _last_prompt_display(state_dir: Path) -> str | None:
     """The last human prompt this instance received, condensed for the preview
@@ -410,7 +494,7 @@ def _last_prompt_display(state_dir: Path) -> str | None:
     around the rest of the metadata; and anything past
     LAST_PROMPT_PREVIEW_CHARS is cut at an ellipsis, because the field exists
     to recognise the conversation, not to reread it."""
-    found = last_prompt_in_state(state_dir)
+    found = _read_last_prompt(state_dir)
     if found is None:
         return None
     condensed = " ".join(found[0].split())
@@ -419,13 +503,70 @@ def _last_prompt_display(state_dir: Path) -> str | None:
     return condensed or None
 
 
-def _deferred_preview(entry: "ContEntry") -> Callable[[], str]:
-    """A zero-arg producer of `entry`'s preview, for PickerEntry's deferred
-    form. A named closure rather than an inline lambda at the two call sites:
-    the loop variable must be bound NOW (a bare lambda would render whichever
-    row the loop finished on), and the binding-by-default-arg idiom is exactly
-    the kind of trap this spells out instead."""
-    return lambda: entry.preview
+class _PreviewLoader:
+    """Resolves slow previews OFF the UI thread, so highlighting a heavy row
+    never stalls the picker.
+
+    The render path asks `text()` for the highlighted row. A ready preview
+    comes back at once; an unresolved one comes back as PREVIEW_LOADING_TEXT
+    while the resolution runs on the one worker thread, which pokes the
+    application's thread-safe `invalidate()` when it finishes — prompt_toolkit
+    then re-renders and the ready branch serves the real thing. Meanwhile
+    every keystroke works: the UI thread never touches a transcript.
+
+    One worker, deliberately: previews resolve in highlight order and each at
+    most once (`_submitted`), so holding an arrow key across heavy rows queues
+    quick sequential reads instead of forking a thread per row. The worker
+    itself stays GIL-quiet: the expensive segment runs in a child process
+    (`_read_last_prompt` — a CPU-bound thread would convoy the render loop),
+    so this thread mostly WAITS. A resolution that RAISES becomes a
+    visible `(preview failed …)` pane rather than an eternal placeholder,
+    because `_submitted` rightly blocks a retry and a silent swallow would
+    look identical to loading forever."""
+
+    def __init__(self, invalidate: Callable[[], None]) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=1,
+                                            thread_name_prefix="preview")
+        self._invalidate = invalidate
+        self._submitted: set[int] = set()
+
+    def text(self, index: int, entry: PickerEntry) -> str:
+        """The pane content for `entry` right now: the preview, or — with
+        resolution scheduled — the richest stand-in available: the entry's
+        quick form (everything but the transcript-fed field, benchmarked at
+        ~5 ms against seconds for the full read) when it has one, else the
+        bare PREVIEW_LOADING_TEXT line."""
+        if entry.preview_ready:
+            return entry.preview_ansi()
+        if index not in self._submitted:
+            self._submitted.add(index)
+            self._executor.submit(self._resolve, entry)
+        if entry.preview_quick is not None:
+            return entry.quick_ansi()
+        return PREVIEW_LOADING_TEXT
+
+    def _resolve(self, entry: PickerEntry) -> None:
+        try:
+            entry.preview_ansi()
+        except Exception as error:                      # noqa: BLE001 — see class docstring
+            object.__setattr__(entry, "preview", f"(preview failed: {error})")
+        self._invalidate()
+
+    def shutdown(self) -> None:
+        """Stop resolving. Queued rows are dropped (the picker is closing —
+        nobody will read them); a resolution already running finishes, since
+        its result lands in ContEntry's cache and greets the next menu."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _deferred_preview(entry: "ContEntry", *, quick: bool = False) -> Callable[[], str]:
+    """A zero-arg producer of `entry`'s preview (or its quick form), for
+    PickerEntry's deferred slots. A named closure rather than an inline lambda
+    at the call sites: the loop variable must be bound NOW (a bare lambda
+    would render whichever row the loop finished on), and the
+    binding-by-default-arg idiom is exactly the kind of trap this spells out
+    instead."""
+    return (lambda: entry.preview_quick) if quick else (lambda: entry.preview)
 
 
 def _tags_preview(inst: Instance) -> str:
@@ -654,9 +795,11 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             return ANSI(legend_text)
         if not state["shown"]:
             return ""
-        # Wrap in ANSI(...) so rich-rendered escape codes in Create-row previews show
-        # as styled text. Plain previews (Back rows, etc.) pass through unchanged.
-        return ANSI(entries[state["cursor"]].preview_ansi())
+        # Through the loader, so a heavy preview shows PREVIEW_LOADING_TEXT and
+        # resolves off-thread instead of stalling this render. Wrap in ANSI(...)
+        # so rich-rendered escape codes show as styled text; the placeholder and
+        # plain previews (Back rows, etc.) pass through unchanged.
+        return ANSI(loader.text(state["cursor"], entries[state["cursor"]]))
 
     def title_fragments() -> list[tuple[str, str]]:
         return [(UiClass.TITLE.css, title)]
@@ -808,12 +951,20 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         Window(FormattedTextControl(_fragment_source(status_fragments)), height=STATUS_HEIGHT),
     ])
 
-    Application(
+    app: Application[None] = Application(
         layout=Layout(body),
         key_bindings=kb,
         style=Style.from_dict(STYLE_DICT),
         full_screen=True,
-    ).run()
+    )
+    # Created here, after `app` exists, because the worker needs its
+    # (thread-safe) invalidate; preview_text above reaches `loader` through the
+    # closure, which resolves by the time the first render calls it.
+    loader = _PreviewLoader(app.invalidate)
+    try:
+        app.run()
+    finally:
+        loader.shutdown()
 
     return state["result"]
 
@@ -950,6 +1101,7 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                 entries.append(PickerEntry(
                     display=cont_display,
                     preview=_deferred_preview(inst),   # reads transcripts on first highlight, not at menu open
+                    preview_quick=_deferred_preview(inst, quick=True),
                     value=identity,
                     # A live container owns the name (Enter would hit a docker
                     # name conflict) and owns the state dir rw (Del would delete
@@ -1050,6 +1202,7 @@ def _delete_submenu(registry: Registry, legend_text: str) -> None:
             entries.append(PickerEntry(
                 display=row,
                 preview=_deferred_preview(inst),       # deferred, as in the main picker
+                preview_quick=_deferred_preview(inst, quick=True),
                 value=identity,
                 # Deleting a live container's state dir (bind-mounted rw) could
                 # corrupt the running session — information-only here too.
