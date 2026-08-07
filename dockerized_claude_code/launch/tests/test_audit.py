@@ -17,10 +17,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from unittest.mock import patch
+
+from launch import paths
 from launch.audit import (
-    _check_json_file, _load_store, _store_entry_issues, _stray_root_instances,
-    build_parser,
+    _check_json_file, _cowork_issues, _load_store, _store_entry_issues,
+    _stray_root_instances, build_parser,
 )
+from launch.cowork import control, mailbox
 from launch.paths import AGENTS_DIR
 from launch.tags import scan_all
 
@@ -234,6 +238,97 @@ class TestLoadStore(unittest.TestCase):
         mapping, issues = _load_store(self.path)
         self.assertEqual(mapping, {})
         self.assertEqual(issues, [])
+
+
+class TestCoworkIssues(unittest.TestCase):
+    """The group-hosting checks. Real trees in a tmpdir, because every one of
+    these findings is a statement about on-disk layout — and one AGENTS_STATE
+    patch moves the whole feature (the builders read it at call time)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        p = patch.object(paths, "AGENTS_STATE", self.state)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _instance(self, name: str) -> None:
+        paths.instance_state_dir_path(name).mkdir(parents=True)
+
+    def _kinds(self):
+        return [kind for kind, _, _ in _cowork_issues()]
+
+    def test_a_host_that_never_used_cowork_has_no_findings(self):
+        self.assertEqual(_cowork_issues(), [])
+
+    def test_a_participants_dir_with_a_live_instance_is_clean(self):
+        self._instance("golem__a")
+        paths.cowork_outbox_path("golem__a").mkdir(parents=True)
+        self.assertEqual(_cowork_issues(), [])
+
+    def test_an_orphaned_group_dir_is_reported_not_cleaned(self):
+        paths.cowork_dir_path("deleted__x").mkdir(parents=True)
+        issues = _cowork_issues()
+        self.assertEqual(self._kinds(), ["orphan_group"])
+        self.assertIn("review the work", issues[0][2])
+        self.assertTrue(paths.cowork_dir_path("deleted__x").exists())   # report only
+
+    def test_a_misfiled_session_is_reported_with_its_location(self):
+        self._instance("golem__a")
+        wrong = paths.cowork_group_path("golem__a", "boss__p-widget")
+        wrong.mkdir(parents=True)
+        paths.group_session_path(wrong).write_text(
+            '{"manager": "boss__p", "project": "widget", "task": "t"}')
+        issues = _cowork_issues()
+        self.assertEqual(self._kinds(), ["bad_session"])
+        self.assertIn("golem__a/boss__p-widget", issues[0][1])
+        self.assertIn("boss__p", issues[0][2])
+
+    def test_an_unreadable_session_is_reported(self):
+        self._instance("boss__p")
+        broken = paths.cowork_group_path("boss__p", "boss__p-widget")
+        broken.mkdir(parents=True)
+        paths.group_session_path(broken).write_text("{not json")
+        self.assertEqual(self._kinds(), ["bad_session"])
+
+    def test_rejected_captures_are_counted_per_instance(self):
+        self._instance("golem__a")
+        rejected = paths.cowork_outbox_path("golem__a") / mailbox.REJECTED_SUBDIR
+        rejected.mkdir(parents=True)
+        (rejected / "a.json").write_text("{}")
+        (rejected / "b.json").write_text("{}")
+        issues = _cowork_issues()
+        self.assertEqual(self._kinds(), ["rejected"])
+        self.assertIn("2 capture(s)", issues[0][2])
+
+    def test_rejected_control_requests_are_counted_too(self):
+        self._instance("boss__p")
+        rejected = (paths.cowork_dir_path("boss__p") / control.CONTROL_SUBDIR
+                    / control.REJECTED_SUBDIR)
+        rejected.mkdir(parents=True)
+        (rejected / "r.txt").write_text("roster")
+        issues = _cowork_issues()
+        self.assertEqual(self._kinds(), ["rejected"])
+        self.assertIn("control request", issues[0][2])
+
+    def test_an_empty_rejected_dir_is_not_a_finding(self):
+        self._instance("golem__a")
+        (paths.cowork_outbox_path("golem__a") / mailbox.REJECTED_SUBDIR).mkdir(parents=True)
+        self.assertEqual(_cowork_issues(), [])
+
+    def test_a_stale_pidfile_is_reported(self):
+        pid_path = paths.hub_pid_path()
+        pid_path.parent.mkdir(parents=True)
+        pid_path.write_text("999999999\n")          # far past any real pid
+        self.assertEqual(self._kinds(), ["stale_pid"])
+
+    def test_a_live_hubs_pidfile_is_not_a_finding(self):
+        import os
+        pid_path = paths.hub_pid_path()
+        pid_path.parent.mkdir(parents=True)
+        pid_path.write_text(f"{os.getpid()}\n")     # us: definitely alive
+        self.assertEqual(_cowork_issues(), [])
 
 
 class TestAuditCli(unittest.TestCase):

@@ -20,6 +20,7 @@ from launch.cowork import group as grp
 from launch.cowork import roster
 from launch.cowork.roster import Candidate, Roster, describe, reachable, survey
 from launch.tags import scan_all
+from launch.tags import store
 from launch.tags.identity import COWORK_SPECIALTY
 
 MANAGER = "refactorer__proj"
@@ -36,6 +37,12 @@ class RosterHarness(unittest.TestCase):
         self.state = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
         self._patch(patch.object(paths, "AGENTS_STATE", self.state))
+        # paths.INSTANCES_FILE is a CONSTANT computed at import, so patching
+        # AGENTS_STATE does not move it — without this, store.save() in a test
+        # writes into the REAL ~/.claude-agents/instances.toml (found the hard
+        # way: the audit flagged this suite's fixture names as ghost entries).
+        self._patch(patch.object(store, "INSTANCES_FILE",
+                                 self.state / "instances.toml"))
         self.registry = scan_all(paths.AGENTS_DIR)
         self.agent = self._an_agent_name()
         self.live: set[str] | None = set()
@@ -55,7 +62,6 @@ class RosterHarness(unittest.TestCase):
     def add_instance(self, session: str, *specialties: str, running: bool = True,
                      workspace: str = "/work") -> str:
         """Create a real instance: state dir + instances.toml entry."""
-        from launch.tags import store
         instance_id = f"{self.agent}__{session}"
         paths.instance_state_dir_path(instance_id).mkdir(parents=True, exist_ok=True)
         mapping = store.load()
@@ -194,6 +200,36 @@ class TestCommitments(RosterHarness):
         free = self.add_coworker("zzz_free")
         self._group(MANAGER, "widget", busy)
         self.assertEqual(self.ids(survey(MANAGER, self.registry).candidates)[0], free)
+
+
+class TestRunningManagers(RosterHarness):
+    """The hub's exit condition reads this; the distinction that matters is
+    manager-tagged-and-running vs everything else, with docker-unknown kept
+    apart from "none"."""
+
+    def test_a_running_manager_is_reported(self):
+        boss = self.add_instance("boss", COWORK_SPECIALTY, "manager")
+        self.assertEqual(roster.running_managers(self.registry), frozenset({boss}))
+
+    def test_a_running_plain_coworker_is_not_a_manager(self):
+        self.add_coworker("peer")
+        self.assertEqual(roster.running_managers(self.registry), frozenset())
+
+    def test_a_stopped_manager_does_not_count(self):
+        self.add_instance("boss", COWORK_SPECIALTY, "manager", running=False)
+        self.assertEqual(roster.running_managers(self.registry), frozenset())
+
+    def test_docker_unknown_is_none_not_empty(self):
+        # "Every manager is gone" and "we could not tell" must stay different
+        # answers — the hub exits on the first and keeps serving on the second.
+        self.add_instance("boss", COWORK_SPECIALTY, "manager")
+        self.live = None
+        self.assertIsNone(roster.running_managers(self.registry))
+
+    def test_a_running_container_with_no_store_entry_is_not_a_manager(self):
+        assert self.live is not None
+        self.live.add("ghost__x")            # container up, instance deleted
+        self.assertEqual(roster.running_managers(self.registry), frozenset())
 
 
 class TestDescription(RosterHarness):

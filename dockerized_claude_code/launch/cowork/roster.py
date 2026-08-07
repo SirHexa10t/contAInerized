@@ -109,6 +109,24 @@ def survey(asker: str | None, registry: Registry) -> Roster:
                   liveness_known=running is not None)
 
 
+def running_managers(registry: Registry) -> frozenset[str] | None:
+    """The `{manager}`-tagged instances whose containers are up right now — or
+    None when docker could not be consulted at all.
+
+    The hub's exit condition reads this: it serves as long as any manager is
+    running, and None is kept distinct from "none" for the same reason
+    `Roster.liveness_known` exists — a docker hiccup must not read as "every
+    manager is gone" and shut the hub down mid-session."""
+    running = docker_running_instances_subprocess()
+    if running is None:
+        return None
+    return frozenset(
+        instance_id for instance_id in running
+        if (identity := instance_from_store(instance_id, registry)) is not None
+        and identity.is_manager
+    )
+
+
 def reachable(roster: Roster) -> tuple[Candidate, ...]:
     """The candidates the hub could actually wake right now.
 

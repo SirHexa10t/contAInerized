@@ -9,6 +9,7 @@ from launch.agents_crud import (
     persist_instance, resolve_pick,
 )
 from launch.container_env import set_container_env
+from launch.cowork.lifecycle import ensure_hub_running
 from launch.docker_config import (
     ensure_image, prompt_install_failures, require_docker, run_container,
     running_instance_report, set_container_mounts, set_dry_run,
@@ -230,6 +231,14 @@ def launch() -> None:
     image = ensure_image(inst)
     # Surfaces any failed-install names + retry hint before run_container execs into Claude Code's TUI.
     prompt_install_failures(image, inst.instance)
+    # A {manager} needs the cowork hub serving, and this is the last moment to
+    # ensure it: AFTER the build (so the hub's managerless grace only has to
+    # cover the seconds until `docker run`, not a whole image build) and before
+    # the TUI takes the terminal. Skipped on dry-run — projecting a launch must
+    # not start a daemon — but still printed, so the projection stays faithful.
+    if inst.is_manager:
+        print(f"  Cowork hub:       "
+              f"{'(dry-run: would be ensured)' if opts.dry_run else ensure_hub_running()}")
     run_container(inst, image, opts.claude_args, resume_flag)
 
 

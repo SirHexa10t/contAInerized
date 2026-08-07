@@ -140,12 +140,15 @@ class TestLaunchOrchestrator(unittest.TestCase):
     after CLI parsing, before the picker — so it's covered by TestGatherInput
     below, not by these orchestrator-level mocks.)"""
 
-    def _mock_pipeline(self, *, dry_run):
+    def _mock_pipeline(self, *, dry_run, is_manager=False):
         """Patch every stage launch() calls. Returns a dict of the active mocks
         so individual tests can inspect call args. Each patch is started with
         its cleanup registered IMMEDIATELY — a mid-fixture failure must not
-        leak started patches into later tests."""
-        inst = MagicMock(is_brand_new=False)
+        leak started patches into later tests.
+
+        `is_manager` is explicit (a bare MagicMock attribute is truthy, which
+        would silently walk every test down the manager branch)."""
+        inst = MagicMock(is_brand_new=False, is_manager=is_manager)
         opts = run.LaunchOptions(MagicMock(), [], dry_run, False)
 
         mocks = {
@@ -160,6 +163,8 @@ class TestLaunchOrchestrator(unittest.TestCase):
             "ensure_image":     patch.object(run, "ensure_image", return_value="claude-agents:base"),
             "prompt_install_failures": patch.object(run, "prompt_install_failures", return_value=None),
             "run_container":    patch.object(run, "run_container"),
+            "ensure_hub_running": patch.object(run, "ensure_hub_running",
+                                               return_value="already serving (pid 1)"),
         }
         active = {}
         for name, p in mocks.items():
@@ -175,6 +180,23 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks = self._mock_pipeline(dry_run=False)
         run.launch()
         mocks["run_container"].assert_called_once()
+
+    def test_manager_launch_ensures_the_cowork_hub(self):
+        mocks = self._mock_pipeline(dry_run=False, is_manager=True)
+        run.launch()
+        mocks["ensure_hub_running"].assert_called_once()
+
+    def test_non_manager_launch_leaves_the_hub_alone(self):
+        # A lone coworker has nothing to route to; its captures wait durably.
+        mocks = self._mock_pipeline(dry_run=False, is_manager=False)
+        run.launch()
+        mocks["ensure_hub_running"].assert_not_called()
+
+    def test_dry_run_projects_the_hub_but_never_starts_it(self):
+        # Projecting a launch must not start a daemon.
+        mocks = self._mock_pipeline(dry_run=True, is_manager=True)
+        run.launch()
+        mocks["ensure_hub_running"].assert_not_called()
 
     def test_run_container_called_in_dry_run(self):
         # run_container fires in both modes — its orchestration (mount

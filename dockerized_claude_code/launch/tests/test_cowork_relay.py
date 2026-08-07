@@ -492,6 +492,24 @@ class TestServe(RelayHarness):
             relay.serve(interval=0, report=False, passes=1)
         self.assertEqual(len(self.prompts_to(MANAGER)), 1)
 
+    def test_stop_ends_an_endless_run_with_the_reason(self):
+        # passes=None would loop forever; `stop` is what ends the hub's real life.
+        import io
+        from contextlib import redirect_stdout
+        answers = iter([None, "no managers remain"])
+        buffer = io.StringIO()
+        with patch.object(relay.time, "sleep", lambda _: None), redirect_stdout(buffer):
+            relay.serve(interval=0, passes=None, stop=lambda: next(answers))
+        self.assertIn("hub stopping: no managers remain", buffer.getvalue())
+
+    def test_stop_is_consulted_after_the_pass_not_before(self):
+        # A shutdown-worthy state must not leave that pass's captures undrained.
+        session = self.make_session(COWORKER)
+        self.drop_capture(COWORKER, "answer", group=session.key)
+        with patch.object(relay.time, "sleep", lambda _: None):
+            relay.serve(interval=0, report=False, passes=None, stop=lambda: "done")
+        self.assertEqual(len(self.prompts_to(MANAGER)), 1)   # the capture was routed first
+
 
 class TestRoundTrip(RelayHarness):
     def test_ask_reply_notify_end_to_end(self):

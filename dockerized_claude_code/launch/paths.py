@@ -213,6 +213,11 @@ OPTIONAL_CREDS_README_PATH = OPTIONAL_CREDS_DIR / "README.txt"
 # the agents/ tree: professions' own dirs + specialty-claimed `_<name>` dirs).
 BASE_DOCKERFILE = DOCKERIZED_CLAUDE_ROOT / "Dockerfile"
 
+# The cowork hub's entry script, also at the repo root (mirrors run.py /
+# quick_question.py). Named here because lifecycle.ensure_hub_running spawns it
+# as a detached process — a path, not an import.
+COWORK_SCRIPT = DOCKERIZED_CLAUDE_ROOT / "cowork.py"
+
 
 # ============================================================
 # Toolchain caches — shared across [code] agents/sessions
@@ -357,6 +362,7 @@ INBOX_SEPARATOR = "@"
 group_hosting_dir:       Callable[[], Path]           = lambda: AGENTS_STATE / "group_hosting"
 hub_state_path:          Callable[[], Path]           = lambda: group_hosting_dir() / "hub.state.json"
 hub_pid_path:            Callable[[], Path]           = lambda: group_hosting_dir() / "hub.pid"
+hub_log_path:            Callable[[], Path]           = lambda: group_hosting_dir() / "hub.log"   # the detached hub's stdout/stderr — `tail -f` is the "watch the team" view
 cowork_dir_path:         Callable[[str], Path]         = lambda instance: group_hosting_dir() / instance
 cowork_outbox_path:      Callable[[str], Path]         = lambda instance: group_hosting_dir() / instance / "outbox"
 group_key:               Callable[[str, str], str]     = lambda manager, project: f"{manager}-{project}"

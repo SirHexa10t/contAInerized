@@ -232,6 +232,56 @@ class TestDiscovery(CoworkTmpRoot):
             self.assertEqual(discover_sessions(), [])
 
 
+class TestMisfiledSessions(CoworkTmpRoot):
+    """The complement of discovery: everything discover_sessions skips must
+    surface here with a reason, and nothing may appear in both answers."""
+
+    def _plant(self, instance: str, dirname: str, payload: str) -> None:
+        d = self.root / instance / dirname
+        d.mkdir(parents=True)
+        (d / "session.json").write_text(payload)
+
+    def test_a_clean_tree_has_nothing_misfiled(self):
+        create_session("m__1", "p", "t")
+        self.assertEqual(grp.misfiled_sessions(), [])
+
+    def test_an_unreadable_session_is_misfiled(self):
+        self._plant("m__1", "m__1-p", "{broken")
+        (misfiled, why), = grp.misfiled_sessions()
+        self.assertIn("unreadable", why)
+
+    def test_a_session_in_the_wrong_tree_is_misfiled(self):
+        self._plant("golem__a", "m__1-p",
+                    '{"manager": "m__1", "project": "p", "task": "t"}')
+        (misfiled, why), = grp.misfiled_sessions()
+        self.assertIn("m__1", why)
+        self.assertIn("golem__a", why)
+
+    def test_a_renamed_group_dir_is_misfiled(self):
+        self._plant("m__1", "renamed-away",
+                    '{"manager": "m__1", "project": "p", "task": "t"}')
+        (misfiled, why), = grp.misfiled_sessions()
+        self.assertIn("renamed", why)
+
+    def test_working_copies_and_inboxes_are_nobodys_finding(self):
+        # No session.json → not a candidate for either answer.
+        (self.root / "golem__a" / "m__1-p").mkdir(parents=True)
+        (self.root / "m__1" / "m__1-p@golem__a").mkdir(parents=True)
+        self.assertEqual(grp.misfiled_sessions(), [])
+        self.assertEqual(discover_sessions(), [])
+
+    def test_discovery_and_misfiled_partition_the_walk(self):
+        # One good group, one of each defect: every session.json-carrying dir
+        # lands in exactly one of the two answers.
+        good = create_session("m__1", "p", "t")
+        self._plant("m__1", "renamed-away",
+                    '{"manager": "m__1", "project": "x", "task": "t"}')
+        self._plant("golem__a", "m__1-q",
+                    '{"manager": "m__1", "project": "q", "task": "t"}')
+        self.assertEqual([s.key for s in discover_sessions()], [good.key])
+        self.assertEqual(len(grp.misfiled_sessions()), 2)
+
+
 class TestHubState(CoworkTmpRoot):
     """Hub state is the hub's private bookkeeping. It deliberately holds no
     group membership — that is session.json's job, rediscovered by scanning."""

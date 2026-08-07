@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -245,21 +246,56 @@ def discover_sessions() -> list[Session]:
         found under someone else's tree is misplaced, not authoritative;
       * the dir name must equal the session's own key.
 
-    Mismatches are skipped so one bad directory cannot poison discovery; the
-    audit is the right place to *report* them.
+    Mismatches are skipped so one bad directory cannot poison discovery;
+    `misfiled_sessions` below is their report, for the audit.
 
     Sorted by key for stable output.
     """
     found: list[Session] = []
+    for instance_dir, candidate in _group_candidates():
+        session = load_session(candidate)
+        if session is None:
+            continue
+        if session.manager != instance_dir.name or candidate.name != session.key:
+            continue
+        found.append(session)
+    return sorted(found, key=lambda s: s.key)
+
+
+def misfiled_sessions() -> list[tuple[Path, str]]:
+    """Every dir holding a `session.json` that `discover_sessions` SKIPS,
+    each with why — the complement of discovery, fed to the audit.
+
+    Sharing `_group_candidates` with discovery is the point: the two answers
+    partition the same walk, so a dir can never fall between them. Three ways
+    in: the file does not parse; it parses but records a different manager
+    than the tree it sits in (someone's copy, or a hand-move); or the dir was
+    renamed away from the session's own key. All three mean the hub will not
+    route for this group until a human decides which side is right — which is
+    exactly what makes them audit findings rather than log lines."""
+    out: list[tuple[Path, str]] = []
+    for instance_dir, candidate in _group_candidates():
+        session = load_session(candidate)
+        if session is None:
+            out.append((candidate, "session.json is unreadable or malformed"))
+        elif session.manager != instance_dir.name:
+            out.append((candidate, f"records manager '{session.manager}' but sits "
+                                   f"in '{instance_dir.name}'s tree"))
+        elif candidate.name != session.key:
+            out.append((candidate, f"dir name does not match its session key "
+                                   f"'{session.key}' — was the dir renamed?"))
+    return sorted(out)
+
+
+def _group_candidates() -> Iterator[tuple[Path, Path]]:
+    """(instance_dir, candidate) for every dir CARRYING a session.json —
+    the one walk both discovery and its audit-facing complement read, so their
+    answers partition the tree instead of drifting apart. Dirs without the
+    file (working copies, inboxes) are nobody's finding and are not yielded."""
     for instance_dir in iter_subdirs(group_hosting_dir()):
         for candidate in iter_subdirs(instance_dir):
-            session = load_session(candidate)
-            if session is None:
-                continue
-            if session.manager != instance_dir.name or candidate.name != session.key:
-                continue
-            found.append(session)
-    return sorted(found, key=lambda s: s.key)
+            if is_file(group_session_path(candidate)):
+                yield instance_dir, candidate
 
 
 def sessions_for(instance: str) -> list[Session]:

@@ -165,17 +165,24 @@ def poll_once() -> tuple[Event, ...]:
 
 def serve(interval: float = POLL_INTERVAL, *, report: bool = True,
           passes: int | None = None,
-          also_poll: Callable[[], tuple[Event, ...]] | None = None) -> None:
+          also_poll: Callable[[], tuple[Event, ...]] | None = None,
+          stop: Callable[[], str | None] | None = None) -> None:
     """Poll until interrupted. `passes` bounds the loop for a caller that wants a
-    finite run (tests, a one-shot drain); None means forever.
+    finite run (tests, a one-shot drain); None means forever — unless `stop`
+    says otherwise.
 
     `also_poll` is a second per-pass event source — the control channel. A
     callback rather than an import, because the dependency runs the other way:
     `cowork.control` calls `send` here, so relay importing it back would be a
     cycle. The caller that knows about both (the CLI) wires them together.
 
-    Deliberately thin — every decision lives in `poll_once` and the callback, so
-    the loop itself has nothing to get wrong."""
+    `stop` is consulted once per pass, AFTER the pass — a shutdown-worthy state
+    must not leave that pass's captures half-drained. It returns a human-readable
+    reason rather than a bare bool so the loop can say WHY it ended (the hub's
+    exit is "no managers remain", and a hub that just stops looks crashed).
+
+    Deliberately thin — every decision lives in `poll_once` and the callbacks,
+    so the loop itself has nothing to get wrong."""
     remaining = passes
     while remaining is None or remaining > 0:
         events = poll_once() + (also_poll() if also_poll else ())
@@ -183,6 +190,10 @@ def serve(interval: float = POLL_INTERVAL, *, report: bool = True,
             if report:
                 print(f"  [{event.kind.value}] {event.instance}"
                       f"{' ' + event.group if event.group else ''}: {event.detail}")
+        if stop is not None and (reason := stop()) is not None:
+            if report:
+                print(f"  hub stopping: {reason}")
+            return
         if remaining is not None:
             remaining -= 1
             if remaining == 0:

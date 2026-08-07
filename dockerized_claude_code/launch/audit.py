@@ -16,6 +16,15 @@ Reports:
   - store issues (instances.toml not valid TOML; a MISSING file is fine —
     instances then run on their agents' `.lego` defaults)
   - oauth issues (.claude.json / .credentials.json missing, empty, or not valid JSON)
+  - cowork state under ~/.claude-agents/group_hosting/:
+      orphan_group — a participant dir whose instance was deleted (the work
+                     inside may still be wanted, so nothing auto-cleans it)
+      bad_session  — a session.json discovery SKIPS: unreadable, filed in the
+                     wrong instance's tree, or in a dir renamed off its key
+      rejected     — captures / control requests the hub parked instead of
+                     processing; each is a turn or command that went nowhere
+      stale_pid    — hub.pid names a dead process (harmless — the next hub
+                     clears it — but after a crash it is worth knowing)
 
 Run from the project root:
   python -m launch.audit
@@ -28,10 +37,14 @@ from pathlib import Path
 from typing import Any
 
 from .agents_crud import list_all_instances
-from .file_access import agent_md_index, is_dir, iter_subdirs, path_exists, read_text
+from .cowork import control, group as grp, lifecycle, mailbox
+from .file_access import (
+    agent_md_index, is_dir, iter_files, iter_subdirs, path_exists, read_text,
+)
 from .paths import (
     ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE, INSTANCES_FILE,
-    instance_state_dir_path, state_history_path,
+    cowork_outbox_path, group_hosting_dir, hub_pid_path, instance_state_dir_path,
+    state_history_path,
 )
 from .tags import Registry, TagError, scan_all
 from .tags.identity import SESSION_SEP
@@ -109,6 +122,37 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
     return out
 
 
+def _cowork_issues() -> list[Issue]:
+    """Findings under the group-hosting tree. Composed from the cowork
+    package's own reporters (`orphan_group_dirs`, `misfiled_sessions`) plus two
+    piles only the audit watches: `rejected/` dirs — where the hub parks what
+    it could not process, deliberately never deleting — and a pidfile naming a
+    dead process. Every check degrades to "no findings" on a host that has
+    never used {cowork} (the tree simply is not there)."""
+    out: list[Issue] = []
+    for orphan in grp.orphan_group_dirs():
+        out.append(("orphan_group", orphan.name,
+                    "group-hosting dir for a deleted instance — review the work "
+                    "inside, then remove it"))
+    for misfiled, why in grp.misfiled_sessions():
+        out.append(("bad_session", f"{misfiled.parent.name}/{misfiled.name}", why))
+    for instance_dir in sorted(iter_subdirs(group_hosting_dir()), key=lambda d: d.name):
+        for label, rejected in (
+            ("capture(s)", cowork_outbox_path(instance_dir.name) / mailbox.REJECTED_SUBDIR),
+            ("control request(s)", instance_dir / control.CONTROL_SUBDIR / control.REJECTED_SUBDIR),
+        ):
+            count = sum(1 for _ in iter_files(rejected))
+            if count:
+                out.append(("rejected", instance_dir.name,
+                            f"{count} {label} parked in {rejected.name}/ — the hub "
+                            f"could not process them; inspect, then delete"))
+    if lifecycle.owner() is None and path_exists(hub_pid_path()):
+        out.append(("stale_pid", hub_pid_path().name,
+                    "names a process that is not running — a crashed hub left it; "
+                    "the next `cowork serve` clears it"))
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The audit CLI. It takes no arguments of its own — the parser exists so
     `-h`/`--help` prints this module's docstring (the full list of checks and
@@ -162,6 +206,7 @@ def main() -> None:
             issues.append(("no_history", dir_name, "no history.jsonl found (instance never started?)"))
 
     issues.extend(_store_entry_issues(entries, actual, registry))
+    issues.extend(_cowork_issues())
 
     if not issues:
         print(f"All clear. {len(instances)} instance(s) under {AGENTS_STATE}.")

@@ -32,6 +32,12 @@ class CliHarness(unittest.TestCase):
         self.state = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
         self._patch(patch.object(paths, "AGENTS_STATE", self.state))
+        # paths.INSTANCES_FILE is a CONSTANT computed at import, so patching
+        # AGENTS_STATE does not move it — without this, store.save() in a test
+        # writes into the REAL ~/.claude-agents/instances.toml (found the hard
+        # way: the audit flagged this suite's fixture names as ghost entries).
+        self._patch(patch.object(store, "INSTANCES_FILE",
+                                 self.state / "instances.toml"))
         self.addCleanup(self._drop_pidfile)
 
         from launch.file_access import agent_md_index
@@ -332,6 +338,24 @@ class TestServe(CliHarness):
         code, out = self.run_cli("serve", "--once")
         self.assertEqual(code, EXIT_REFUSED)
         self.assertIn("already running", out)
+
+    def test_the_endless_mode_exits_when_the_last_manager_goes(self):
+        class FiredWatch:
+            def __init__(self, registry): pass
+            def reason_to_stop(self):
+                return "no {manager} instance has been running for 60s"
+
+        with patch.object(cli.lifecycle, "ManagerWatch", FiredWatch), \
+             patch.object(relay.time, "sleep", lambda _: None):
+            code, out = self.run_cli("serve", "--interval", "0")
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("hub stopping", out)
+        self.assertIsNone(lifecycle.owner())               # pidfile released on the way out
+
+    def test_a_one_shot_drain_never_probes_docker_for_managers(self):
+        with patch.object(cli.lifecycle, "ManagerWatch") as watch:
+            self.run_cli("serve", "--once", "--interval", "0")
+        watch.assert_not_called()
 
     def test_an_interrupted_hub_leaves_no_pidfile_behind(self):
         # Ctrl-C is ordinary; it must not need the stale-file path to recover.

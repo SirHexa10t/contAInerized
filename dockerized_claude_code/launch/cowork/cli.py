@@ -185,6 +185,12 @@ def _serve(args: argparse.Namespace) -> int:
     registry is scanned once — the control gate needs it on every pass, and the
     tag tree does not change mid-run.
 
+    The endless mode also watches for its own obsolescence: once no `{manager}`
+    container has been running for the grace period, the hub exits and clears
+    its pidfile — `run.py` restarts one on the next manager launch, so exiting
+    is free. `--once` skips the watch: a one-shot drain should drain, not
+    docker-probe.
+
     The guard is released in a `finally` so an interrupted hub does not leave a
     pidfile that blocks the next one — the stale-file path exists for crashes, not
     for ordinary Ctrl-C."""
@@ -195,10 +201,12 @@ def _serve(args: argparse.Namespace) -> int:
               f"Two would each drain half the captures, so this one is exiting.")
         return EXIT_REFUSED
     registry = scan_all(AGENTS_DIR)
+    watch = None if args.once else lifecycle.ManagerWatch(registry)
     print(f"  hub serving (pid {claimed.pid}); Ctrl-C to stop")
     try:
         relay.serve(interval=args.interval, passes=1 if args.once else None,
-                    also_poll=lambda: control.poll_control(registry))
+                    also_poll=lambda: control.poll_control(registry),
+                    stop=watch.reason_to_stop if watch else None)
     except KeyboardInterrupt:
         print("\n  stopped")
     finally:

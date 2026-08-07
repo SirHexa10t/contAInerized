@@ -65,6 +65,9 @@ re-exports.
 - `quick_question.py` — thin repo-root entry for the quickie tool (the `q` alias target): hands argv to `launch.quickie.main` (argparse, so `q -h` is quickie's own help, not claude's).
 - `launch/quickie/` — the `q` one-shot-question tool: a LEAF CONSUMER of the launcher core (imports `launch/` helpers; nothing in `launch/` imports it back). Layers: `cli.py` = the argparse front end (a question, `--explain`/`--research` to pick the agent, `--history`/`--answer <id>`/`--resume <id>` thread ops) dispatching to → `ask.py`, a lean cousin of `run.py`'s `launch()` (no picker/form/store) that builds an Instance from a `QuickieAgent` spec — QUICK (`_quickie`, quick/Sonnet, default), TRIVIA (`_trivia`, reliable/Opus, `--explain`), RESEARCH (`researcher.md` + `_research.lego`, researcher engine, base image, `--research`) — under `quickie/<gibberish>/` (via `Instance.state_dir_override`) with the shared `quickie/communal/` workspace and runs `claude -p` in stream-json mode (via `run_container(interactive=False, print_prompt=…, stream_renderer=render_stream)`), reusing the core's `compute_resume_flag` for `--resume`'s `--continue`; `render.py` = `render_stream`, which turns Claude Code's stream-json events into a live `⋯ thinking…` stderr ticker + a streamed stdout answer (reasoning TEXT is redacted by current models — `display: omitted` — so only elapsed time is shown, never the chain-of-thought); and `history.py` = `--history` (grey timestamp + id + last question, ascending) and `--answer <id>` (reprint the saved answer), via `file_access.last_prompt_in_state` / `last_answer_in_state`. Shared mechanisms it needs live in the core (the override field, run_container print mode + its `stream_renderer` hook / `docker_stream_subprocess`, compute_resume_flag, the transcript reads), never in quickie.
 
+- `cowork.py` — thin repo-root entry for the multi-agent hub CLI (mirrors `quick_question.py`): hands argv to `launch.cowork.main`.
+- `launch/cowork/` — multi-agent group hosting: like quickie, a LEAF CONSUMER of the core (nothing in `launch/` imports it back except `run.py`'s one `ensure_hub_running` call and `audit.py`'s checks). One concern per module — `group` (durable state + discovery-by-scan), `mailbox` (message plane + capture attribution), `sync` (file plane), `journal` (conversation log), `roster` (who is recruitable), `control` (agent-facing verbs, tag-gated), `lifecycle` (singleton + start/stop policy), `relay` (the loop + routing policy; orchestration only), `cli` (argparse). It owns NO docker calls: injection (`docker_attach_inject`) lives in `docker_config`, which is that module's stated invariant. Dependency direction inside: `relay` never imports `control` (control calls `relay.send`) — the CLI wires them together via `serve(also_poll=…)`.
+
 ### Other directories
 
 - `launch/template_files/` — source-side files `file_access.copy_file` plants to `user_extras/` on first launch.
@@ -150,6 +153,15 @@ an `Addendum` in `tags/addendums.py` and key it under the tag's name in
 finds it once, edit-via-relocation is one line. Static composite paths go
 inline with their constituents; dynamic paths get a `<name>_path` lambda at
 the bottom.
+
+**If tests will ever redirect the path's ROOT, make it a no-arg BUILDER, not a
+constant** (`group_hosting_dir()`, `instances_dir()` — lambdas reading
+`AGENTS_STATE` at call time). A module that imports a constant binds it at
+import, so patching `paths.AGENTS_STATE` silently leaves that module writing to
+the real state dir — this bit twice: every cowork test fixture needed
+per-module patches until the root became a builder, and store-writing tests
+polluted the real `instances.toml` because `INSTANCES_FILE` is (still) an
+import-time constant (they now patch `tags.store.INSTANCES_FILE` directly).
 
 ### A new bind-mount
 

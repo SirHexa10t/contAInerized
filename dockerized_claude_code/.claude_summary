@@ -4,13 +4,13 @@
 
 ### Purpose
 
-Docker-based launcher for pre-made Claude Code agents. Each persona ships a `CLAUDE.md` (`agents/<name>.md`) plus a `.lego` file of default *tags*; all share OAuth credentials, slash commands, skills, and toolchain caches. Instances are persistent named sessions per agent (`<agent>__<session>`); prior conversations resume automatically. Tags come in four kinds, all discovered from the `agents/` file tree — nothing about a tag is hard-coded in the launcher.
+Docker-based launcher for pre-made Claude Code agents. Each persona ships a `CLAUDE.md` (`agents/<name>.md`) plus a `.lego` file of default *tags*; all share OAuth credentials, slash commands, skills, and toolchain caches. Instances are persistent named sessions per agent (`<agent>__<session>`); prior conversations resume automatically. Tags come in four kinds, all discovered from the `agents/` file tree — nothing about a tag is hard-coded in the launcher. Running instances can also collaborate: a host-side hub (`launch/cowork/`) routes messages and files between `{cowork}`-tagged instances, coordinated by a `{manager}`.
 
 ### Tech Stack
 
 - Python 3.12+ host launcher; deps (canonical list: `pyproject.toml` `[project]`): `prompt_toolkit` (picker TUI), `python-dotenv` (`engine.conf` parsing), `rich` (markdown previews); stdlib elsewhere (`tomllib` for every launcher-authored config, `urllib` for CDN-range fetches).
 - Plain **`docker build` / `docker run`** — no compose. Base image (root `Dockerfile`) = debian:trixie-slim + Claude Code + jq/yq/fd/ripgrep + iptables/sudo ({firewall} prerequisites, inert otherwise); per-layer Dockerfiles live in the tag tree.
-- `unittest` suite (~750 tests, <1s: `python3 -m unittest discover -s launch/tests`); `mypy launch/ run.py quick_question.py` (`disallow_untyped_defs` for source; tests exempt) + `ruff check .` both clean. No CI gate.
+- `unittest` suite (~1,230 tests, a few seconds: `python3 -m unittest discover -s launch/tests`); `mypy launch/ run.py quick_question.py cowork.py` (`disallow_untyped_defs` for source; tests exempt) + `ruff check .` both clean. No CI gate.
 
 ### The tag system
 
@@ -20,7 +20,7 @@ Four kinds (closed set — classes in `launch/tags/`), members open (folders und
 |---|---|---|---|
 | engine | `( )` | `engine.conf` env budget (model/effort); nested dirs overlay parent conf | default, golem, poet, thinker, researcher, breakthrough, reliable (Opus), quick (Sonnet, quickie's default) |
 | profession | `[ ]` | Dockerfile image layer (+`tag.docker` build-args); nesting ⇒ requirement | code, code/webdev |
-| specialty | `{ }` | `warn`, `claude_args`, `workspace_readonly`, `[wants]`; optional hidden `_<name>` image layer in the profession tree; `tag.docker` run config | auto (skip-permissions, wants firewall), firewall (iptables whitelist, run-only), dood (docker socket, `_dood` image layer under code/), read-only (`{ro}` — `/workspace` :ro + claims the hidden `policy/_read-only` fragment denying Write/Edit) |
+| specialty | `{ }` | `warn`, `claude_args`, `workspace_readonly`, `[wants]`; optional hidden `_<name>` image layer in the profession tree; `tag.docker` run config; nests like professions (tree ancestors become `requires`) | auto (skip-permissions, wants firewall), firewall (iptables whitelist, run-only), dood (docker socket, `_dood` image layer under code/), read-only (`{ro}` — `/workspace` :ro + claims the hidden `policy/_read-only` fragment denying Write/Edit), cowork (`{cowrk}` — recruitable into groups: `/cowork` mount + Stop-hook capture via the claimed `policy/_cowork` fragment), cowork/manager (`{mngr}` — may host groups; the hub honours only its control requests) |
 | policy | `< >` | `policy.json` settings fragment; `stance` colors orange (allow) / blue (deny) / white (demand); `always_on = true` = static tag (merged into EVERY instance, locked in the form, never in .lego/instances.toml) | web-research `<+qry>`, no-sudo `<-su>` (always-on), no-net `<-net>`, vcs-safe `<-gpush>`, plan-first `<!plan>`, free-bash `<+bash>` (plus the hidden `_read-only` fragment, owned by the `{ro}` specialty) |
 
 `agents/specialty/combos.info` holds multi-tag warnings (dood+auto). STRICT tree rule: a non-`_` dir in a kind subtree MUST have `tag.info`; `_` dirs are hidden assets (image layers or specialty-claimed policy fragments). `scan_all(AGENTS_DIR)` → `Registry`, fail-loud cross-validation at startup.
@@ -29,6 +29,7 @@ Four kinds (closed set — classes in `launch/tags/`), members open (folders und
 
 ```
 run.py                  entry point — staged launch(); --dry-run prints docker invocations instead of executing; --refresh-installs busts install caches
+cowork.py               entry point for the multi-agent hub CLI → launch.cowork.main (roster / recruit / send / status / serve / close; run.py auto-starts a detached `serve` per {manager} launch)
 quick_question.py       entry point for the `q` quickie tool → launch.quickie.main (argparse, `-h` is q's own help not claude's: `q "question"` one-shot [quick/Sonnet], `--explain` [trivia/Opus], `--research` [lean researcher], `--history` lists threads, `--answer <id>` reprints a saved answer, `--resume <id>` continues one; no picker/form; print mode; threads under ~/.claude-agents/quickie/, shared communal/ workspace)
 Dockerfile              base image (built with --network=host: BuildKit-bridge DNS workaround)
 install_dependencies.sh host setup (uv → ~/pydev venv + Docker; Linux/macOS-aware; Docker >=20.10 floor). install_rc_alias.sh writes the `ai`/`q` aliases into ~/.bashrc + ~/.zshrc using the venv python by absolute path
@@ -44,6 +45,7 @@ launch/
   firewall/             {firewall} subsystem (package like tags/, gui/): __init__ facade (5 entry points) + resolver.py (the coupled coordinator: two-phase DNS cascade [getent on Linux, socket.getaddrinfo fallback on macOS], live-fetched CDN widening, burst-batched iptables updater, 5-min drift-heal refresher; criticals widened to Anthropic's registered block + selftest_address() for init-firewall.sh's DNS-free `curl --resolve` probe) + whitelist.py (pure entry expansion) + status.py (agent-visible domains_pending_resolve.yml tracker)
   gui/                  the TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py = every form (kind-sectioned tag form, toolkit form, generic checkbox_form) + shared style system (UiClass, stance colors); menu_picker.py = picker + F8 legend + workspace/session prompts + banner + "Edit Toolkits" opener + stale-tag guard (invalid stored tags render red-bg/black-fg on the Cont row and block start — invalid_tags_report explains the fix; F2 re-picks) (imports forms/styles from tag_form, one-way)
   quickie/              the `q` one-shot-question tool — leaf consumer of the core (cli.py = argparse front end [question / --explain / --research / --history / --answer / --resume] → ask.py [lean launch() cousin: QuickieAgent specs QUICK(_quickie, quick/Sonnet) | TRIVIA(_trivia, reliable/Opus, --explain) | RESEARCH(researcher.md + _research.lego, researcher engine, base image, --research); thread under quickie/<gibberish> via Instance.state_dir_override, communal/ workspace, run_container(interactive=False, print_prompt, stream_renderer) stream-json mode; --resume reuses core compute_resume_flag for --continue] + render.py [render_stream: stream-json events → live '⋯ thinking… (Ns)' stderr ticker + streamed stdout answer; reasoning TEXT redacted by current models (display:omitted), so only elapsed time shows] + history.py [--history: grey timestamp + id + last question, ascending; --answer <id>: reprints last answer; via file_access.last_prompt_in_state / last_answer_in_state])
+  cowork/               multi-agent group hosting — consumes the core, owns no docker calls (injection lives in docker_config): group (session.json + hub state + discovery-by-scan), mailbox (stage messages, attribute Stop-hook captures via transcript promptId join), sync (one symmetric _deliver: working copies vs `<group>@<sender>` inboxes; membership + tree confinement enforced), journal (per-group append-only conversation.md), roster (who is recruitable/running/committed), control (agent-facing verb files in /cowork/control/, tag-gated to {manager}), lifecycle (pidfile singleton, ensure_hub_running, exit-when-managerless), relay (the poll loop + routing policy), cli (argparse front end)
   user_additions.py     optional-creds mounts + first-launch template plants
   claude_code_config.py status line + terminal title (host-staged in-container UX)
   audit.py              read-only state checker (python -m launch.audit)
@@ -66,7 +68,9 @@ Entry: `python3 run.py [target] [--dry-run] [--refresh-installs] [...claude-args
 4. `persist_instance` — the store entry always reflects the last launch (new AND cont).
 5. `apply_tags` — stage every `tag.docker` mount, dispatch `_apply_*` handlers ({firewall}'s DNS resolve kicks off here, overlapping the build).
 6. `setup_state` — CLAUDE.md install (source `.md` + `addendums.compose(chain)`), settings install (base + policy fragments → `<state>/settings.json`), OAuth touch, env staging, mounts, user extras, optional creds.
-7. Banner (per-axis tag lines + red unmet-wants warnings) → `ensure_image(inst)` (base + per-layer `docker build`, PARENT_IMAGE threading, per-layer arg_forward) → `prompt_install_failures(image, …)` → `run_container` (cap_adds/entrypoint/env-forwards from contributions; specialty `claude_args` like {auto}'s skip-permissions; execs `docker run --rm -it --name claude-code_<instance>`).
+7. Banner (per-axis tag lines + red unmet-wants warnings) → `ensure_image(inst)` (base + per-layer `docker build`, PARENT_IMAGE threading, per-layer arg_forward) → `prompt_install_failures(image, …)` → for a `{manager}`: `ensure_hub_running()` (detached, reparented-to-init `cowork.py serve`; log at `group_hosting/hub.log`) → `run_container` (cap_adds/entrypoint/env-forwards from contributions; specialty `claude_args` like {auto}'s skip-permissions; execs `docker run --rm -it --name claude-code_<instance>`).
+
+Cowork data flow: the hub delivers by staging a message file in the recipient's `group_hosting/<id>/<group>/messages/` and typing a one-line pointer into its live session (`docker_config.docker_attach_inject` — pty attach, raw mode, container-matched winsize); replies come back via the `{cowork}` Stop hook dropping a JSON capture into `<id>/outbox/`, attributed to a group by joining the capture's `prompt_id` to the transcript's `promptId` and reading the `[cowork <group>]` tag out of the prompt text (never FIFO — human turns interleave). Files move as reviewed copies between working copies and `<group>@<sender>/` inboxes; nothing the hub writes lands where its owner works. The hub exits once no `{manager}` container has run for 60s; `python -m launch.audit` covers the tree (orphan_group / bad_session / rejected / stale_pid).
 
 Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/home/claude/.claude` (rw) with the generated `settings.json` RO-file-mounted over `~/.claude/settings.json` (agent can't relax its policies); shared OAuth files; `custom_commands|custom_skills|settings/*` (ro); caches → `/home/claude/<rel>` ([code]); tag.docker mounts ({firewall} scripts, {dood} socket).
 
@@ -81,6 +85,8 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 - Env layering: Dockerfile `ENV` (baked) → engine conf (per-launch `-e`) → `ContainerEnvKey` `container_emit=True` (always-on `-e`: status line, BASH_ENV, cred tokens) → tag `[build] arg_forward` (build-args, `INSTALL_*` glob) → tag `[run] env_forward` (conditional `-e`: WHITELIST_ADDRESSES).
 - Wants vs requires: `requires` (tree-derived) hard-cascade in the form; `[wants]` are advisory — red form/banner warnings only (auto wants firewall).
 - One acknowledged import cycle: `docker_config ↔ firewall` (lazy imports inside the updater worker). `.claude_dev_guidelines` holds the full role/placement/anti-pattern rules — read it before adding code.
+- Group-hosting paths are call-time BUILDERS (`paths.group_hosting_dir()` etc., composing from `AGENTS_STATE` at call time), not constants — one `patch.object(paths, "AGENTS_STATE", tmp)` redirects the whole feature in tests. (Watch the exception: `INSTANCES_FILE` IS an import-time constant, so store-writing tests must patch `tags.store.INSTANCES_FILE` too or they write the real file.)
+- The picker's Cont previews resolve off the UI thread: quick form (metadata+tags, `[loading…]` prompt stand-in) renders instantly; the transcript read runs in a spawned CHILD PROCESS (`menu_picker._read_last_prompt`) because a CPU-bound thread convoys the GIL — measured in `launch/benchmark/bench_preview_gil.py` / `bench_preview_segments.py`. At 6+ tags (`tags.base.SQUASH_AT`) rows and the status line collapse tags to one-char color chips (`Tag.squash_glyph`).
 
 ### Known Issues
 
@@ -95,32 +101,75 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 
 - Two automatic first-launch migrations a fresh session should expect: (1) a pre-rewrite state dir folds legacy `agent_workspace_map.json` + `agent_modes_map.json` into `instances.toml` (backed up as `*.pre-rewrite.bak`; legacy `auto` → `auto`+`firewall`); (2) the first `{firewall}` launch removes the old root-level `resolved_domains.txt` + `cdn_ranges/` and rebuilds those caches under `firewall_cache/` (`_remove_legacy_cache_locations`).
 - Archive docs, NOT live plans: `refactoring-replan.md`, `refactoring_plan.md`, `TODO.txt` describe the completed, launch-verified tags rewrite. `ISSUES.md` is the live tracker.
+- The cowork feature is code-complete and tested (design record: `group_hosting_plan.md`; mechanism survey: `agent_cross_comm_propositions.md`). Instances tagged `{cowork}` BEFORE the feature landed must be relaunched once — the `/cowork` mount and the Stop-hook `settings.json` are launch-time; the operator plans to restart all instances.
 
 ### File Manifest
 
 <!-- manifest:begin -->
-1784936767 TODO.txt
-1784936547 launch/audit.py
+1786120012 README.md
+1786119945 launch/tests/test_cowork_group.py
+1786119926 launch/tests/test_audit.py
+1786119890 launch/tests/test_cowork_roster.py
+1786119878 launch/tests/test_cowork_cli.py
+1786119841 launch/audit.py
+1786119816 launch/cowork/group.py
+1786119459 group_hosting_plan.md
+1786119417 launch/tests/test_cowork_lifecycle.py
+1786119377 launch/cowork/lifecycle.py
+1786119110 launch/tests/test_cowork_relay.py
+1786119044 launch/tests/test_run.py
+1786118997 launch/file_access.py
+1786118919 run.py
+1786118899 launch/cowork/cli.py
+1786118880 launch/cowork/relay.py
+1786118718 TODO.txt
+1786117389 launch/cowork/roster.py
+1786117373 launch/paths.py
+1786116384 launch/benchmark/bench_preview_gil.py
+1786116275 launch/tests/test_menu_picker.py
+1786116227 launch/gui/menu_picker.py
+1786114143 launch/benchmark/bench_preview_segments.py
+1786077687 launch/tests/test_claude_code_config.py
+1786077544 launch/claude_code_config.py
+1786075997 launch/tests/test_tags.py
+1786075681 launch/gui/tag_form.py
+1786075670 launch/tags/base.py
+1786071772 launch/cowork/__init__.py
+1786071716 launch/tests/test_essential_files.py
+1786071613 launch/tests/test_cowork_control.py
+1786071549 launch/cowork/control.py
+1786071296 agents/specialty/cowork/tag.info
+1786071264 launch/tags/identity.py
+1786071221 agents/specialty/cowork/manager/tag.info
+1786070918 launch/tags/registry.py
+1786070892 launch/tags/specialty.py
+1786059917 launch/tests/test_cowork_sync.py
+1786059875 launch/cowork/sync.py
+1786053236 cowork.py
+1786046699 launch/tests/test_paths.py
+1786046594 launch/cowork/mailbox.py
+1786044326 launch/docker_config.py
+1786037154 launch/tests/test_file_access.py
+1786036326 launch/tests/test_cowork_journal.py
+1786036246 launch/cowork/journal.py
+1786033566 launch/tests/test_cowork_mailbox.py
+1786028316 launch/tests/test_docker_config.py
+1786028201 agents/policy/_cowork/policy.json
+1785461215 .claude/settings.local.json
+1785455578 agent_cross_comm_propositions.md
+1785452284 agents/engine/reliable/tag.info
+1784940392 agents/engine/reliable/engine.conf
 1784936508 launch/tests/test_firewall.py
-1784936485 launch/tests/test_paths.py
 1784936466 launch/firewall/resolver.py
-1784936399 launch/paths.py
-1784933818 launch/tests/test_docker_config.py
-1784933775 README.md
 1784933766 quick_question.py
 1784933758 install_rc_alias.sh
-1784933746 launch/docker_config.py
 1784927226 .claude_dev_guidelines
 1784927161 launch/tests/test_quickie.py
 1784927028 install_dependencies.sh
 1784875605 launch/quickie/cli.py
-1784872950 launch/tests/test_audit.py
 1784870833 launch/quickie/ask.py
-1784869416 launch/tests/test_file_access.py
 1784869252 launch/tests/test_tag_form.py
-1784869243 launch/tests/test_essential_files.py
 1784869212 launch/quickie/history.py
-1784869049 launch/file_access.py
 1784869029 agents/_quickie.lego
 1784868973 agents/_research.lego
 1784868968 agents/_trivia.lego
@@ -129,12 +178,8 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 1784868949 agents/engine/quick/tag.info
 1784867887 launch/quickie/render.py
 1784863523 launch/quickie/__init__.py
-1784863437 run.py
 1784863426 launch/agents_crud.py
-1784858363 agents/engine/reliable/engine.conf
-1784858358 agents/engine/reliable/tag.info
 1784855600 agents/_quickie.md
-1784855541 launch/tags/identity.py
 1784852256 pyproject.toml
 1784833065 launch/benchmark/bench_firewall_updater.py
 1784833065 launch/template_code/firewall_domains.py
@@ -142,22 +187,16 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 1784832974 launch/firewall/status.py
 1784832821 launch/firewall/__init__.py
 1784832821 launch/tag_handlers.py
-1784766788 launch/gui/menu_picker.py
-1784766752 launch/claude_code_config.py
 1784766752 launch/gui/__init__.py
-1784762260 launch/tests/test_tags.py
 1784762199 launch/tests/test_agents_crud.py
-1784762164 launch/gui/tag_form.py
 1784762133 agents/bug-investigator.lego
 1784762133 agents/policy/no-sudo/tag.info
 1784762133 agents/policy/vcs-safe/tag.info
 1784762133 agents/project-starter.lego
 1784762133 agents/refactorer.lego
 1784762133 launch/tags/policy.py
-1784762133 launch/tags/registry.py
 1784760100 agents/feature-identifier.lego
 1784760100 agents/medical-investigator.lego
-1784758465 launch/tests/test_menu_picker.py
 1784758385 launch/tests/test_container_env.py
 1784758385 launch/tests/test_env_coverage.py
 1784758385 launch/tests/test_toolkit_profile.py
@@ -167,7 +206,6 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 1784758048 launch/tags/profession.py
 1784757837 launch/tags/__init__.py
 1784757768 agents/profession/code/webdev/tag.info
-1784757768 launch/tags/base.py
 1784757768 launch/tags/migrations.py
 1784754130 agents/profession/code/Dockerfile
 1784753834 agents/researcher.lego
@@ -177,9 +215,7 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 1784593902 agents/specialty/firewall/tag.docker
 1784546113 agents/profession/code/tag.info
 1784427571 agents/policy/plan-first/tag.info
-1784427571 launch/tests/test_claude_code_config.py
 1784319171 agents/specialty/read-only/tag.info
-1784319122 launch/tags/specialty.py
 1784317587 agents/engine/researcher/engine.conf
 1784317333 agents/engine/thinker/engine.conf
 1784316802 agents/engine/researcher/tag.info
@@ -211,7 +247,6 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 1784303107 launch/tags/store.py
 1784303107 launch/template_code/docker_prompts.py
 1784303107 launch/tests/test_cache.py
-1784303107 launch/tests/test_run.py
 1784303107 launch/tests/test_tag_handlers.py
 1784303107 launch/user_additions.py
 1784303106 agents/bug-investigator.md

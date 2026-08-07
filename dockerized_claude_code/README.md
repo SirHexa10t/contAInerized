@@ -34,6 +34,21 @@ isolated Docker container with persistent per-instance state.
   question; oldest first); **`q --answer <id>`** reprints a thread's saved
   answer; **`q --resume <id> "follow-up"`** continues one; **`q -h`** prints
   the tool's own help (a real arg-parser, so flags don't reach `claude`).
+- **Multi-agent group hosting (`{cowork}` / `{manager}`)** — running
+  instances can work together, coordinated by a host-side hub. Tag instances
+  `{cowork}` to make them recruitable (each gets its own
+  `~/.claude-agents/group_hosting/<id>/` mounted at `/cowork`); tag one
+  `{manager}` (nested inside `{cowork}`) to let it convene groups: it asks the
+  hub for a roster, recruits peers, hands work out, reviews what comes back in
+  per-coworker inboxes, and closes the group — all by writing request files
+  into its own `/cowork/control/`. Launching a `{manager}` auto-starts the hub
+  (detached; it exits on its own once no manager has run for a minute), and the
+  `cowork` CLI (`python3 cowork.py`) drives the same machinery by hand:
+  `roster` / `recruit` / `send` / `status` / `serve` / `close`. Messages are
+  injected into live sessions; files move as reviewed copies (never into a dir
+  its owner is working in); every group keeps an append-only
+  `conversation.md`. Watch a team live with
+  `tail -f ~/.claude-agents/group_hosting/hub.log`.
 - **Interactive picker** — full-screen TUI with type-to-filter, Del to
   delete an instance, F2 to modify its session name and/or workspace.
 - **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is in
@@ -299,6 +314,19 @@ python3 run.py poet__myproject --refresh-installs       # force-retry every opti
 (`run.py` has a shebang; `chmod +x run.py` once and you can run `./run.py …`
 directly.)
 
+The `cowork` tool drives multi-agent groups by hand (a `{manager}` agent issues
+the same verbs itself through its `/cowork/control/` channel — see the Features
+list):
+
+```bash
+python3 cowork.py status                                # hub + every group, rounds, waiting inboxes
+python3 cowork.py roster --as boss__proj                # who boss__proj could recruit
+python3 cowork.py recruit boss__proj widget golem__api  # create/extend group boss__proj-widget
+python3 cowork.py send boss__proj-widget golem__api "please review retry.py" --with-files
+python3 cowork.py serve                                 # run the hub loop (run.py auto-starts one per {manager} launch)
+python3 cowork.py close boss__proj-widget               # end a group; its files + conversation.md are kept
+```
+
 If you installed the shortcut aliases (see *Shortcut aliases* above), `ai …`
 is equivalent to `python3 run.py …`, and `q "…"` runs the quick-question tool.
 
@@ -444,6 +472,9 @@ syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
   user_extras/                       # hand-edited, non-project-specific user configuration
     firewall_whitelist.txt           # user-managed extra domains for {firewall} (auto-created with a template preamble; comments + one domain per line)
     optional_creds/                  # opt-in passthrough creds; see "Optional Host Mounts" below
+  group_hosting/                     # {cowork} multi-agent state — one dir per participant, mounted at /cowork in its container
+    hub.pid / hub.log / hub.state.json   # the hub's singleton pidfile, event log (`tail -f` = watch the team), and private bookkeeping — outside every mount
+    <instance-id>/                   # a participant's tree: its per-group working copies, inboxes (<group>@<sender>/), outbox/, control/
   quickie/                           # the `q` tool's state (segregated from the main instances/)
     communal/                        # one shared workspace for quick questions — drop files here
     <gibberish>/                     # one throwaway conversation thread per question

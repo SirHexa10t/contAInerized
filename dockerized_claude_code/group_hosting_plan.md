@@ -1,18 +1,25 @@
 # group_hosting — adaptation plan
 
-Forward-looking plan for turning the proven cross-agent PoC into a real feature.
-The mechanism survey and its evidence live in `agent_cross_comm_propositions.md`;
-this file is the implementation plan that follows from it.
+Design record of the cross-agent cowork feature — written as the forward-looking
+implementation plan and kept as the WHY behind the code. The mechanism survey and
+its evidence live in `agent_cross_comm_propositions.md`; this file is the design
+that followed from it. Everything below is now implemented (see the next
+paragraph for the inventory); where implementation taught us something the plan
+did not know, the section says so inline.
 
 Implemented and tested so far: the `{cowork}` and `{manager}` tags (nested,
 with their addendums), the `_cowork` settings fragment (Stop-hook capture,
 `dontAsk`, the read-write allowlist), the per-participant mount,
 `docker_config.docker_attach_inject`, the repo-root `cowork.py` entry script, and
 every `launch/cowork/` module: `group`, `mailbox`, `journal`, `sync`, `relay`,
-`roster`, `lifecycle`, `control`, `cli`. The `poc/` scripts have been **deleted**
-— everything proven there now lives in the modules above. Still to build:
-`run.py` ensure-running for the hub, its exit-when-the-last-manager-goes, audit
-integration, and the docs refresh.
+`roster`, `lifecycle`, `control`, `cli` — including the hub's full lifecycle
+(`run.py` ensures a detached hub on every `{manager}` launch; the hub exits once
+no manager has been running for a grace period). The `poc/` scripts have been
+**deleted** — everything proven there now lives in the modules above. The audit
+covers the tree (`orphan_group` / `bad_session` / `rejected` / `stale_pid`), and
+the docs are refreshed (README features + CLI + state layout; `.claude_summary`;
+`.claude_dev_guidelines` module roles + the paths-as-builders lesson). Nothing
+from this plan remains unbuilt.
 
 ---
 
@@ -519,15 +526,29 @@ captures, so singleton-ness is a correctness requirement, not tidiness.
 
 - **Ensure-running, not start.** `run.py` checks a pidfile at
   `group_hosting/hub.pid` *and* whether that pid is alive (a stale pidfile after a
-  crash or reboot must not block startup), then spawns only if needed.
-- **Detach it.** `start_new_session=True`, so closing the terminal does not SIGHUP
-  the hub along with the shell.
+  crash or reboot must not block startup), then spawns only if needed — after the
+  image build, right before `docker run`, so the hub's managerless grace only has
+  to cover seconds of container startup rather than a whole build.
+- **Detach it — via `sh`/`nohup`, reparented to init, NOT a plain
+  `start_new_session` Popen.** Implementation found the direct-child version has a
+  dark corner: a child the launcher never waits on becomes a ZOMBIE when it dies,
+  and `os.kill(pid, 0)` — the liveness probe — succeeds on zombies, so a crashed
+  hub read as "already serving" for as long as the manager's run.py lived, with no
+  new hub startable. The spawn therefore goes through a short-lived `sh` that
+  backgrounds the hub (`nohup … & echo $!`) and exits, reparenting the hub to
+  init, which reaps it the moment it dies. `nohup` rather than `setsid` because
+  macOS has no `setsid` binary. Output appends to `group_hosting/hub.log`
+  (spawned with `python -u`, or block-buffering would leave `tail -f` — the
+  watch-the-team view — trailing kilobytes behind reality).
 - **It exits when the last manager goes.** It does not die with *a* manager (that
-  would break the two-manager case), but it does not linger either: it polls for
-  live `{manager}` instances and shuts down — removing its pidfile — once none
-  remain. `run.py` respawns it on the next manager launch, so exiting is free.
-  A short grace of a few poll cycles avoids thrash when a manager is closed and
-  immediately relaunched.
+  would break the two-manager case), but it does not linger either:
+  `lifecycle.ManagerWatch` polls `roster.running_managers` each pass and the hub
+  shuts down — removing its pidfile, printing the reason — once no manager has
+  been running for `MANAGERLESS_GRACE_SECONDS` (60s). Time-based rather than
+  pass-counted so tuning the poll interval cannot change its meaning; a
+  docker-unreachable probe resets the clock rather than counting as "all gone",
+  and the grace also covers close-and-relaunch thrash. `run.py` respawns the hub
+  on the next manager launch, so exiting is free. `--once` drains skip the watch.
 - **Skip on `--dry-run`.** Dry-run projects a launch; it must not start a daemon.
 - **Trigger on `{manager}` only.** A lone coworker has nothing to route to, and
   because outboxes are durable its captures simply wait. Starting on any

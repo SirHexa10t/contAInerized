@@ -8,6 +8,7 @@ from a crash blocking every future hub forever.
 
 import os
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -144,6 +145,184 @@ class TestRelease(LifecycleTmpRoot):
         lifecycle.release(claimed)
         lifecycle.release(claimed)
         self.assertFalse(paths.hub_pid_path().exists())
+
+
+class TestEnsureHubRunning(LifecycleTmpRoot):
+    """run.py's hook: start a hub only when nobody serves. The spawn itself is
+    patched — what matters is WHETHER it happens, HOW detached it is, and where
+    its output goes; an actual child is exercised by the reparenting test
+    below and the manual smoke run."""
+
+    def setUp(self):
+        super().setUp()
+        self.spawned: list[dict] = []
+        done = SimpleNamespace(returncode=0, stdout="4242\n", stderr="")
+        p = patch.object(lifecycle.subprocess, "run",
+                         side_effect=lambda argv, **kw: (self.spawned.append(
+                             {"argv": argv, **kw}), done)[1])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _command(self) -> str:
+        argv = self.spawned[0]["argv"]
+        self.assertEqual(argv[:2], ["sh", "-c"])
+        return argv[2]
+
+    def test_spawns_the_entry_script_when_nobody_serves(self):
+        line = lifecycle.ensure_hub_running()
+        self.assertEqual(len(self.spawned), 1)
+        command = self._command()
+        self.assertIn(str(paths.COWORK_SCRIPT), command)
+        self.assertIn(" serve ", command)
+        # -u because stdout is a file: unbuffered, or the log trails reality.
+        self.assertIn(" -u ", command)
+        self.assertIn("4242", line)
+
+    def test_the_hub_is_detached_and_reparented(self):
+        # nohup survives the launching terminal closing; `& echo $!` is the
+        # reparenting: sh exits at once, init adopts the hub, and a dead hub
+        # can never linger as OUR zombie fooling the liveness probe.
+        command = (lifecycle.ensure_hub_running(), self._command())[1]
+        self.assertIn("nohup ", command)
+        self.assertIn("& echo $!", command)
+
+    def test_output_goes_to_the_log_not_the_terminal(self):
+        # A daemon inheriting this terminal would scribble its event stream
+        # over the Claude session about to start.
+        command = (lifecycle.ensure_hub_running(), self._command())[1]
+        self.assertIn(f">> {paths.hub_log_path()}", command)
+        self.assertIn("2>&1", command)
+        self.assertIn("< /dev/null", command)
+
+    def test_a_live_hub_is_left_alone(self):
+        claimed = lifecycle.claim()
+        self.addCleanup(lifecycle.release, claimed)
+        line = lifecycle.ensure_hub_running()
+        self.assertEqual(self.spawned, [])
+        self.assertIn("already serving", line)
+        self.assertIn(str(claimed.pid), line)
+
+    def test_a_stale_pidfile_does_not_block_the_spawn(self):
+        self.write_pid(f"{self.a_dead_pid()}\n")
+        lifecycle.ensure_hub_running()
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_works_before_the_group_hosting_dir_exists(self):
+        # The first manager ever launched: nothing has created the tree yet,
+        # and the spawn must not crash the whole launch over it.
+        self.assertFalse(paths.group_hosting_dir().exists())
+        lifecycle.ensure_hub_running()
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_a_failed_spawn_reports_instead_of_pretending(self):
+        self.spawned_result = None
+        with patch.object(lifecycle.subprocess, "run",
+                          return_value=SimpleNamespace(returncode=127, stdout="",
+                                                       stderr="sh: not found")):
+            line = lifecycle.ensure_hub_running()
+        self.assertIn("FAILED", line)
+        self.assertIn("cowork serve", line)
+
+
+class TestHubReparenting(LifecycleTmpRoot):
+    """The zombie corner, exercised for real: a child THIS process spawns and
+    never waits on reads as alive after death (`os.kill(pid, 0)` succeeds on
+    zombies), which would have made a crashed hub unrestartable for as long as
+    the manager's run.py lived. The sh-reparented spawn must not have that
+    property."""
+
+    def test_a_direct_unwaited_child_would_fool_the_liveness_probe(self):
+        # The failure mode itself, pinned so the WHY survives refactors.
+        import subprocess
+        import sys
+        import time
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        self.addCleanup(child.wait)
+        time.sleep(0.3)                        # child has exited; we never waited
+        self.assertTrue(lifecycle._running(child.pid))   # the zombie reads as alive
+
+    def test_the_reparented_hub_reads_as_dead_once_it_exits(self):
+        # Valid only where pid 1 reaps orphans — every real host (systemd,
+        # launchd) does, and the launcher runs host-side by design. A minimal
+        # container whose pid 1 is an ordinary program does not, so there the
+        # orphan stays a zombie through no fault of the spawn — detect that
+        # and skip rather than fail the suite on an environment that cannot
+        # host the hub anyway.
+        import shlex
+        import subprocess
+        import sys
+        import time
+        probe = (f"nohup {shlex.quote(sys.executable)} -c 'pass' "
+                 f">> /dev/null 2>&1 < /dev/null & echo $!")
+        result = subprocess.run(["sh", "-c", probe], capture_output=True, text=True)
+        pid = int(result.stdout.strip())
+        deadline = time.monotonic() + 5
+        while lifecycle._running(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)                   # a reaping init collects it within moments
+        if lifecycle._running(pid):
+            state = Path(f"/proc/{pid}/stat").read_text().split()[2] \
+                if Path(f"/proc/{pid}/stat").exists() else "?"
+            if state == "Z":
+                self.skipTest("pid 1 here does not reap orphans (not a real "
+                              "host init) — the reparenting cannot be observed")
+        self.assertFalse(lifecycle._running(pid))
+
+
+class TestManagerWatch(LifecycleTmpRoot):
+    """The exit condition: grace measured in TIME, docker-unknown never counts,
+    and a manager reappearing resets the clock."""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 0.0
+        self.managers: frozenset | None = frozenset()
+        p = patch.object(lifecycle, "running_managers", lambda registry: self.managers)
+        p.start()
+        self.addCleanup(p.stop)
+        self.watch = lifecycle.ManagerWatch(registry=None, grace_seconds=60.0,
+                                            clock=lambda: self.now)
+
+    def test_keeps_serving_while_a_manager_runs(self):
+        self.managers = frozenset({"boss__p"})
+        for self.now in (0.0, 100.0, 1000.0):
+            self.assertIsNone(self.watch.reason_to_stop())
+
+    def test_managerless_but_inside_the_grace_keeps_serving(self):
+        self.now = 0.0
+        self.assertIsNone(self.watch.reason_to_stop())
+        self.now = 59.0
+        self.assertIsNone(self.watch.reason_to_stop())
+
+    def test_exits_once_the_grace_has_fully_elapsed(self):
+        self.now = 0.0
+        self.watch.reason_to_stop()
+        self.now = 60.0
+        reason = self.watch.reason_to_stop()
+        self.assertIsNotNone(reason)
+        self.assertIn("manager", reason)
+
+    def test_a_manager_reappearing_resets_the_clock(self):
+        # The relaunch-thrash case the grace exists for.
+        self.now = 0.0
+        self.watch.reason_to_stop()
+        self.now, self.managers = 59.0, frozenset({"boss__p"})
+        self.assertIsNone(self.watch.reason_to_stop())
+        self.now, self.managers = 60.0, frozenset()
+        self.assertIsNone(self.watch.reason_to_stop())    # a fresh 60s starts here
+
+    def test_docker_unknown_never_counts_toward_the_grace(self):
+        # A probe hiccup must not be read as "every manager is gone".
+        self.now, self.managers = 0.0, None
+        for self.now in (0.0, 100.0, 10_000.0):
+            self.assertIsNone(self.watch.reason_to_stop())
+
+    def test_docker_unknown_mid_gap_resets_the_clock(self):
+        self.now, self.managers = 0.0, frozenset()
+        self.watch.reason_to_stop()
+        self.now, self.managers = 30.0, None
+        self.watch.reason_to_stop()
+        self.now, self.managers = 61.0, frozenset()
+        self.assertIsNone(self.watch.reason_to_stop())    # 61-ish is a NEW start
 
 
 class TestPidFileLocation(LifecycleTmpRoot):

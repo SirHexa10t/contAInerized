@@ -41,7 +41,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from .paths import (
     ACCOUNT_FILE, AGENTS_DIR,
@@ -169,6 +169,17 @@ def append_text(path: Path, content: str) -> None:
     ensure_dir(path.parent)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(content)
+
+
+def open_binary_append(path: Path) -> IO[bytes]:
+    """Open `path` for binary append, creating its parents — for handing a real
+    OS-level file handle to subprocess (a Popen redirect needs a file object,
+    which the content-shaped helpers here rightly never expose). The caller
+    owns closing it; a Popen child keeps its own duplicate of the descriptor,
+    so closing the parent's copy right after spawning is the normal pattern.
+    Used for the {cowork} hub's detached-stdout log."""
+    ensure_dir(path.parent)
+    return path.open("ab")
 
 
 def copy_file(src: Path, dest: Path, overwrite_if_changed: bool = False) -> None:
