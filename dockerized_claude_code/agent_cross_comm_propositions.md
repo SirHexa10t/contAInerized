@@ -4,8 +4,9 @@ Design notes for a prospective feature: letting several running agent instances
 collaborate (e.g. a worker, a reviewer, a manager) instead of working alone.
 
 This file surveys **how one process can hand a prompt to another running agent**
-and wake it up. It is a decision record, not a plan — nothing here is
-implemented. The PoC for the recommended option lives in `poc/wake_poc.py`.
+and wake it up. It is a decision record. Since it was written, the `{cowork}`
+feature implemented option 2 (pty injection) as the hub's ingress; the `poc/`
+scripts that validated these options were removed after serving their purpose.
 
 Verified against **Claude Code 2.1.215**. Findings are tagged:
 
@@ -52,7 +53,10 @@ turn**, versus which only move bytes.
 
 ### What does *not* exist
 
-Ruled out by documentation, so no design should assume them:
+Ruled out by documentation **as of Claude Code 2.1.215**, so no design should
+assume them. ⚠️ **Two of these stopped being true in v2.1.224** — see the dated
+addendum below; kept as written because the options table above was evaluated
+against this state of the world.
 
 - No built-in cross-process messaging between separate `claude` instances.
   **Agent Teams** is the closest feature, but its mailboxes
@@ -64,249 +68,71 @@ Ruled out by documentation, so no design should assume them:
 - No hook that can spontaneously originate a turn. Option 3 is the only
   hook-based continuation, and it only fires when a turn *ends*.
 
----
+### Addendum (2026-08-11): cross-session messaging, v2.1.224
 
-## Why option 1 is the recommendation
+Anthropic shipped **cross-session messaging** in the Claude Code CLI
+(`SendMessage`/`ListAgents` across independent sessions; docs:
+<https://code.claude.com/docs/en/cross-session-messaging>), which supersedes the
+first two "does not exist" bullets: separate `claude` instances CAN now message
+each other, and every non-`--bare` session binds a **per-session inbox Unix
+socket** whose path is exported as `CLAUDE_CODE_MESSAGING_SOCKET` (to hooks and
+Bash, before `SessionStart` runs) — a supported ingress "when you want a script
+or hook to post into a session."
 
-It is the only mechanism that is simultaneously supported, structured, and
-capable of waking an agent — and it matches the intuition that a daemon should
-just message a session that is already running. One long-lived process per
-agent, parked on stdin, holding its own conversation.
+What it changes for THIS launcher — researched by a cowork peer, full sourced
+findings in the closed group's
+`group_hosting/refactorer__dockerized_claude_code/refactorer__dockerized_claude_code-agent_comms_research/findings.md`:
 
-Confirmed by test:
-
-- **One process, many messages.** Two consecutive turns served by a single
-  process, still alive after both. The CLI calls this *"realtime streaming
-  input"*.
-- **It is a real agent, not an echo.** It used the `Write` tool to create a file
-  with exact contents, then recalled what it had done on the following turn.
-- **Sessions are attachable.** A *fresh* persistent process launched with
-  `--resume <session_id>` recalled work from the earlier process — so a
-  collaboration session can be picked up later, including by a human.
-- **A control protocol exists** alongside user messages:
-  `control_request` / `control_response` / `control_cancel_request`,
-  `interrupt`, `can_use_tool`, `set_permission_mode`, `hook_callback`.
-
-Two consequences worth designing around:
-
-- **`can_use_tool` routes permission decisions out over the stream**, which
-  makes "the reviewer approves the worker's writes" an enforced boundary rather
-  than a convention.
-- **`interrupt` can cancel a peer mid-turn** — no other option here offers that.
-
-Relevant flags: `--permission-mode` (`acceptEdits`, `auto`, `bypassPermissions`,
-`manual`, `dontAsk`, `plan`) lets a worker edit without the blanket bypass that
-`{auto}` grants; `--replay-user-messages` echoes delivered messages back on
-stdout as a delivery acknowledgement.
-
-### Costs and open questions
-
-- **The instance is headless.** No human-attachable TUI while it runs — the only
-  reason options 2 and 4 remain interesting. Mitigated by `--resume`.
-- **Container plumbing needs stdin as a pipe.** `docker_stream_subprocess`
-  currently passes `stdin=DEVNULL`; a persistent agent needs `PIPE`.
-- **[open] The `control_request` wire format is undocumented.** Interrupt and
-  `can_use_tool` would need to be reverse-engineered against the Agent SDK
-  before either can be depended on.
-- **[open] Long-run behaviour.** Context growth and compaction across a long
-  collaboration are untested.
-- **[open] Concurrency.** Two processes must never drive one session's history —
-  interleaved writes corrupt the transcript JSONL. One live process per
-  instance, or separate session ids / `--fork-session`.
+- **Not a transport replacement.** Same-machine discovery = shared registration
+  files + socket, so container-per-agent breaks it (docs say so explicitly);
+  the cross-machine path routes through Anthropic servers.
+- **The socket IS a candidate replacement for option 2** (pty injection): a
+  `SessionStart` hook inside each container could publish the socket path to a
+  mounted volume for the hub to write to. Researched further on 2026-08-11
+  (socket_protocol group): **the wire format is undocumented — a checked null
+  result — so the verdict is WAIT** for a payload spec or official client.
+  Also settled: the kill-switch env vars are sticky (unset, not `=0`);
+  `crossSessionInbound` is a strictness ratchet (project/local `accept` is
+  ignored; user scope — which our merged settings.json is — works, and an
+  explicit `accept` moots the PID-1 own-child failure); Linux sandboxes offer
+  only the all-or-nothing `allowAllUnixSockets`. Host-write acceptance remains
+  untested. Details: ISSUES.md "Socket delivery" entry.
+- **Sprung trap, verified live in this tree:** the base image sets
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (Dockerfile), which disables
+  feature-flag evaluation and with it this whole feature — no
+  `CLAUDE_CODE_MESSAGING_SOCKET` appears in a 2.1.226 container today. Any
+  socket experiment starts by lifting that for the instance under test.
+- Their design independently converges with this survey's recommendations
+  (named addressing, per-recipient inboxes, text-only payloads, loop caps), and
+  their delivery-outcome notices (held/denied/expired) prompted the hub's
+  stand-down notices (see ISSUES.md).
 
 ---
 
-## Topology: the relay is also the bus
+## Outcome (2026-08-11) — the survey concluded; the feature shipped
 
-The topology is not a free choice. **Only the process holding an agent's stdin
-can prompt it**, so every message physically passes through the host-side relay —
-there is no peer-to-peer path. That constraint is welcome: it forces a star, and
-the hub is exactly where round caps, logging, and "done" detection want to live.
+Everything below the options survey used to be design sections (the option-1
+recommendation, the relay/town_square service, the `{cowork}` specialty draft,
+the closing design cautions). They are deleted, not archived — no longer
+propositions:
 
-The same relay carries both directions. It holds each agent's **stdin**
-(delivery) and parses each agent's **stdout** `result` events (that is how the
-PoC knows a turn finished), so agent→agent messaging needs no new channel: the
-relay reads A's reply and writes it into B's stdin.
-
-```
-            HOST                                     CONTAINERS
-  ┌───────────────────────┐   stdin (JSON line)   ┌─────────────────┐
-  │                       │ ────────────────────► │ worker  (rw ws) │
-  │   relay daemon        │ ◄──────────────────── │                 │
-  │   - routing policy    │   stdout (result ev)  └─────────────────┘
-  │   - round cap, "done" │
-  │   - journal → inboxes/│   stdin               ┌─────────────────┐
-  │                       │ ────────────────────► │ reviewer  {ro}  │
-  └───────────────────────┘ ◄──────────────────── │                 │
-                              stdout               └─────────────────┘
-                    shared volume: workspace (worker rw, reviewer ro)
-                                 + inboxes/ journal (relay is sole writer)
-```
-
-Containers must be started with `docker run -i` and **no `-t`** — `-i` keeps
-stdin open as a pipe, while a TTY would reintroduce echo and CRLF mangling into
-the JSON stream. The relay's lifetime is the collaboration's lifetime: if it
-dies, the pipes close and the agents see EOF and wind down. Transcripts survive,
-and `--resume <session_id>` re-attaches, so that is recoverable — but it makes
-the relay the de-facto session object.
-
-### What the message between agents should be
-
-| Carrier | How A's message reaches B | Verdict |
-|---------|---------------------------|---------|
-| **In-band: A's turn-reply *is* the message; the relay routes it** | Relay takes A's `result` text, wraps it (`Message from worker: …`), writes it to B's stdin | **Start here.** No agent-side convention to forget or malform; it is the path already proven end to end |
-| Mailbox files the agents write with tools | A writes `outbox/reviewer/001.md`; the relay watches and delivers | Defer. Adds a convention the model must remember every turn plus silent failure modes (wrong dir, malformed file), while the relay still does the same routing |
-| MCP `send_message` tool | A calls a real tool; the MCP server hands off to the relay | The right *upgrade*, not the start — schema-enforced addressing, mid-turn and multi-recipient sends. Worth it once more than two or three agents are involved |
-
-Two moves keep the in-band carrier sufficient:
-
-1. **Split control from data.** Messages carry only control ("done, changed
-   `foo.py` and `bar.py` — please review"); the work product travels through the
-   **shared workspace volume**. Code and diffs never bloat the message stream,
-   and the no-two-read-write-writers rule holds by construction (worker `rw`,
-   reviewer the same path under `{ro}`).
-2. **Keep the mailbox layout — as the relay's journal.** The relay logs every
-   routed message to `inboxes/<agent>/NNN.md` (Agent Teams' layout). That gives
-   the durable, replayable paper trail of the file-based approach with a *single
-   writer* and no agent-side convention.
-
-Routing stays dumb policy in the relay to begin with: worker's reply → reviewer;
-reviewer's verdict → worker; an approval marker (or the round cap) ends the run.
-Each agent learns its role from its per-instance CLAUDE.md addendum — plumbing
-the launcher already has (`install_latest_md`) — including the one line that
-makes the in-band carrier work: *"your reply is forwarded verbatim to your peer,
-so make it self-contained."* A manager doing real judgement-routing later joins
-as a third spoke whose replies the relay reads as routing decisions; the star
-does not change.
-
----
-
-## The town_square service
-
-The relay gets a name and a home: a middle service owning
-`~/.claude-agents/town_square/` — a sibling of `instances/`, `cache/`,
-`firewall_cache/`, and `quickie/`, declared in `paths.py`.
-
-**What it does and does not solve.** A directory cannot hold a pipe. The write
-end of a container's stdin belongs to whichever process called `docker run -i`,
-and nothing on disk can substitute for that. So the directory alone does not
-solve the piping problem — but a *service that spawns the agents* does, because
-it is then the parent process holding every pipe. `town_square/` is that
-service's journal and coordination surface, not its mechanism.
-
-**The control plane stays out of the containers.** With the in-band carrier the
-agents never read or write `town_square/` themselves — the service does, on the
-host. So it needs no mount, exactly like `firewall_cache/`, and the only
-puncture of per-instance isolation remains the shared *workspace*. (A later move
-to a mailbox or MCP carrier would change that: those need the agents to reach the
-bus, via a mount or a bind-mounted socket.)
-
-**Durable state, ephemeral pipes.** `town_square/` survives a service restart;
-the pipes do not. If the service dies the agents see EOF and wind down, but the
-transcripts and journal remain and `--resume <session_id>` re-attaches each one.
-
-**How it should spawn agents.** Preferably by calling the launcher's own
-`run_container` with a persistent mode added, so tag resolution, mounts, and
-engine-conf assembly are reused rather than reimplemented (what
-`poc/relay_poc.py` does by hand, and why it duplicates the credential mounts).
-
-### Relay and carrier are layers, not alternatives
-
-Worth stating plainly, because the table above invites the confusion:
-
-- The **relay** is the *wake* mechanism. It holds stdin and is the only thing
-  that can originate a turn in an idle agent. It is never optional.
-- The **carrier** is what a message *is* — in-band reply text (v1), mailbox
-  files, or an MCP `send_message` tool (the upgrade).
-
-Adopting MCP replaces the carrier only. An MCP tool is pull-model, so it still
-cannot wake an idle peer; the relay remains underneath it either way.
-
-### Verified constraints (Claude Code 2.1.215, this tree)
-
-- **`tag.docker` cannot express persistent mode.** It accepts exactly
-  `build_arg_forward`, `cap_add`, `entrypoint`, `mounts`, `env_forward`; there is
-  no generic run-flag key, and unknown keys are *silently dropped* (a
-  `tag.docker` containing `stdin = "pipe"` parses to an empty contribution, no
-  error). Adding one intent-shaped key (`stdin = "pipe"`) would be the clean
-  extension — it should drive **both** `-i` and `stdin=PIPE`, since specifying
-  only the flag leaves the two free to drift.
-- **`-i` alone is not enough.** It only keeps the container's stdin open; what
-  stdin is *connected to* comes from the parent. `docker_subprocess` inherits the
-  launcher's stdin and `docker_stream_subprocess` passes
-  `stdin=subprocess.DEVNULL`, so a relay-driven agent needs
-  `stdin=subprocess.PIPE` — a Python argument, not a docker flag.
-- **A hidden layer may sit at the profession root.** `discover_layers` sets
-  `requires = frozenset(ancestors)`, so `agents/profession/_cowork/` would carry
-  no dependency at all (unlike `code/_dood`, which inherits `{code}`).
-- **Hidden asset dirs cannot contain tags.** `discover_layers` rejects any
-  `tag.info` beneath a `_`-dir, so role tags cannot nest inside `_cowork`.
-- **Specialties are flat.** `Specialty.scan` does a single `iterdir()` with no
-  recursion, so there is no specialty→specialty inheritance. A specialty's
-  `requires` comes from the *layer it claims* — that is how `{dood}` acquires
-  `{code}` — so tree position lives on the profession side.
-
----
-
-## The `{cowork}` specialty
-
-Decided and added (`agents/specialty/cowork/tag.info`). It grants **capability
-only**: the instance may be recruited into a collaboration, and nothing about a
-normal interactive launch changes. The headless, relay-driven session mode is
-chosen by the relay when it starts the group — *not* baked into the instance.
-
-That split is deliberate. A tag that forced headless mode would poison the
-instance: tag it once and it could never be opened interactively again. As it
-stands a coworking instance stays fully usable on its own, and stays inspectable
-mid-collaboration via `claude --resume <session_id>`.
-
-What it deliberately does **not** carry:
-
-- **No `claude_args`.** The stream-json flags belong to the relay's launch, and
-  keeping them next to the pipe wiring stops the two from drifting apart.
-- **No `workspace_readonly`.** That is role-specific — the reviewer wants `{ro}`,
-  the worker must not have it.
-- **No role.** Worker / reviewer / manager behaviour comes from the agent's own
-  `.md` persona. Encoding roles in tags would give `{cowork-worker}`,
-  `{cowork-reviewer}`, and so on — combinatorics for no gain.
-
-It carries `warn = true`, because coworking punctures the per-instance isolation
-the launcher otherwise provides: peers share a workspace, so a peer's mistakes
-can reach your files.
-
-**Recognition is by tag name**, decided deliberately in preference to adding a
-`tag.info` schema field. The trade accepted with it: the launcher will name
-`cowork` in its own logic, so renaming the tag later means editing code — unlike
-the rest of the tag system, which is field-driven and never special-cases names.
-
-### Still to build
-
-1. **Persistent launch mode.** `run_container` passes `["-it"] if interactive
-   else []`, so a non-interactive launch currently gets *neither* `-i` nor `-t`;
-   and `docker_stream_subprocess` hardwires `stdin=DEVNULL`. Relay-driven agents
-   need `-i` (no `-t`) plus `stdin=PIPE`.
-2. **The relay daemon**, promoted from `poc/relay_poc.py`: N agents, routing
-   policy, round cap, journal.
-3. **Role briefings** as per-instance CLAUDE.md addenda, via the existing
-   `install_latest_md` plumbing (the PoC's `WORKER_BRIEF` / `REVIEWER_BRIEF`).
-
-Until (1) and (2) land, `{cowork}` is inert by design — which is exactly what a
-capability-only tag should be on a solo launch.
-
----
-
-## Design cautions (independent of mechanism)
-
-- **The protocol is the easy part; the scheduler is not.** Who runs next, what
-  wakes them, and when the group stops determine everything else.
-- **Never let two writers share a code workspace read-write.** Edits are
-  read-then-write with no locking, so concurrent writers silently lose work.
-  Share a *mailbox*; give the reviewer the workspace read-only via `{ro}`
-  (which denies the edit tools *and* mounts `/workspace` read-only).
-- **Cap the rounds and define "done" explicitly**, or agents ping-pong
-  indefinitely at multiplied token cost.
-- **Messages must be self-contained.** Peers have separate contexts and never
-  saw each other's reasoning.
-- **Multi-agent work deliberately punctures the per-instance isolation** this
-  project exists to provide. Be deliberate about combining it with `{auto}` or
-  `{dood}`.
+- **The feature shipped as `{cowork}`/`{manager}` + the host-side hub.**
+  `group_hosting_plan.md` is the design record; `launch/cowork/` is the
+  implementation; ISSUES.md tracks what is still open.
+- **Option 2 (pty injection) is the shipped wake, not the starred option 1.**
+  The hub design reduced docker's role to "exactly one thing: injection, the
+  wake", and injection needed no change to how containers are started or owned.
+  Option 1 (persistent `--input-format stream-json` stdin) remains the cleaner
+  ingress IF the launcher ever owns every agent's stdin — a structural change.
+  Its one implementation prerequisite, preserved from the deleted constraints
+  section: `tag.docker` accepts no run-flag keys and silently drops unknown
+  ones, so option 1 needs a new intent-shaped key (e.g. `stdin = "pipe"`)
+  driving BOTH the `-i` flag and the Python-side `stdin=PIPE`, or the two
+  drift.
+- **The closing design cautions are now enforced or taught by the shipped
+  feature** — self-contained messages, round budgets, no shared read-write
+  workspace, `{ro}` for reviewer coworkers — via the `{cowork}`/`{manager}`
+  addenda and the hub's own limits.
+- **Live validation of the shipped machinery** (two end-to-end engagements,
+  new tag format, `+quiet`, queue consumption): see "Live validation
+  (2026-08-11)" in `group_hosting_plan.md`.

@@ -319,7 +319,52 @@ class TestPollAttribution(RelayHarness):
         grp.save_session(session.closed())
         self.drop_capture(COWORKER, "answer", session=session)
         self.assertEqual([e.kind for e in poll_once()], [EventKind.LATE])
-        self.assertEqual(self.injected, [])      # a closed group generates no traffic
+        # The manager is not woken — but the SENDER gets a one-time stand-down
+        # notice, or a re-authorised coworker keeps working into a void.
+        self.assertEqual(self.prompts_to(MANAGER), [])
+        [notice] = self.prompts_to(COWORKER)
+        self.assertTrue(notice.startswith(relay.NOTICE_PREFIX))
+        # The notice must never read as group traffic, or acknowledging it
+        # would attribute to a group and provoke another notice, forever.
+        self.assertIsNone(mailbox.group_from_prompt(notice))
+
+    def test_the_stand_down_notice_is_sent_once_not_per_straggle(self):
+        session = self.make_session(COWORKER)
+        grp.save_session(session.closed())
+        self.drop_capture(COWORKER, "answer", prompt_id="pa", session=session)
+        poll_once()
+        self.drop_capture(COWORKER, "still going", prompt_id="pb", session=session)
+        poll_once()
+        self.assertEqual(len(self.prompts_to(COWORKER)), 1)
+
+    def test_a_released_coworkers_reply_does_not_crash_the_hub(self):
+        # The poison pill this guards: sync._deliver rightly raises for a
+        # non-member, and an uncaught raise killed the pass while leaving the
+        # capture to re-kill every later pass and every restart.
+        session = self.make_session(COWORKER)
+        grp.save_session(session.without_coworker(COWORKER))
+        self.drop_capture(COWORKER, "my work is done", session=session)
+        events = poll_once()
+        self.assertEqual([e.kind for e in events], [EventKind.NONMEMBER])
+        # No files taken from a non-member, and the sender is told, once.
+        inbox = paths.cowork_inbox_path(MANAGER, session.key, COWORKER)
+        self.assertFalse(inbox.exists())
+        [notice] = self.prompts_to(COWORKER)
+        self.assertIn("no longer in group", notice)
+        self.assertEqual(poll_once(), ())        # capture consumed, not poisoned
+
+    def test_a_crashing_handler_parks_the_capture_and_the_hub_lives(self):
+        session = self.make_session(COWORKER)
+        self.drop_capture(COWORKER, "answer", session=session)
+        with patch.object(relay.sync, "submit", side_effect=OSError("disk full")):
+            events = poll_once()
+        self.assertEqual([e.kind for e in events], [EventKind.ERROR])
+        self.assertIn("parked", events[0].detail)
+        # Parked means: out of the outbox (next pass is clean, no crash loop)
+        # but preserved under rejected/ for inspection, not deleted.
+        self.assertEqual(poll_once(), ())
+        rejected = paths.cowork_outbox_path(COWORKER) / "rejected"
+        self.assertEqual(len(list(rejected.iterdir())), 1)
 
     def test_a_late_reply_keeps_its_files_instead_of_stranding_them(self):
         # The loss this prevents, observed live: a coworker was closed out, then

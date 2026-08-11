@@ -79,6 +79,40 @@ class ControlHarness(unittest.TestCase):
         return grp.save_session(session)
 
 
+class TestQuietFlag(ControlHarness):
+    """`+quiet` on any verb: the reply file is written as ever, only the wake
+    prompt to the ASKER is skipped — for managers that poll replies/ themselves,
+    whose wake would otherwise land as a redundant turn."""
+
+    def test_quiet_roster_writes_the_reply_without_waking(self):
+        self.drop_request(MANAGER, "roster +quiet")
+        self.poll()
+        self.assertEqual(len(self.replies(MANAGER)), 1)
+        self.assertEqual(self.injected, [])
+
+    def test_quiet_send_still_wakes_the_recipient(self):
+        # Quiet silences the control ANSWER, never the message DELIVERY — a
+        # recipient that is not woken would never read its message at all.
+        self.a_group(PEER)
+        self.drop_request(MANAGER, f"send {MANAGER}-widget {PEER} +files +quiet",
+                          body="please review")
+        self.poll()
+        self.assertEqual([target for target, _ in self.injected], [PEER])
+        self.assertIn("Delivered", self.replies(MANAGER)[0])
+
+    def test_quiet_refusals_are_quiet_too(self):
+        # The requester polls either way; a refusal is an answer like any other.
+        self.drop_request(MANAGER, "done nope-x +quiet")
+        self.poll()
+        self.assertIn("Refused", self.replies(MANAGER)[0])
+        self.assertEqual(self.injected, [])
+
+    def test_without_the_flag_the_wake_still_happens(self):
+        self.drop_request(MANAGER, "roster")
+        self.poll()
+        self.assertEqual([target for target, _ in self.injected], [MANAGER])
+
+
 class TestGate(ControlHarness):
     def test_a_non_managers_request_is_denied(self):
         self.drop_request(PEER, "roster")

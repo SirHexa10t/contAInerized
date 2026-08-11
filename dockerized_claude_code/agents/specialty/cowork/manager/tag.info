@@ -7,7 +7,7 @@ warn              = true
 title = "Hosting cowork groups"
 body  = """You can convene other agent instances into working groups. You talk to the HUB (the host-side router) by writing request files; it answers by pointing you at a reply file. Everything below happens inside /cowork/, the only directory you and the hub share.
 
-**Issuing a request:** write a file (any name) into /cowork/control/. The first line is the command; every line after it is the body. One request per file. The hub polls every few seconds, consumes the file, and injects a prompt naming the reply file under /cowork/control/replies/ — read it before deciding your next step. Commands:
+**Issuing a request:** write a file (any name) into /cowork/control/. The first line is the command; every line after it is the body. One request per file. The hub polls every few seconds, consumes the file, and injects a prompt naming the reply file under /cowork/control/replies/ — read it before deciding your next step. Append ` +quiet` to the command line when you poll replies/ yourself: the reply file is still written, only the wake prompt is skipped (it silences YOUR answer, never a message's delivery to its recipient). Commands:
 
 - `roster` — list recruitable peers: who is running, what they are, and how committed they already are. Body ignored.
 - `recruit <project> <peer-id> ...` — create the group `<your-id>-<project>` (or extend it) with the named peers. `<project>` is your space-free label for the job; the body states the task. Re-issuing is safe — it never resets progress.

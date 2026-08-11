@@ -326,6 +326,15 @@ def consume(capture: Capture) -> None:
     remove_path(capture.source)
 
 
+def park(capture: Capture) -> None:
+    """Move a capture whose HANDLING failed into `rejected/`, next to the ones
+    that would not parse. The alternative shapes are both worse: consuming loses
+    a turn the code merely failed to process, and leaving it in place makes it a
+    poison pill — the same capture re-crashes every pass, and a restarted hub
+    dies on it again. Parked, it stays inspectable and the hub stays up."""
+    _reject(capture.source.parent, capture.source)
+
+
 def _reject(outbox: Path, path: Path) -> None:
     """Park an unparseable capture where it cannot be re-read."""
     destination = outbox / REJECTED_SUBDIR / path.name

@@ -915,3 +915,65 @@ That is convenient while building (it is how the plan's own edits got made) but 
 means the permission design is untested in practice, and any gap in the allowlist
 stays hidden until `{auto}` comes off. Needs a pass without `{auto}` before the
 feature is called done. Not urgent.
+
+## Live validation (2026-08-11)
+
+What the shipped machinery has PROVEN in real use — recorded here because the
+circumstances will change (this is the pre-socket-era baseline: Claude Code
+**2.1.226**, pty injection as the only ingress, hub on the host, coworkers in
+containers). Everything below was observed on disk or in transcripts, not
+inferred.
+
+**Two complete manager→coworker engagements, one round each.** A `{manager}`
+instance (this repo's workspace) recruited a researcher instance in a DIFFERENT
+workspace, twice (groups `agent_comms_research`, `socket_protocol`). Each ran:
+`roster` → fit/resource gate → `recruit` → one self-contained brief → a single
+complete reply with a sourced artifact file → inbox merge → `done`. Both briefs
+survived the no-shared-context constraint (the coworker needed nothing beyond
+the message text), and both groups closed having used **1 of 6 rounds** — the
+budget's headroom went unused because the protocol's "make each message carry
+its weight" bullet did its job.
+
+**The mechanics, each observed live:**
+
+- **Attribution** by `prompt_id` → transcript `promptId` join, under the
+  current `[cowork task <manager>::<project>]` marker — including across the
+  format migration (messages staged by the old hub still attributed after the
+  restart, per the compat regex).
+- **Queue consumption**: both groups' `messages/` dirs are empty on disk after
+  the replies routed — a handled message leaves the queue with no agent
+  holding delete rights.
+- **`+quiet` control requests**: four issued (recruit/send/done), zero
+  redundant wake prompts; the reply files appeared under `control/replies/`
+  and were read by polling. (Against the pre-flag hub, `+quiet` degraded
+  safely: `roster` ignored it, and the send-form would have been refused —
+  which is why the flag was only used once the new hub was confirmed live by
+  its own tag format.)
+- **File submission**: coworker working-copy → manager inbox on turn end, with
+  the notification quoting the exact `diff -r` review command; merge + clear
+  behaved as the addendum prescribes.
+- **The grant model**: the coworker's `all-actions` policy made
+  WebFetch/WebSearch/Bash run unprompted under `{cowork}`'s `dontAsk` floor —
+  the same instance shape that had every research tool auto-denied before the
+  grant policies existed (perm_probe group, same day).
+
+**Specialization through the wire — a two-sided result.** A persona's
+*procedure* survives cowork intact: the researcher's method (raw-markdown doc
+fetching, per-claim URLs, verified-vs-inference separation, sourced null
+results) expressed fully in both engagements. A persona's *voice* does not
+survive competing imperatives: the poet coworker (perm_probe) answered
+protocol-first and style-free under format-constrained prompts — its persona
+was present in context (composition verified in `agents_crud.install_latest_md`)
+but outweighed, not overwritten.
+
+**Closes the "deliberately deferred" issue above:** the permission model has
+now had its pass without `{auto}` — the perm_probe engagement characterised the
+`dontAsk` floor on a grant-less coworker (unlisted tools denied; the built-in
+default-allow set mapped), and the first-person probes settled
+deny-beats-bypass and subagent inheritance. See ISSUES.md's cowork section for
+the durable findings.
+
+**Implemented and test-pinned but not yet exercised live** (honesty line):
+the one-time `[cowork-notice]` stand-down notices, the non-member guard, and
+park-on-error — all landed the same day with crash-reproduction tests, but no
+real straggler has triggered them yet.

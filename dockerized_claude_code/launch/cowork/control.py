@@ -48,6 +48,9 @@ REPLIES_SUBDIR = "replies"        # hub-written answers — a subdir so the requ
 REJECTED_SUBDIR = "rejected"      # denied or unreadable requests — kept, not deleted
 SETTLE_SECONDS = 2.0              # a just-modified file may still be mid-write; give it a pass
 FILES_FLAG = "+files"             # `send` suffix: hand the working copy over with the message
+QUIET_FLAG = "+quiet"             # any verb: write the reply file but skip the wake prompt —
+                                  # for requesters that poll `control/replies/` themselves,
+                                  # whose wake would otherwise arrive as a redundant turn
 
 
 def poll_control(registry: Registry,
@@ -87,10 +90,14 @@ def _handle(asker: str, request: Path, registry: Registry,
 
     command, _, body = text.partition("\n")
     verb, *args = command.split()
+    # Stripped here, centrally, because quiet-ness belongs to the REQUEST, not
+    # to any one verb — same anywhere-in-args treatment `_send` gives +files.
+    quiet = QUIET_FLAG in args
+    args = [a for a in args if a != QUIET_FLAG]
     handler = _VERBS.get(verb)
-    detail = (handler(asker, args, body.strip(), registry) if handler
+    detail = (handler(asker, args, body.strip(), registry, quiet=quiet) if handler
               else _refuse(asker, verb, f"unknown verb '{verb}' — expected one "
-                                        f"of {', '.join(sorted(_VERBS))}"))
+                                        f"of {', '.join(sorted(_VERBS))}", quiet=quiet))
     remove_path(request)
     return Event(EventKind.CONTROL, asker, "", detail)
 
@@ -99,18 +106,20 @@ def _handle(asker: str, request: Path, registry: Registry,
 # Verbs — each returns the one-line detail for the operator's event stream
 # ============================================================
 
-def _roster(asker: str, args: list[str], body: str, registry: Registry) -> str:
+def _roster(asker: str, args: list[str], body: str, registry: Registry,
+            *, quiet: bool = False) -> str:
     """`roster` — who could be recruited, with the asker excluded."""
-    _answer(asker, "roster", roster.describe(roster.survey(asker, registry)))
+    _answer(asker, "roster", quiet=quiet, text=roster.describe(roster.survey(asker, registry)))
     return "answered a roster request"
 
 
-def _recruit(asker: str, args: list[str], body: str, registry: Registry) -> str:
+def _recruit(asker: str, args: list[str], body: str, registry: Registry,
+             *, quiet: bool = False) -> str:
     """`recruit <project> <peer>...` — create or extend a group the asker hosts.
     The body is the task statement, recorded on creation."""
     if not args:
-        return _refuse(asker, "recruit",
-                       "usage: recruit <project> <peer-id> ... (body = the task)")
+        return _refuse(asker, "recruit", quiet=quiet,
+                       reason="usage: recruit <project> <peer-id> ... (body = the task)")
     project, peers = args[0], args[1:]
     try:
         session = create_session(asker, project, body)
@@ -118,76 +127,79 @@ def _recruit(asker: str, args: list[str], body: str, registry: Registry) -> str:
             session = session.with_coworker(peer)
         session = save_session(session)
     except ValueError as error:          # separator guard: '@' in a name
-        return _refuse(asker, "recruit", str(error))
+        return _refuse(asker, "recruit", quiet=quiet, reason=str(error))
     members = "\n".join(f"  - {c}" for c in session.coworkers) or "  (none yet)"
-    _answer(asker, "recruit",
-            f"Group `{session.key}` — {session.rounds_left} of "
+    _answer(asker, "recruit", quiet=quiet,
+            text=f"Group `{session.key}` — {session.rounds_left} of "
             f"{session.round_budget} round(s) left.\n\nCoworkers:\n{members}\n\n"
             f"Your working copy is {COWORK_IN_CONTAINER / session.key}/ — put the "
             f"material there, then `send {session.key} <peer-id> +files`.")
     return f"recruited {len(peers) or 'no'} peer(s) into '{session.key}'"
 
 
-def _send(asker: str, args: list[str], body: str, registry: Registry) -> str:
+def _send(asker: str, args: list[str], body: str, registry: Registry,
+          *, quiet: bool = False) -> str:
     """`send <group> <peer> [+files]` — deliver the body, optionally handing the
     working copy over first (files land before the message that cites them)."""
     with_files = FILES_FLAG in args
     args = [a for a in args if a != FILES_FLAG]
     if len(args) != 2:
-        return _refuse(asker, "send",
-                       f"usage: send <group-key> <peer-id> [{FILES_FLAG}] "
+        return _refuse(asker, "send", quiet=quiet,
+                       reason=f"usage: send <group-key> <peer-id> [{FILES_FLAG}] "
                        f"(body = the message)")
     key, peer = args
     session = _hosted(asker, key)
     if session is None:
-        return _refuse(asker, "send", _not_yours(asker, key))
+        return _refuse(asker, "send", quiet=quiet, reason=_not_yours(asker, key))
     if not body:
-        return _refuse(asker, "send", "the message body is empty — write it on "
+        return _refuse(asker, "send", quiet=quiet, reason="the message body is empty — write it on "
                                       "the lines after the command")
     problem = relay.membership_problem(session, sender=asker, recipient=peer)
     if problem is not None:
-        return _refuse(asker, "send", problem)
+        return _refuse(asker, "send", quiet=quiet, reason=problem)
     if with_files:
         sync.hand_over(session, peer)
     outcome = relay.send(session, sender=asker, recipient=peer, body=body)
     if not outcome.delivered:
-        return _refuse(asker, "send", outcome.reason)
-    _answer(asker, "send",
-            f"Delivered to {peer}"
+        return _refuse(asker, "send", quiet=quiet, reason=outcome.reason)
+    _answer(asker, "send", quiet=quiet,
+            text=f"Delivered to {peer}"
             f"{' with your working copy' if with_files else ''} — "
             f"{outcome.session.rounds_left} of {outcome.session.round_budget} "
             f"round(s) left. The reply will arrive as a prompt.")
     return f"sent to {peer} in '{key}'"
 
 
-def _release(asker: str, args: list[str], body: str, registry: Registry) -> str:
+def _release(asker: str, args: list[str], body: str, registry: Registry,
+             *, quiet: bool = False) -> str:
     """`release <group> <peer>` — drop a peer; its dirs stay on disk."""
     if len(args) != 2:
-        return _refuse(asker, "release", "usage: release <group-key> <peer-id>")
+        return _refuse(asker, "release", quiet=quiet, reason="usage: release <group-key> <peer-id>")
     key, peer = args
     session = _hosted(asker, key)
     if session is None:
-        return _refuse(asker, "release", _not_yours(asker, key))
+        return _refuse(asker, "release", quiet=quiet, reason=_not_yours(asker, key))
     if peer not in session.coworkers:
-        return _refuse(asker, "release", f"'{peer}' is not in '{key}'")
+        return _refuse(asker, "release", quiet=quiet, reason=f"'{peer}' is not in '{key}'")
     save_session(session.without_coworker(peer))
     journal.append(session, journal.Direction.NOTE, peer, "released from the group")
-    _answer(asker, "release", f"Released {peer} from `{key}`. Its inbox and "
+    _answer(asker, "release", quiet=quiet, text=f"Released {peer} from `{key}`. Its inbox and "
                               f"working copy are kept on disk.")
     return f"released {peer} from '{key}'"
 
 
-def _done(asker: str, args: list[str], body: str, registry: Registry) -> str:
+def _done(asker: str, args: list[str], body: str, registry: Registry,
+          *, quiet: bool = False) -> str:
     """`done <group>` — close a group the asker hosts."""
     if len(args) != 1:
-        return _refuse(asker, "done", "usage: done <group-key>")
+        return _refuse(asker, "done", quiet=quiet, reason="usage: done <group-key>")
     session = _hosted(asker, args[0])
     if session is None:
-        return _refuse(asker, "done", _not_yours(asker, args[0]))
+        return _refuse(asker, "done", quiet=quiet, reason=_not_yours(asker, args[0]))
     closed = save_session(session.closed())
     journal.append(closed, journal.Direction.NOTE, asker,
                    f"group closed by its manager after {closed.rounds_used} round(s)")
-    _answer(asker, "done", f"`{closed.key}` is closed. Its files and "
+    _answer(asker, "done", quiet=quiet, text=f"`{closed.key}` is closed. Its files and "
                            f"conversation.md are kept.")
     return f"closed '{closed.key}'"
 
@@ -214,27 +226,33 @@ def _not_yours(asker: str, key: str) -> str:
     return f"no active group '{key}' hosted by you. Yours: {yours}"
 
 
-def _refuse(asker: str, verb: str, reason: str) -> str:
+def _refuse(asker: str, verb: str, reason: str, *, quiet: bool = False) -> str:
     """Answer a manager's malformed or unactionable request with the reason.
 
     Managers get told; non-managers do not (their requests are parked unread —
     the plan's rule, and answering would invite probing). The reply is the same
     pointer mechanism as success, so the manager's next read explains itself."""
-    _answer(asker, verb, f"Refused: {reason}")
+    _answer(asker, verb, f"Refused: {reason}", quiet=quiet)
     return f"refused '{verb}': {reason}"
 
 
-def _answer(asker: str, verb: str, text: str) -> None:
+def _answer(asker: str, verb: str, text: str, *, quiet: bool = False) -> None:
     """Write the reply file and inject the pointer at it.
 
     Numbered from what is on disk (like mailbox.next_seq) so no answer ever
     overwrites an unread one. Injection failure is tolerable here: the file is
     durable, and the manager's addendum names the replies dir, so a wedged
-    injection costs discovery time rather than the answer."""
+    injection costs discovery time rather than the answer.
+
+    `quiet` skips only the wake — the reply file is ALWAYS written. It silences
+    this request's answer to the ASKER; a message delivery to a recipient
+    (relay.send inside `_send`) still wakes that recipient."""
     replies = cowork_dir_path(asker) / CONTROL_SUBDIR / REPLIES_SUBDIR
     sequence = sum(1 for _ in iter_files(replies, suffix=".md")) + 1
     name = f"{sequence:03d}-{verb}.md"
     write_text(replies / name, text.rstrip() + "\n")
+    if quiet:
+        return
     docker_attach_inject(
         asker, f"The hub answered your '{verb}' request — read "
                f"{COWORK_IN_CONTAINER / CONTROL_SUBDIR / REPLIES_SUBDIR / name} "

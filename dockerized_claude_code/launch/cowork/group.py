@@ -329,10 +329,16 @@ class ParticipantState:
     used for delivery checking (a send with no matching turn after a timeout
     means the injection did not land), not for attributing replies — attribution
     comes from pairing the reply with its prompt via the transcript.
+
+    `noticed` lists the groups this participant has already received a one-time
+    outcome notice for (closed / not-a-member). Remembered so the notice cannot
+    ping-pong: the participant's acknowledgement of a notice is itself a turn,
+    and an unremembered notice would answer that turn with another notice.
     """
     last_prompt_id: str | None = None
     outstanding_send: str | None = None
     sent_at: float | None = None
+    noticed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -356,7 +362,8 @@ class HubState:
             "participants": {
                 name: {"last_prompt_id": st.last_prompt_id,
                        "outstanding_send": st.outstanding_send,
-                       "sent_at": st.sent_at}
+                       "sent_at": st.sent_at,
+                       "noticed": list(st.noticed)}
                 for name, st in sorted(self.participants.items())
             },
         }
@@ -389,6 +396,9 @@ def load_hub_state() -> HubState:
             last_prompt_id=entry.get("last_prompt_id"),
             outstanding_send=entry.get("outstanding_send"),
             sent_at=entry.get("sent_at"),
+            # Absent in pre-notice state files; () is the correct history then.
+            noticed=tuple(entry.get("noticed") or ()
+                          if isinstance(entry.get("noticed"), list) else ()),
         )
         for name, entry in raw.items() if isinstance(entry, dict)
     }

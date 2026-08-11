@@ -222,6 +222,107 @@ the earlier failed attempts all shared one mistake — asking a peer:
   design. Rephrasing to get past that is the manipulation the refusal detected;
   ask the operator to drive it directly instead.
 
+### A released coworker's reply was a hub-killing poison pill — FIXED
+
+`relay._forward_to_manager` called `sync.submit` without checking membership,
+and `sync._deliver` (correctly) raises for non-members. Nothing caught it:
+the pass died, the capture survived, and every later pass — and every hub
+restart — died again on the same file. Found while adopting delivery-outcome
+notices (below), fixed threefold: `_handle` now short-circuits non-members
+(`NONMEMBER` event; journalled, never forwarded, no files taken), `poll_once`
+parks any capture whose handling raises into `rejected/` (`ERROR` event) instead
+of dying, and both paths are pinned by tests including the crash reproduction.
+
+### Senders got no outcome notice for unroutable replies — FIXED
+
+Adopted from Anthropic's cross-session messaging (its held/denied/expired
+notices; see the agent_comms_research group's findings.md). A coworker whose
+reply hit a closed group — or who had been released — learned nothing and could
+keep working into a void. The hub now injects a one-time stand-down notice,
+prefixed `[cowork-notice]` — hyphenated deliberately so `GROUP_TAG_RE` can never
+parse it as group traffic, which is what makes the notice loop-proof: the ack it
+provokes drains as unsolicited. Once-per-(instance, group) is remembered in hub
+state (`ParticipantState.noticed`, surviving restarts); `_clear_outstanding` was
+also fixed to stop rebuilding the state from scratch, which would have silently
+re-armed every notice.
+
+### Socket delivery could replace pty injection — RESEARCHED: WAIT
+
+Cross-session messaging (v2.1.224) gives every non-`--bare` session an inbox
+Unix socket, path exported as `CLAUDE_CODE_MESSAGING_SOCKET` before
+`SessionStart` runs — documented for "a script or hook posts into a session",
+i.e. exactly what `docker_attach_inject`'s pty keystroke-typing approximates
+unsupported. Plan shape, should it ever open: a `SessionStart` hook in each
+container publishes its socket path to a mounted volume; the hub writes to it.
+
+**Verdict: do not build yet.** The follow-up research (group socket_protocol,
+its `socket_protocol.md`, per-claim URLs) resolved every question, and the
+decisive one negatively:
+
+1. **The wire format is UNDOCUMENTED — a checked null result**, not a gap in
+   our reading: the socket section prescribes no payload, the full CLI
+   reference has no posting client, and the docs index ships protocol
+   references for other subsystems but none for messaging. An unversioned,
+   reverse-engineered contract as the hub's sole ingress is worse than the
+   pty hack it would replace. Re-check on Claude Code releases; build when a
+   payload spec or official client appears (prototype behind a flag, keep pty
+   injection as the fallback — the CHANGELOG already shows churn here).
+2. **The kill-switch is sticky:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0`
+   still disables — it must be UNSET (verified wording; our Dockerfile sets it,
+   confirmed live as no socket in a 2.1.226 container). The fine-grained trio
+   (`DISABLE_AUTOUPDATER`, `DISABLE_ERROR_REPORTING`,
+   `DISABLE_FEEDBACK_COMMAND`, plus `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`)
+   keeps messaging alive — but **telemetry-off and messaging are mutually
+   exclusive** (`DISABLE_TELEMETRY` and `DO_NOT_TRACK=1` both kill flag
+   fetching; no "telemetry off, flags on" switch exists). Accepting telemetry
+   in exchange for the socket is an operator policy call, not ours.
+3. **`crossSessionInbound` is a strictness ratchet, not scope-ordered:** a
+   project/local `accept` is silently IGNORED (`accept` < `hold` < `refuse`;
+   only managed / `--settings` / user scopes can loosen). Our merged
+   `~/.claude/settings.json` IS user scope in-container, so the fragment
+   model can deliver `accept` — but nothing project-side ever could.
+   NOT worth shipping ahead of time: `accept` is a gate on the messaging
+   socket's inbound traffic, and with the feature dead in our containers
+   (kill-switch) and pty injection as the ingress, that channel carries zero
+   traffic — the key would be inert configuration that reads as load-bearing.
+   Add it the day the socket path reopens, not before.
+4. **`accept` moots the PID-1 problem:** own-child verification applies only
+   when NO `crossSessionInbound` value applies, so setting it explicitly
+   sidesteps the in-container lineage failure. Without it, an unverified
+   message to a bypass-class instance is held and silently dropped at
+   `dialogExpiry` (default 5m) — unattended coworkers would lose mail.
+5. Linux sandbox nuance for the eventual prototype: the per-path
+   `allowUnixSockets` list is macOS-only and IGNORED on Linux;
+   `allowAllUnixSockets: true` is the only Linux switch (and only matters if
+   the optional seccomp filter is installed).
+6. Still untested (flagged inference, unavoidable until a prototype): whether
+   a host process writing into a bind-mounted socket is accepted at all, and
+   what sender identity it presents. Nothing documents non-Claude writers.
+   **This is the potential show-stopper, and most of it CAN be checked early**
+   — cheaply, before any build, if the feature is ever revisited:
+   - *(a) activation:* run one throwaway instance with the kill-switch var
+     genuinely UNSET — note `docker run -e VAR=` cannot do it (empty is still
+     "set" under the sticky semantics); the clean route is an entrypoint
+     wrapper that `unset`s it before exec (the `{firewall}` tag already shows
+     tag-shipped entrypoints), or a build-arg-gated `ENV`. Success =
+     `CLAUDE_CODE_MESSAGING_SOCKET` present and the socket file bound.
+   - *(b) in-container proof:* start TWO sessions inside that one container
+     and have them message each other — docs sanction exactly this ("Two
+     sessions inside the same container can still message each other"), and it
+     proves the feature works in our image with zero wire-format knowledge,
+     using Claude itself as the client.
+   - *(c) host reachability:* `connect()` to the bind-mounted socket from the
+     host — tests the mount and the same-OS-user/peer-credential boundary
+     (container uid vs host uid) without sending a valid payload.
+   - *(d) acceptance of a real message* — blocked on the wire format; this is
+     the one piece that must wait.
+   (a)–(c) are an hour with one throwaway instance; a failure at (a) or (c)
+   kills the plan before any code exists.
+
+Full sourced findings: the closed socket_protocol group's `socket_protocol.md`
+and agent_comms_research's `findings.md`; survey context:
+`agent_cross_comm_propositions.md`'s 2026-08-11 addendum.
+
 ## Known issues — launcher
 
 - **No lockfile** — CI gate FIXED. `check.sh` is now the single definition of a

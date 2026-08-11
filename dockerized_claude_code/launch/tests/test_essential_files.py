@@ -252,13 +252,16 @@ class TestTagTreeDiscovery(unittest.TestCase):
 
     def test_manager_addendum_teaches_the_control_channel(self):
         # The addendum IS the protocol documentation an agent gets; if the
-        # control dir or a verb is renamed, this must fail.
-        from launch.cowork.control import CONTROL_SUBDIR, REPLIES_SUBDIR, _VERBS
+        # control dir, a verb, or the quiet flag is renamed, this must fail.
+        from launch.cowork.control import (
+            CONTROL_SUBDIR, QUIET_FLAG, REPLIES_SUBDIR, _VERBS,
+        )
         addendum = self.reg.specialties["manager"].addendum
         self.assertIsNotNone(addendum)
         _, body = addendum
         self.assertIn(f"/cowork/{CONTROL_SUBDIR}/", body)
         self.assertIn(f"{CONTROL_SUBDIR}/{REPLIES_SUBDIR}/", body)
+        self.assertIn(QUIET_FLAG, body)
         for verb in _VERBS:
             self.assertIn(f"`{verb}", body)
 

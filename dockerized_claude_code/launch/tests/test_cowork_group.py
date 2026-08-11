@@ -292,11 +292,21 @@ class TestHubState(CoworkTmpRoot):
     def test_round_trip(self):
         state = HubState(participants={}).with_participant(
             "golem__a", ParticipantState(last_prompt_id="uuid-1",
-                                         outstanding_send="m__1-p", sent_at=99.0))
+                                         outstanding_send="m__1-p", sent_at=99.0,
+                                         noticed=("m__1-old",)))
         save_hub_state(state)
         loaded = load_hub_state()
         self.assertEqual(loaded.for_participant("golem__a").last_prompt_id, "uuid-1")
         self.assertEqual(loaded.for_participant("golem__a").outstanding_send, "m__1-p")
+        # `noticed` must survive a hub restart, or every one-time stand-down
+        # notice re-arms and the first straggler after a restart gets re-noticed.
+        self.assertEqual(loaded.for_participant("golem__a").noticed, ("m__1-old",))
+
+    def test_pre_notice_state_files_load_with_empty_noticed(self):
+        # State written before the notice feature has no `noticed` key at all.
+        paths.hub_state_path().write_text(json.dumps(
+            {"schema": 1, "participants": {"golem__a": {"last_prompt_id": "u1"}}}))
+        self.assertEqual(load_hub_state().for_participant("golem__a").noticed, ())
 
     def test_unknown_participant_gets_a_default(self):
         self.assertEqual(load_hub_state().for_participant("nobody__x"), ParticipantState())

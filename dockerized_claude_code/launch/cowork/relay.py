@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from ..docker_config import docker_attach_inject
@@ -59,6 +59,8 @@ class EventKind(Enum):
     UNKNOWN_GROUP = "unknown-group"  # tagged for a group that does not exist on disk at all
     DUPLICATE = "duplicate"          # already handled before a crash lost the deletion
     LATE = "late"                    # a reply to a CLOSED group: its files are kept, nothing is routed
+    NONMEMBER = "non-member"         # a reply from an instance the group does not include (released?)
+    ERROR = "error"                  # a capture whose handling raised — parked, never a poison pill
     CONTROL = "control"              # a manager's control request — honoured, or answered with an error
     DENIED = "denied"                # a control request from a non-manager — ignored, per the design
 
@@ -161,7 +163,19 @@ def poll_once() -> tuple[Event, ...]:
     events: list[Event] = []
     for instance in mailbox.instances_with_outbox():
         for capture in mailbox.read_captures(instance):
-            events.append(_handle(capture, sessions))
+            # A handler that raises must not take the hub down, and the capture
+            # must not stay in the outbox either — consumed it would be a lost
+            # turn, left in place it re-crashes every pass AND every restart (a
+            # poison pill; a released coworker's reply did exactly that before
+            # `_handle` grew its membership guard). Parked, it is inspectable.
+            try:
+                events.append(_handle(capture, sessions))
+            except Exception as error:
+                mailbox.park(capture)
+                events.append(Event(
+                    EventKind.ERROR, capture.instance, "",
+                    f"handling failed ({error}) — capture parked in rejected/"))
+                continue
             mailbox.consume(capture)
     return tuple(events)
 
@@ -256,6 +270,18 @@ def _handle(capture: mailbox.Capture, sessions: dict[str, Session]) -> Event:
     if capture.instance == session.manager:
         return Event(EventKind.LOGGED, capture.instance, group,
                      "the manager's own turn — logged, never forwarded")
+    if capture.instance not in session.coworkers:
+        # A released (or never-recruited) instance answering the group. Its files
+        # MUST NOT be taken — sync._deliver rightly raises for non-members, and
+        # before this guard existed that raise was a poison pill: the uncaught
+        # error killed the pass, the capture survived to re-kill the next one.
+        _notify_sender(capture.instance, group,
+                       f"You are no longer in group '{group}'. Your reply was "
+                       f"journalled but not forwarded, and no files were taken. "
+                       f"Stand down unless re-recruited.")
+        return Event(EventKind.NONMEMBER, capture.instance, group,
+                     "reply from an instance the group does not include "
+                     "(released?) — journalled, not forwarded, files not taken")
     if session.status is not GroupStatus.ACTIVE:
         return _keep_late_submission(session, capture, group)
     return _forward_to_manager(session, capture, group)
@@ -293,11 +319,19 @@ def _keep_late_submission(session: Session, capture: mailbox.Capture,
 
     The manager is deliberately NOT woken. A closed group should generate no
     traffic and consume no rounds, and `cowork status` already reports a waiting
-    inbox — so the work is retrievable without the group coming back to life."""
+    inbox — so the work is retrievable without the group coming back to life.
+
+    The SENDER is told, once — without it, a re-authorised coworker keeps working
+    into a void (observed live before the files-kept fix; the silence half is
+    what Anthropic's cross-session messaging solves with held/expired notices)."""
     submission = sync.submit(session, capture.instance)
     journal.append(session, journal.Direction.NOTE, capture.instance,
                    f"replied after the group closed — {len(submission.files)} "
                    f"file(s) kept in {submission.inbox.name}; nothing routed")
+    _notify_sender(capture.instance, group,
+                   f"Group '{group}' has closed. Your reply was journalled and "
+                   f"your files were kept in the manager's inbox, but nothing "
+                   f"further will be routed. Stand down unless re-recruited.")
     return Event(EventKind.LATE, capture.instance, group,
                  f"group is closed; {len(submission.files)} file(s) kept in "
                  f"{submission.inbox.name}, manager not woken")
@@ -334,6 +368,34 @@ def _mark_outstanding(recipient: str, group: str) -> None:
         last_prompt_id=prior, outstanding_send=group, sent_at=time.time()))
 
 
+# Hyphenated ON PURPOSE: mailbox.GROUP_TAG_RE requires whitespace after
+# "cowork", so a notice can never be attributed as group traffic — the
+# recipient's acknowledgement turn drains as unsolicited instead of triggering
+# another notice. (A "[cowork notice]" spelling WOULD match, as group "notice".)
+NOTICE_PREFIX = "[cowork-notice]"
+
+
+def _notify_sender(instance: str, group: str, text: str) -> bool:
+    """One-time, best-effort outcome notice to a reply's sender.
+
+    Once per (instance, group), remembered in hub state: the acknowledgement a
+    notice provokes is itself a turn, so an unremembered notice would answer the
+    acknowledgement with another notice, forever. Injection failure leaves the
+    memory unset — the next stray reply retries the notice instead of losing it.
+    Best-effort by design: the notice is a courtesy to the sender, and every
+    guarantee (files kept, journal entry) has already happened by the time it
+    is sent."""
+    state = load_hub_state()
+    participant = state.for_participant(instance)
+    if group in participant.noticed:
+        return False
+    if not docker_attach_inject(instance, f"{NOTICE_PREFIX} {text}"):
+        return False
+    update_participant(instance, replace(
+        participant, noticed=(*participant.noticed, group)))
+    return True
+
+
 def _clear_outstanding(instance: str, prompt_id: str | None) -> None:
     """Note the reply arrived, and remember which turn it answered.
 
@@ -341,6 +403,10 @@ def _clear_outstanding(instance: str, prompt_id: str | None) -> None:
     handled but not yet deleted is re-read on the next pass. It remembers a single
     turn, so two captures handled-and-not-deleted would still see the older one
     reprocessed — acceptable, because reprocessing costs a repeated journal entry
-    and an idempotent re-copy, not lost work."""
-    update_participant(instance, ParticipantState(
-        last_prompt_id=prompt_id, outstanding_send=None, sent_at=None))
+    and an idempotent re-copy, not lost work.
+
+    `replace` on the CURRENT state, not a fresh ParticipantState — constructing
+    one here would silently reset `noticed` and re-arm every one-time notice."""
+    current = load_hub_state().for_participant(instance)
+    update_participant(instance, replace(
+        current, last_prompt_id=prompt_id, outstanding_send=None, sent_at=None))
