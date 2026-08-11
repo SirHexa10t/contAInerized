@@ -43,15 +43,19 @@ HUB_STATE_SCHEMA = 1     # bumped only on a breaking change to the on-disk shape
 
 
 def _separator_free(label: str, kind: str) -> str:
-    """`label`, or a ValueError if it carries INBOX_SEPARATOR.
+    """`label`, or a ValueError if it carries a character some composed name
+    needs to be able to split on.
 
-    An inbox dir is named `<group>@<sender>` and sits as a SIBLING of the group
-    dirs in the same tree, so the two must never be able to share a name. Group
-    keys are composed without `@`, which makes that structurally impossible —
-    but only as long as nothing that composes one smuggles the separator in. The
-    session suffix a user types is free text (`menu_picker.prompt_session` does
-    not restrict characters) and a project label is written by an agent, so both
-    are checked here, at the point a name enters durable state.
+    Two composed names lean on this. An inbox dir is named `<group>@<sender>`
+    and sits as a SIBLING of the group dirs in the same tree, so the two must
+    never be able to share a name. And the prompt marker is
+    `[cowork task <manager>::<project>]` (mailbox.TAG_SEPARATOR), which
+    attribution splits on its first `::` to rebuild the group key. Both are
+    structural guarantees, not conventions — and they hold only as long as
+    nothing that composes a name smuggles a separator in. The session suffix a
+    user types is free text (`menu_picker.prompt_session` does not restrict
+    characters) and a project label is written by an agent, so both are checked
+    here, at the point a name enters durable state.
 
     Raises rather than sanitising: silently rewriting an id would leave the group
     keyed under a name its participants do not answer to."""
@@ -59,6 +63,10 @@ def _separator_free(label: str, kind: str) -> str:
         raise ValueError(f"a cowork {kind} may not contain "
                          f"{INBOX_SEPARATOR!r} (it separates a group from a "
                          f"sender in inbox dir names): {label!r}")
+    if ":" in label:
+        raise ValueError(f"a cowork {kind} may not contain ':' (the prompt "
+                         f"marker joins manager and project with '::'): "
+                         f"{label!r}")
     return label
 
 

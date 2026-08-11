@@ -599,6 +599,8 @@ from the failure log so the warning clears once a retry actually works.
 run.py                               # entry point + staged launch() orchestrator (scan tags → migrate store → resolve → resume? → persist → apply tags → setup → build → run)
 quick_question.py                    # entry point for the `q` quickie tool → launch.quickie.main (argparse; --explain/--research/--history/--answer/--resume; print-mode one-shot)
 Dockerfile                           # base image — Claude Code + uv + ripgrep + iptables/sudo ({firewall} prerequisites); built with `network: host` to dodge BuildKit DNS issues
+check.sh                             # the quality gate — see "Quality gate" below
+.github/workflows/ci.yml             # CI — sets up an environment and calls check.sh
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), bind-mount dicts (DOCKER_BASE_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
   utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_keypress, call_or_exit. No disk access. Leaf module.
@@ -628,16 +630,32 @@ launch/
     docker_prompts.py                #   docker-side strings — build-step progress, {firewall} waiting line, install-failure prompt copy
     firewall_domains.py              #   the curated built-in whitelist domains (~135 entries)
   template_files/                    # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/.
-  tests/                             # unittest suite — ~750 tests, <1s. Run via `python3 -m unittest discover -s launch/tests` from the project root.
+  tests/                             # unittest suite. Run it together with ruff + mypy via `bash check.sh` from the project root.
 agents/                              # agent definitions + the tag tree
   <name>.md, <name>.lego             #   persona + default tag selections, per agent
   engine/<name>/                     #   (engine) members — tag.info + engine.conf (nested folders overlay parent conf)
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
-  policy/{web-research,no-sudo,plan-first,…}/ #   <policy> members — tag.info + policy.json settings fragment (also no-net, vcs-safe, free-bash, hidden _read-only)
+  policy/{web-research,no-sudo,plan-first,…}/ #   <policy> members — tag.info + policy.json settings fragment (also no-net, no-git, vcs-safe, free-bash, all-actions, hidden _read-only)
 custom_commands/                     # launcher-bundled slash commands (mounted into every container)
 custom_skills/                       # launcher-bundled skills (mounted into every container)
 .claude/commands/                    # workspace-local slash commands for THIS project — auto-discovered when launched here; no mount.
 settings/                            # status line + bashrc + base Claude Code settings + keybindings + manifest helpers (mounted into every container)
 tips/                                # reference notes. Read by humans, not the launcher.
 ```
+
+## Quality gate
+
+After changing launcher code, run the gate — the test suite plus the static
+checks, one command:
+
+```bash
+bash check.sh
+```
+
+Exit 0 means the tree passes. CI (`.github/workflows/ci.yml`) runs the same
+script; what exactly it checks and why is documented in the script's own header.
+
+To smoke-test a launch without starting a container:
+`python3 run.py <instance> --dry-run` walks every stage up to (but not
+including) the real docker calls.

@@ -56,8 +56,9 @@ class EventKind(Enum):
     REPLY = "reply"                  # attributed and routed
     LOGGED = "logged"                # attributed to a manager's own turn — logged, not routed
     UNSOLICITED = "unsolicited"      # untagged prompt: a human typed it, so it is not ours
-    UNKNOWN_GROUP = "unknown-group"  # tagged for a group that is not active on disk
+    UNKNOWN_GROUP = "unknown-group"  # tagged for a group that does not exist on disk at all
     DUPLICATE = "duplicate"          # already handled before a crash lost the deletion
+    LATE = "late"                    # a reply to a CLOSED group: its files are kept, nothing is routed
     CONTROL = "control"              # a manager's control request — honoured, or answered with an error
     DENIED = "denied"                # a control request from a non-manager — ignored, per the design
 
@@ -117,7 +118,7 @@ def send(session: Session, *, sender: str, recipient: str, body: str,
 
     staged = mailbox.stage_message(recipient, session.key, sender, body,
                                    seq=mailbox.next_seq(recipient, session.key))
-    prompt = mailbox.pointer_prompt(session.key, sender, staged)
+    prompt = mailbox.pointer_prompt(session.manager, session.project, staged)
     if not docker_attach_inject(recipient, prompt):
         journal.append(session, journal.Direction.NOTE, recipient,
                        f"message staged at {staged} but injection failed — "
@@ -154,11 +155,13 @@ def poll_once() -> tuple[Event, ...]:
     Sessions are re-discovered every pass rather than cached, so a group created
     or closed while the hub runs is picked up without a restart — discovery is a
     directory scan, which is cheap next to a poll interval."""
-    active = {s.key: s for s in discover_sessions() if s.status is GroupStatus.ACTIVE}
+    # EVERY group, not just the active ones: a reply that arrives after its group
+    # closed still carries work worth keeping (see `_keep_late_submission`).
+    sessions = {s.key: s for s in discover_sessions()}
     events: list[Event] = []
     for instance in mailbox.instances_with_outbox():
         for capture in mailbox.read_captures(instance):
-            events.append(_handle(capture, active))
+            events.append(_handle(capture, sessions))
             mailbox.consume(capture)
     return tuple(events)
 
@@ -221,7 +224,7 @@ def overdue_sends(state: HubState | None = None, *, now: float | None = None,
     )
 
 
-def _handle(capture: mailbox.Capture, active: dict[str, Session]) -> Event:
+def _handle(capture: mailbox.Capture, sessions: dict[str, Session]) -> Event:
     """Resolve one capture and act on it. Returns without touching the capture
     file — `poll_once` consumes it, so a crash in here retries rather than
     silently dropping a turn."""
@@ -231,20 +234,30 @@ def _handle(capture: mailbox.Capture, active: dict[str, Session]) -> Event:
         return Event(EventKind.DUPLICATE, capture.instance, "",
                      "already handled on an earlier pass")
 
-    group = mailbox.attribute(capture)
-    if group is None:
+    attribution = mailbox.attribute(capture)
+    if attribution is None:
         return Event(EventKind.UNSOLICITED, capture.instance, "",
                      "a turn the hub did not prompt — not routed")
-    session = active.get(group)
+    group = attribution.group
+    session = sessions.get(group)
     if session is None:
         return Event(EventKind.UNKNOWN_GROUP, capture.instance, group,
-                     "tagged for a group that is not active — not routed")
+                     "tagged for a group that does not exist — not routed")
+
+    # Queue semantics: the reply IS the proof the message was handled, so the
+    # staged file is consumed here — on every routed branch below, including a
+    # late submission — leaving `messages/` holding only unhandled backlog.
+    # The body survives in conversation.md, journalled at send time.
+    if attribution.message_file is not None:
+        mailbox.consume_staged(capture.instance, group, attribution.message_file)
 
     journal.append(session, journal.Direction.FROM, capture.instance, capture.answer)
     _clear_outstanding(capture.instance, capture.prompt_id)
     if capture.instance == session.manager:
         return Event(EventKind.LOGGED, capture.instance, group,
                      "the manager's own turn — logged, never forwarded")
+    if session.status is not GroupStatus.ACTIVE:
+        return _keep_late_submission(session, capture, group)
     return _forward_to_manager(session, capture, group)
 
 
@@ -264,6 +277,30 @@ def _forward_to_manager(session: Session, capture: mailbox.Capture,
     if not outcome.delivered:
         detail += f"; manager NOT notified ({outcome.reason})"
     return Event(EventKind.REPLY, capture.instance, group, detail)
+
+
+def _keep_late_submission(session: Session, capture: mailbox.Capture,
+                          group: str) -> Event:
+    """A coworker's reply that arrived after its group closed: keep the work,
+    route nothing.
+
+    The files are still copied into the manager's inbox, because that inbox is
+    the manager's OWN tree — nothing is exposed by writing there — and because
+    dropping a coworker's finished work over a race with `done` is exactly the
+    loss this exists to prevent. It happened: a coworker was closed out, then
+    re-authorised by its operator, did the work, and its artifacts were stranded
+    in its own tree with no route to the manager.
+
+    The manager is deliberately NOT woken. A closed group should generate no
+    traffic and consume no rounds, and `cowork status` already reports a waiting
+    inbox — so the work is retrievable without the group coming back to life."""
+    submission = sync.submit(session, capture.instance)
+    journal.append(session, journal.Direction.NOTE, capture.instance,
+                   f"replied after the group closed — {len(submission.files)} "
+                   f"file(s) kept in {submission.inbox.name}; nothing routed")
+    return Event(EventKind.LATE, capture.instance, group,
+                 f"group is closed; {len(submission.files)} file(s) kept in "
+                 f"{submission.inbox.name}, manager not woken")
 
 
 def _notification(capture: mailbox.Capture, submission: sync.Delivery) -> str:

@@ -396,6 +396,35 @@ class TestCoworkMountRealInstance(unittest.TestCase):
         self.assertEqual(perms["defaultMode"], "dontAsk")
         self.assertLessEqual({"Write", "Edit"}, set(perms["allow"]))
 
+    def test_fragment_allows_every_command_the_protocol_instructs(self):
+        # The floor is defined by the addendum: it tells a coworker to copy an
+        # inbox into its working copy and clear it, and a manager to review with
+        # `diff -r`. Under dontAsk, a command missing here makes the protocol's
+        # own instructions impossible to follow.
+        from launch.tags import scan_all
+        cowork = scan_all(paths.AGENTS_DIR).specialties["cowork"]
+        allow = set(cowork.load_fragment()["permissions"]["allow"])
+        self.assertLessEqual({"Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)",
+                              "Bash(diff:*)"}, allow)
+        # And the addendum really does instruct those operations — if it stops
+        # saying so, this floor needs rejustifying rather than quietly standing.
+        _, body = cowork.addendum
+        self.assertIn("Copy what you take up", body)
+
+    def test_fragment_omits_shell_twins_of_allowed_tools(self):
+        # Dropped deliberately: Read/Glob/Grep are allowed, and the addendum's
+        # last bullet tells agents to prefer them over shell equivalents — so
+        # allowing ls/cat/grep/... contradicted our own advice and only padded
+        # settings.json. `wc` is the kept exception (counting lines without
+        # reading a whole file into context).
+        from launch.tags import scan_all
+        allow = set(scan_all(paths.AGENTS_DIR).specialties["cowork"]
+                    .load_fragment()["permissions"]["allow"])
+        for command in ("ls", "find", "grep", "rg", "cat", "head", "tail"):
+            with self.subTest(command=command):
+                self.assertNotIn(f"Bash({command}:*)", allow)
+        self.assertLessEqual({"Read", "Glob", "Grep", "Bash(wc:*)"}, allow)
+
 
 class TestAddDockerMountCollisions(unittest.TestCase):
     """add_docker_mount rejects conflicting duplicates at staging time. Two

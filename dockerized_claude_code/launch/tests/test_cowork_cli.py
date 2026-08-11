@@ -373,7 +373,8 @@ class TestServe(CliHarness):
         host.write_text(json.dumps({
             "promptId": "p1",
             "message": {"role": "user",
-                        "content": mailbox.tag_message(session.key, "go")}}) + "\n")
+                        "content": mailbox.tag_message(session.manager,
+                                                       session.project, "go")}}) + "\n")
         outbox = paths.cowork_outbox_path(self.peer)
         outbox.mkdir(parents=True, exist_ok=True)
         (outbox / "c.json").write_text(json.dumps({

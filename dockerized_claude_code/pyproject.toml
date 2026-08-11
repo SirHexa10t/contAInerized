@@ -16,11 +16,11 @@ dependencies = [
 
 [tool.ruff]
 # Generous line length — the project intentionally allows long lines for
-# multi-name imports, descriptive picker fragments, etc. /test-project no
-# longer runs `ruff format --check` (the project's columnar alignment
-# conflicts with ruff format's always-on normalization), but this setting
-# still kicks in for anyone invoking `ruff format` manually so they get
-# less-destructive behaviour than the stock 88-col default.
+# multi-name imports, descriptive picker fragments, etc. The quality gate
+# (check.sh) deliberately omits `ruff format --check` (the project's columnar
+# alignment conflicts with ruff format's always-on normalization), but this
+# setting still kicks in for anyone invoking `ruff format` manually so they
+# get less-destructive behaviour than the stock 88-col default.
 line-length = 200
 
 [tool.ruff.format]

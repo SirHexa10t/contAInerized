@@ -19,9 +19,10 @@ recruited into someone else's group is still just a coworker there: `send`,
 `release` and `done` act only on groups the requester hosts. Without that, two
 managers in one group could each spend the other's round budget.
 
-Replies are injected UNTAGGED on purpose: a `[cowork <group>]` prefix marks
-traffic whose answer should be routed, and the manager's acknowledgement of a
-roster is nobody's business — untagged, it drains as unsolicited and stops.
+Replies are injected UNTAGGED on purpose: a `[cowork task <manager>::<project>]`
+prefix marks traffic whose answer should be routed, and the manager's
+acknowledgement of a roster is nobody's business — untagged, it drains as
+unsolicited and stops.
 """
 
 from __future__ import annotations

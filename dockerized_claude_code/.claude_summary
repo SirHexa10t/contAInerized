@@ -10,7 +10,7 @@ Docker-based launcher for pre-made Claude Code agents. Each persona ships a `CLA
 
 - Python 3.12+ host launcher; deps (canonical list: `pyproject.toml` `[project]`): `prompt_toolkit` (picker TUI), `python-dotenv` (`engine.conf` parsing), `rich` (markdown previews); stdlib elsewhere (`tomllib` for every launcher-authored config, `urllib` for CDN-range fetches).
 - Plain **`docker build` / `docker run`** — no compose. Base image (root `Dockerfile`) = debian:trixie-slim + Claude Code + jq/yq/fd/ripgrep + iptables/sudo ({firewall} prerequisites, inert otherwise); per-layer Dockerfiles live in the tag tree.
-- `unittest` suite (~1,230 tests, a few seconds: `python3 -m unittest discover -s launch/tests`); `mypy launch/ run.py quick_question.py cowork.py` (`disallow_untyped_defs` for source; tests exempt) + `ruff check .` both clean. No CI gate.
+- Quality gate: `bash check.sh` — the single definition of a passing tree (`unittest discover -s launch/tests`, `ruff check .`, `mypy launch/ *.py`; `disallow_untyped_defs` for source, tests exempt). All three clean. `.github/workflows/ci.yml` only builds an environment and calls that script — inlining a check there fails `TestQualityGate` in test_essential_files.py.
 
 ### The tag system
 
@@ -51,7 +51,7 @@ launch/
   audit.py              read-only state checker (python -m launch.audit)
   template_code/        pure data: docker_prompts (UI copy), firewall_domains (curated whitelist; CDN ranges fetched live, never baked)
   template_files/       first-launch user-side templates
-  tests/                ~750 tests; test_env_coverage cross-checks tag.docker arg_forwards vs Dockerfile ARGs; test_essential_files validates the real tree via scan_all
+  tests/                run via check.sh; test_env_coverage cross-checks tag.docker arg_forwards vs Dockerfile ARGs; test_essential_files validates the real tree via scan_all
 agents/                 personas (<name>.md + <name>.lego) + the tag tree (engine/ profession/ specialty/ policy/)
 custom_commands/, custom_skills/, settings/, tips/   bundled commands/skills, mounted settings, human notes
 ```
@@ -90,7 +90,11 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 
 ### Known Issues
 
-- No CI gate, no lockfile — tracked in `ISSUES.md`.
+- No lockfile (deps are `>=` floors; the weekly CI run dates such breakage
+  rather than preventing it) — tracked in `ISSUES.md`, which is also where the
+  cowork permission-model findings and their open questions live (the `dontAsk`
+  allowlist is a FLOOR, not an enumerable ceiling: unlisted `echo` and the
+  Agent/Task tool run anyway, so "not in the allow list" never proves "cannot").
 - `docker build` runs per layer on every launch (no image-exists short-circuit) — a few cache-hit seconds each time.
 - `install_latest_md` / `install_settings` overwrite their state-dir files every launch — in-container edits are silently discarded (intentional: launcher owns them).
 - `--network=host` on builds — permanent workaround for BuildKit bridge DNS issues.

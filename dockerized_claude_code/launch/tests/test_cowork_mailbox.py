@@ -15,9 +15,9 @@ from unittest.mock import patch
 
 from launch.cowork import mailbox as mb
 from launch.cowork.mailbox import (
-    Capture, attribute, consume, container_group_path, group_from_prompt,
-    host_transcript_path, pointer_prompt, prompt_text, read_captures,
-    stage_message, tag_message,
+    Capture, attribute, consume, consume_staged, container_group_path,
+    group_from_prompt, host_transcript_path, next_seq, pointer_prompt,
+    prompt_text, read_captures, stage_message, tag_message,
 )
 
 
@@ -46,20 +46,41 @@ class TestGroupTag(unittest.TestCase):
     identifies a human-typed turn."""
 
     def test_round_trip(self):
-        self.assertEqual(group_from_prompt(tag_message("m__1-p", "hello")), "m__1-p")
+        # tag_message writes `manager::project`; attribution must hand back the
+        # group KEY, which is the same pair joined by `-`.
+        self.assertEqual(group_from_prompt(tag_message("m__1", "p", "hello")), "m__1-p")
+
+    def test_tag_shows_the_halves_not_the_key(self):
+        # The format the operator asked for: `[cowork task <manager>::<project>]`.
+        self.assertTrue(tag_message("m__1", "p", "hi")
+                        .startswith("[cowork task m__1::p] "))
+
+    def test_hyphenated_names_round_trip(self):
+        # Both halves may contain `-` (agent names do; the key separator is also
+        # `-`), which is exactly why the tag needs `::` — the first `::` is
+        # unambiguous because group.py rejects `:` in either half.
+        self.assertEqual(
+            group_from_prompt(tag_message("bug-hunter__a-b", "fix-pass", "go")),
+            "bug-hunter__a-b-fix-pass")
 
     def test_untagged_is_none(self):
         self.assertIsNone(group_from_prompt("just a question someone typed"))
 
     def test_tag_must_lead(self):
         # A tag mentioned mid-prompt is discussion, not routing metadata.
-        self.assertIsNone(group_from_prompt("see [cowork m__1-p] for context"))
+        self.assertIsNone(group_from_prompt("see [cowork task m__1::p] for context"))
 
     def test_leading_whitespace_tolerated(self):
-        self.assertEqual(group_from_prompt("  [cowork m__1-p] hi"), "m__1-p")
+        self.assertEqual(group_from_prompt("  [cowork task m__1::p] hi"), "m__1-p")
+
+    def test_old_format_still_attributes(self):
+        # Staged messages and transcripts outlive a hub upgrade: a prompt tagged
+        # `[cowork <group-key>]` by the previous hub must still route after the
+        # format change, or every in-flight reply would drain as unsolicited.
+        self.assertEqual(group_from_prompt("[cowork m__1-p] hi"), "m__1-p")
 
     def test_body_survives_tagging(self):
-        self.assertIn("the actual message", tag_message("g", "the actual message"))
+        self.assertIn("the actual message", tag_message("g", "p", "the actual message"))
 
 
 class TestPromptRecovery(unittest.TestCase):
@@ -179,10 +200,40 @@ class TestStaging(CoworkTmpRoot):
 
     def test_pointer_prompt_is_single_line_and_tagged(self):
         # Injection types keystrokes: a newline would submit a fragment.
-        prompt = pointer_prompt("m__1-p", "m__1", Path("/cowork/m__1-p/messages/001.md"))
+        prompt = pointer_prompt("m__1", "p", Path("/cowork/m__1-p/messages/001-from-m__1.md"))
         self.assertNotIn("\n", prompt)
         self.assertEqual(group_from_prompt(prompt), "m__1-p")
-        self.assertIn("/cowork/m__1-p/messages/001.md", prompt)
+        self.assertIn("/cowork/m__1-p/messages/001-from-m__1.md", prompt)
+
+    def test_consume_staged_removes_exactly_the_handled_message(self):
+        stage_message("golem__a", "m__1-p", "m__1", "first", seq=1)
+        stage_message("golem__a", "m__1-p", "m__1", "second", seq=2)
+        consume_staged("golem__a", "m__1-p", "001-from-m__1.md")
+        remaining = [p.name for p in
+                     (self.root / "golem__a" / "m__1-p" / "messages").iterdir()]
+        self.assertEqual(remaining, ["002-from-m__1.md"])
+
+    def test_consume_staged_tolerates_a_missing_file(self):
+        # Consumption retries alongside its capture; the second pass must not
+        # crash the hub over a file the first pass already removed.
+        consume_staged("golem__a", "m__1-p", "001-from-m__1.md")
+
+    def test_next_seq_never_reuses_a_number_after_consumption(self):
+        # 001 handled and consumed while 002 still waits: count+1 would mint a
+        # second 002 and overwrite the unread message. Max+1 cannot.
+        stage_message("golem__a", "m__1-p", "m__1", "first", seq=1)
+        stage_message("golem__a", "m__1-p", "m__1", "second", seq=2)
+        consume_staged("golem__a", "m__1-p", "001-from-m__1.md")
+        self.assertEqual(next_seq("golem__a", "m__1-p"), 3)
+
+    def test_pointer_prompt_does_not_restate_the_sender(self):
+        # The staged file's name and header already carry the sender, and the
+        # protocol has senders introduce themselves in the body — naming them in
+        # the pointer too was noise the operator asked to drop.
+        prompt = pointer_prompt("m__1", "p", Path("/cowork/m__1-p/messages/002-from-golem__a.md"))
+        before_path = prompt.split("/cowork/", 1)[0]
+        self.assertNotIn("golem__a", before_path)
+        self.assertIn("A message is at", prompt)
 
 
 class TestReadCaptures(CoworkTmpRoot):
@@ -243,7 +294,27 @@ class TestAttribute(CoworkTmpRoot):
                        session_id="s", transcript_path=transcript_path, answer="a reply")
 
     def test_tagged_prompt_attributes_to_its_group(self):
-        self.assertEqual(attribute(self._capture("[cowork m__1-p] please review")), "m__1-p")
+        result = attribute(self._capture("[cowork m__1-p] please review"))
+        self.assertEqual(result.group, "m__1-p")
+        # Not a pointer prompt — there is no staged file to consume.
+        self.assertIsNone(result.message_file)
+
+    def test_pointer_prompt_names_the_file_the_turn_answered(self):
+        # The queue contract's linchpin: the reply's paired prompt carries the
+        # staged file's path, so the hub can consume exactly the message that
+        # was handled — no FIFO guess, no delete rights for the recipient.
+        prompt = pointer_prompt("m__1", "p", Path("/cowork/m__1-p/messages/003-from-m__1.md"))
+        result = attribute(self._capture(prompt))
+        self.assertEqual(result.group, "m__1-p")
+        self.assertEqual(result.message_file, "003-from-m__1.md")
+
+    def test_old_format_pointer_still_names_its_file(self):
+        # Messages staged before the format change are answered after it.
+        result = attribute(self._capture(
+            "[cowork m__1-p] A message from m__1 is at "
+            "/cowork/m__1-p/messages/002-from-m__1.md — read that file and reply to it."))
+        self.assertEqual(result.group, "m__1-p")
+        self.assertEqual(result.message_file, "002-from-m__1.md")
 
     def test_human_typed_turn_is_unattributed(self):
         # The whole point: a typed turn cannot carry a tag the hub never wrote.
@@ -273,9 +344,9 @@ class TestAttribute(CoworkTmpRoot):
                            session_id="s",
                            transcript_path="/home/claude/.claude/projects/-workspace/s.jsonl",
                            answer="r")
-        self.assertEqual(attribute(cap("pC")), "m__1-beta")
+        self.assertEqual(attribute(cap("pC")).group, "m__1-beta")
         self.assertIsNone(attribute(cap("pB")))
-        self.assertEqual(attribute(cap("pA")), "m__1-alpha")
+        self.assertEqual(attribute(cap("pA")).group, "m__1-alpha")
 
 
 if __name__ == "__main__":

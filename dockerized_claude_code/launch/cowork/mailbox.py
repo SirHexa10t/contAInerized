@@ -43,22 +43,39 @@ from ..paths import (
 # The machine-readable marker the hub prepends to every injected prompt. Kept
 # bracket-delimited and leading so it is trivially parseable, survives being
 # typed as keystrokes, and stays legible to the human watching the session.
-GROUP_TAG_RE = re.compile(r"^\s*\[cowork\s+([^\]]+)\]")
+#
+# Written as `[cowork task <manager>::<project>]` — the two halves shown
+# separately because the recipient cares who is hosting and for what, and a
+# joined key does not say where one ends and the other begins. The regex also
+# accepts the older `[cowork <group-key>]` form: staged messages and
+# transcripts outlive a hub upgrade, so prompts tagged before the format
+# change must still attribute after it.
+GROUP_TAG_RE = re.compile(r"^\s*\[cowork(?: task)?\s+([^\]]+)\]")
+TAG_SEPARATOR = "::"    # between manager and project in the marker; group.py
+                        # rejects `:` in both, which is what keeps this splittable
 MESSAGES_SUBDIR = "messages"      # staged message bodies, inside the recipient's group dir
 REJECTED_SUBDIR = "rejected"      # captures that would not parse — kept, not deleted
 
 
-def tag_message(group: str, body: str) -> str:
+def tag_message(manager: str, project: str, body: str) -> str:
     """`body` prefixed with the group marker, ready to inject or stage."""
-    return f"[cowork {group}] {body}"
+    return f"[cowork task {manager}{TAG_SEPARATOR}{project}] {body}"
 
 
 def group_from_prompt(text: str) -> str | None:
     """The group key a prompt was tagged with, or None for an untagged prompt —
     which is how a human-typed turn is recognised, since it cannot carry a tag
-    the hub never wrote."""
+    the hub never wrote.
+
+    A current tag carries `manager::project`, which joined by `-` IS the group
+    key (`group.py` rejects `:` in both halves, so the first `::` is always the
+    marker's own). A tag with no `::` is the older form that carried the key
+    itself — still honoured, see GROUP_TAG_RE."""
     match = GROUP_TAG_RE.match(text)
-    return match.group(1).strip() if match else None
+    if match is None:
+        return None
+    reference = match.group(1).strip()
+    return reference.replace(TAG_SEPARATOR, "-", 1)
 
 
 # ============================================================
@@ -88,25 +105,36 @@ def stage_message(recipient: str, group: str, sender: str, body: str,
 def next_seq(recipient: str, group: str) -> int:
     """The number the next message staged for `recipient` in `group` should carry.
 
-    Counted from what is on disk rather than tracked in hub state: the numbering
+    Derived from what is on disk rather than tracked in hub state: the numbering
     exists so a recipient reads its messages in order and the hub never overwrites
     an unread one, and the directory is already the authoritative record of both.
     A counter in hub state could disagree with the files after a manual clear-out;
     this cannot.
 
+    Max + 1, NOT count + 1: handled messages are consumed (`consume_staged`), so
+    the count drops while the highest number stays taken — after `001` is consumed
+    with `002` still unread, count+1 would mint a second `002` and overwrite it.
+
     Lives here because this module owns MESSAGES_SUBDIR and the `NNN-from-<id>.md`
     name format — a caller deriving the number itself would have to know both."""
     staged = cowork_group_path(recipient, group) / MESSAGES_SUBDIR
-    return sum(1 for _ in iter_files(staged, suffix=".md")) + 1
+    taken = [int(f.name[:3]) for f in iter_files(staged, suffix=".md")
+             if f.name[:3].isdigit()]
+    return max(taken, default=0) + 1
 
 
-def pointer_prompt(group: str, sender: str, path: Path) -> str:
+def pointer_prompt(manager: str, project: str, path: Path) -> str:
     """The one-line, tagged prompt that tells a recipient where to read.
 
     Single line by necessity: injection types the text, so a newline would
-    submit early. The tag is what makes the eventual reply attributable."""
-    return tag_message(group, f"A message from {sender} is at {path} — read that "
-                              f"file and reply to it.")
+    submit early. The tag is what makes the eventual reply attributable.
+
+    Deliberately does NOT name the sender: the staged file's own name and
+    header carry it, and the protocol tells participants to open every message
+    by introducing themselves — a sender named twice before the file is even
+    read is noise in a line that should stay short."""
+    return tag_message(manager, project,
+                       f"A message is at {path} — read that file and reply to it.")
 
 
 # ============================================================
@@ -192,8 +220,26 @@ def prompt_text(transcript: Path, prompt_id: str) -> str | None:
     return None
 
 
-def attribute(capture: Capture) -> str | None:
-    """The group `capture` answers, or None when it cannot be attributed.
+# The pointer's fixed frame around the path — present in both the current
+# wording ("A message is at <path> — read…") and the pre-rename one ("A message
+# from <sender> is at <path> — read…"), so replies to messages staged before an
+# upgrade still name their file.
+_POINTER_PATH_RE = re.compile(r" is at (\S+) — ")
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """What a capture's paired prompt reveals: which group the turn answers,
+    and — when the prompt was a message pointer — which staged file it was
+    answering. The latter is what lets the hub consume a handled message,
+    queue-style, without the recipient needing delete rights of its own."""
+    group: str
+    message_file: str | None    # basename under the recipient's messages/
+
+
+def attribute(capture: Capture) -> Attribution | None:
+    """The group (and message) `capture` answers, or None when it cannot be
+    attributed.
 
     None covers both "a human typed this" (untagged prompt) and "the pairing was
     unavailable" (no prompt_id, or an unreadable transcript). Both mean the same
@@ -204,7 +250,26 @@ def attribute(capture: Capture) -> str | None:
     if transcript is None:
         return None
     text = prompt_text(transcript, capture.prompt_id)
-    return group_from_prompt(text) if text else None
+    group = group_from_prompt(text) if text else None
+    if text is None or group is None:
+        return None
+    pointed = _POINTER_PATH_RE.search(text)
+    name = Path(pointed.group(1)).name if pointed else None
+    return Attribution(group=group, message_file=name)
+
+
+def consume_staged(recipient: str, group: str, name: str) -> None:
+    """Delete one staged message once the reply to it has been routed — the
+    message-queue contract: a handled message leaves the queue, and whatever
+    remains under `messages/` is genuinely unhandled backlog.
+
+    Safe to lose: the body was journalled into the group's conversation.md at
+    send time, so the queue file is a delivery vehicle, not the record. Only the
+    basename is honoured (composed under the recipient's own messages dir), and
+    a missing file is a no-op — consumption retries alongside its capture."""
+    path = cowork_group_path(recipient, group) / MESSAGES_SUBDIR / name
+    if is_file(path):
+        remove_path(path)
 
 
 def read_captures(instance: str) -> list[Capture]:

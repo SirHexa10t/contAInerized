@@ -1,0 +1,57 @@
+# The CI gate. Every check lives in check.sh, which is also what a developer
+# runs locally — this file only builds an environment and calls it, so the two
+# paths cannot drift apart. Add a check to check.sh, never here.
+name: CI
+
+on:
+  push:
+  pull_request:
+  # No lockfile: the deps in pyproject.toml are floors (>=), so a new
+  # prompt_toolkit or rich release can break a tree nobody touched. A weekly
+  # run turns that from an invisible risk into a dated signal.
+  schedule:
+    - cron: "0 6 * * 1"
+
+# A newer push to the same ref makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    strategy:
+      # Report both ends of the range even when one of them fails.
+      fail-fast: false
+      matrix:
+        # 3.12 is the floor pyproject.toml declares; 3.14 is what
+        # install_dependencies.sh actually provisions into ~/pydev. Nothing
+        # else verifies either number, so the gate pins both ends.
+        python-version: ["3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the launcher's runtime deps and the two checkers
+        run: |
+          # uv reads [project].dependencies straight out of pyproject.toml —
+          # the same mechanism install_dependencies.sh uses — so the dependency
+          # list is never restated here. `pip install .` is not an option: the
+          # project ships no [build-system] because run.py runs from the repo.
+          python -m pip install --upgrade uv
+          uv pip install --system -r pyproject.toml
+          # Pinned deliberately. pyproject.toml records this repo already being
+          # bitten by ruff broadening its default rule set between releases;
+          # an unpinned checker turns someone else's release into our red
+          # build. Bumping these is a one-line edit, made on purpose.
+          uv pip install --system ruff==0.16.2 mypy==2.3.0
+
+      - name: Quality gate
+        run: bash check.sh

@@ -239,7 +239,12 @@ def _resolve(key: str, *, require_active: bool = True) -> Session | None:
         if session.key != key:
             continue
         if require_active and session.status is not GroupStatus.ACTIVE:
-            print(f"  '{key}' is closed — reopen it by recruiting again, or pick another")
+            # Honest wording: `create_session` returns an existing session
+            # UNTOUCHED (so a re-recruit cannot reset a round count), which means
+            # recruiting again does NOT reopen a closed group. See ISSUES.md.
+            print(f"  '{key}' is closed, and closed groups cannot be reopened — "
+                  f"recruit under a new project label. Its files and "
+                  f"conversation.md are kept.")
             return None
         return session
     print(f"  No group '{key}'. `cowork status` lists them.")

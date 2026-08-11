@@ -75,18 +75,33 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertEqual({o.key for o in engine_rows if o.checked}, {"poet"})
 
     def test_engines_ordered_by_model_then_output_budget(self):
-        # Model family first (fable → opus → sonnet → haiku); within a family,
-        # CLAUDE_CODE_MAX_OUTPUT_TOKENS descending, then name. breakthrough +
-        # researcher set 40000 (→ ahead, name-tiebroken); thinker sits at 36000
-        # (its premium bump over default); default inherits the 32000 default.
-        # reliable (opus) sorts after the whole fable block; then the sonnet
-        # pair — quick (21600) ahead of poet (18000) — then golem (haiku).
+        # The CONTRACT, asserted as invariants rather than as a literal list:
+        # model family first (fable → opus → sonnet → haiku), then
+        # CLAUDE_CODE_MAX_OUTPUT_TOKENS descending within a family, then name.
+        # Derived so that adding or deleting an engine — including a throwaway
+        # probe tier — cannot break a test about ORDERING.
+        families = ["fable", "opus", "sonnet", "haiku"]
         rows = _tag_form_options(REGISTRY, AgentBuild())
         engine_keys = [o.key for o in rows if o.key in REGISTRY.engines]
-        self.assertEqual(
-            engine_keys,
-            ["breakthrough", "researcher", "thinker", "default", "reliable", "quick", "poet", "golem"],
-        )
+        self.assertGreater(len(engine_keys), 1)          # the ordering must have something to order
+
+        def family_rank(key: str) -> int:
+            model = REGISTRY.engines[key].conf_map.get("ANTHROPIC_MODEL", "")
+            return next((i for i, f in enumerate(families) if f in model), len(families))
+
+        def budget(key: str) -> int:
+            return int(REGISTRY.engines[key].conf_map.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS", 0))
+
+        ranks = [family_rank(k) for k in engine_keys]
+        self.assertEqual(ranks, sorted(ranks), "model families must not interleave")
+        for rank in set(ranks):
+            block = [k for k in engine_keys if family_rank(k) == rank]
+            budgets = [budget(k) for k in block]
+            self.assertEqual(budgets, sorted(budgets, reverse=True),
+                             f"budgets must descend within the {families[rank]} block")
+            for earlier, later in zip(block, block[1:]):
+                if budget(earlier) == budget(later):
+                    self.assertLess(earlier, later, "equal budgets tiebreak by name")
 
     def test_non_engine_rows_are_not_grouped(self):
         rows = _tag_form_options(REGISTRY, AgentBuild())
@@ -129,14 +144,17 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertEqual(dood.body[0], (STYLE_UNDERLINE, "Docker-outside-of-Docker"))
 
     def test_policies_grouped_by_shortname_symbol(self):
-        # `!` < `+` < `-` in ASCII — demands, then grants, then denials.
+        # `!` < `+` < `-` in ASCII — demands, then grants, then denials. The
+        # boundaries are derived rather than hardcoded so adding a policy to a
+        # group cannot break the test while the GROUPING (the actual invariant)
+        # still holds.
         rows = _tag_form_options(REGISTRY, AgentBuild())
         policy_keys = [o.key for o in rows if o.key in REGISTRY.policies]
         shortnames = [REGISTRY.policies[k].shortname for k in policy_keys]
         self.assertEqual(shortnames, sorted(shortnames))
-        self.assertEqual(shortnames[0][0], "!")   # demands first
-        self.assertTrue(all(s[0] == "+" for s in shortnames[1:3]))
-        self.assertTrue(all(s[0] == "-" for s in shortnames[3:]))
+        symbols = [s[0] for s in shortnames]
+        self.assertEqual(symbols, sorted(symbols, key="!+-".index))   # never interleaved
+        self.assertLessEqual({"!", "+", "-"}, set(symbols))           # all three stances present
 
     def test_requires_parenthetical_present(self):
         # webdev's tree position (profession/code/webdev) makes code a prerequisite;

@@ -359,8 +359,6 @@ add another setup script/form (within Picker, like [code]'s definitions?) for th
             Move those credentials to the user-s folder?
             
     
-After exiting a form, add a confirmation-prompt in case nothing was changed:
-    "You didn't change anything. Be aware that [SPACE] fills the form; [ENTER] finalizes it. Are you sure that you want to exit? [Y/n]"
 
 <-git> tag ; no push, no commit, no stage, no fetch; nothing. As if it's not a git remo
     Inherit from <-gpush> ?
@@ -386,14 +384,23 @@ Add command that'd apply only to this ai project:
     /print-own-files - prints the MEMORY.md and CLAUDE.md files (and maybe others) + credential-dirs
         maybe it'd be better as a plain command (`! cmd`) - the paths are constant...
 
-{manager} already has a skill of its own that queries the hub... Add other commands
+{manager} already will have a skill of its own that queries the hub ( /cowork )... Add other commands
     other managerial procedures, such as running /unspagghetify , then on all files from bottom of tree to top: /refactor (each in its own prompt, when it's done)
         Any new insights and suggestions shall be written into a report that'd be reviewed later
     testing instructions (just like the refactoring skill, but for testing)
 
 an agent that helps build other agents; helps think of more cases and better coverage for your purpose/theme, allowed to comission help from researcher (can do so through the `q` (alias) command...?)
 
+Maybe treat firewall additions as Professions? Like [cloud_aws] / [clowd_gcp] . On the technical level, it should go there.
 
+Fix expired GCP credentials issue
+
+write a general /test command
+
+Form:
+    put the project-path and instance name at the top of the form (ideally: fill those through the form, but retain the current behavior: first the path, then the name (with legality check))
+    After exiting a form, add a confirmation-prompt in case nothing was changed:
+        "You didn't change anything. Be aware that [SPACE] fills the form; [ENTER] finalizes it. Are you sure that you want to exit? [Y/n]"
 
 
 

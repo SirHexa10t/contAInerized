@@ -1,14 +1,16 @@
 ---
-description: Run the project's full check stack — unit tests, ruff lint, mypy type-check, and a launcher dry-run smoke. Read-only; reports findings, doesn't fix.
+description: Run the project's quality gate (bash check.sh — tests, lint, types) plus a launcher dry-run smoke. Read-only; reports findings, doesn't fix.
 ---
 
 ## Instructions
 
-Run the preflight first, then each numbered step in order. **Do not stop on failure** — run everything so the user sees a complete picture in one pass. Report each step's outcome under a clear heading so failures can't hide.
+Run the preflight first, then the two numbered steps in order. **Do not stop on failure** — run everything so the user sees a complete picture in one pass. Report each step's outcome under a clear heading so failures can't hide.
+
+The checks themselves are not defined here. `check.sh` at the project root is the single definition of a passing tree — the same script CI runs — and this command's job is only to (a) repair the environment first, which the script deliberately never does, and (b) add the dry-run smoke, which CI can't run (it's interactive). If you're tempted to run one of the gate's tools directly, edit `check.sh` instead — a check that lives only here would drift from CI (`TestQualityGate` in `launch/tests/test_essential_files.py` enforces this).
 
 ### Preflight — tool presence (+ conditional install)
 
-Detect each tool / runtime dep. **When missing, attempt to install it inline** so the numbered steps can actually run. The installer choice cascades by what's available: `uv` first (project convention — fast, manages tool isolation), `pip3 --user` as a fallback for the Python deps. If neither's available, fall through to a printed manual command so the user knows what to run.
+Detect each tool / runtime dep. **When missing, attempt to install it inline** so the gate reports real findings instead of missing-tool failures. The installer choice cascades by what's available: `uv` first (project convention — fast, manages tool isolation), `pip3 --user` as a fallback for the Python deps. If neither's available, fall through to a printed manual command so the user knows what to run.
 
 A missing tool that we successfully install ends the run as "✓ now available"; a missing tool we couldn't install ends as "✗ still missing" — that distinction matters for the report.
 
@@ -22,7 +24,9 @@ else
     echo "✗ docker MISSING — install Docker Engine from https://docs.docker.com/engine/install/"
 fi
 
-# CLI tools (ruff, mypy) — uv tool install puts them in an isolated env, no venv-activation needed
+# The gate's CLI tools — uv tool install puts them in an isolated env, no
+# venv-activation needed. check.sh counts a missing one as a FAILURE (a check
+# that didn't run isn't a check that passed), so repair here, before the gate.
 for tool in ruff mypy; do
     if command -v "$tool" >/dev/null 2>&1; then
         echo "✓ $tool"
@@ -37,7 +41,8 @@ for tool in ruff mypy; do
     fi
 done
 
-# Python runtime deps (prompt_toolkit, python-dotenv, rich) — needed for test_run + the dry-run step.
+# Python runtime deps (prompt_toolkit, python-dotenv, rich) — needed by the
+# suite's run/picker tests and the dry-run step.
 # `pip3 --user --break-system-packages` is the cheap path: doesn't need root, and the
 # --break-system-packages flag bypasses PEP 668's externally-managed marker on Debian/Ubuntu
 # (no-op everywhere else). `uv pip install` without a venv refuses outright, so we don't try it.
@@ -56,39 +61,19 @@ else
 fi
 ```
 
-**Still run the numbered steps even if a tool stayed missing** — the per-step `command not found` / ImportError output confirms which were absent. The final report frames "still missing" failures as environmental, not regressions; "now available" cases proceed to real findings.
+**Still run the numbered steps even if a tool stayed missing** — the gate names each check it couldn't run, which confirms what was absent. The final report frames "still missing" failures as environmental, not regressions; "now available" cases proceed to real findings.
 
-### 1. Tests
+### 1. Quality gate
 
 From the project root (`/workspace`):
 
 ```bash
-python3 -m unittest discover -s launch/tests
+bash check.sh
 ```
 
-Expect a `Ran NNN tests in 0.NNNs / OK` tail when clean. On failure, surface the failing test names + their tracebacks verbatim — don't paraphrase.
+Runs the test suite, the linter, and the type-check. It never stops at the first failure — every check runs, each gets a `✓`/`✗` verdict, and the exit code is non-zero if any failed. A failing check prints its tool's full output; surface failing test names and tracebacks verbatim in the report — don't paraphrase.
 
-### 2. Ruff (linter)
-
-From the project root:
-
-```bash
-ruff check .
-```
-
-Reports any rule violations across all Python files. Exit 0 = clean.
-
-### 3. Mypy (type-check)
-
-From the project root:
-
-```bash
-mypy launch/ run.py
-```
-
-Reports any type errors. Exit 0 = clean.
-
-### 4. Launcher dry-run
+### 2. Launcher dry-run
 
 Exercise the launcher's full orchestration up to (but not including) the real `docker build` / `docker run` calls — catches import-time errors and orchestration bugs that the unit tests stub past.
 
@@ -105,58 +90,49 @@ Exit 0 = orchestration completed through every stage; failures surface as the us
 
 ## Report shape
 
-After everything runs, lead with the Preflight result + four step-result bullets, then list findings underneath each. Frame any per-step failure that's clearly an environmental gap (missing tool, missing Python dep) as such — not as a code regression. Example with a clean environment:
+After everything runs, lead with the Preflight result + two step-result bullets, then list findings underneath each. Frame any failure that's clearly an environmental gap (missing tool, missing Python dep) as such — not as a code regression. Example with a clean environment:
 
 ```
 Preflight: ✓ docker, ✓ ruff, ✓ mypy, ✓ runtime deps
-- Tests:   374 passed, 0 failed
-- Ruff:    2 findings
-- Mypy:    clean
+- Gate:    3/3 clean (tests, lint, types)
 - Dry-run: clean
-
-Ruff findings:
-  launch/foo.py:42:1  E501  line too long (95 > 88 characters)
-  launch/bar.py:17:5  F841  local variable 'unused' is assigned but never used
-
-Mypy findings:
-  (none)
 
 Dry-run:
   (no errors; ran through gather_input → resolve_target → apply_tags → setup_state → ensure_image → run_container; docker_subprocess printed each "would invoke" line and returned)
 ```
 
-Example where preflight auto-installed everything that was missing (the run then proceeds with real findings):
+Example with real findings — the gate names its failing checks; quote each tool's output underneath:
 
 ```
-Preflight: ✓ docker, ✓ ruff (installed inline), ✓ mypy (installed inline), ✓ runtime deps (installed inline)
-- Tests:   374 passed, 0 failed
-- Ruff:    clean
-- Mypy:    clean
+Preflight: ✓ docker, ✓ ruff (installed inline), ✓ mypy (installed inline), ✓ runtime deps
+- Gate:    FAILED — 2 of 3: lint, types (tests clean)
 - Dry-run: clean
+
+Lint findings:
+  launch/foo.py:42:1  F841  local variable 'unused' is assigned but never used
+
+Type findings:
+  launch/bar.py:17: error: Incompatible return value type (got "str", expected "int")
 ```
 
 Example where docker is missing — dry-run no longer skips that check, so it surfaces as a step failure rather than a hidden assumption:
 
 ```
 Preflight: ✗ docker MISSING, ✓ ruff, ✓ mypy, ✓ runtime deps
-- Tests:   374 passed, 0 failed
-- Ruff:    clean
-- Mypy:    clean
+- Gate:    3/3 clean (tests, lint, types)
 - Dry-run: blocked — "docker is required but was not found in PATH" (require_docker runs in both modes now)
 
-Action: install Docker Engine, then re-run /test-project for the dry-run step.
+Action: install Docker Engine, then re-run /test-ai-project for the dry-run step.
 ```
 
-Example where the auto-install couldn't proceed (e.g., `uv` itself was missing) — surface that gap up front so the per-step blockages aren't misread as code regressions:
+Example where the auto-install couldn't proceed (e.g., `uv` itself was missing) — surface that gap up front so the blockages aren't misread as code regressions:
 
 ```
 Preflight: ✗ docker MISSING, ✗ ruff still missing (uv not in PATH), ✗ mypy still missing (uv not in PATH), ✗ runtime deps still missing
-- Tests:   374 passed, 1 module failed to import (env issue — see Preflight)
-- Ruff:    blocked (tool missing)
-- Mypy:    blocked (tool missing)
+- Gate:    FAILED — 3 of 3: tests (import errors — env issue, see Preflight), lint(missing), types(missing)
 - Dry-run: blocked (runtime deps missing — `python3 run.py` can't import menu_picker)
 
-Action: install uv (https://astral.sh/uv), then re-run /test-project — the preflight will pick up from there.
+Action: install uv (https://astral.sh/uv), then re-run /test-ai-project — the preflight will pick up from there.
 ```
 
 Do not auto-fix anything. The user reviews findings and decides what to do.

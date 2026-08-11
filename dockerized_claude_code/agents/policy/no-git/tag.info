@@ -1,0 +1,4 @@
+shortname         = "-git"
+short_description = "no git at all"
+full_description  = "Deny every git invocation via the Bash tool — stage, commit, push, checkout, config, all of it; the repo's version-control state stays exactly as the human left it. Strictly stronger than <-gpush> (which still allows local commits), so carrying both is redundant. Bash-pattern-level only: sibling binaries that also move repo state (gh, git-lfs) are separate commands and NOT covered — deny them too if the instance carries such credentials."
+stance            = "deny"

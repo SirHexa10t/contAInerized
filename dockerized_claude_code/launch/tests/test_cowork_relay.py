@@ -25,6 +25,10 @@ from launch.cowork.relay import EventKind, poll_once, send
 MANAGER = "boss__proj"
 COWORKER = "golem__a"
 OTHER = "golem__b"
+# A group nobody ever created: captures tagged for it must drain as unroutable.
+# A Session object, not a key string, because drop_capture composes the tag the
+# way the hub does — from the halves. Never saved to disk, which is the point.
+GHOST = Session("ghost__x", "gone", "never created")
 
 
 class RelayHarness(unittest.TestCase):
@@ -76,10 +80,17 @@ class RelayHarness(unittest.TestCase):
         return str(paths.CLAUDE_CONFIG_IN_CONTAINER / relative)
 
     def drop_capture(self, instance: str, answer: str, *, prompt_id: str = "p1",
-                     group: str | None = None, tagged: bool = True) -> None:
+                     session: Session | None = None, tagged: bool = True) -> None:
         """Put a Stop-hook capture in `instance`'s outbox, with a transcript entry
-        its prompt_id resolves to."""
-        text = mailbox.tag_message(group, "do the thing") if tagged and group else "hi there"
+        its prompt_id resolves to.
+
+        Takes the Session rather than a group key because the fabricated prompt
+        must be what the CURRENT hub injects, and the tag is composed from the
+        manager/project halves — a key cannot be split back into them. (Prompts
+        tagged by an older hub still attribute; that contract is pinned in
+        test_cowork_mailbox, not re-simulated here.)"""
+        text = (mailbox.tag_message(session.manager, session.project, "do the thing")
+                if tagged and session else "hi there")
         container_path = self.transcript_for(instance, prompt_id, text)
         outbox = paths.cowork_outbox_path(instance)
         outbox.mkdir(parents=True, exist_ok=True)
@@ -142,6 +153,24 @@ class TestSend(RelayHarness):
         for body in ("first", "second"):
             send(session, sender=MANAGER, recipient=COWORKER, body=body)
         self.assertEqual(len(self.staged_for(COWORKER, session)), 2)
+
+    def test_a_routed_reply_consumes_the_message_it_answered(self):
+        # Message-queue semantics, end to end: the reply pairs to the FIRST
+        # pointer, so routing it consumes 001 while the unanswered 002 stays
+        # queued — whatever remains under messages/ is genuinely unhandled.
+        session = self.make_session(COWORKER)
+        send(session, sender=MANAGER, recipient=COWORKER, body="answer me")
+        send(session, sender=MANAGER, recipient=COWORKER, body="and then this")
+        container_path = self.transcript_for(COWORKER, "p1", self.prompts_to(COWORKER)[0])
+        outbox = paths.cowork_outbox_path(COWORKER)
+        outbox.mkdir(parents=True, exist_ok=True)
+        (outbox / "p1.json").write_text(json.dumps({
+            "last_assistant_message": "here you go", "prompt_id": "p1",
+            "session_id": "s1", "transcript_path": container_path}))
+        poll_once()
+        staged = paths.cowork_group_path(COWORKER, session.key) / mailbox.MESSAGES_SUBDIR
+        self.assertEqual([p.name for p in sorted(staged.iterdir())],
+                         [f"002-from-{MANAGER}.md"])
 
     def test_exhausting_the_budget_refuses_the_send_and_closes_the_group(self):
         session = self.make_session(COWORKER, budget=1)
@@ -261,7 +290,7 @@ class TestSendWhenInjectionFails(RelayHarness):
 class TestPollAttribution(RelayHarness):
     def test_a_tagged_reply_is_attributed_and_routed(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "here is my answer", group=session.key)
+        self.drop_capture(COWORKER, "here is my answer", session=session)
         events = poll_once()
         self.assertEqual([e.kind for e in events], [EventKind.REPLY])
         self.assertEqual(events[0].group, session.key)
@@ -282,15 +311,44 @@ class TestPollAttribution(RelayHarness):
 
     def test_a_tag_for_an_unknown_group_is_not_routed(self):
         self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "answer", group="ghost__x-gone")
+        self.drop_capture(COWORKER, "answer", session=GHOST)
         self.assertEqual([e.kind for e in poll_once()], [EventKind.UNKNOWN_GROUP])
 
     def test_a_closed_groups_traffic_is_drained_but_not_routed(self):
         session = self.make_session(COWORKER)
         grp.save_session(session.closed())
-        self.drop_capture(COWORKER, "answer", group=session.key)
+        self.drop_capture(COWORKER, "answer", session=session)
+        self.assertEqual([e.kind for e in poll_once()], [EventKind.LATE])
+        self.assertEqual(self.injected, [])      # a closed group generates no traffic
+
+    def test_a_late_reply_keeps_its_files_instead_of_stranding_them(self):
+        # The loss this prevents, observed live: a coworker was closed out, then
+        # re-authorised by its operator, did the work — and its artifacts sat in
+        # its own tree with no route to the manager.
+        session = self.make_session(COWORKER)
+        self.plant_work(COWORKER, session, "findings.md", "the results\n")
+        grp.save_session(session.closed())
+        self.drop_capture(COWORKER, "done, see findings.md", session=session)
+        events = poll_once()
+        inbox = paths.cowork_inbox_path(MANAGER, session.key, COWORKER)
+        self.assertEqual((inbox / "findings.md").read_text(), "the results\n")
+        self.assertIn("file(s) kept", events[0].detail)
+
+    def test_a_late_reply_is_recorded_in_the_conversation(self):
+        # Otherwise the manager has files in an inbox with no idea why.
+        session = self.make_session(COWORKER)
+        grp.save_session(session.closed())
+        self.drop_capture(COWORKER, "my late answer", session=session)
+        poll_once()
+        log = journal.read_journal(session)
+        self.assertIn("my late answer", log)          # the reply itself
+        self.assertIn("after the group closed", log)  # and why nothing was routed
+
+    def test_a_capture_for_a_group_that_never_existed_is_still_unrouted(self):
+        # The LATE path must not swallow the genuine unknown-group case.
+        self.make_session(COWORKER)
+        self.drop_capture(COWORKER, "answer", session=GHOST)
         self.assertEqual([e.kind for e in poll_once()], [EventKind.UNKNOWN_GROUP])
-        self.assertEqual(self.injected, [])
 
     def test_an_instance_in_no_group_still_has_its_outbox_drained(self):
         # The {cowork} Stop hook fires on EVERY turn for the life of a tagged
@@ -307,15 +365,15 @@ class TestPollAttribution(RelayHarness):
 
     def test_captures_are_consumed_so_a_second_pass_is_quiet(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "answer", group=session.key)
+        self.drop_capture(COWORKER, "answer", session=session)
         poll_once()
         self.assertEqual(poll_once(), ())
 
     def test_a_capture_left_behind_by_a_crash_is_seen_as_a_duplicate(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "answer", prompt_id="pX", group=session.key)
+        self.drop_capture(COWORKER, "answer", prompt_id="pX", session=session)
         poll_once()
-        self.drop_capture(COWORKER, "answer", prompt_id="pX", group=session.key)
+        self.drop_capture(COWORKER, "answer", prompt_id="pX", session=session)
         self.assertEqual([e.kind for e in poll_once()], [EventKind.DUPLICATE])
 
     def test_an_instance_in_two_groups_has_its_outbox_drained_once(self):
@@ -324,14 +382,14 @@ class TestPollAttribution(RelayHarness):
         second = grp.save_session(
             grp.create_session(MANAGER, "second", "other work").with_coworker(COWORKER))
         self.assertNotEqual(first.key, second.key)
-        self.drop_capture(COWORKER, "answer", group=first.key)
+        self.drop_capture(COWORKER, "answer", session=first)
         self.assertEqual(len(poll_once()), 1)
 
     def test_a_reply_is_filed_against_its_own_group_not_the_other(self):
         first = self.make_session(COWORKER)
         second = grp.save_session(
             grp.create_session(MANAGER, "second", "other work").with_coworker(COWORKER))
-        self.drop_capture(COWORKER, "this belongs to the second group", group=second.key)
+        self.drop_capture(COWORKER, "this belongs to the second group", session=second)
         poll_once()
         self.assertIn("second group", journal.read_journal(second))
         self.assertEqual(journal.read_journal(first), "")
@@ -340,7 +398,7 @@ class TestPollAttribution(RelayHarness):
 class TestPollRouting(RelayHarness):
     def test_a_coworkers_reply_notifies_the_manager(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "I finished it", group=session.key)
+        self.drop_capture(COWORKER, "I finished it", session=session)
         poll_once()
         self.assertEqual(len(self.prompts_to(MANAGER)), 1)
         self.assertIn("I finished it", self.staged_for(MANAGER, session)[0])
@@ -349,7 +407,7 @@ class TestPollRouting(RelayHarness):
         # The hub injects notifications INTO the manager, so forwarding its
         # replies would close a notify -> reply -> notify loop.
         session = self.make_session(COWORKER)
-        self.drop_capture(MANAGER, "noted, thanks", group=session.key)
+        self.drop_capture(MANAGER, "noted, thanks", session=session)
         events = poll_once()
         self.assertEqual([e.kind for e in events], [EventKind.LOGGED])
         self.assertEqual(self.injected, [])
@@ -357,7 +415,7 @@ class TestPollRouting(RelayHarness):
 
     def test_a_reply_is_logged_before_it_is_forwarded(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "my reply text", group=session.key)
+        self.drop_capture(COWORKER, "my reply text", session=session)
         poll_once()
         self.assertIn("my reply text", journal.read_journal(session))
 
@@ -365,27 +423,27 @@ class TestPollRouting(RelayHarness):
         # The notification quotes the reply, so logging it verbatim would repeat
         # the text a relaunched participant then pays to re-read.
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "a distinctive sentence", group=session.key)
+        self.drop_capture(COWORKER, "a distinctive sentence", session=session)
         poll_once()
         self.assertEqual(journal.read_journal(session).count("a distinctive sentence"), 1)
 
     def test_the_log_still_records_that_the_manager_was_notified(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "reply", group=session.key)
+        self.drop_capture(COWORKER, "reply", session=session)
         poll_once()
         self.assertIn("notified", journal.read_journal(session))
 
     def test_the_manager_still_receives_the_full_reply(self):
         # Shortening the LOG entry must not shorten the message itself.
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "a distinctive sentence", group=session.key)
+        self.drop_capture(COWORKER, "a distinctive sentence", session=session)
         poll_once()
         self.assertIn("a distinctive sentence", self.staged_for(MANAGER, session)[0])
 
     def test_submitted_files_reach_the_managers_inbox(self):
         session = self.make_session(COWORKER)
         self.plant_work(COWORKER, session, "answer.py", "the code\n")
-        self.drop_capture(COWORKER, "done", group=session.key)
+        self.drop_capture(COWORKER, "done", session=session)
         poll_once()
         inbox = paths.cowork_inbox_path(MANAGER, session.key, COWORKER)
         self.assertEqual((inbox / "answer.py").read_text(), "the code\n")
@@ -406,7 +464,7 @@ class TestPollRouting(RelayHarness):
             return True
 
         with patch.object(relay, "docker_attach_inject", record):
-            self.drop_capture(COWORKER, "done", group=session.key)
+            self.drop_capture(COWORKER, "done", session=session)
             poll_once()
         self.assertEqual(seen, [True])
 
@@ -414,7 +472,7 @@ class TestPollRouting(RelayHarness):
         session = self.make_session(COWORKER)
         self.plant_work(MANAGER, session, "task.py", "before\n")
         self.plant_work(COWORKER, session, "task.py", "after\n")
-        self.drop_capture(COWORKER, "edited it", group=session.key)
+        self.drop_capture(COWORKER, "edited it", session=session)
         poll_once()
         self.assertIn("task.py", self.staged_for(MANAGER, session)[0])
 
@@ -422,7 +480,7 @@ class TestPollRouting(RelayHarness):
         # Container paths, not the host paths the hub copies between.
         session = self.make_session(COWORKER)
         self.plant_work(COWORKER, session, "task.py", "x\n")
-        self.drop_capture(COWORKER, "done", group=session.key)
+        self.drop_capture(COWORKER, "done", session=session)
         poll_once()
         body = self.staged_for(MANAGER, session)[0]
         self.assertIn(f"{paths.COWORK_IN_CONTAINER}/{session.key}", body)
@@ -430,20 +488,20 @@ class TestPollRouting(RelayHarness):
 
     def test_a_reply_with_no_files_gets_no_file_section(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "just answering, no files", group=session.key)
+        self.drop_capture(COWORKER, "just answering, no files", session=session)
         poll_once()
         self.assertNotIn("Files submitted", self.staged_for(MANAGER, session)[0])
 
     def test_the_event_reports_how_many_files_changed(self):
         session = self.make_session(COWORKER)
         self.plant_work(COWORKER, session, "a.py", "1\n")
-        self.drop_capture(COWORKER, "done", group=session.key)
+        self.drop_capture(COWORKER, "done", session=session)
         self.assertIn("1 file", poll_once()[0].detail)
 
     def test_two_coworkers_replying_in_one_pass_both_route(self):
         session = self.make_session(COWORKER, OTHER)
-        self.drop_capture(COWORKER, "from a", prompt_id="pa", group=session.key)
-        self.drop_capture(OTHER, "from b", prompt_id="pb", group=session.key)
+        self.drop_capture(COWORKER, "from a", prompt_id="pa", session=session)
+        self.drop_capture(OTHER, "from b", prompt_id="pb", session=session)
         events = poll_once()
         self.assertEqual({e.instance for e in events}, {COWORKER, OTHER})
         self.assertEqual(len(self.prompts_to(MANAGER)), 2)
@@ -453,7 +511,7 @@ class TestPollRouting(RelayHarness):
         send(session, sender=MANAGER, recipient=COWORKER, body="the ask")
         self.assertEqual(
             grp.load_hub_state().for_participant(COWORKER).outstanding_send, session.key)
-        self.drop_capture(COWORKER, "the answer", group=session.key)
+        self.drop_capture(COWORKER, "the answer", session=session)
         poll_once()
         self.assertIsNone(
             grp.load_hub_state().for_participant(COWORKER).outstanding_send)
@@ -487,7 +545,7 @@ class TestOverdueSends(RelayHarness):
 class TestServe(RelayHarness):
     def test_a_bounded_run_drains_and_returns(self):
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "answer", group=session.key)
+        self.drop_capture(COWORKER, "answer", session=session)
         with patch.object(relay.time, "sleep", lambda _: None):
             relay.serve(interval=0, report=False, passes=1)
         self.assertEqual(len(self.prompts_to(MANAGER)), 1)
@@ -505,7 +563,7 @@ class TestServe(RelayHarness):
     def test_stop_is_consulted_after_the_pass_not_before(self):
         # A shutdown-worthy state must not leave that pass's captures undrained.
         session = self.make_session(COWORKER)
-        self.drop_capture(COWORKER, "answer", group=session.key)
+        self.drop_capture(COWORKER, "answer", session=session)
         with patch.object(relay.time, "sleep", lambda _: None):
             relay.serve(interval=0, report=False, passes=None, stop=lambda: "done")
         self.assertEqual(len(self.prompts_to(MANAGER)), 1)   # the capture was routed first
@@ -525,7 +583,7 @@ class TestRoundTrip(RelayHarness):
 
         # The coworker takes it up, works, and its turn ends.
         self.plant_work(COWORKER, session, "task.py", "DONE\n")
-        self.drop_capture(COWORKER, "finished — see task.py", group=session.key)
+        self.drop_capture(COWORKER, "finished — see task.py", session=session)
         events = poll_once()
 
         self.assertEqual([e.kind for e in events], [EventKind.REPLY])

@@ -1,6 +1,6 @@
 shortname         = "auto"
-short_description = "no permission prompts"
-full_description  = "autonomous; doesn't need permission to perform actions. Comes with a firewall for a slight security increase. Danger: hard to control!"
+short_description = "no permission prompts; allow all, including unknowns"
+full_description  = "autonomous; doesn't need permission to perform actions. Comes with a firewall for a slight security increase. VERIFIED: the bypass does NOT defeat deny policies — a session running with it was still refused a `<-su>`-denied sudo command, and so was its subagent, so pairing {auto} with guardrail denials (<-su>, <-gpush>, <-net>, {ro}) gives you autonomy that is still fenced. What it DOES widen: anything unlisted runs by default (including tools that do not exist yet), and it can write .claude/ config paths that a permission-gated instance cannot — so an {auto} instance can author its own agent definitions. Danger: hard to control!"
 warn              = true
 claude_args       = ["--dangerously-skip-permissions"]
 

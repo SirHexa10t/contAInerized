@@ -1,0 +1,4 @@
+shortname         = "+all"
+short_description = "pre-approve every *known* tool class"
+full_description  = "Allows the full tool family in one tick: bash (any command), web fetch + search, file reads/writes/edits, notebooks, and subagents. The union of <+bash> and <+qry> plus the file tools, for when enumerating grants is friction — pick this OR that pair, not both (they overlap completely). NOT the same as {auto}: {auto} bypasses the permission engine with --dangerously-skip-permissions, so anything unmatched runs by default; <+all> keeps the engine on and allows by NAME, so an unlisted or future tool still lands on the mode's default — under {cowork}'s dontAsk that means auto-denied — and deny policies (<-su>, <-gpush>, <-net>, {ro}'s write-deny) still override every allow here. Deny-by-default with named exceptions versus allow-by-default: choose <+all> when you want autonomy that still respects the guardrail policies."
+stance            = "allow"

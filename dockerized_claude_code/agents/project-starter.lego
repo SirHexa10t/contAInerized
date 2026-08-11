@@ -1,3 +1,3 @@
 engine = "thinker"
 professions = ["code"]
-policies = ["plan-first", "web-research"]
+policies = ["plan-first", "all-actions"]

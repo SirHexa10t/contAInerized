@@ -1,6 +1,8 @@
 """Structural integrity: assert the files the launcher relies on actually
 exist at the paths it computes. Catches "renamed/moved a file but missed a
-reference" regressions immediately.
+reference" regressions immediately. Repo-hygiene invariants that no single
+module owns live here too — no stray root Dockerfiles, one definition of the
+quality gate.
 
 For each chain tag with launch-side machinery, this also verifies the
 required `_apply_<name>` handler is in place — a missing artifact fails
@@ -94,6 +96,81 @@ class TestDefaultAgentConf(unittest.TestCase):
         self.assertTrue(paths.DEFAULT_CONF.is_file())
 
 
+class TestQualityGate(unittest.TestCase):
+    """check.sh is the ONE definition of what a passing tree means; the CI
+    workflow builds an environment and calls it. The point of that split is
+    that a developer's local run and CI can't check different things, so these
+    tests exist to keep the definition from being copied into the workflow —
+    which is how the two would silently drift."""
+
+    # The three checks, as the fragments each must appear as somewhere.
+    GATE_COMMANDS = ["unittest discover", "ruff check", "mypy launch/"]
+
+    def setUp(self):
+        root = paths.DOCKERIZED_CLAUDE_ROOT
+        self.script = root / "check.sh"
+        self.workflow = root / ".github" / "workflows" / "ci.yml"
+
+    def test_gate_script_exists(self):
+        self.assertTrue(self.script.is_file(), "check.sh is the gate — it must exist")
+
+    def test_gate_script_runs_all_three_checks(self):
+        text = self.script.read_text()
+        for command in self.GATE_COMMANDS:
+            with self.subTest(command=command):
+                self.assertIn(command, text)
+
+    def test_gate_script_does_not_stop_at_the_first_failure(self):
+        # `set -e` would abort at the first failing check, hiding the other
+        # two — the opposite of the "complete picture in one pass" contract in
+        # the script's header. Asserting on the flag stands in for a behavioral
+        # test, which would have to run the gate (and so this suite) recursively.
+        # re.MULTILINE matters: without it `^` anchors to the start of the file,
+        # which is the shebang, and the assertion can never fail.
+        text = self.script.read_text()
+        self.assertNotRegex(text, re.compile(r"^set -[a-z]*e", re.MULTILINE),
+                            "check.sh must not be fail-fast")
+
+    def test_workflow_delegates_to_the_gate_script(self):
+        self.assertTrue(self.workflow.is_file())
+        self.assertIn("bash check.sh", self.workflow.read_text())
+
+    def test_workflow_does_not_restate_the_checks(self):
+        # The drift-catcher. A check inlined here would run in CI but not
+        # locally (or worse, run differently), and nothing else would notice.
+        text = self.workflow.read_text()
+        for command in self.GATE_COMMANDS:
+            with self.subTest(command=command):
+                self.assertNotIn(command, text,
+                                 f"{command!r} belongs in check.sh, not the workflow")
+
+    def test_project_skill_delegates_to_the_gate_script(self):
+        # /test-ai-project is the third surface that could restate a check —
+        # it already drifted once (its mypy line predated two entry points).
+        # Like the workflow, it may only repair the environment and call the
+        # script; a check defined there would run for agents but not CI.
+        skill = (paths.DOCKERIZED_CLAUDE_ROOT
+                 / ".claude" / "commands" / "test-ai-project.md")
+        self.assertTrue(skill.is_file())
+        text = skill.read_text()
+        self.assertIn("bash check.sh", text)
+        for command in self.GATE_COMMANDS:
+            with self.subTest(command=command):
+                self.assertNotIn(command, text,
+                                 f"{command!r} belongs in check.sh, not the skill")
+
+    def test_workflow_matrix_covers_the_declared_python_floor(self):
+        # Bump requires-python and CI must follow, or the floor is a claim
+        # nothing tests. Pinned against pyproject rather than a literal so
+        # there is still only one source for the number.
+        import tomllib
+        with (paths.DOCKERIZED_CLAUDE_ROOT / "pyproject.toml").open("rb") as handle:
+            requires = tomllib.load(handle)["project"]["requires-python"]
+        floor = requires.lstrip(">=~^ ")
+        self.assertIn(f'"{floor}"', self.workflow.read_text(),
+                      f"requires-python is {requires} — add {floor} to the CI matrix")
+
+
 class TestTagTreeDiscovery(unittest.TestCase):
     """Integration checkpoint (tags rewrite): the real agents/ tree is
     discovered + validated by the tags package. Guards every migration step —
@@ -133,6 +210,46 @@ class TestTagTreeDiscovery(unittest.TestCase):
                          frozenset({"cowork"}))
         self.assertTrue(self.reg.specialties["manager"].warn)
 
+    def test_cowork_wants_its_grants_and_a_firewall(self):
+        # All three probed live (perm_probe): without the grants a coworker is
+        # auto-denied every script run and all web access; WITH them and no
+        # {firewall} it reached arbitrary hosts and installed packages
+        # unsupervised. Wants are advisory — the red form/banner warning, never
+        # a hard cascade — because a read-only reviewer coworker is a
+        # legitimate build.
+        wants = self.reg.specialties["cowork"].wants_map
+        self.assertLessEqual({"free-bash", "web-research", "firewall"}, set(wants))
+        self.assertIn("DENIED", wants["free-bash"])
+
+    def test_autonomy_tags_all_want_a_firewall(self):
+        # The shared rule: any tag that lets an agent act without a human
+        # watching each turn asks for a network boundary. {auto} bypasses the
+        # prompt engine; {cowork} is driven by a manager. Same argument, so a
+        # future autonomy tag should join this list rather than rediscover it.
+        for tag in ("auto", "cowork"):
+            with self.subTest(tag=tag):
+                self.assertIn("firewall", self.reg.specialties[tag].wants_map)
+
+    def test_all_actions_is_the_union_of_the_grant_pair(self):
+        # <+all>'s description says "pick this OR that pair — they overlap
+        # completely"; this pins the claim so neither side can drift under it.
+        def allows(name):
+            return set(self.reg.policies[name].load_fragment()["permissions"]["allow"])
+        umbrella = allows("all-actions")
+        self.assertLessEqual(allows("free-bash") | allows("web-research"), umbrella)
+        # And it covers every denial the probe surfaced.
+        self.assertLessEqual({"Bash", "WebFetch", "WebSearch"}, umbrella)
+        self.assertEqual(self.reg.policies["all-actions"].label, "<+all>")
+
+    def test_cowork_addendum_warns_that_only_the_last_message_survives(self):
+        # The capture is `last_assistant_message` — a coworker that narrates
+        # incrementally loses everything but its closing chunk, silently, and
+        # neither side can tell. Observed live; the addendum bullet is the only
+        # mitigation, so it must not be edited away.
+        _, body = self.reg.specialties["cowork"].addendum
+        self.assertIn("one final message", body.lower())
+        self.assertIn("silently lost", body)
+
     def test_manager_addendum_teaches_the_control_channel(self):
         # The addendum IS the protocol documentation an agent gets; if the
         # control dir or a verb is renamed, this must fail.
@@ -145,14 +262,52 @@ class TestTagTreeDiscovery(unittest.TestCase):
         for verb in _VERBS:
             self.assertIn(f"`{verb}", body)
 
+    def test_code_installs_ruff_unconditionally(self):
+        # Not a template.form toggle and not ARG-gated: Python is a given for
+        # [code], and the linter a code agent runs on its own output should not
+        # be re-installed per container. Kept in the failure-log shape so a
+        # transient network fault warns instead of aborting the build.
+        text = (self.reg.professions["code"].path / "Dockerfile").read_text()
+        self.assertIn("uv tool install ruff", text)
+        self.assertNotIn("ARG INSTALL_RUFF", text)     # unconditional by design
+        self.assertNotIn("ruff", self.reg.professions["code"].load_toolkit())
+
     def test_professions_have_dockerfile(self):
         for name in ("code", "webdev"):
             self.assertTrue((self.reg.professions[name].path / "Dockerfile").is_file())
 
     def test_policies_discovered(self):
-        self.assertLessEqual({"web-research", "no-sudo"}, set(self.reg.policies))
+        self.assertLessEqual({"web-research", "no-sudo", "no-git"}, set(self.reg.policies))
         self.assertEqual(self.reg.policies["web-research"].label, "<+qry>")
         self.assertEqual(self.reg.policies["vcs-safe"].label, "<-gpush>")
+
+    def test_no_git_denies_the_whole_family_not_just_push(self):
+        # <-git> forbids ALL git via Bash — stage, commit, push, everything —
+        # in both pattern spellings the engine honours (<-su> sets the shape).
+        # <-gpush> stays the lighter option that still allows local commits.
+        fragment = self.reg.policies["no-git"].load_fragment()
+        self.assertEqual(fragment["permissions"]["deny"],
+                         ["Bash(git *)", "Bash(git:*)"])
+        self.assertEqual(self.reg.policies["no-git"].label, "<-git>")
+
+    def test_the_doer_agents_carry_the_grant_umbrella(self):
+        # The lego-level defaults chosen deliberately (TODO - cowork follow-up):
+        # agents whose job is autonomous DOING get <+all> (or bash alone for the
+        # web-less mathematician); watch-their-hands agents (refactorer,
+        # strict-reviewer) and voice/persona agents (poet) deliberately do NOT —
+        # a grant appearing on one of those is a decision, not a drift.
+        expected = {"golem": ["all-actions"],
+                    "bug-investigator": ["all-actions"],
+                    "researcher": ["all-actions"],
+                    "project-starter": ["plan-first", "all-actions"],
+                    "mathematician": ["free-bash"],
+                    "refactorer": ["vcs-safe"],
+                    "strict-reviewer": [],
+                    "poet": []}
+        for agent, policies in expected.items():
+            with self.subTest(agent=agent):
+                build = load_lego(paths.AGENTS_DIR / f"{agent}.lego")
+                self.assertEqual(list(build.policies), policies)
 
     def test_no_sudo_is_the_always_on_static_policy(self):
         # <-su> applies to every instance (install_settings merges it from

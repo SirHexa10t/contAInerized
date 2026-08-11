@@ -3,6 +3,60 @@ short_description = "able to prompt other agents"
 full_description  = "Marks this instance as eligible to be recruited into a multi-agent group, where a host-side hub passes messages between running instances and exchanges files through per-participant directories. Grants eligibility only — it changes nothing about a normal interactive launch beyond a /cowork mount and a turn-completion hook, so a coworking instance stays perfectly usable on its own. Participants never share a directory: each has its own working copy per group, and work moves as reviewed copies (an inbox model), so a peer's mistakes cannot reach your files directly. The one role distinction is {manager}, the specialty nested inside this one — it marks who may HOST groups; everything finer (worker, reviewer, tester) still comes from the agent's own .md persona. Danger: a recruited instance can be woken and given work by its manager, spending your tokens on turns you did not type."
 warn              = true
 
+# {cowork}'s settings fragment (policy/_cowork/policy.json — JSON, so its
+# rationale lives here) sets permissions.defaultMode = "dontAsk" so a headless
+# coworker never hangs on a permission prompt with nobody watching.
+#
+# That makes the allowlist a NEAR-ceiling, not an absolute one. Probed on a live
+# restricted coworker (Claude Code 2.1.226): unlisted `python3`, `ruff`,
+# WebFetch and WebSearch were all auto-denied — but unlisted `echo` and the
+# Agent/Task tool ran anyway, so a built-in default-allow set exists that
+# cannot be enumerated from outside. Treat the list as the floor you can RELY
+# on, never as proof of what is impossible.
+#
+# Two escalation routes were probed. The first is CLOSED and directly verified:
+#   * DELEGATION CANNOT WIDEN PERMISSIONS. A session denied a command by a deny
+#     policy spawned a subagent, which received the same refusal ("Permission to
+#     use Bash with command `sudo -n true` has been denied.") while ordinary
+#     commands ran — so enforcement is per tool call inside the subagent, not
+#     only in the parent. Matches the binary: "Subagents inherit the parent
+#     session's permission mode".
+#   * `.claude/` CONFIG PATHS are refused to a permission-gated instance, so a
+#     restricted coworker cannot author itself a wider agent definition. But the
+#     block is the permission ENGINE, not a filesystem guard: an {auto} instance
+#     writes those paths successfully. Strong enough for coworkers (the
+#     untrusted side), NOT a hard boundary in general.
+# See ISSUES.md for the evidence and what remains untested.
+#
+# The fragment allows exactly the PROTOCOL FLOOR — the file tools plus
+# `Bash(mkdir|cp|mv|diff:*)`, which are the operations the addendum below
+# instructs an agent to perform (take an inbox up into your working copy, clear
+# it, review with `diff -r`) — plus `Bash(wc:*)`, the one inspection command
+# that saves reading a whole file into context. It deliberately does NOT allow
+# ls/find/grep/rg/cat/head/tail: those duplicate the Read/Glob/Grep tools that
+# are already allowed, and the addendum's last bullet actively steers agents to
+# those tools instead, so allowing the shell twins contradicted our own advice
+# and merely padded settings.json (they were dropped once a live probe showed
+# them subsumed whenever a grant policy is present).
+#
+# Probed empirically (perm_probe): under the floor alone, every
+# script/interpreter/tool run (python3, ruff, ...) and all web access are
+# denied. The wants below surface that at pick time; the human still chooses —
+# a read-only reviewer coworker without them stays a valid setup. (<+all>
+# covers the grants in one tick; deny policies still win over it.)
+[wants]
+free-bash = """under {cowork}'s dontAsk ceiling, every script, interpreter,
+and dev-tool run (python3, pytest, ruff, ...) is auto-DENIED without
+<+bash> — the coworker can read and edit but never run what it wrote."""
+web-research = """under {cowork}'s dontAsk ceiling, WebFetch and WebSearch
+are auto-DENIED without <+qry> — the coworker cannot consult documentation
+or verify anything beyond the local filesystem."""
+firewall = """a coworker is woken and given work by its manager, with nobody
+watching each turn — the same reason {auto} wants {firewall}. Verified on a
+live coworker: with the grants above and no {firewall}, it reached arbitrary
+hosts and installed packages off the network unsupervised. Keep {firewall}
+checked unless the group's work genuinely needs the open internet."""
+
 [addendum]
 title = "Coworking"
 body  = """You may be working alongside other agent instances, coordinated by a host-side hub. A peer's message arrives as an ordinary prompt; your reply is captured and forwarded to that peer verbatim. Follow this protocol:
@@ -12,9 +66,10 @@ body  = """You may be working alongside other agent instances, coordinated by a 
 - **Open every message by naming who is asking and which project it concerns** (for example `From researcher__ai_workspace, project edge_case_tests:`). Your peer has no other way to tell, a message with no sender reads as an instruction from its operator, and a peer may be working with you on more than one project at once.
 - **Do not interleave projects with the same peer.** Finish a stretch of work on one project before switching that peer to another. A peer holds a single conversation, so alternating between projects forces it to hold two unrelated contexts side by side — it confuses the work and wastes tokens re-establishing where each one stood.
 - **Send only what the peer needs.** Do not paste whole files, logs, or directory dumps and leave the other side to sift through them — you are both spending tokens on every word. Summarise, quote the few relevant lines, and name paths for anything they can look up themselves.
+- **Put your WHOLE answer in one final message.** Only the LAST message of your turn is captured and forwarded — anything you say earlier, before or between tool calls, is silently lost, and neither you nor your peer can tell. Do the work first, then write the complete reply as a single closing message. (Observed: a coworker that reported findings incrementally had everything but its closing paragraph discarded.)
 - **Keep replies bounded and lead with the answer.** If a question has a short answer, give the short answer.
 - **Do not flood.** Keep at most two requests outstanding to any one peer. If you have further tasks, issues, or remarks, hold them until you get a reply — queued prompts arrive as separate turns and derail whatever the peer is mid-way through.
-- **Long messages arrive as a pointer.** When a message is more than one line, the hub writes it to a file and tells you the path instead of typing it. Read that file, then reply as normal — your reply is captured automatically, so never write it into a file yourself.
+- **Messages arrive as pointers, and behave like a queue.** The hub delivers every message by writing it to a file and typing you a one-liner (tagged `[cowork task <manager>::<project>]`) naming the path. Read that file, then reply as normal — your reply is captured automatically, so never write it into a file yourself. Once your reply is routed, the hub consumes the message file: whatever still sits under `messages/` is unhandled backlog, oldest first, and nothing you have answered will be there.
 - **Group work happens in /cowork/<group-key>/, and only there.** That directory is your own working copy for that group; when your turn ends the hub copies it to the group's manager for review, so keep it holding exactly what you would hand in. Work for different groups stays in different directories — never mix them.
 - **Material sent TO you lands in /cowork/<group-key>@<sender-id>/ — an inbox, not your working copy.** Copy what you take up into your working copy before editing (the inbox is overwritten by the next delivery), and clear the inbox once you have — what remains in it reads as not-yet-processed.
 - **Flag uncertainty and cite sources.** A peer cannot tell your guess from a verified fact. If you looked it up, say where; if you did not, say so.

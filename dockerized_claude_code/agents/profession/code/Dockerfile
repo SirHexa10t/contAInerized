@@ -226,6 +226,18 @@ RUN : "${INSTALL_GCLOUD}" "${FORCE_INSTALLS_REFRESH}" \
 # User-runnable (uv-tool / static binary / npm-global into ~/.local).
 USER claude
 
+# ruff — UNCONDITIONAL, unlike every install below it: no ARG, no
+# template.form toggle. Python is a given for [code] (the base image ships
+# python3 + uv), and a linter is not an optional toolchain but the check a
+# code agent runs on its own output — a coworker probe found `ruff: command
+# not found` to be the one remaining blocker after permissions were sorted,
+# and every instance re-installing it per container is waste. Still wrapped in
+# the failure-log shape so a transient network fault degrades to a banner
+# warning rather than aborting the build.
+RUN sed -i '/^ruff$/d' /var/log/claude-agents/install_failures.log \
+ && { uv tool install ruff; } \
+    || { echo "ruff" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ ruff install failed; continuing" >&2; }
+
 ARG INSTALL_AWS=0
 RUN : "${INSTALL_AWS}" "${FORCE_INSTALLS_REFRESH}" \
  && sed -i '/^aws$/d' /var/log/claude-agents/install_failures.log \

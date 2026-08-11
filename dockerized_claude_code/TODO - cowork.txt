@@ -1,0 +1,12 @@
+
+check official coworking feature (research)
+
+rename the folders in `~ /.claude-agents/group_hosting/<instance-id>/`:
+    `<instance_name>::<task>` instead of `<instance_name>@<task>`
+
+Enable spawning instances per required task.
+The spawned instances won't be saved into `~ /.claude-agents/instances/`, but into `~ /.claude-agents/group_hosting/<instance-id>/`
+
+Create agent-writing assistant
+
+
