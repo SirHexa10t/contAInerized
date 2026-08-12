@@ -3,10 +3,12 @@
 # instance has the {firewall} specialty (declared in ../tag.docker; the
 # launcher passes `--entrypoint` on `docker run`).
 #
-# Pure plumbing — no flag decisions live here. Claude flags ({auto}'s
-# --dangerously-skip-permissions, --effort, --continue, user args) all arrive
-# as "$@" from the launcher; this script just runs the iptables firewall and
-# forwards every arg to claude.
+# Pure plumbing — no flag decisions live here, and no knowledge of what it wraps.
+# Whatever should run after the firewall arrives as "$@" from the launcher: either
+# `claude` plus its flags ({auto}'s --dangerously-skip-permissions, --effort,
+# --continue, user args), or another wrapper that will itself exec the agent
+# ({muxer} starts it inside a multiplexer). This script runs the iptables firewall
+# and hands off, whichever it is.
 #
 # Flow:
 #   1. Run init-firewall.sh as root via sudo, handing the launcher-resolved
@@ -23,9 +25,9 @@
 #      firewall is already in place; the vars have done their job. Re-run
 #      protection inside init-firewall.sh would block tampering anyway, but
 #      unsetting closes the leak proactively.
-#   4. exec claude with whatever args the launcher passed in (effort/resume
-#      flags, specialty claude_args like {auto}'s skip-permissions, and the
-#      user's argv passthrough).
+#   4. exec whatever the launcher passed as "$@" — the next link in the
+#      entrypoint chain (docker_config.entrypoint_chain composes it), which is
+#      either the agent command itself or another wrapper around it.
 
 set -euo pipefail
 
@@ -33,4 +35,8 @@ sudo /usr/local/bin/init-firewall.sh "${FIREWALL_SELFTEST_ADDR:-}"
 sudo -k
 unset WHITELIST_ADDRESSES FIREWALL_SELFTEST_ADDR
 
-exec claude "$@"
+# Generic hand-off, NOT a hardcoded `exec claude`: another tag may need to wrap
+# the agent too ({muxer} starts it inside a multiplexer). The launcher passes the
+# next link — another entrypoint script, or `claude` itself — as our arguments, so
+# this stays the firewall's business and nothing else's.
+exec "$@"

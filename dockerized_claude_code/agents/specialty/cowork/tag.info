@@ -1,6 +1,6 @@
 shortname         = "cowrk"
 short_description = "able to prompt other agents"
-full_description  = "Marks this instance as eligible to be recruited into a multi-agent group, where a host-side hub passes messages between running instances and exchanges files through per-participant directories. Grants eligibility only — it changes nothing about a normal interactive launch beyond a /cowork mount and a turn-completion hook, so a coworking instance stays perfectly usable on its own. Participants never share a directory: each has its own working copy per group, and work moves as reviewed copies (an inbox model), so a peer's mistakes cannot reach your files directly. The one role distinction is {manager}, the specialty nested inside this one — it marks who may HOST groups; everything finer (worker, reviewer, tester) still comes from the agent's own .md persona. Danger: a recruited instance can be woken and given work by its manager, spending your tokens on turns you did not type."
+full_description  = "Marks this instance as eligible to be recruited by an agent tagged with {manager}, into a multi-agent group, where agents may prompt each-other. Useful for sharing solutions, helping with specialized tasks, and in theory: conversing with AI agents of different kinds"
 warn              = true
 
 # {cowork}'s settings fragment (policy/_cowork/policy.json — JSON, so its

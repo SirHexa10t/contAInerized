@@ -1,0 +1,20 @@
+# {muxer} container mechanics. The image layer (profession/_muxer/) installs the
+# multiplexer; everything here is run-time.
+#
+# The ENTRYPOINT is the whole trick. The base image's ENTRYPOINT is `claude`, so
+# without an override the container hands the terminal straight to the agent and
+# none of this tag's promises hold. Declaring it HERE rather than in launcher code
+# means the "what does a muxer container run" decision is data, and it routes
+# through the same `entrypoint_flags` path every other tag uses — including its
+# refusal when two tags both claim the entrypoint.
+#
+# The script itself is GENERATED per launch (launch/cluster/solo.py writes it into
+# the instance state dir, which is mounted at ~/.claude): the session name, the
+# agent's argv, and the host project label all differ per instance, so a static
+# asset could not carry them. What IS static — every option, binding, and the help
+# popup — is a candidate for a mounted `.tmux.conf`; see cluster_plan.md.
+#
+# `launch.cluster.solo.SCRIPT_NAME` must agree with the filename below; a test in
+# test_cluster_solo.py pins the two together so the path cannot drift.
+[run]
+entrypoint = "/home/claude/.claude/muxer-start.sh"

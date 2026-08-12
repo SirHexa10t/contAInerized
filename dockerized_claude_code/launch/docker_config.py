@@ -7,7 +7,7 @@ wait_for_container_running, docker_exec_root_subprocess,
 docker_running_instances_subprocess, docker_check_any_agent_running_subprocess,
 docker_subprocess), the
 image-naming helper (image_tag), the tag.docker flag emitters
-(build_arg_flags / env_forward_flags / entrypoint_flags), the post-build
+(build_arg_flags / env_forward_flags / entrypoint_chain), the post-build
 install-failure surfacing (prompt_install_failures), and the container
 invocation itself (run_container).
 
@@ -550,20 +550,31 @@ def env_forward_flags(contributions: list[DockerContribution]) -> list[str]:
     return [arg for n in names if n in staged for arg in ("-e", f"{n}={staged[n]}")]
 
 
-def entrypoint_flags(contributions: list[DockerContribution]) -> list[str]:
-    """The `--entrypoint <path>` flag if exactly one active tag overrides the
-    entrypoint; [] when none does (the image's own ENTRYPOINT — claude —
-    applies). A bare script name resolves to LOCAL_BIN_IN_CONTAINER (where
-    the owning tag's mounts put it); a path is used as-is. Two tags both
-    claiming the entrypoint can't compose — fail loud."""
+def entrypoint_chain(contributions: list[DockerContribution]) -> tuple[list[str], list[str]]:
+    """`(flags, inner)` — the `--entrypoint` flag plus the links that follow it.
+
+    Several tags can legitimately want to wrap the agent: `{firewall}` applies
+    iptables first, `{muxer}` starts it inside a multiplexer. They compose as a
+    CHAIN rather than competing: the first script becomes docker's entrypoint and
+    every later one is handed to it as arguments, so each wrapper does its own job
+    and then `exec "$@"`s the next. `{firewall}`'s script ends that way for
+    exactly this reason (it used to `exec claude` and could not be followed).
+
+    Order comes from `contributions`, which is already in chain order
+    (`identity._ordered_groups`), and it matters: the firewall must be applied
+    before anything else runs, and its `sudo -k` must happen before the agent
+    starts. `test_docker_config` pins firewall-before-muxer so the ordering is a
+    checked property rather than a coincidence of directory names.
+
+    A bare script name resolves to LOCAL_BIN_IN_CONTAINER (where the owning tag's
+    mounts put it); a path is used as-is. No overrides at all → `([], [])`, and the
+    image's own ENTRYPOINT (claude) applies."""
     entrypoints = [c.entrypoint for c in contributions if c.entrypoint]
     if not entrypoints:
-        return []
-    if len(entrypoints) > 1:
-        raise RuntimeError(f"multiple active tags override the container entrypoint: {entrypoints}")
-    ep = entrypoints[0]
-    resolved = ep if "/" in ep else f"{LOCAL_BIN_IN_CONTAINER}/{ep}"
-    return ["--entrypoint", resolved]
+        return [], []
+    resolved = [ep if "/" in ep else f"{LOCAL_BIN_IN_CONTAINER}/{ep}"
+                for ep in entrypoints]
+    return ["--entrypoint", resolved[0]], resolved[1:]
 
 
 # ============================================================
@@ -752,23 +763,51 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
         if (selftest := selftest_address()) is not None:
             stage_container_env(ContainerEnvKey.FIREWALL_SELFTEST_ADDR, selftest)
     container_name = f"{CONTAINER_NAME_PREFIX}{inst.instance}"
+    # {muxer}: the agent runs inside a multiplexer, so the command becomes a
+    # generated startup script instead of claude's own argv. Assembled here
+    # because this is where that argv is known, and only for an interactive
+    # launch — quickie's print mode has no terminal to split.
+    agent_argv = (
+        ["claude"]
+        + effort_args(inst.conf, claude_args)
+        + resume_flag
+        + list(inst.claude_args)
+        + claude_args
+    )
+    muxed = interactive and inst.is_muxer
+    if muxed:
+        # {muxer} is the chain's TERMINAL link: the agent's argv is baked into the
+        # generated script (quoting it through two more shells is where a flag
+        # value with spaces would come apart), so nothing follows it.
+        from .cluster import solo
+        solo.install_launcher(inst, tuple(agent_argv))
+
+    entry_flags, inner_links = entrypoint_chain(contributions)
+    # What the container is actually told to run, after the image name:
+    #   no wrapper      -> the agent's flags (the image ENTRYPOINT is `claude`)
+    #   wrapper(s)      -> the remaining links, then the agent command explicitly
+    #   ...ending in {muxer} -> nothing more; its script carries the agent itself
+    if muxed:
+        command = inner_links
+    elif entry_flags:
+        command = inner_links + agent_argv
+    else:
+        command = agent_argv[1:]        # `claude` comes from the image ENTRYPOINT
+
     # Spawn the updater BEFORE docker_subprocess (which blocks for the
     # container's lifetime). No-op for non-{firewall} launches.
     start_firewall_updater(container_name)
     args = (
         ["run", "--rm", *(["-it"] if interactive else []), "--name", container_name, "-e", "TERM"]
         + [f"--cap-add={cap}" for c in contributions for cap in c.cap_add]
-        + entrypoint_flags(contributions)
+        + entry_flags
         + [arg for src, tgt in _docker_mounts.items() for arg in ("-v", f"{src}:{tgt}")]
         + container_env_args()             # always-on -e flags (status line, BASH_ENV, cred tokens)
         + conf_env_args(inst.conf)         # -e flags setting each engine-conf key=value in the container
         + env_forward_flags(contributions)  # tag-conditional -e flags (WHITELIST_ADDRESSES)
         + [image]
         + (["-p", print_prompt] if print_prompt is not None else [])   # one-shot print mode (quickie)
-        + effort_args(inst.conf, claude_args)  # explicit --effort from the conf — see effort_args for why the env var isn't enough
-        + resume_flag                      # present if a resumed session
-        + list(inst.claude_args)           # specialty-contributed flags ({auto}'s --dangerously-skip-permissions)
-        + claude_args                      # leftover argv (unrecognised flags + unresolved positional) → claude
+        + command                          # see the chain assembly above
     )
     if stream_renderer is not None:
         docker_stream_subprocess(args, stream_renderer)

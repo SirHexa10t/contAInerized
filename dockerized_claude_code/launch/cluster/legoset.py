@@ -1,0 +1,148 @@
+"""`.legoset` — a cluster template (TOML syntax).
+
+`agents/<name>.legoset` names a default membership: which agents, how many of
+each, and each one's default role. It is to a cluster what `.lego` is to an
+instance — a *starting point* the creation form opens on, never a lock. The user
+adds, drops, renames, and re-tags members afterwards.
+
+    # agents/devteam.legoset
+    members = [
+      { agent = "project-starter" },
+      { agent = "refactorer" },
+      { agent = "researcher", role = "primary" },
+      { agent = "researcher", role = "adversarial" },
+      { agent = "bug-investigator" },
+    ]
+
+A bare string is sugar for the one-key table, so a template with no interesting
+roles stays a one-liner:
+
+    members = ["project-starter", "refactorer"]
+
+Kept separate from the tag tree and from `.lego`, exactly as `lego.py` is: a
+`.legoset` names AGENTS, it is not one, and it says nothing about tags — each
+member inherits its own agent's `.lego`. Reference validity (do these agents
+exist?) is checked against the registry by `validate`, not here, mirroring how
+`lego.load_lego` leaves validation to `Registry.validate_build`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ..tags.base import read_toml
+from ..tags.lego import load_lego
+from .member import ClusterError, Member
+
+LEGOSET_SUFFIX = ".legoset"
+LEGO_SUFFIX = ".lego"      # the per-agent build file each member inherits
+MEMBER_KEYS = ("agent", "role")
+
+
+@dataclass(frozen=True)
+class ClusterTemplate:
+    """A parsed `.legoset`: its name (the file stem) and its default members.
+
+    Members keep the file's ORDER, because that is the order their tmux windows
+    are created in — a template author putting the lead first should see the
+    lead first."""
+    name: str
+    members: tuple[Member, ...]
+
+    @property
+    def agents(self) -> frozenset[str]:
+        """Every agent named, deduplicated — what a registry check consults."""
+        return frozenset(m.agent for m in self.members)
+
+
+def load_legoset(path: Path) -> ClusterTemplate:
+    """Parse a `.legoset`. Unlike `load_lego`, a MISSING file is an error rather
+    than an empty default: an instance with no `.lego` is a legitimate
+    all-defaults build, whereas a cluster with no members is nothing at all.
+
+    Type-checks every entry and rejects duplicate ids, so a template that would
+    have produced two members writing the same directory fails here — at parse
+    time, naming the file — rather than at launch."""
+    if not path.is_file():
+        raise ClusterError(f"no cluster template at {path}")
+    data = read_toml(path)
+
+    raw = data.get("members")
+    if not isinstance(raw, list) or not raw:
+        raise ClusterError(f"{path}: 'members' must be a non-empty list")
+
+    members: list[Member] = []
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(raw):
+        member = _member_from(entry, path, index)
+        if member.id in seen:
+            raise ClusterError(
+                f"{path}: two members would both be named {member.id!r} "
+                f"(entries {seen[member.id]} and {index}) — give at least one of "
+                f"them a distinct 'role'")
+        seen[member.id] = index
+        members.append(member)
+    return ClusterTemplate(name=path.stem, members=tuple(members))
+
+
+def _member_from(entry: Any, path: Path, index: int) -> Member:
+    """One `members` entry as a `Member`, in either accepted form."""
+    if isinstance(entry, str):
+        return Member.of(entry)
+    if not isinstance(entry, dict):
+        raise ClusterError(
+            f"{path}: members[{index}] must be a string or a table with 'agent' "
+            f"(and optionally 'role'), got {type(entry).__name__}")
+    unknown = set(entry) - set(MEMBER_KEYS)
+    if unknown:
+        raise ClusterError(
+            f"{path}: members[{index}] has unknown key(s) "
+            f"{', '.join(sorted(unknown))} — only {', '.join(MEMBER_KEYS)} are "
+            f"recognised (tags come from the agent's own .lego)")
+    agent = entry.get("agent")
+    if not isinstance(agent, str) or not agent:
+        raise ClusterError(f"{path}: members[{index}] needs a non-empty string 'agent'")
+    role = entry.get("role")
+    if role is not None and (not isinstance(role, str) or not role):
+        raise ClusterError(f"{path}: members[{index}]'s 'role' must be a non-empty string")
+    return Member.of(agent, role)
+
+
+def validate(template: ClusterTemplate, known_agents: frozenset[str]) -> None:
+    """Raise unless every agent the template names exists.
+
+    Takes the agent NAME SET rather than a Registry so the check is trivially
+    testable and so this module keeps its one dependency direction (it already
+    imports the tag package for TOML reading, not for lookups). The caller
+    supplies `agents_crud.agent_md_index`'s keys, or the registry's."""
+    missing = sorted(template.agents - known_agents)
+    if missing:
+        raise ClusterError(
+            f"cluster template {template.name!r} names unknown agent(s): "
+            f"{', '.join(missing)}")
+
+
+def instantiate(template: ClusterTemplate, agents_dir: Path) -> tuple[Member, ...]:
+    """The template's members, each carrying its own agent's `.lego` defaults.
+
+    Parsing a `.legoset` deliberately yields members with EMPTY builds — the file
+    names agents, not tags. This is the step that gives each member the starting
+    point its agent declares (engine, professions, specialties, policies), which
+    is what makes a `refactorer` member arrive with `[code]` and `<-gpush>` rather
+    than as a bare base image.
+
+    Separate from `load_legoset` because it touches disk per agent: parsing stays
+    pure and testable, and the lookup happens once, here, at instantiation."""
+    return tuple(
+        Member(agent=member.agent, role=member.role,
+               build=load_lego(agents_dir / f"{member.agent}{LEGO_SUFFIX}"))
+        for member in template.members)
+
+
+def discover_templates(agents_dir: Path) -> dict[str, Path]:
+    """Every `.legoset` in the agents dir, by name — the pick list a cluster
+    form opens with. A scan rather than a registry, for the same reason cowork
+    discovers groups by scanning: the directory IS the record."""
+    return {path.stem: path for path in sorted(agents_dir.glob(f"*{LEGOSET_SUFFIX}"))}

@@ -1,0 +1,19 @@
+# devteam — the PoC cluster: a small development team that cohabits one project.
+#
+# Each entry names an agent (agents/<name>.md + <name>.lego); a member inherits
+# that agent's own .lego defaults for its tags. `role` distinguishes two members
+# built from the same agent and becomes part of the member's id, its tmux window
+# name, and its worktree branch. Omit `role` and it defaults to the agent's name.
+#
+# Order is launch order: members become tmux windows in the order listed here, so
+# put the one you want to land on first.
+#
+# Deliberately absent: team-lead (needs agent_writer first — see cluster_plan.md's
+# roadmap) and tester / security / creative / reporter, which come later.
+members = [
+  { agent = "project-starter" },
+  { agent = "refactorer" },
+  { agent = "researcher", role = "primary" },
+  { agent = "researcher", role = "adversarial" },
+  { agent = "bug-investigator" },
+]

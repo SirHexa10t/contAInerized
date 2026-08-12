@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 from launch import docker_config, paths
 from launch.container_env import ContainerEnvKey, _container_env, stage_container_env
 from launch.docker_config import (
-    build_arg_flags, effort_args, entrypoint_flags, env_forward_flags,
+    build_arg_flags, effort_args, entrypoint_chain, env_forward_flags,
     image_tag, set_container_mounts,
 )
 from launch.tags import DockerContribution
@@ -23,9 +23,94 @@ from launch.tags import DockerContribution
 
 def _run_inst(**over):
     """Duck-typed Instance for run_container tests — only the attrs it reads."""
-    defaults = dict(docker_contributions=[], conf={}, claude_args=[], instance="poet__x")
+    # `is_muxer` is read by run_container to decide whether the command becomes a
+    # generated tmux script; False keeps these tests about the ordinary path.
+    defaults = dict(docker_contributions=[], conf={}, claude_args=[],
+                    instance="poet__x", is_muxer=False)
     defaults.update(over)
     return SimpleNamespace(**defaults)
+
+
+class TestRunContainerMuxer(unittest.TestCase):
+    """`{muxer}` replaces the container command with a generated tmux script, so
+    claude's own argv must NOT also be appended — it is baked into the script, and
+    passing it twice would hand the script stray arguments."""
+
+    def _capture(self, **over):
+        # The entrypoint flag comes from {muxer}'s tag.docker via entrypoint_flags,
+        # so the stub carries that contribution exactly as the real tag does.
+        from launch.cluster.solo import CONTAINER_SCRIPT
+        from launch.tags.base import DockerContribution
+        recorded = []
+        contribution = DockerContribution(entrypoint=CONTAINER_SCRIPT)
+        with patch.object(docker_config, "docker_subprocess",
+                          side_effect=lambda a: recorded.append(a)), \
+             patch.object(docker_config, "start_firewall_updater"), \
+             patch("launch.cluster.solo.install_launcher",
+                   return_value=CONTAINER_SCRIPT):
+            docker_config.run_container(
+                _run_inst(is_muxer=True, docker_contributions=[contribution], **over),
+                "claude-agents:base", ["--extra"], ["--continue"])
+        return recorded[0]
+
+    def test_the_entrypoint_comes_from_the_tag_not_from_code(self):
+        from launch.cluster.solo import CONTAINER_SCRIPT
+        argv = self._capture()
+        self.assertIn("--entrypoint", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], CONTAINER_SCRIPT)
+
+    def test_claudes_argv_is_not_appended_as_well(self):
+        argv = self._capture()
+        self.assertNotIn("--continue", argv)
+        self.assertNotIn("--extra", argv)
+
+    def test_firewall_plus_muxer_composes_into_a_chain(self):
+        from launch.cluster.solo import CONTAINER_SCRIPT
+        from launch.tags.base import DockerContribution
+        recorded = []
+        contributions = [DockerContribution(entrypoint="firewall-entrypoint.sh"),
+                         DockerContribution(entrypoint=CONTAINER_SCRIPT)]
+        with patch.object(docker_config, "docker_subprocess",
+                          side_effect=lambda a: recorded.append(a)), \
+             patch.object(docker_config, "start_firewall_updater"), \
+             patch("launch.cluster.solo.install_launcher",
+                   return_value=CONTAINER_SCRIPT):
+            docker_config.run_container(
+                _run_inst(is_muxer=True, docker_contributions=contributions),
+                "claude-agents:base", [], [])
+        argv = recorded[0]
+        # firewall is docker's entrypoint; muxer's script is its argument, so
+        # firewall's `exec "$@"` hands off to it. Nothing follows muxer.
+        self.assertEqual(argv[argv.index("--entrypoint") + 1],
+                         "/usr/local/bin/firewall-entrypoint.sh")
+        self.assertEqual(argv[-1], CONTAINER_SCRIPT)
+
+    def test_a_wrapper_without_muxer_gets_claude_explicitly(self):
+        # With any entrypoint override the image's own ENTRYPOINT is bypassed, so
+        # `claude` has to be named — it used to be hardcoded in firewall's script.
+        from launch.tags.base import DockerContribution
+        recorded = []
+        with patch.object(docker_config, "docker_subprocess",
+                          side_effect=lambda a: recorded.append(a)), \
+             patch.object(docker_config, "start_firewall_updater"):
+            docker_config.run_container(
+                _run_inst(docker_contributions=[
+                    DockerContribution(entrypoint="firewall-entrypoint.sh")]),
+                "claude-agents:base", ["--extra"], ["--continue"])
+        argv = recorded[0]
+        self.assertIn("claude", argv)
+        self.assertLess(argv.index("claude-agents:base"), argv.index("claude"))
+        self.assertIn("--continue", argv)
+
+    def test_a_non_muxer_launch_is_untouched(self):
+        recorded = []
+        with patch.object(docker_config, "docker_subprocess",
+                          side_effect=lambda a: recorded.append(a)), \
+             patch.object(docker_config, "start_firewall_updater"):
+            docker_config.run_container(_run_inst(), "claude-agents:base",
+                                        ["--extra"], ["--continue"])
+        self.assertIn("--continue", recorded[0])
+        self.assertNotIn("--entrypoint", recorded[0])
 
 
 class TestRunContainerModes(unittest.TestCase):
@@ -220,21 +305,54 @@ class TestEnvForwardFlags(ContainerEnvFixture):
 
 class TestEntrypointFlags(unittest.TestCase):
     def test_no_override_uses_image_entrypoint(self):
-        self.assertEqual(entrypoint_flags([DockerContribution()]), [])
+        self.assertEqual(entrypoint_chain([DockerContribution()]), ([], []))
 
-    def test_bare_name_resolves_to_local_bin(self):
-        flags = entrypoint_flags([DockerContribution(entrypoint="firewall-entrypoint.sh")])
-        self.assertEqual(flags, ["--entrypoint",
-                                 f"{paths.LOCAL_BIN_IN_CONTAINER}/firewall-entrypoint.sh"])
+    def test_one_override_becomes_the_entrypoint(self):
+        flags, inner = entrypoint_chain([DockerContribution(entrypoint="firewall-entrypoint.sh")])
+        self.assertEqual(flags, ["--entrypoint", "/usr/local/bin/firewall-entrypoint.sh"])
+        self.assertEqual(inner, [])
 
-    def test_path_used_as_is(self):
-        flags = entrypoint_flags([DockerContribution(entrypoint="/opt/custom/entry.sh")])
+    def test_an_absolute_path_is_used_as_is(self):
+        flags, _ = entrypoint_chain([DockerContribution(entrypoint="/opt/custom/entry.sh")])
         self.assertEqual(flags, ["--entrypoint", "/opt/custom/entry.sh"])
 
-    def test_two_overrides_conflict_loudly(self):
-        with self.assertRaises(RuntimeError):
-            entrypoint_flags([DockerContribution(entrypoint="a.sh"),
-                              DockerContribution(entrypoint="b.sh")])
+    def test_two_overrides_CHAIN_instead_of_failing(self):
+        # They used to be mutually exclusive. Several tags legitimately wrap the
+        # agent — {firewall} applies iptables, {muxer} starts a multiplexer — so
+        # the first becomes docker's entrypoint and the rest are its arguments,
+        # each `exec "$@"`-ing the next.
+        flags, inner = entrypoint_chain([
+            DockerContribution(entrypoint="firewall-entrypoint.sh"),
+            DockerContribution(entrypoint="/home/claude/.claude/muxer-start.sh")])
+        self.assertEqual(flags, ["--entrypoint", "/usr/local/bin/firewall-entrypoint.sh"])
+        self.assertEqual(inner, ["/home/claude/.claude/muxer-start.sh"])
+
+    def test_the_firewall_wrapper_hands_off_generically(self):
+        # A hardcoded `exec claude "$@"` cannot be followed by another wrapper,
+        # which is exactly why {muxer} and {firewall} could not compose.
+        text = (paths.AGENTS_DIR / "specialty" / "firewall"
+                / "firewall-entrypoint.sh").read_text()
+        code = [line for line in text.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+        self.assertIn('exec "$@"', code)
+        self.assertFalse([line for line in code if "exec claude" in line])
+
+    def test_firewall_sorts_before_muxer_in_the_real_registry(self):
+        # Ordering is load-bearing: iptables must be applied, and `sudo -k` run,
+        # before the agent starts. It comes from the contribution order rather
+        # than an explicit priority, so it is pinned here.
+        from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+        registry = scan_all(paths.AGENTS_DIR)
+        inst = Instance(
+            agent="refactorer", md_path=paths.AGENTS_DIR / "refactorer.md",
+            session="s", workspace="/w", is_brand_new=False,
+            **resolve_build(AgentBuild(engine=None, professions=(),
+                                       specialties=("firewall", "muxer"),
+                                       policies=()), "refactorer", registry))
+        chain = [c.entrypoint for c in inst.docker_contributions if c.entrypoint]
+        self.assertEqual(len(chain), 2)
+        self.assertIn("firewall", chain[0])
+        self.assertIn("muxer", chain[1])
 
 
 class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):

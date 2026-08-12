@@ -143,6 +143,8 @@ SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
 # fragment's Stop-hook command hardcodes this path — the two must agree.
 COWORK_IN_CONTAINER = Path("/cowork")
 WORKSPACE_IN_CONTAINER = Path("/workspace")                        # bind-mount target for the picked workspace — the project dir every agent sees
+WORKSPACES_IN_CONTAINER = Path("/workspaces")                      # cluster mode ONLY: the per-member worktrees dir. Plural because N cohabiting members share one container and so cannot each mount a different tree at /workspace — each gets /workspaces/<member-id> as its cwd instead.
+CLUSTER_IN_CONTAINER = Path("/cluster")                            # cluster mode ONLY: the shared cluster dir every member sees (banner today; the message-queue later)
 CLAUDE_SUMMARY_IN_CONTAINER = WORKSPACE_IN_CONTAINER / ".claude_summary"   # project summary file the agent reads on demand (lives at the workspace mount root)
 BASHRC_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".bashrc"         # bind-mount target for settings/bashrc.sh; also the value BASH_ENV points at so non-interactive bash sources it
 INSTALL_FAILURES_LOG_IN_CONTAINER = Path("/var/log/claude-agents/install_failures.log")   # claude-owned log file each INSTALL_<TOOL> RUN in Dockerfile.code appends to on failure; docker_config.prompt_install_failures reads it post-build. Mirror of the literal path used by every Dockerfile.code install block — keep in sync (no build-arg threading yet)
@@ -157,7 +159,7 @@ RO_MOUNT_OPTION = "ro"
 # its tag.docker — no mount dict here anymore. What remains are the
 # container-side landmarks the launcher must agree on with those scripts.
 
-LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # where tag.docker entrypoint scripts land; docker_config.entrypoint_flags resolves bare names against it
+LOCAL_BIN_IN_CONTAINER = Path("/usr/local/bin")   # where tag.docker entrypoint scripts land; docker_config.entrypoint_chain resolves bare names against it
 FIREWALL_DONE_IN_CONTAINER = Path("/var/run/init-firewall.done")   # marker init-firewall.sh touches after its rules + self-test succeed; docker_config.wait_for_firewall_applied polls it so the phase-2 updater never injects rules into a half-built firewall. Mirror of the literal in the script — test_docker_config guards the sync
 INIT_FIREWALL_SH = AGENTS_DIR / "specialty" / "firewall" / "init-firewall.sh"   # host-side source of the marker literal above (the drift-guard test reads it)
 
@@ -370,6 +372,29 @@ cowork_group_path:       Callable[[str, str], Path]    = lambda instance, group:
 cowork_inbox_path:       Callable[[str, str, str], Path] = lambda owner, group, sender: group_hosting_dir() / owner / f"{group}{INBOX_SEPARATOR}{sender}"
 group_session_path:      Callable[[Path], Path]        = lambda group_dir: group_dir / "session.json"   # its presence is what marks a dir as a group (and its parent as the manager)
 group_conversation_path: Callable[[Path], Path]        = lambda group_dir: group_dir / "conversation.md"
+
+# Cluster builders — the cohabiting-agents mode (design record: cluster_plan.md).
+# One subdir per cluster under `clusters_dir()`, holding `cluster.toml` (the
+# member set + each member's tags — the analogue of instances.toml) and one state
+# dir per member. Same no-arg-BUILDER discipline as `group_hosting_dir` above and
+# for the same reason: patching `paths.AGENTS_STATE` in a test must move the whole
+# feature, which it cannot do for a constant another module bound at import time.
+#
+# `cluster_worktree_path` is where the writer-safety model lands: each member gets
+# its own git worktree of the shared project, so N members editing concurrently
+# integrate through git instead of clobbering one checkout.
+#
+# NOTE the asymmetry with a solo instance, forced by cohabitation: all members
+# share ONE container, so they cannot each mount a different tree at /workspace.
+# Instead the worktrees dir mounts at WORKSPACES_IN_CONTAINER and each member's
+# cwd is its own subdir — the path differs per member, the mount point does not.
+clusters_dir:            Callable[[], Path]            = lambda: AGENTS_STATE / "clusters"
+cluster_path:            Callable[[str], Path]         = lambda session: clusters_dir() / session
+cluster_state_path:      Callable[[str], Path]         = lambda session: clusters_dir() / session / "cluster.toml"  # its presence is what marks a dir as a cluster
+cluster_member_dir:      Callable[[str, str], Path]    = lambda session, member: clusters_dir() / session / "members" / member
+cluster_worktrees_dir:   Callable[[str], Path]         = lambda session: clusters_dir() / session / "worktrees"
+cluster_worktree_path:   Callable[[str, str], Path]    = lambda session, member: clusters_dir() / session / "worktrees" / member
+cluster_banner_path:     Callable[[str], Path]         = lambda session: clusters_dir() / session / "banner"       # what the tmux status line renders; hub-owned later
 
 # Per-provider CDN-range cache file under FIREWALL_CACHE_DIR (see its comment
 # further up) — provider names come from firewall/resolver.py's fetcher registry.

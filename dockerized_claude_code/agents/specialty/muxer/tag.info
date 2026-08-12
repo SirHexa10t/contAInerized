@@ -1,0 +1,25 @@
+shortname         = "mux"
+short_description = "extra shells, survives detach"
+full_description  = "Runs a terminal multiplexer inside the container, so one window holds several. Gives you an extra shell alongside the agent — log into a CLI, tune bashrc, tail a log, check the network, run a server next to the work — and swap between them with a keystroke. The session is sticky: detach and everything keeps running, reattach later from anywhere, which also makes this the tag for running the launcher on a server. It visualizes what is running, organizes and remembers the layout, shares one view between several attachers, and provides one deliberate way to close the whole thing at once. Grants no new authority — it changes what YOU can do in the container, not what the agent may do. {cluster} builds on it: a cluster is a special case of multiplexing."
+
+# No `warn`: unlike {dood} (host-root authority) or {auto} (bypasses the
+# permission engine), this tag hands the agent nothing it did not already have.
+# It adds panes for the human and a process that outlives a dropped terminal.
+
+# The image layer lives at `profession/_muxer/` and is claimed by name (see
+# specialty.scan). At the profession ROOT deliberately, so this tag carries no
+# [code] requirement — a multiplexer is useful to any instance.
+#
+# The backend is tmux TODAY, chosen on researched grounds (cluster_plan.md's
+# "Multiplexer options" table). It is deliberately not named in the tag: herdr is
+# the watched alternative — agent-native, with pane state and a documented socket
+# API — and swapping to it should not require renaming a tag that users have in
+# their .lego files. That is why this is `{muxer}` and not `{tmux}`.
+
+[addendum]
+title = "Extra terminals"
+body  = """A terminal multiplexer (currently tmux) is installed in this container, so the operator can hold several shells here and detach without stopping the work. Whether a multiplexer session is actually running depends on how this instance was started — in cluster mode it always is; solo, the operator may start one. `tmux list-sessions` tells you.
+
+- **You may not be alone in this terminal.** When a session is running, the human can switch to another shell in this same container at any moment, and may be watching from more than one place. Anything you leave running is visible to them.
+- **Long-running work can be backgrounded properly.** For something that should outlive your turn — a dev server, a watch task, a long build — giving it its own window beats blocking your own session, and it stays alive between your turns: `tmux new-window -d '<command>'`.
+- **Do not tear the session down.** Killing the multiplexer's server or its session ends every other pane with it, including the operator's own shell, and in cluster mode it stops every member. Closing the whole thing is the human's decision, and they have a key binding for it."""

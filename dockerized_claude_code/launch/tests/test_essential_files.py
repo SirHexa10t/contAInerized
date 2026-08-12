@@ -202,6 +202,55 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertEqual(self.reg.specialties["dood"].requires, frozenset({"code"}))  # via _dood layer
         self.assertTrue(self.reg.specialties["auto"].warn)
 
+    def test_cluster_nests_inside_muxer_which_owns_the_layer(self):
+        # A cluster IS multiplexing, so ticking {cluster} must bring {muxer} —
+        # the same tree mechanism that makes {manager} require {cowork}. The
+        # multiplexer install rides {muxer}'s hidden layer, at the profession
+        # ROOT so it carries no [code] requirement.
+        muxer, cluster = self.reg.specialties["muxer"], self.reg.specialties["cluster"]
+        self.assertEqual(cluster.requires, frozenset({"muxer"}))
+        self.assertEqual(muxer.requires, frozenset())
+        self.assertIsNotNone(muxer.layer)
+        self.assertEqual(muxer.layer.path.name, "_muxer")
+        self.assertEqual(muxer.layer.requires, frozenset())
+        # {cluster} has no layer YET — the message-queue will bring `_cluster`.
+        self.assertIsNone(cluster.layer)
+
+    def test_neither_muxer_nor_cluster_warns(self):
+        # `warn` marks AUTHORITY an instance would not otherwise have ({dood}'s
+        # host-root, {auto}'s bypassed prompts). {muxer} adds panes for the human.
+        # {cluster} multiplies an exposure every agent already carries toward its
+        # own workspace and state rather than introducing a new kind — so an
+        # earlier `warn = true` on it was revoked.
+        self.assertFalse(self.reg.specialties["muxer"].warn)
+        self.assertFalse(self.reg.specialties["cluster"].warn)
+
+    def test_the_muxer_layer_installs_a_multiplexer_and_nothing_else(self):
+        # Thin on purpose: swapping the backend (herdr is the watched candidate)
+        # should be this file plus cluster/tmux.py, not a tag-tree rebuild.
+        text = (self.reg.specialties["muxer"].layer.path / "Dockerfile").read_text()
+        self.assertIn("tmux", text)
+        self.assertNotIn("docker-ce", text)
+
+    def test_cluster_addendum_teaches_the_member_its_own_identity(self):
+        # A member shares its persona with any sibling built from the same agent,
+        # so the env vars are the only way it can tell which one it is.
+        _, body = self.reg.specialties["cluster"].addendum
+        for var in ("CLUSTER_MEMBER", "CLUSTER_ROLE", "CLUSTER_SESSION"):
+            self.assertIn(var, body)
+        # And the trust rule cowork learned the hard way.
+        self.assertIn("no authority", body.lower())
+
+    def test_muxer_addendum_does_not_promise_a_session_that_may_not_exist(self):
+        # {muxer} installs the multiplexer; nothing in the SOLO launch path starts
+        # one (run_container execs claude directly). An addendum asserting "this
+        # container runs a multiplexer" would therefore be false for every solo
+        # instance carrying the tag — so it must describe availability, and tell
+        # the agent how to check.
+        _, body = self.reg.specialties["muxer"].addendum
+        self.assertIn("installed", body)
+        self.assertIn("list-sessions", body)
+
     def test_manager_nests_inside_cowork(self):
         # The role tag: shipped inside cowork/, so recruiting power implies
         # recruitability, and the form auto-ticks {cowork} under {manager}.

@@ -337,6 +337,31 @@ and agent_comms_research's `findings.md`; survey context:
   it. A real fix means a lockfile (`uv lock` / `uv pip compile`), which changes
   how `install_dependencies.sh` installs; not attempted.
   ALSO NOTE: the workflow is inert until the repo is hosted on GitHub.
+- **Runtime-installed packages vanish on every relaunch, and the split is not
+  obvious.** `~/.local` is NOT among the launcher's mounts (only
+  `.local/share/pnpm/store`, as a cache), and containers run `--rm`, so anything
+  installed *inside* a container is gone when it is recreated. What survives is
+  exactly what the IMAGE bakes in: `rich-cli` (base `Dockerfile`) and `ruff`
+  (`agents/profession/code/Dockerfile`), both via `uv tool install` at build
+  time. What does not: `pip3 install --user` packages (`prompt_toolkit`,
+  `python-dotenv`, `rich`) and any `uv tool install` run at runtime (`mypy`).
+  Observed on three consecutive relaunches; the confusing part is that `ruff`
+  keeps working while `mypy` disappears, which looks arbitrary until you know one
+  is in the image and the other is not.
+  Consequence for THIS repo specifically: an agent working on the launcher needs
+  the launcher's own deps to run its test suite, so the first `check.sh` after
+  any relaunch reports import errors that look like regressions and are not.
+  Already mitigated, deliberately: `check.sh` treats a missing checker as a
+  FAILURE with the `uv tool install` hint rather than skipping it, and
+  `/test-ai-project`'s preflight installs what is missing before running the
+  gate. So the workflow absorbs it — it is surprising, not broken.
+  What would close it: either persist `~/.local/bin`, `~/.local/lib` and
+  `~/.local/share/uv/tools` (they are not caches, so a stale binary could shadow
+  an image-provided one, and the dirs are Python-version and arch specific), or
+  bake the launcher's own dev deps into an image layer (wrong for a general-purpose
+  agent container — most instances never touch this repo). Neither is clearly
+  better than the current "reinstall on demand", which is why it is documented
+  rather than fixed.
 - **`docker build` runs per layer on every launch** — no image-exists
   short-circuit, so each launch pays a few cache-hit seconds per layer.
 - **`install_latest_md` / `install_settings` overwrite their state-dir files

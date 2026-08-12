@@ -39,6 +39,7 @@ SESSION_SEP = "__"
 # Renaming either tag dir means changing its constant here.
 COWORK_SPECIALTY = "cowork"
 MANAGER_SPECIALTY = "manager"
+MUXER_SPECIALTY = "muxer"
 
 
 _TagT = TypeVar("_TagT", bound=Tag)
@@ -209,6 +210,17 @@ class Instance:
     def conf(self) -> dict[str, str]:
         """The engine's effective env conf (`-e KEY=VALUE` source + effort)."""
         return self.engine.conf_map if self.engine else {}
+
+    @property
+    def is_muxer(self) -> bool:
+        """True when `{muxer}` is active, i.e. this instance launches inside a
+        terminal multiplexer instead of handing the terminal straight to claude.
+
+        By name for the same reason as `is_cowork`/`is_manager`: what it gates is
+        launcher behaviour (which command the container runs), not something a
+        `tag.docker` manifest can express. `{cluster}` nests inside `{muxer}`, so
+        a validly-built cluster member satisfies this too."""
+        return any(s.name == MUXER_SPECIALTY for s in self.specialties)
 
     @property
     def workspace_readonly(self) -> bool:
