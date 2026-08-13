@@ -138,6 +138,11 @@ class Tag:
                           proclaims an almost-dependency, and the message
                           surfaces in the form's warning zone while the
                           wanted tag is unchecked.
+      commands          — slash-command names this tag grants (`commands =
+                          [...]` in tag.info). The files live centrally in
+                          `agents/_commands/<name>.md` — one findable place,
+                          and one file grantable by several tags — and the
+                          registry validates every name resolves to a file.
       docker            — parsed tag.docker, or None when the tag makes no
                           container contribution."""
 
@@ -154,6 +159,7 @@ class Tag:
     addendum: tuple[str, str] | None = None
     requires: frozenset[str] = frozenset()
     wants: tuple[tuple[str, str], ...] = ()
+    commands: tuple[str, ...] = ()
     docker: DockerContribution | None = None
 
     @property
@@ -219,6 +225,20 @@ def parse_wants(info: dict[str, Any], tag_dir: Path) -> tuple[tuple[str, str], .
             raise TagError(f"{tag_dir}/{INFO_FILE}: wants.{wanted} must be a string message")
         pairs.append((wanted, message))
     return tuple(sorted(pairs))
+
+
+def parse_commands(info: dict[str, Any], tag_dir: Path) -> tuple[str, ...]:
+    """Extract the optional `commands` list (slash-command names this tag
+    grants) as a sorted tuple. Shape errors — a non-list, a non-string entry,
+    a name listed twice — are `TagError`s at scan time; whether each name
+    resolves to a real `agents/_commands/<name>.md` is checked cross-kind in
+    the registry validator, which knows the tree root."""
+    raw = info.get("commands", [])
+    if not isinstance(raw, list) or not all(isinstance(c, str) for c in raw):
+        raise TagError(f"{tag_dir}/{INFO_FILE}: `commands` must be a list of command-name strings")
+    if len(set(raw)) != len(raw):
+        raise TagError(f"{tag_dir}/{INFO_FILE}: `commands` lists a command more than once")
+    return tuple(sorted(raw))
 
 
 def parse_docker(tag_dir: Path) -> DockerContribution | None:
@@ -347,6 +367,7 @@ def common_fields(tag_dir: Path) -> dict[str, Any]:
         "full_description": full,
         "addendum": _parse_addendum(info, tag_dir),
         "wants": parse_wants(info, tag_dir),
+        "commands": parse_commands(info, tag_dir),
         "docker": parse_docker(tag_dir),
         "_info": info,   # handed back so the kind can read its own keys without a re-read
     }

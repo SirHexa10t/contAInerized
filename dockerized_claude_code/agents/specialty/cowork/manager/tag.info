@@ -2,6 +2,7 @@ shortname         = "mngr"
 short_description = "can host cowork groups"
 full_description  = "Makes this instance the HOST of multi-agent cowork groups: it may ask the hub for a roster of recruitable peers, convene them into named groups, hand work out, review what comes back, and close the group. Nested inside cowork — a manager is itself a coworker, so recruiting it into someone else's group stays possible — and the hub honours control requests ONLY from instances carrying this tag; a plain cowork peer writing the same request file is ignored. Grants coordination power, not extra access: the manager still sees only its own /cowork dir, and every exchange still flows through the hub. Danger: a manager spends other instances' turns — every message it sends wakes a peer and consumes that peer's tokens — so give it a round budget you can afford and a persona that delegates deliberately."
 warn              = true
+commands          = ["cowork"]   # /cowork — the file lives centrally in agents/_commands/
 
 [addendum]
 title = "Hosting cowork groups"

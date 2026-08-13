@@ -31,6 +31,9 @@ ENGINE_DIR = AGENTS_DIR / "engine"                                # engine tags 
 DEFAULT_CONF = ENGINE_DIR / "default" / "engine.conf"             # fallback engine conf when an agent names none
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
 BASE_SETTINGS_FILE = SETTINGS_DIR / "settings.json"                # shared Claude Code settings base — merged with each instance's policy fragments into <state>/settings.json (agents_crud.install_settings); NOT mounted directly
+SHARED_COMMANDS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_commands"   # slash commands EVERY instance gets; assembled into state_commands_dir per launch
+COMMANDS_DIR_NAME = "_commands"                                   # dirname under agents/ holding every TAG-granted slash command — split out because the registry validates against a parameterised tree root (scan_all(agents_dir)), so it needs the name, not the composed repo path. Underscore-prefixed to read as the project's established "internal asset, not a tag" marker (_muxer, _quickie) beside the four kind subtrees — and NOT "[commands]", which would wear a profession's punctuation while being no tag, and is a shell glob-class that mangles hand-typed paths
+AGENTS_COMMANDS_DIR = AGENTS_DIR / COMMANDS_DIR_NAME              # one file per command; a tag grants one by NAME (`commands = [...]` in its tag.info), so several tags can share a file and every specialized command is findable in one place. Sits safely beside the four kind subtrees: the scanners walk only engine/profession/specialty/policy
 TEMPLATE_FILES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
 OPTIONAL_CREDS_README_TEMPLATE = TEMPLATE_FILES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
 FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
@@ -181,7 +184,10 @@ DOCKER_BASE_MOUNTS = {
     ACCOUNT_FILE:                               f"{CLAUDE_HOME_IN_CONTAINER}/.claude.json",                         # shared OAuth account info
     CREDENTIALS_FILE:                           f"{CLAUDE_CONFIG_IN_CONTAINER}/.credentials.json",                  # shared API credentials — Claude Code refreshes the token in place
     # Project-bundled sources — inlined since DOCKER_BASE_MOUNTS is their only consumer
-    DOCKERIZED_CLAUDE_ROOT / "custom_commands": f"{CLAUDE_CONFIG_IN_CONTAINER}/commands:{RO_MOUNT_OPTION}",         # shared slash commands
+    # NOTE: custom_commands/ is deliberately NOT here. Commands are assembled per
+    # instance (shared + every command the active tags declare) into
+    # state_commands_dir and mounted from there by set_container_mounts — see
+    # that builder's comment.
     DOCKERIZED_CLAUDE_ROOT / "custom_skills":   f"{SKILLS_IN_CONTAINER}:{RO_MOUNT_OPTION}",                        # shared skill directory — each subdir is a skill
     SETTINGS_DIR / "statusline.sh":             f"{CLAUDE_CONFIG_IN_CONTAINER}/statusline.sh:{RO_MOUNT_OPTION}",    # shared status-line script
     SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
@@ -318,6 +324,13 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # CLAUDE_CONFIG_IN_CONTAINER for the in-container view.
 state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / "CLAUDE.md"
 state_settings_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / "settings.json"   # launcher-generated (base settings + policy fragments); RO-mounted over ~/.claude/settings.json
+# The instance's slash-command dir, ASSEMBLED per launch from the shared
+# custom_commands/ plus every AGENTS_COMMANDS_DIR file the active tags declare,
+# then RO-mounted whole over ~/.claude/commands. It replaces a direct mount of
+# custom_commands/, because docker cannot create a mountpoint for a per-tag file
+# inside a read-only mount — `mount: read-only file system` at container start.
+# One assembled dir, one mount.
+state_commands_dir:      Callable[[Path], Path]        = lambda state_dir: state_dir / "commands"
 state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / "domains_pending_resolve.yml"
 # Per-launch input log Claude Code writes directly under the state dir (sibling
 # of `projects/`, not nested with the session transcripts). `last_history_mtime`

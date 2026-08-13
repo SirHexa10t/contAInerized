@@ -390,8 +390,9 @@ Add command that'd apply only to this ai project:
     testing instructions (just like the refactoring skill, but for testing)
 
 an agent that helps build other agents; helps think of more cases and better coverage for your purpose/theme, allowed to comission help from researcher (can do so through the `q` (alias) command...?)
+    move this project's commands onto this agent?
 
-Maybe treat firewall additions as Professions? Like [cloud_aws] / [clowd_gcp] . On the technical level, it should go there.
+Maybe treat firewall additions as Professions? Like [cloud_aws] / [clowd_gcp] , including fitting CLI packages. On the technical level, it should go there.
 
 Fix expired GCP credentials issue
 

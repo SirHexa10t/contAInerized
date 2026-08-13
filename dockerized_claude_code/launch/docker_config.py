@@ -61,7 +61,7 @@ from .paths import (
     DEFAULT_WORKSPACE, DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT,
     FIREWALL_DONE_IN_CONTAINER, INSTALL_FAILURES_LOG_IN_CONTAINER,
     LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION, cowork_dir_path,
-    state_settings_path,
+    state_commands_dir, state_settings_path,
 )
 from .tags import DockerContribution, Instance
 from .template_code.docker_prompts import (
@@ -619,6 +619,13 @@ def set_container_mounts(inst_id: Instance) -> None:
         add_docker_mount(cowork_dir, str(COWORK_IN_CONTAINER))
     add_docker_mount(state_settings_path(inst_id.state_dir),
                      f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}")
+    # The commands dir is ASSEMBLED per instance (shared commands + each active
+    # command the active tags declare) by agents_crud.install_commands, then mounted whole and
+    # read-only. Mounting the shared repo dir here instead, and letting tags mount
+    # their own files over it, is what produced `mount: read-only file system` at
+    # container start — docker cannot create a mountpoint inside a read-only mount.
+    add_docker_mount(state_commands_dir(inst_id.state_dir),
+                     f"{CLAUDE_CONFIG_IN_CONTAINER}/commands:{RO_MOUNT_OPTION}")
     for source, target in DOCKER_BASE_MOUNTS.items():
         add_docker_mount(source, target)
 

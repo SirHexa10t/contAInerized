@@ -36,11 +36,27 @@ from pathlib import Path
 
 from .member import valid_label
 
-# `-u` on every invocation: the container sets no LANG/LC_ALL/LC_CTYPE (verified),
-# so tmux cannot infer a UTF-8 locale and falls back to byte handling that mangles
-# wide glyphs — Claude Code's icon rendered as a black box and its `❯` prompt as an
-# underscore, while the same session outside tmux was fine. `-u` forces UTF-8.
-TMUX = ("tmux", "-u")
+# The session lives on its OWN server socket, not tmux's default one.
+#
+# WHY, measured the hard way: an agent running inside the session shares a socket
+# with it, and `$TMUX` points a bare `tmux` command at the server that owns the
+# pane — so `tmux kill-server`, issued for any innocent reason, destroys the
+# session hosting the agent AND the container with it (the startup script is PID
+# 1). That happened twice to this very session while its own author was testing
+# tmux. The addendum said "do not tear the session down"; advice is not a
+# safeguard.
+#
+# With a named socket plus `unset TMUX` in the agent's pane (see `solo_argv`), a
+# careless `tmux kill-server` hits an EMPTY scratch server and is harmless, while
+# touching the real session requires naming it: `tmux -L muxer …`. Destructive by
+# accident becomes destructive only on purpose.
+#
+# `-u` on every invocation because the container sets no LANG/LC_ALL/LC_CTYPE
+# (verified), so tmux cannot infer a UTF-8 locale and falls back to byte handling
+# that mangles wide glyphs — Claude Code's icon rendered as a black box and its `❯`
+# prompt as an underscore, while the same session outside tmux was fine.
+SOCKET = "muxer"
+TMUX = ("tmux", "-u", "-L", SOCKET)
 BANNER_REFRESH_SECONDS = 5      # how often tmux re-runs the status-right command
 SHELL_WINDOW = "shell"          # the free terminal, always last
 SHELL_COMMAND = ("bash", "-l")  # login shell: the operator's bashrc/aliases apply
@@ -57,6 +73,25 @@ STACK_KEY = "-"                 # re-stack: shell below the agent
 SIDE_KEY = "|"                  # re-split: shell to the right
 SIDE_PANE_PERCENT = 33          # width the shell gets when put side by side
 KILL_NOTE = "Kill this whole session and everything in it"
+MOUSE_KEY = "m"                 # hand the mouse to the terminal, and take it back.
+                                # Knowingly overrides `select-pane -m` (mark a pane
+                                # for join/swap), on the same reasoning as `-`
+                                # above: in a two-pane session a pane marker is
+                                # worth less than the one key that restores the
+                                # terminal's own select-and-copy.
+MOUSE_NOTE = "Mouse: tmux, or your terminal for native select and copy"
+COPY_TABLE = "copy-mode"        # the key table tmux dispatches through while
+                                # scrolled back — the reason typing was swallowed
+COPY_CONFIRMATION = "copied — paste with your terminal paste key, or ^b ] here"
+# What "typing" means: every printable ASCII character. Bound one by one, because
+# tmux's scroll-back view eats every one of them that is not — see
+# `_typethrough_command`.
+_PRINTABLE = tuple(chr(code) for code in range(0x20, 0x7F))
+# The type-through batch renders as one ~6KB line of near-identical bindings. This
+# script is kept so a failed start can be READ, so that line gets a label telling
+# the reader they can skip it.
+TYPETHROUGH_LABEL = ("# Any printable key leaves the scroll-back view and lands in"
+                     " the pane. One call: 95 would cost 0.7s of spawning.")
 
 # The curated help. printf-safe: no apostrophes (the binding wraps it in single
 # quotes) and every literal % doubled. Held open by `read` because the image has
@@ -75,7 +110,11 @@ _HELP_LINES = (
     "  ^b %%            new shell pane to the right",
     "  ^b c            new window — a whole extra screen",
     "",
-    "  ^b [            scroll back - press q to leave",
+    "  wheel           scroll back - type anything to come back",
+    "  drag            mark text: copied when you let go  (^b ] pastes it)",
+    "  ^b m            give the mouse to your terminal, or take it back",
+    "",
+    "  ^b [            scroll back by keyboard - Escape to leave",
     "  ^b d            detach: leave, everything keeps running",
     "  ^b shift-Q      quit: end the session and stop the container",
     "",
@@ -182,9 +221,17 @@ def solo_argv(session: str, agent: Pane, *, shell_cwd: Path,
     if not 1 <= shell_percent <= 90:
         raise ValueError(f"shell_percent must be 1-90, got {shell_percent}")
     shell = shell_pane(shell_cwd)
+    # `unset TMUX` ONLY in the agent's pane. tmux points a bare `tmux` command at
+    # the server that owns the pane via `$TMUX`, so without this the agent's own
+    # multiplexer experiments run against the session hosting it — one
+    # `kill-server` and both the session and the container are gone. Removing the
+    # variable sends the agent's bare `tmux` to an empty default socket instead.
+    # The OPERATOR's shell keeps `$TMUX`: a human in that pane should be able to
+    # drive their own session without knowing the socket name.
+    caged = f"unset TMUX; exec {agent.shell_command}"
     commands: list[tuple[str, ...]] = [
         (*TMUX, "new-session", "-d", "-s", session, "-n", agent.name,
-         "-c", str(agent.cwd), *agent.env_flags(), agent.shell_command),
+         "-c", str(agent.cwd), *agent.env_flags(), "sh", "-c", caged),
     ]
     # Same session-environment scrub as the cluster path, for the same measured
     # reason (`new-session -e` leaks into the session env). Harmless here even
@@ -334,7 +381,7 @@ def _key_argv(shell_percent: int) -> list[tuple[str, ...]]:
         (*TMUX, "bind-key", "-N", "tmux's own full key list",
          "-T", "prefix", FULL_KEYS_KEY,
          "display-popup", "-E", "-w", "90", "-h", "30",
-         "tmux -u list-keys -N; read _"),
+         f'{" ".join(TMUX)} list-keys -N; read _'),
         # Two measured parsing traps here, both silent-ish:
         #  * a bare ";" as its own argv element does NOT chain into the binding —
         #    tmux ends `bind-key` there and runs the rest immediately, so the key
@@ -355,6 +402,124 @@ def _key_argv(shell_percent: int) -> list[tuple[str, ...]]:
     ]
 
 
+def _key_token(char: str) -> str:
+    """`char` as tmux spells it in the KEY position of `bind-key`.
+
+    Two exceptions, both measured on 3.5a against every printable character:
+
+    * a space is the key NAME `Space`. An argument that looks like whitespace is
+      not a key.
+    * `;` must arrive ESCAPED. tmux reads a lone `;` argv element as a command
+      separator, so the unescaped form ends `bind-key` early and it reports "too
+      few arguments (need at least 1)" — the one character out of 95 that fails
+      silently enough to be missed.
+    """
+    if char == " ":
+        return "Space"
+    return "\\;" if char == ";" else char
+
+
+def _send_command(char: str) -> str:
+    """The tmux command that puts `char` into the pane's process.
+
+    `-l` (literal) rather than a key name, so `#`, `$` and `~` arrive as
+    themselves rather than being looked up as key names. The character is QUOTED
+    because this string is parsed by tmux's own lexer, where `;` separates
+    commands and `"` and `#` are special; single quotes cover every character
+    except a single quote, which takes double ones.
+    """
+    if char == " ":
+        # `-l " "` would hand tmux a whitespace-only argument; the name form is
+        # unambiguous and verified to deliver 0x20.
+        return "send-keys Space"
+    quote = '"' if char == "'" else "'"
+    return f"send-keys -l {quote}{char}{quote}"
+
+
+def _typethrough_command() -> tuple[str, ...]:
+    """Stop the scroll-back view from swallowing what the operator types.
+
+    **The reported bug, and it was ours.** `mouse on` leaves tmux's own wheel
+    binding in place: `copy-mode -e`, which means scrolling up puts the pane into
+    copy-mode, where keys are dispatched through the `copy-mode` KEY TABLE instead
+    of being sent to the process. Of the 95 printable characters, 81 are unbound
+    there and silently dropped; the other 14 do something unrelated (`q` leaves,
+    `Space` pages down, `g` opens a goto-line prompt). Hence the symptom: scroll up
+    in Claude Code, type, and nothing appears until you scroll back to the bottom,
+    which is where `-e` quietly exits the mode.
+
+    A plain terminal has no such state — you type while scrolled up, it jumps to
+    the bottom, your character is in the prompt. These bindings reproduce exactly
+    that: cancel the view, then deliver the character. Order is what makes it work,
+    and it was verified rather than assumed — a pane in copy-mode given
+    `send -X cancel ; send-keys -l Z` left the mode AND the application received
+    the `Z`.
+
+    **Deliberate cost.** The 14 letter-keys copy-mode ships lose those meanings
+    everywhere, not just after a scroll, because a key table cannot tell how the
+    mode was entered. Arrows / PageUp / Home / End still navigate, `C-Space` and
+    `M-w` still select and copy, `C-r` / `C-s` still search (and their prompts
+    still take letters, being a command-prompt rather than this table), and
+    `Escape` still leaves. What goes is vi-flavoured letter navigation — a fair
+    trade in a session whose main pane is a prompt people type prose into, and the
+    reason the popup now says "Escape to leave" where it said "press q".
+
+    **One tmux call, not 95.** Measured: 95 separate `bind-key` invocations spend
+    0.72s on process spawning at container start, for bindings that are identical
+    every launch. Chaining them with `;` argv separators is one client connection,
+    and it keeps the generated script to a single labelled line.
+    """
+    chained: list[str] = []
+    for char in _PRINTABLE:
+        if chained:
+            chained.append(";")
+        chained += ["bind-key", "-T", COPY_TABLE, _key_token(char),
+                    f"send -X cancel ; {_send_command(char)}"]
+    return (*TMUX, *chained)
+
+
+def _copy_argv() -> list[tuple[str, ...]]:
+    """Marking text with the mouse, and the way out when the terminal refuses.
+
+    **The second reported bug: "copying with mouse-marking isn't possible".**
+    Marking does in fact work — `mouse on` binds a drag to `copy-mode -M`, which
+    selects — but tmux's drag-end is `copy-pipe-and-cancel`, so the highlight
+    vanishes the instant the button comes up and nothing says a copy happened. If
+    the text then also fails to reach the system clipboard, the gesture is
+    indistinguishable from one that did nothing at all. Both halves are addressed:
+
+    * the clipboard route is stated rather than inferred. tmux emits the OSC 52
+      clipboard sequence only when the CLIENT terminal's terminfo advertises `Ms`,
+      which varies with the operator's `$TERM` and with how current their terminfo
+      database is; `*:clipboard` asserts the capability for every terminal instead.
+    * the drag now confirms itself, and names the tmux-side paste key while it is
+      there. A one-line message is the whole difference between "it copied" and "I
+      cannot tell".
+
+    Whether those bytes reach the HOST clipboard is the terminal emulator's call —
+    several refuse OSC 52 writes by default, and no multiplexer can overrule that.
+    That is what `MOUSE_KEY` is for: it hands the mouse back to the terminal, whose
+    own select-and-copy needs no cooperation from us. It doubles as the way to
+    select ACROSS both panes, which tmux's pane-aware selection deliberately will
+    not do.
+    """
+    return [
+        # `-as`: terminal-features is a server option holding a LIST, so this
+        # appends a rule rather than replacing tmux's own per-terminal entries.
+        (*TMUX, "set-option", "-as", "terminal-features", ",*:clipboard"),
+        (*TMUX, "bind-key", "-T", COPY_TABLE, "MouseDragEnd1Pane",
+         f'send -X copy-pipe-and-cancel ; display-message "{COPY_CONFIRMATION}"'),
+        # `set -g mouse` with no value TOGGLES a flag option (verified: off → on →
+        # off), and `#{?mouse,…}` reads the option back, so one binding both flips
+        # the mode and reports which side now owns the mouse. Neither branch of the
+        # conditional may contain a comma — tmux splits `#{?…}` on the first one.
+        (*TMUX, "bind-key", "-N", MOUSE_NOTE, "-T", "prefix", MOUSE_KEY,
+         "set -g mouse ; display-message "
+         '"mouse: #{?mouse,tmux — the wheel scrolls and a drag copies,'
+         'your terminal — native select and copy}"'),
+    ]
+
+
 def _option_argv(session: str, *, banner: Path | None, refresh: int,
                  pane_titles: bool = False, left_label: str | None = None,
                  show_windows: bool = True) -> list[tuple[str, ...]]:
@@ -367,6 +532,18 @@ def _option_argv(session: str, *, banner: Path | None, refresh: int,
     """
     options: list[tuple[str, str]] = [
         ("mouse", "on"),                       # click a window name to switch
+        # PINNED, not left to tmux's default, which is derived from $EDITOR /
+        # $VISUAL at server start: with `vi` in either, copy-mode dispatches
+        # through the `copy-mode-vi` table instead, and the type-through bindings
+        # below — which target `copy-mode` — would silently not apply. One line
+        # here beats emitting both tables, and the letter keys those tables differ
+        # over are exactly the ones type-through repurposes anyway.
+        ("mode-keys", "emacs"),
+        # `on` rather than the `external` default. Both attempt the terminal
+        # clipboard when tmux itself copies; `on` additionally accepts OSC 52 from
+        # an application inside a pane. Stating it removes a default we do not
+        # control from the path between a mouse drag and the operator's clipboard.
+        ("set-clipboard", "on"),
         ("remain-on-exit", "on"),              # a dead member stays visible
         ("status", "on"),
         ("status-interval", str(refresh)),
@@ -423,6 +600,13 @@ def _option_argv(session: str, *, banner: Path | None, refresh: int,
         (*TMUX, "bind-key", "-N", KILL_NOTE, "-T", "prefix", KILL_KEY,
          "confirm-before", "-p", "kill this whole session, all windows? (y/n)",
          "kill-session"))
+    # Mouse and scroll-back behaviour, emitted for BOTH shapes: a cluster member's
+    # pane swallows keystrokes exactly like a solo agent's, because the fault is in
+    # a key table — which is server-global — and not in the layout. Last, so the
+    # kill binding stays the first `bind-key` in the sequence and the narrative
+    # above (options, then the one way out) reads in order.
+    commands += _copy_argv()
+    commands.append(_typethrough_command())
     return commands
 
 
@@ -493,7 +677,11 @@ def script(session: str, panes: tuple[Pane, ...], *, banner: Path | None = None,
                              project_label=project_label, banner=banner)
     else:
         assembly = startup_argv(session, panes, banner=banner, shell_cwd=shell_cwd)
-    lines += [shlex.join(argv) for argv in assembly]
+    typethrough = _typethrough_command()
+    for argv in assembly:
+        if argv == typethrough:
+            lines.append(TYPETHROUGH_LABEL)
+        lines.append(shlex.join(argv))
     # `|| echo` rather than a bare attach: under `set -e` a failed attach would
     # exit the script — i.e. stop the container — before the wait loop below ever
     # ran, with nothing said about why. Measured: attaching with no TERM set fails
@@ -511,9 +699,10 @@ def script(session: str, panes: tuple[Pane, ...], *, banner: Path | None = None,
         "",
         "# Detached, not finished: hold the container open while the session lives.",
         f'echo "detached — re-attach with:  docker exec -it $(hostname) '
-        f'tmux attach -t {shlex.quote(session)}"',
+        f'tmux -L {SOCKET} attach -t {shlex.quote(session)}"',
         'echo "(this terminal can be closed; Ctrl-C here stops the container)"',
-        f"while tmux has-session -t {shlex.quote(session)} 2>/dev/null; do sleep 2; done",
+        f'while {" ".join(TMUX)} has-session -t {shlex.quote(session)} 2>/dev/null; '
+        f"do sleep 2; done",
         "",
     ]
     return "\n".join(lines)

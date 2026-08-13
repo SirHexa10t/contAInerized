@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..paths import COMMANDS_DIR_NAME
 from .addendums import KNOWN_PLACEHOLDERS, referenced_placeholders
 from .base import Tag, TagError
 from .engine import Engine
@@ -174,11 +175,12 @@ def scan_all(agents_dir: Path) -> Registry:
         policies=_by_name(Policy.scan(agents_dir), "policy"),
         combos=tuple(scan_combos(agents_dir)),
     )
-    _validate(reg, layers, fragments)
+    _validate(reg, layers, fragments, agents_dir)
     return reg
 
 
-def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path]) -> None:
+def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path],
+              agents_dir: Path) -> None:
     """Cross-cutting checks no single scanner can make (fail loud on the
     first fault):
       - names unique across ALL kinds (one namespace);
@@ -186,7 +188,8 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
       - `requires` (tree-derived) resolve to real tags of the right kind:
         professions require professions; specialties additionally require
         specialties (their own tree nests too — `{manager}` inside `cowork/`);
-      - `wants` and combo references resolve to real tags (any kind)."""
+      - `wants` and combo references resolve to real tags (any kind);
+      - every declared command name resolves to a `commands/<name>.md` file."""
     # Global name uniqueness across kinds.
     seen: dict[str, str] = {}
     for kind, m in reg._kind_maps():
@@ -227,6 +230,19 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
         for name in combo.tags:
             if name not in known:
                 raise TagError(f"combos.info: combo references unknown tag '{name}'")
+
+    # Declared commands resolve to real files — a typo'd name would otherwise
+    # silently assemble an instance missing the command it was tagged for.
+    # Validated against THIS scan's tree root (not the repo constant), so a
+    # fixture tree in a test carries its own commands/ dir.
+    commands_dir = agents_dir / COMMANDS_DIR_NAME
+    for tag in reg.get_all():
+        for command in tag.commands:
+            if not (commands_dir / f"{command}.md").is_file():
+                available = sorted(p.stem for p in commands_dir.glob("*.md"))
+                raise TagError(
+                    f"{tag.path}: commands references unknown command '{command}' "
+                    f"— no {COMMANDS_DIR_NAME}/{command}.md; available: {available}")
 
     # addendum bodies only reference launcher-known placeholders — a typo'd
     # `{cred_cils}` would otherwise crash compose at launch time.

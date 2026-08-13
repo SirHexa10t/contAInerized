@@ -68,6 +68,7 @@ from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
 from rich import box                                                       # dep — declared in pyproject.toml [project]
@@ -85,7 +86,10 @@ from ..file_access import (
     expand_user_path, is_dir, last_prompt_in_state, path_exists, read_text,
     resolved_cwd, resolved_path, tab_complete_paths,
 )
-from ..paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS, instance_state_dir_path
+from ..paths import (
+    AGENTS_COMMANDS_DIR, DEFAULT_WORKSPACE, DEFAULTING_DIRS,
+    instance_state_dir_path,
+)
 from .tag_form import (
     RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _fragment_source,
     _normalize, _plain,
@@ -105,6 +109,11 @@ from ..utils import ordering_index_or_end, relative_time
 HINT_BASE_TEXT       = "↑↓ navigate  •  type to filter  •  Enter select  •  Esc cancel"
 HINT_DELETE_SUFFIX   = "  •  Del delete"
 HINT_MODIFY_SUFFIX   = "  •  F2 modify"
+WHEEL_LINES          = 3     # rows the wheel moves per notch, on either side
+# Shown above a long preview so its scroll position is legible. Only for genuinely
+# long content — on a preview that fits, a position marker is noise.
+PREVIEW_POSITION       = "\x1b[2m   line {} / {}\x1b[0m"
+PREVIEW_POSITION_FLOOR = 40
 HINT_LEGEND_SUFFIX   = "  •  F8 legend"
 HINT_LEGEND_OPEN     = "F8 / Esc close legend"
 FILTER_LABEL         = "filter: "
@@ -603,6 +612,38 @@ def _tags_preview(inst: Instance) -> str:
     return buf.getvalue()
 
 
+def _tag_commands(registry: Registry) -> list[tuple[Tag, str, str]]:
+    """`(tag, /command, description)` for every slash command a TAG grants.
+
+    Read from the declarations rather than any directory: a tag names its
+    commands in tag.info (`commands = [...]`) and the files live centrally in
+    `agents/_commands/` — one findable place, and one file grantable by several
+    tags. The registry has already validated that every declared name resolves
+    to a real file, so the read here cannot miss. Any KIND may declare —
+    `{manager}` and `[self]` both do — which is why this iterates all four.
+
+    The description comes from the command file's own `description:` frontmatter —
+    the same line Claude Code shows in its `/help` — so the legend cannot drift
+    from what the command says about itself. A file without one is listed anyway
+    with an empty description; silently hiding it would be worse than a blank cell.
+    """
+    return [(tag, f"/{name}",
+             _frontmatter_description(AGENTS_COMMANDS_DIR / f"{name}.md"))
+            for tag in registry.get_all() for name in tag.commands]
+
+
+def _frontmatter_description(md: Path) -> str:
+    """The `description:` line from a command file's YAML frontmatter, or "".
+
+    Deliberately a line scan rather than a YAML parse: the frontmatter here is
+    two or three flat keys, and a dependency (or a hand-rolled parser) for one
+    field would be more to maintain than to read."""
+    for line in read_text(md).splitlines()[:12]:
+        if line.startswith("description:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 def _build_composition_legend(registry: Registry) -> str:
     """Build the F8 'composition legend' shown over the preview pane — one
     table per tag kind, header = the kind's nutshell, rows = each discovered
@@ -632,6 +673,25 @@ def _build_composition_legend(registry: Registry) -> str:
                 Text(t.label, style=RICH_BY_STYLE[tag_style(t)]),
                 Text.assemble((t.fullname, "underline"), f": {t.short_description}"),
             )
+        console.print(table)
+
+    # Commands a TAG grants, if any. Omitted entirely when none do, rather than
+    # printing an empty table that implies the feature is broken. "Tag", not
+    # "Specialty": any kind may declare (`[self]` is a profession).
+    if commands := _tag_commands(registry):
+        console.print(Markdown(
+            "# Tag Commands\n\n"
+            "Slash commands that arrive WITH a tag — present only in instances "
+            "carrying a granting tag, unlike the shared commands every agent gets."))
+        console.print()
+        table = Table(box=box.SIMPLE_HEAD, header_style="cyan", pad_edge=False)
+        table.add_column("Tag")
+        table.add_column("Command")
+        table.add_column("Description")
+        for tag, command, description in commands:
+            table.add_row(Text(tag.label, style=RICH_BY_STYLE[tag_style(tag)]),
+                          Text(command, style="bold"),
+                          Text(description))
         console.print(table)
     return buf.getvalue()
 
@@ -742,6 +802,33 @@ def _cursor_step(entries: list[PickerEntry], shown: list[int], cursor: int, delt
     return landable[(landable.index(cursor) + delta) % len(landable)]
 
 
+class _ScrollingControl(FormattedTextControl):
+    """A `FormattedTextControl` that turns the wheel into a caller-supplied step.
+
+    prompt_toolkit already delivers a mouse event only to the control under the
+    pointer, so "scroll whichever side the mouse is over" needs no hit-testing of
+    our own — each side just handles its own events. Returning None marks the
+    event handled; returning NotImplemented would let it bubble and the other
+    side would react too.
+    """
+
+    def __init__(self, *args: Any, on_scroll: Callable[[int], None], **kw: Any) -> None:
+        # `on_scroll` receives NOTCHES (-1 up, +1 down), not lines: the list moves
+        # one ROW per notch (precise selection) while the preview moves several
+        # LINES, and only each side knows which it wants.
+        super().__init__(*args, **kw)
+        self._on_scroll = on_scroll
+
+    def mouse_handler(self, mouse_event: MouseEvent) -> object:
+        if mouse_event.event_type is MouseEventType.SCROLL_UP:
+            self._on_scroll(-1)
+            return None
+        if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+            self._on_scroll(1)
+            return None
+        return super().mouse_handler(mouse_event)
+
+
 def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
     """Render a full-screen picker; block until the user picks or cancels.
 
@@ -759,6 +846,10 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         "shown": list(range(len(entries))),
         "result": (None, None),
         "legend_open": False,
+        # Lines the preview is scrolled down by. Reset whenever the preview's
+        # CONTENT changes (a new row, or the legend opening), because a leftover
+        # offset would open the next preview part-way down for no reason.
+        "preview_scroll": 0,
     }
 
     def focusable() -> list[int]:
@@ -775,6 +866,26 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         # cursor stays inside `shown` for rendering (Enter is guarded anyway).
         state["cursor"] = landable[0] if landable else (state["shown"][0] if state["shown"] else 0)
 
+    def scroll_list(notches: int) -> None:
+        """Move the highlight by `notches` focusable rows.
+
+        Moves the CURSOR rather than a viewport offset, so the wheel and the arrow
+        keys can never disagree about which row is selected — and the preview
+        follows along, which is what makes wheeling the list useful at all.
+        Unselectable rows are skipped because `focusable()` already excludes them."""
+        landable = focusable()
+        if not landable:
+            return
+        here = state["cursor"]
+        nearest = min(range(len(landable)), key=lambda i: abs(landable[i] - here))
+        state["cursor"] = landable[max(0, min(nearest + notches, len(landable) - 1))]
+        # A new row means a new preview, so it starts at the top — EXCEPT while the
+        # legend is open: the side pane is then showing the legend, whose content
+        # does not depend on the cursor, so resetting it would throw away the
+        # reader's place in it for no reason.
+        if not state["legend_open"]:
+            state["preview_scroll"] = 0
+
     def list_fragments() -> list[tuple[str, str]]:
         if not state["shown"]:
             return [(UiClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
@@ -790,16 +901,43 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             out.pop()
         return out
 
-    def preview_text() -> ANSI | str:
+    def _preview_source() -> str:
+        """The preview's full text, before scrolling."""
         if state["legend_open"] and legend_text is not None:
-            return ANSI(legend_text)
+            return legend_text
         if not state["shown"]:
             return ""
-        # Through the loader, so a heavy preview shows PREVIEW_LOADING_TEXT and
-        # resolves off-thread instead of stalling this render. Wrap in ANSI(...)
-        # so rich-rendered escape codes show as styled text; the placeholder and
-        # plain previews (Back rows, etc.) pass through unchanged.
-        return ANSI(loader.text(state["cursor"], entries[state["cursor"]]))
+        return loader.text(state["cursor"], entries[state["cursor"]])
+
+    def scroll_preview(notches: int) -> None:
+        """Move the preview by `notches` wheel steps, clamped to its content.
+
+        Clamped rather than free-running: scrolling a short preview off the top
+        looks like the pane went blank. Two lines are always left reachable so the
+        end of the text still reads as the end."""
+        limit = max(0, _preview_lines_total() - 2)
+        state["preview_scroll"] = max(
+            0, min(state["preview_scroll"] + notches * WHEEL_LINES, limit))
+
+    def _preview_lines_total() -> int:
+        return len(_preview_source().splitlines())
+
+    def preview_text() -> ANSI | str:
+        source = _preview_source()
+        if not source:
+            return ""
+        offset = state["preview_scroll"]
+        lines = source.splitlines()
+        if offset:
+            # Slicing whole LINES, not characters: the text carries ANSI escapes
+            # and cutting mid-sequence would leak the escape into the output.
+            source = "\n".join(lines[offset:])
+        # A one-line position marker, since there is no usable scrollbar (see the
+        # preview Window). It states only what is actually known — how far down the
+        # SOURCE we are — rather than implying a viewport size the slice cannot know.
+        if len(lines) > PREVIEW_POSITION_FLOOR:
+            source = f"{PREVIEW_POSITION.format(offset + 1, len(lines))}\n{source}"
+        return ANSI(source)
 
     def title_fragments() -> list[tuple[str, str]]:
         return [(UiClass.TITLE.css, title)]
@@ -830,6 +968,8 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
 
     def move(delta: int) -> None:
         state["cursor"] = _cursor_step(entries, state["shown"], state["cursor"], delta)
+        if not state["legend_open"]:      # the legend does not follow the cursor
+            state["preview_scroll"] = 0
 
     @kb.add("up")
     def _(event: KeyPressEvent) -> None: move(-1)
@@ -847,11 +987,15 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
     def _(event: KeyPressEvent) -> None:
         if landable := focusable():
             state["cursor"] = landable[0]
+            if not state["legend_open"]:
+                state["preview_scroll"] = 0
 
     @kb.add("end")
     def _(event: KeyPressEvent) -> None:
         if landable := focusable():
             state["cursor"] = landable[-1]
+            if not state["legend_open"]:
+                state["preview_scroll"] = 0
 
     @kb.add("enter")
     def _(event: KeyPressEvent) -> None:
@@ -866,6 +1010,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
     def _(event: KeyPressEvent) -> None:
         if state["legend_open"]:
             state["legend_open"] = False
+            state["preview_scroll"] = 0
             return
         state["result"] = (None, None)
         event.app.exit()
@@ -879,6 +1024,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
     def _(event: KeyPressEvent) -> None:
         if legend_text is not None:
             state["legend_open"] = not state["legend_open"]
+            state["preview_scroll"] = 0   # legend and preview scroll independently
 
     @kb.add("backspace")
     def _(event: KeyPressEvent) -> None:
@@ -932,20 +1078,30 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT),
         VSplit([
             Window(
-                FormattedTextControl(_fragment_source(list_fragments),
-                                     get_cursor_position=cursor_pos,
-                                     focusable=True,
-                                     show_cursor=False),
+                _ScrollingControl(_fragment_source(list_fragments),
+                                  get_cursor_position=cursor_pos,
+                                  focusable=True,
+                                  show_cursor=False,
+                                  on_scroll=scroll_list),
                 wrap_lines=False,
                 width=D(weight=LIST_WEIGHT),
             ),
             Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=UiClass.DIVIDER.css),
             Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
             Window(
-                FormattedTextControl(preview_text),
+                _ScrollingControl(preview_text, on_scroll=scroll_preview),
                 wrap_lines=True,
                 width=D(weight=PREVIEW_WEIGHT),
                 style=UiClass.PREVIEW.css,
+                # NO ScrollbarMargin. It renders the WINDOW's own scroll state,
+                # while the scrolling here is done by slicing the text before the
+                # window ever sees it — so the bar described a viewport that does
+                # not exist: it sat at the bottom while the text was at the top,
+                # then shrank away as the sliced content got shorter. A correct bar
+                # would mean scrolling the window instead of the text (and
+                # ScrollbarMargin cannot be dragged either — it has no mouse
+                # handler). The position indicator below is honest about what it
+                # knows; see `preview_text`.
             ),
         ]),
         Window(FormattedTextControl(_fragment_source(status_fragments)), height=STATUS_HEIGHT),
@@ -956,6 +1112,15 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         key_bindings=kb,
         style=Style.from_dict(STYLE_DICT),
         full_screen=True,
+        # Without this prompt_toolkit never puts the terminal into mouse-reporting
+        # mode, so NO mouse event reaches any control — the per-side scroll
+        # handlers were correct and simply never called. It defaults to False.
+        #
+        # The trade-off, stated because it is felt: while the picker is open the
+        # terminal's own click-drag selection is suppressed (the app owns the
+        # mouse), so text cannot be selected out of a row or preview until the
+        # picker closes. Holding Shift bypasses it in most terminals.
+        mouse_support=True,
     )
     # Created here, after `app` exists, because the worker needs its
     # (thread-safe) invalidate; preview_text above reaches `loader` through the

@@ -325,6 +325,50 @@ and agent_comms_research's `findings.md`; survey context:
 
 ## Known issues — launcher
 
+- **A tag cannot mount a file into `~/.claude/commands/` — FIXED, and worth
+  remembering as a class.** `{manager}` shipping `/cowork` via a `tag.docker`
+  mount killed every launch of it: *"create mountpoint … read-only file system"*.
+  Cause: `custom_commands/` was mounted at `~/.claude/commands` with `:ro`, and
+  docker cannot create a mountpoint for a nested file inside a read-only mount.
+  `settings.json` gets away with the same shape only because its parent
+  (`~/.claude`) is a read-WRITE mount.
+  Fixed by ASSEMBLING the directory per instance instead:
+  `agents_crud.install_commands` copies the shared commands plus every command
+  the active tags declare into `<state>/commands/`, which is mounted whole and
+  read-only. A tag now ships a command by declaring its name in `tag.info`
+  (`commands = [...]`); the files live centrally in `agents/_commands/` — one
+  file shareable by several tags, validated at scan time, and the picker's
+  legend lists every declaration. (An earlier iteration had each tag carrying
+  its own `_commands/` dir; retired because commands couldn't be shared and the
+  underscore dirs read as pseudo-tags in the tree.)
+  The general rule: **a read-only mount cannot host a nested mount.** Anything
+  that wants per-tag files inside one has to be assembled host-side first.
+- **`{muxer}`: whether a copy reaches the HOST clipboard is the terminal's call,
+  not ours.** tmux hands a copy-mode selection to the outer terminal with the OSC
+  52 escape sequence, and several emulators refuse clipboard WRITES by default
+  (kitty needs `clipboard_control write-clipboard`, xterm needs
+  `allowWindowOps`). Our side is now complete and verified — `set-clipboard on`,
+  the `*:clipboard` feature asserted for every `$TERM` regardless of terminfo, and
+  a drag that confirms itself — so a failure past that point is configuration in
+  the operator's terminal. Two things make it livable rather than mysterious: the
+  drag says "copied", and `^b m` hands the mouse to the terminal so its own
+  select-and-copy (which needs no cooperation from tmux) takes over. Diagnosis in
+  one command: `tmux -L muxer set-buffer -w "TEST"` then paste — if `TEST` does
+  not arrive, the emulator is blocking OSC 52.
+  What would close it: nothing on our side. Do NOT add a clipboard helper binary
+  (`xclip`/`wl-copy`) — there is no X or Wayland display in the container to talk
+  to, so it would fail differently rather than work.
+- **`mouse on` is not an additive option — worth remembering as a class.** It
+  looked like it only added click-to-focus and wheel scrolling; it silently
+  redefined two interaction primitives, and both surfaced as bug reports. The
+  wheel becomes `copy-mode -e`, so scrolling puts the pane in a key table where 81
+  of the 95 printable characters are DROPPED (typing appeared to do nothing until
+  you scrolled back down), and tmux takes the mouse from the terminal, so native
+  drag-select stops reaching the emulator. Both are fixed in `cluster/tmux.py`
+  (`_typethrough_command`, `_copy_argv`). The lesson generalises: an option that
+  adds a capability may also be REPLACING a default, and tmux documents the
+  addition rather than the replacement — check what a default binding did before
+  enabling the thing that overrides it.
 - **No lockfile** — CI gate FIXED. `check.sh` is now the single definition of a
   passing tree (tests + `ruff` + `mypy`), and `.github/workflows/ci.yml` calls
   it on push / PR / weekly across Python 3.12 and 3.14. Three tests in
@@ -379,6 +423,20 @@ and agent_comms_research's `findings.md`; survey context:
   --network=host` under Docker Desktop, and `{dood}`, which hard-fails on macOS
   (`_apply_dood` needs a host `docker` group — see `tag_handlers.py`, whose
   error message still reads as Linux-only).
+
+## Known issues — testing technique
+
+- **A same-length mutation can leave stale bytecode behind, and the restored tree
+  then fails.** Mutation-testing a guard means editing a source file, running the
+  suite, and restoring it. CPython validates a `.pyc` against the source's
+  **(mtime, size)** — so a mutation that changes neither (`range(0x20, 0x7F)` →
+  `range(0x20, 0x7E)`) leaves a cache entry that still looks valid after the
+  restore, and the next run imports the MUTATED bytecode. Observed exactly once
+  and it was maximally confusing: the file on disk was provably correct while three
+  tests failed. Any mutation harness in this repo must delete the relevant
+  `__pycache__` after both the write AND the restore. Left here rather than fixed
+  because the harnesses are throwaway scripts, not a checked-in tool — the cost is
+  remembering, and the symptom (a clean file that fails) is worth recognising fast.
 
 ## Known issues — docs
 

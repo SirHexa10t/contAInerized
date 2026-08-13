@@ -1,0 +1,3 @@
+engine = "thinker"
+professions = ["code", "self"]
+policies = ["vcs-safe"]

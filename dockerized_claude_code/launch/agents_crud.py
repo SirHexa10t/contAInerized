@@ -23,15 +23,17 @@ run.py import from here; nothing here imports them back.
 import json
 
 from .file_access import (
-    force_remove, home_relative, is_dir, iter_subdirs, move_path, path_exists,
-    read_text, write_text,
+    copy_file, ensure_dir, force_remove, home_relative, is_dir, iter_subdirs,
+    move_path, path_exists, read_text, write_text,
 )
 from .paths import (
-    AGENTS_DIR, BASE_SETTINGS_FILE, INSTANCES_FILE, instance_state_dir_path,
-    instances_dir, state_settings_path,
+    AGENTS_COMMANDS_DIR, AGENTS_DIR, BASE_SETTINGS_FILE, INSTANCES_FILE,
+    SHARED_COMMANDS_DIR, instance_state_dir_path, instances_dir,
+    state_commands_dir, state_settings_path,
 )
 from .tags import (
-    Agent, Instance, Registry, addendums, load_agent, resolve_build, store,
+    Agent, Instance, Registry, TagError, addendums, load_agent, resolve_build,
+    store,
 )
 from .tags.engine import engine_sort_key
 from .tags.identity import SESSION_SEP
@@ -97,6 +99,46 @@ def modify_instance(old: Instance, new: Instance) -> None:
 # ============================================================
 # Per-instance state-dir writers
 # ============================================================
+
+def install_commands(inst: Instance) -> None:
+    """Assemble this instance's slash-command dir: the shared commands, plus every
+    command its active tags DECLARE (`commands = [...]` in tag.info → the file
+    `agents/_commands/<name>.md`).
+
+    **Why assembled rather than mounted per tag.** The obvious approach — each tag
+    mounting its own command file over `~/.claude/commands/<name>.md` — cannot
+    work: that directory is itself a READ-ONLY mount, and docker cannot create a
+    mountpoint inside one. The container dies at start with `mount: read-only file
+    system`, naming a path but not the reason. So the launcher builds one directory
+    and mounts that.
+
+    **Why declared rather than shipped inside the tag dir.** One central dir means
+    a command can be granted by several tags without duplicating the file, and
+    every specialized command is findable in one place; the registry has already
+    validated that each declared name resolves to a real file, so nothing here can
+    miss. Two tags declaring the SAME command converge on one file — only a NAME
+    collision between a tag command and a shared one is a fault, and a loud one:
+    silently letting either shadow the other would ship a different command than
+    one of its authors wrote.
+
+    Rebuilt from scratch each launch (like `install_latest_md`) so a command
+    removed from a tag, or a tag removed from the instance, actually disappears
+    instead of lingering from a previous run."""
+    destination = state_commands_dir(inst.state_dir)
+    force_remove(destination)
+    ensure_dir(destination)
+    sources = {path.name: path for path in sorted(SHARED_COMMANDS_DIR.glob("*.md"))}
+    for tag in inst.active_tags:
+        for name in tag.commands:
+            source = AGENTS_COMMANDS_DIR / f"{name}.md"
+            claimed = sources.setdefault(source.name, source)
+            if claimed != source:
+                raise TagError(
+                    f"command name collision: {tag.label} grants {source}, but "
+                    f"{claimed} already installs as '{source.name}' — rename one")
+    for source in sources.values():
+        copy_file(source, destination / source.name)
+
 
 def install_settings(inst: Instance, registry: Registry) -> None:
     """Merge the shared base settings (settings/settings.json) with the

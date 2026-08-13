@@ -705,14 +705,40 @@ State these at the top of the eventual feature so nobody reads them as bugs:
 
 **Queued, not yet done (2026-08-12):**
 
-- **Move `/cowork` under `{manager}`.** `custom_commands/` mounts into every
-  container, so every instance carries a manager-only command.
-  `group_hosting_plan.md` already specifies the fix: a
-  `specialty/cowork/manager/tag.docker` mounting `commands/cowork.md`. Same for
-  `/cluster` when it exists.
-- **Add a "Specialty Commands" legend section** — `(tag: </command> <description>)`
-  — since `{manager}` will be the second tag to ship a command and the picker's
-  legend has no place for them today.
+- ~~Move `/cowork` under `{manager}`~~ **DONE.** It lives at
+  `specialty/cowork/manager/_commands/cowork.md`, mounted by that tag's
+  `tag.docker`, so only manager-tagged instances carry it. Note the dir is
+  `_commands/` — the tag tree's strict rule reserves un-prefixed subdirs for
+  nested tags, and `commands/` raised a TagError. Same pattern for `/cluster`.
+- ~~Add a "Specialty Commands" legend section~~ **DONE**, and DISCOVERED rather
+  than listed: any tag with `_commands/*.md` appears, with the description read
+  from the command's own `description:` frontmatter so the legend cannot drift
+  from what the command says about itself. Adding a command to a tag is one file
+  *(2026-08-13 — both bullets superseded: per-tag `_commands/` dirs are retired.
+  A tag now DECLARES its commands in `tag.info` (`commands = [...]`) and the
+  files live centrally in `agents/_commands/`, shareable across tags; the legend
+  section is "Tag Commands" since professions grant commands too. The mount
+  mentioned above never survived either — a read-only mount cannot host a
+  nested mount, so the dir is assembled per instance; see ISSUES.md.)*
+  plus one mount, with nothing to register in the picker.
+- ~~Per-area mouse scrolling in the picker~~ **DONE.** prompt_toolkit delivers a
+  mouse event only to the control under the pointer, so "scroll whichever side
+  the mouse is over" needed no hit-testing — one `_ScrollingControl` on each side.
+  The list moves one ROW per notch (so wheel and arrows cannot disagree about the
+  selection) while the preview moves three LINES and carries a scrollbar. Moving
+  rows resets the preview offset, or the next row's preview would open part-way
+  down. **The bug that made it look unimplemented:** prompt_toolkit's
+  `mouse_support` defaults to False, so the terminal was never put into
+  mouse-reporting mode and NO control received any event — the handlers were
+  correct and simply never called, with nothing erroring. Now set explicitly and
+  asserted against the constructed Application. Trade-off it brings: while the
+  picker is open the terminal's own click-drag selection is suppressed (Shift
+  bypasses it in most terminals).
+- **Dragging the preview scrollbar is NOT possible** as things stand:
+  prompt_toolkit's `ScrollbarMargin` exposes only `create_margin` and
+  `get_width` — no mouse handler — and margins sit outside the area whose events
+  reach a control. The bar is an indicator; the wheel is the control. A draggable
+  bar would mean a custom margin plus event routing of our own.
 - **Split the oversized addendums.** A tag may carry SEVERAL addendums, one per
   topic, and `{cowork}`'s and `{cluster}`'s are each doing multiple jobs in one
   block (protocol + trust + economy). One topic per addendum reads better and

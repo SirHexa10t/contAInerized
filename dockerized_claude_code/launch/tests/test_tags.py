@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from launch import tags
+from launch.paths import COMMANDS_DIR_NAME
 from launch.tags import (
     AgentBuild, Engine, Instance, Policy, PolicyStance, Profession, Registry, Specialty,
     TagError, ToolkitEntry, addendums, image_chain, load_lego, merge_fragments, migrations,
@@ -669,6 +670,84 @@ class TestRegistryValidation(TagTreeTestCase):
     def test_empty_tree_is_valid(self):
         reg = scan_all(self.tree({"placeholder.md": "x\n"}))
         self.assertEqual(reg.all_names(), set())
+
+
+class TestTagCommands(TagTreeTestCase):
+    """The `commands = [...]` tag.info key: a tag GRANTS slash commands by name;
+    the files live centrally in `<agents>/_commands/`. Split validation on
+    purpose — shape errors surface at parse time naming the manifest, while a
+    dangling name surfaces at registry time, because only the registry knows
+    the tree root the central dir hangs off."""
+
+    def test_any_kind_may_declare_and_the_names_are_sorted(self):
+        root = self.tree({
+            f"{COMMANDS_DIR_NAME}/deploy.md": "---\ndescription: d\n---\nbody\n",
+            f"{COMMANDS_DIR_NAME}/audit.md": "---\ndescription: a\n---\nbody\n",
+            "profession/ops/tag.info": 'full_description="o"\ncommands = ["deploy", "audit"]\n',
+            "profession/ops/Dockerfile": "x\n",
+            "policy/guarded/tag.info": 'full_description="g"\ncommands = ["audit"]\n',
+            "policy/guarded/policy.json": '{"permissions": {}}',
+        })
+        reg = scan_all(root)
+        # Sorted at parse time, so assembly and legend order never depend on
+        # authoring order.
+        self.assertEqual(reg.professions["ops"].commands, ("audit", "deploy"))
+        self.assertEqual(reg.policies["guarded"].commands, ("audit",))
+
+    def test_two_tags_may_share_one_command_file(self):
+        # The point of central files: no duplication when a second tag grants
+        # the same command.
+        root = self.tree({
+            f"{COMMANDS_DIR_NAME}/shared.md": "---\ndescription: s\n---\nbody\n",
+            "specialty/one/tag.info": 'full_description="1"\ncommands = ["shared"]\n',
+            "specialty/two/tag.info": 'full_description="2"\ncommands = ["shared"]\n',
+        })
+        reg = scan_all(root)
+        self.assertEqual(reg.specialties["one"].commands,
+                         reg.specialties["two"].commands)
+
+    def test_no_declaration_means_no_commands(self):
+        root = self.tree({"specialty/plain/tag.info": 'full_description="p"\n'})
+        self.assertEqual(scan_all(root).specialties["plain"].commands, ())
+
+    def test_a_dangling_name_aborts_the_scan_naming_tag_and_options(self):
+        # A typo'd name would otherwise assemble an instance MISSING the
+        # command it was tagged for, silently.
+        root = self.tree({
+            f"{COMMANDS_DIR_NAME}/real.md": "---\ndescription: r\n---\nbody\n",
+            "specialty/oops/tag.info": 'full_description="o"\ncommands = ["reall"]\n',
+        })
+        with self.assertRaisesRegex(TagError, r"oops.*unknown command 'reall'.*real"):
+            scan_all(root)
+
+    def test_a_missing_commands_dir_reads_as_no_commands_available(self):
+        # Same failure as a dangling name — with an empty "available" list
+        # rather than a crash on the absent dir.
+        root = self.tree({"specialty/oops/tag.info": 'full_description="o"\ncommands = ["x"]\n'})
+        with self.assertRaisesRegex(TagError, r"available: \[\]"):
+            scan_all(root)
+
+    def test_shape_errors_surface_at_parse_time(self):
+        for label, manifest in [
+            ("not a list", 'full_description="x"\ncommands = "deploy"\n'),
+            ("non-string entry", 'full_description="x"\ncommands = [7]\n'),
+        ]:
+            with self.subTest(shape=label):
+                root = self.tree({"specialty/bad/tag.info": manifest})
+                with self.assertRaisesRegex(TagError, "list of command-name strings"):
+                    scan_all(root)
+
+    def test_a_duplicate_entry_is_its_own_error_not_a_dangling_name(self):
+        # The file EXISTS here, so the only fault left is the repetition —
+        # without that, this test would pass on the dangling-name error instead
+        # and the duplicate guard could die unnoticed (it did, in a mutation
+        # run, when this used a tree with no commands/ dir).
+        root = self.tree({
+            f"{COMMANDS_DIR_NAME}/a.md": "---\ndescription: a\n---\nbody\n",
+            "specialty/bad/tag.info": 'full_description="x"\ncommands = ["a", "a"]\n',
+        })
+        with self.assertRaisesRegex(TagError, "more than once"):
+            scan_all(root)
 
 
 # ============================================================

@@ -5,7 +5,8 @@ import sys
 from typing import NamedTuple
 
 from launch.agents_crud import (
-    compute_resume_flag, install_latest_md, install_settings, invalid_tags_report,
+    compute_resume_flag, install_commands, install_latest_md, install_settings,
+    invalid_tags_report,
     persist_instance, resolve_pick,
 )
 from launch.container_env import set_container_env
@@ -179,6 +180,7 @@ def setup_state(inst: Instance, registry: Registry, refresh_installs: bool = Fal
     refresh-cache-buster ARGs so every optional CLI install retries on the
     upcoming build."""
     install_latest_md(inst)
+    install_commands(inst)
     # Policy-conflict TagError → clean exit naming both culprit policies.
     call_or_exit(install_settings, inst, registry, exceptions=TagError)
     ensure_shared_oauth_files()

@@ -145,12 +145,13 @@ class TestQualityGate(unittest.TestCase):
                                  f"{command!r} belongs in check.sh, not the workflow")
 
     def test_project_skill_delegates_to_the_gate_script(self):
-        # /test-ai-project is the third surface that could restate a check —
+        # /ai_project-test is the third surface that could restate a check —
         # it already drifted once (its mypy line predated two entry points).
         # Like the workflow, it may only repair the environment and call the
         # script; a check defined there would run for agents but not CI.
-        skill = (paths.DOCKERIZED_CLAUDE_ROOT
-                 / ".claude" / "commands" / "test-ai-project.md")
+        # It lives with the other tag-granted commands ([self] declares it),
+        # not in .claude/commands/ — command files ride tags now.
+        skill = paths.AGENTS_COMMANDS_DIR / "ai_project-test.md"
         self.assertTrue(skill.is_file())
         text = skill.read_text()
         self.assertIn("bash check.sh", text)
@@ -298,6 +299,165 @@ class TestTagTreeDiscovery(unittest.TestCase):
         _, body = self.reg.specialties["cowork"].addendum
         self.assertIn("one final message", body.lower())
         self.assertIn("silently lost", body)
+
+    def test_manager_declares_the_cowork_command(self):
+        # `/cowork` used to live in the shared `custom_commands/`, which mounts
+        # into EVERY container — so every instance carried a command only a manager
+        # can use. It belongs to the tag: declared by NAME in tag.info, with the
+        # file central in agents/_commands/ so another tag could share it.
+        #
+        # It needs NO tag.docker: a per-tag mount over ~/.claude/commands/<name>.md
+        # is impossible, because that directory is itself a read-only mount and
+        # docker cannot create a mountpoint inside one (`mount: read-only file
+        # system`, which killed every {manager} launch). The launcher assembles the
+        # dir instead — see agents_crud.install_commands.
+        self.assertEqual(self.reg.specialties["manager"].commands, ("cowork",))
+        self.assertTrue((paths.AGENTS_COMMANDS_DIR / "cowork.md").is_file())
+        self.assertIsNone(self.reg.specialties["manager"].docker,
+                          "{manager} needs no tag.docker — the dir is assembled")
+
+    def test_the_commands_dir_is_assembled_not_mounted_from_the_repo(self):
+        # The shared dir must NOT be an always-on mount any more: mounting it
+        # read-only is what made a nested per-tag mount impossible.
+        from launch.paths import DOCKER_BASE_MOUNTS, SHARED_COMMANDS_DIR
+        self.assertNotIn(SHARED_COMMANDS_DIR, DOCKER_BASE_MOUNTS)
+
+    def test_a_manager_instance_gets_the_command_and_a_plain_one_does_not(self):
+        # The behaviour the whole move exists for, end to end.
+        import tempfile
+        from pathlib import Path
+
+        from launch.agents_crud import install_commands
+        from launch.paths import state_commands_dir
+        from launch.tags import AgentBuild, Instance, resolve_build
+
+        def commands_for(specialties: tuple[str, ...]) -> set[str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                inst = Instance(
+                    agent="refactorer", md_path=paths.AGENTS_DIR / "refactorer.md",
+                    session="s", workspace="/w", is_brand_new=False,
+                    state_dir_override=Path(tmp),
+                    **resolve_build(AgentBuild(specialties=specialties),
+                                    "refactorer", self.reg))
+                install_commands(inst)
+                return {p.name for p in state_commands_dir(inst.state_dir).glob("*.md")}
+
+        managerial = commands_for(("cowork", "manager"))
+        plain = commands_for(())
+        self.assertIn("cowork.md", managerial)
+        self.assertNotIn("cowork.md", plain)
+        # Both still get the shared ones.
+        self.assertLessEqual({"refactor.md", "write-summary.md"}, plain)
+
+    def test_a_tag_command_shadowing_a_shared_one_aborts_loudly(self):
+        # Same NAME from two different files means somebody's command silently
+        # replaces somebody else's in ~/.claude/commands — whichever won, one
+        # author's file would not be what instances run. (Two tags declaring
+        # the same command is fine: one file, no shadowing.)
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from launch import agents_crud
+        from launch.tags import AgentBuild, Instance, TagError, resolve_build
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared"
+            shared.mkdir()
+            (shared / "cowork.md").write_text("---\ndescription: impostor\n---\n")
+            inst = Instance(
+                agent="refactorer", md_path=paths.AGENTS_DIR / "refactorer.md",
+                session="s", workspace="/w", is_brand_new=False,
+                state_dir_override=Path(tmp) / "state",
+                **resolve_build(AgentBuild(specialties=("cowork", "manager")),
+                                "refactorer", self.reg))
+            with patch.object(agents_crud, "SHARED_COMMANDS_DIR", shared), \
+                 self.assertRaisesRegex(TagError, "collision.*cowork"):
+                agents_crud.install_commands(inst)
+
+    def test_the_shared_commands_dir_no_longer_carries_cowork(self):
+        # Two homes for one command would mean every instance gets it anyway.
+        shared = paths.DOCKERIZED_CLAUDE_ROOT / "custom_commands"
+        self.assertFalse((shared / "cowork.md").exists())
+
+    def test_the_central_dir_is_the_only_underscore_commands_dir(self):
+        # `_commands` appears exactly once: the central dir at the agents/ root
+        # (underscored as the project's "internal asset, not a tag" marker).
+        # A per-TAG `_commands/` — the retired mechanism — must not reappear:
+        # nothing reads one any more, so it would be SILENTLY inert, its
+        # command granted to nobody with no error anywhere. Declare in
+        # tag.info; put the file in the central dir.
+        self.assertEqual(list(paths.AGENTS_DIR.rglob(paths.COMMANDS_DIR_NAME)),
+                         [paths.AGENTS_COMMANDS_DIR])
+
+    def test_every_central_command_is_claimed_by_at_least_one_tag(self):
+        # agents/_commands/ is the one place specialized commands live; a file
+        # there that no tag declares is granted to nobody — dead weight that
+        # LOOKS shipped. (The reverse — a declared name with no file — aborts
+        # scan_all, so it needs no test here.)
+        claimed = {name for tag in self.reg.get_all() for name in tag.commands}
+        on_disk = {p.stem for p in paths.AGENTS_COMMANDS_DIR.glob("*.md")}
+        self.assertEqual(on_disk - claimed, set())
+
+    def test_every_central_command_describes_itself(self):
+        # The legend and Claude Code's /help both show the frontmatter
+        # description; a command without one renders as a blank cell.
+        from launch.gui.menu_picker import _frontmatter_description
+        for md in paths.AGENTS_COMMANDS_DIR.glob("*.md"):
+            with self.subTest(command=md.name):
+                self.assertTrue(_frontmatter_description(md))
+
+    def test_self_extends_code_and_grants_the_project_commands(self):
+        # [self] = develops this launcher. A profession, not a specialty, on the
+        # kind's own definition: it earns an IMAGE LAYER (the gate's toolchain,
+        # fixing the deps-vanish-on-relaunch churn ISSUES.md records) and names a
+        # domain of work — nothing about its running conditions is exceptional.
+        # Nested under code/ because the gate also needs ruff, which [code] bakes.
+        self_prof = self.reg.professions["self"]
+        self.assertEqual(self_prof.requires, frozenset({"code"}))
+        self.assertEqual(self_prof.commands,
+                         ("ai_project-test", "ai_project-update-models"))
+        dockerfile = (self_prof.path / "Dockerfile").read_text()
+        for dep in ("prompt_toolkit", "python-dotenv", "rich", "mypy"):
+            self.assertIn(dep, dockerfile)
+
+    def test_the_self_addendum_names_the_gate_and_the_tracker(self):
+        # The two entry points a launcher-developing agent must know; plus the
+        # baked toolchain stated as AVAILABLE, with the why (runtime installs
+        # don't survive) — so a session neither reinstalls out of habit nor
+        # wonders why the image carries what it carries.
+        _, body = self.reg.professions["self"].addendum
+        self.assertIn("check.sh", body)
+        self.assertIn("ISSUES.md", body)
+        self.assertIn("already available", body)
+        self.assertIn("don't survive", body)
+
+    def test_the_legend_lists_every_declared_command(self):
+        # Read from the declarations, not any directory — so it covers every
+        # kind ([self] is a profession, {manager} a specialty).
+        from launch.gui.menu_picker import _tag_commands
+        found = {(tag.name, command) for tag, command, _ in _tag_commands(self.reg)}
+        self.assertLessEqual({("manager", "/cowork"),
+                              ("self", "/ai_project-test"),
+                              ("self", "/ai_project-update-models")}, found)
+
+    def test_a_tag_commands_description_comes_from_its_frontmatter(self):
+        # So the legend cannot drift from what the command says about itself.
+        from launch.gui.menu_picker import _tag_commands
+        descriptions = {command: text for _, command, text in _tag_commands(self.reg)}
+        self.assertTrue(descriptions["/cowork"],
+                        "/cowork's description: frontmatter is missing or unparsed")
+
+    def test_the_legend_renders_a_tag_commands_section(self):
+        import re
+        from launch.gui.menu_picker import _build_composition_legend
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", _build_composition_legend(self.reg))
+        # "Tag Commands", not the earlier "Specialty Commands" — a profession
+        # grants commands too now.
+        self.assertIn("Tag Commands", plain)
+        self.assertNotIn("Specialty Commands", plain)
+        self.assertIn("/cowork", plain)
+        self.assertIn("/ai_project-test", plain)
 
     def test_manager_addendum_teaches_the_control_channel(self):
         # The addendum IS the protocol documentation an agent gets; if the
