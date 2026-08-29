@@ -9,5 +9,5 @@ body  = """Your workspace is the launcher project itself — the tool that built
 
 - **`bash check.sh` is the quality gate**: tests + lint + types, one definition, the same script CI runs. Run it before calling any change done.
 - **The gate's whole toolchain is already available**: the runtime deps the test suite imports (prompt_toolkit, python-dotenv, rich) and mypy are baked into this image, ruff into [code]'s. Baked because installs made at runtime don't survive — containers are removed on exit and ~/.local is no mount — so image layers are the only place these tools persist.
-- **`ISSUES.md` is the live tracker** — problems that stay until fixed, each with its evidence and what would close it. Read it before re-investigating anything surprising; record new structural lessons there.
+- **`plans/ISSUES.md` is the live tracker** — problems that stay until fixed, each with its evidence and what would close it. Read it before re-investigating anything surprising; record new structural lessons there.
 - **The `agents/` tree is validated at scan time** — a mis-shaped tag dir, dangling reference, or typo'd command name fails the test suite loudly via `scan_all`, so the gate covers tag-tree edits too."""

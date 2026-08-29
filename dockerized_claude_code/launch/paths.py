@@ -140,6 +140,18 @@ if not Path(DEFAULT_WORKSPACE).is_dir():
 CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
 CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
+# The operator's tmux overrides (settings/tmux.conf) inside the container. The
+# generated muxer startup script sources this LAST — after the launcher's own
+# options — so a user's line wins over any default. Landmark rather than a
+# tmux-native path (~/.tmux.conf) on purpose: auto-loading would run BEFORE the
+# launcher's options and silently lose to them, the opposite of what an
+# override file promises.
+TMUX_CONF_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "tmux.conf"
+# The curated help text `^b ?` pops up — a PLAIN file `cat` into the popup, so
+# editing it has no quoting rules at all (its printf-embedded ancestor forbade
+# apostrophes and doubled every %). settings/tmux.conf's help binding names
+# this path; the two ride the same mount set below.
+MUXER_HELP_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "muxer-help.txt"
 # {cowork}'s per-instance group-hosting dir inside the container. Deliberately at
 # the root rather than under CLAUDE_CONFIG_IN_CONTAINER: that path is Claude Code's
 # own namespace (projects/, skills/, commands/, todos/), and the `_cowork` policy
@@ -193,6 +205,8 @@ DOCKER_BASE_MOUNTS = {
     SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
     SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
+    SETTINGS_DIR / "tmux.conf":                 f"{TMUX_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                      # the muxer's KEY POLICY (quit/help/layout/mouse) + user overrides — sourced last by the generated startup script, so its lines win; inert without {muxer}
+    SETTINGS_DIR / "muxer-help.txt":            f"{MUXER_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the `^b ?` popup body — plain text, cat into the popup; inert without {muxer}
 }
 
 

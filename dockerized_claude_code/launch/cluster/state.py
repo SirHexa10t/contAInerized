@@ -44,12 +44,22 @@ import re
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from ..file_access import is_dir, is_file, iter_subdirs, read_text, write_text
-from ..paths import (
-    cluster_path, cluster_state_path, cluster_worktree_path, clusters_dir,
+if TYPE_CHECKING:
+    from ..tags import Registry
+
+from ..file_access import (
+    force_remove, is_dir, is_file, iter_subdirs, read_text, write_text,
 )
+from ..paths import (
+    cluster_path, cluster_state_path, cluster_worktree_path,
+    cluster_worktrees_dir, clusters_dir,
+)
+from ..tags.lego import AgentBuild
 from ..tags.store import build_entry, entry_to_build
+from ..utils import shell_returncode
+from . import worktree
 from .member import ClusterError, Member, split_member_id, valid_label
 
 _FILE_HEADER = (
@@ -89,7 +99,10 @@ class Cluster:
 
     @property
     def ids(self) -> tuple[str, ...]:
-        """Member ids in definition order — which is tmux window order."""
+        """Member ids in STORAGE order (id-sorted after a round trip). The
+        order anything user-facing uses — windows, picker rows, previews — is
+        `picker_order`, which needs the registry and so cannot live on the
+        frozen record."""
         return tuple(m.id for m in self.members)
 
     def member(self, identifier: str) -> Member | None:
@@ -114,6 +127,24 @@ class Cluster:
         return replace(self, members=tuple(m for m in self.members
                                            if m.id != identifier))
 
+    def with_build(self, identifier: str, build: AgentBuild) -> Cluster:
+        """This cluster with one member's tags replaced — the picker's F2 edit.
+
+        Order untouched (it is window order; re-tagging must not reshuffle),
+        unknown ids raised on (the edit came from a row that names a member —
+        missing means the file changed underneath, worth a loud stop), and the
+        FORCED specialties re-applied: the tag form lets a user untick
+        anything, but an edit is a second place a member's build enters the
+        file, so it gets the same guarantee `from_template` gives the first —
+        no path produces a member unaware it is one."""
+        member = self.member(identifier)
+        if member is None:
+            raise ClusterError(
+                f"cluster {self.session!r} has no member {identifier!r}")
+        updated = with_forced_tags(replace(member, build=build))
+        return replace(self, members=tuple(
+            updated if m.id == identifier else m for m in self.members))
+
 
 # ============================================================
 # Serialization
@@ -123,15 +154,17 @@ def dumps(cluster: Cluster) -> str:
     """`cluster` as TOML: header, the cluster-level keys, then one key-sorted
     table per member.
 
-    Tables are sorted so the file has a canonical form (a re-save with no change
-    produces no diff), which means they cannot also carry launch order — hence
-    the explicit `order` list. Window order is meaningful, so it is stored rather
-    than inferred from whatever the tables happen to sort to."""
+    Tables are sorted so the file has a canonical form (a re-save with no
+    change produces no diff) — and that IS the whole ordering story: no
+    `order` field. Window/display order is DERIVED at use time from the same
+    logic that sorts the picker's agent rows (`picker_order`), a decision made
+    to keep one ordering everywhere instead of an authored sequence the user
+    would have to manage (an earlier format stored `order`; `loads` ignores it
+    in old files)."""
     lines = [_FILE_HEADER,
              f"project = {_toml_str(str(cluster.project))}"]
     if cluster.template is not None:
         lines.append(f"template = {_toml_str(cluster.template)}")
-    lines.append(f"order = [{', '.join(_toml_str(i) for i in cluster.ids)}]")
     blocks = ["\n".join(lines) + "\n"]
     for member in sorted(cluster.members, key=lambda m: m.id):
         entry = build_entry(member.build, workspace=None)
@@ -146,11 +179,11 @@ def dumps(cluster: Cluster) -> str:
 
 
 def loads(session: str, text: str) -> Cluster:
-    """Parse one cluster's TOML. `order` restores definition order, which the
-    sorted tables cannot carry — window order is meaningful (a template author
-    putting the lead first should get the lead first), so it is stored
-    explicitly rather than inferred. An id in `order` that has no table, or a
-    table missing from `order`, is a corrupt file and says so."""
+    """Parse one cluster's TOML. Members come back id-sorted — the canonical
+    STORAGE order; the order anything displays or launches in is derived from
+    the registry at use time (`picker_order`). A legacy file's `order` key is
+    ignored rather than validated: the field carried authored window order,
+    a concept this format dropped."""
     data = tomllib.loads(text)
     project = data.get("project")
     if not isinstance(project, str) or not project:
@@ -158,16 +191,8 @@ def loads(session: str, text: str) -> Cluster:
     template = data.get("template") if isinstance(data.get("template"), str) else None
 
     tables = {k: v for k, v in data.items() if isinstance(v, dict)}
-    raw_order = data.get("order")
-    order = ([i for i in raw_order if isinstance(i, str)]
-             if isinstance(raw_order, list) else sorted(tables))
-    if set(order) != set(tables):
-        raise ClusterError(
-            f"cluster {session!r}: 'order' {sorted(order)} does not match the "
-            f"member tables {sorted(tables)}")
-
     members = []
-    for identifier in order:
+    for identifier in sorted(tables):
         agent, role = split_member_id(identifier)
         members.append(Member(agent=agent, role=role,
                               build=entry_to_build(tables[identifier])))
@@ -231,6 +256,54 @@ def exists(session: str) -> bool:
     """Whether a cluster of this name is already on disk — the guard a `create`
     consults before writing, so it refuses rather than clobbering."""
     return is_file(cluster_state_path(session))
+
+
+def picker_order(members: tuple[Member, ...],
+                 registry: "Registry") -> tuple[Member, ...]:
+    """Members in the picker's order — THE member ordering, everywhere.
+
+    Same logic that sorts the agent Create rows (profession group, engine
+    family, name — via `creatable_agents`), members of one agent then
+    id-alphabetical beneath it. Decided over an authored `order` field: one
+    derived ordering the user never has to manage, consistent with how the
+    picker already arranges agents, at the accepted cost that a template's
+    file order and the form's pick order carry no meaning.
+
+    Every consumer of a member SEQUENCE goes through here — tmux window
+    creation, the picker's member rows, previews, summaries — so windows,
+    `^b 1..9` numbers, and row order can never disagree. An agent missing
+    from the registry index sorts last rather than crashing: the row/preview
+    renderers show such members as problems, and ordering is not the place to
+    die. Lazy import: agents_crud is core-layer and imports no cluster code,
+    but keeping state.py's import list honest about its own weight matters
+    more than saving a line here."""
+    from ..agents_crud import creatable_agents
+    rank = {agent.name: index
+            for index, agent in enumerate(creatable_agents(registry))}
+    return tuple(sorted(members,
+                        key=lambda m: (rank.get(m.agent, len(rank)), m.id)))
+
+
+def destroy(cluster: Cluster) -> None:
+    """Remove the cluster from disk — the inverse of `save`, at directory level.
+
+    Worktrees first (checkouts only: `git worktree remove` drops the checkout,
+    not the commits, so a member's branches stay reachable under
+    `cluster/<session>/*`), then the state directory. The worktree teardown is
+    GUARDED on any worktree actually existing: a shared-workspace cluster never
+    made any, and its project may not even be a git repository — running git
+    against it would fail noisily for nothing. Prints nothing; the CLI and the
+    picker each narrate their own way. Shared by both so there is exactly one
+    definition of what destroying a cluster means."""
+    if any(cluster.worktree(identifier).is_dir() for identifier in cluster.ids):
+        trees = worktree.plan(cluster.session, cluster.ids,
+                              cluster_worktrees_dir(cluster.session))
+        existing = {p.resolve() for p in worktree.existing_worktrees(cluster.project)}
+        for tree in trees:
+            if tree.path.resolve() in existing:
+                shell_returncode(*worktree.remove_argv(cluster.project, tree))
+        shell_returncode(*worktree.prune_argv(cluster.project))
+    force_remove(cluster_path(cluster.session))
 
 
 # Tags every member carries, whatever its agent's `.lego` says. `cluster` is what

@@ -237,42 +237,33 @@ class TestFreeShellAndQuit(unittest.TestCase):
         argv = tmux.startup_argv("poc", self.panes, shell_cwd=Path("/workspace"))
         self.assertEqual(argv[-1][-1], "poc:member-one")
 
-    def test_a_quit_binding_exists_and_confirms_first(self):
-        # remain-on-exit means windows LINGER when a member dies, so the session
-        # never ends by itself — this binding is the only clean way out, and it
-        # kills every member at once, hence the confirmation.
-        argv = tmux.startup_argv("poc", self.panes)
-        binding = next(a for a in argv if sub(a) == "bind-key")
-        self.assertIn(tmux.KILL_KEY, binding)
-        self.assertIn("confirm-before", binding)
-        self.assertIn("kill-session", binding)
-
     def test_the_quit_and_help_keys_are_advertised_in_the_status_line(self):
         # A binding nobody can see is a binding nobody uses — and quit is the one
         # a tmux newcomer would otherwise have to guess.
         argv = tmux.startup_argv("poc", self.panes, banner=Path("/cluster/banner"))
         options = set_options(argv)
-        # Spelled "shift-Q": read as lowercase `q`, users hit tmux's own
-        # display-panes overlay instead (the red/blue 0/1 blocks in a bug report).
-        self.assertIn(f"^b shift-{tmux.KILL_KEY} quit", options["status-right"])
-        self.assertIn(f"^b {tmux.HELP_KEY} help", options["status-right"])
+        # Spelled ALL the way out: the corner must be executable by someone who
+        # knows no tmux notation — `^b` shorthand is taught inside the popup it
+        # leads to, not here. And `shift+q` explicitly: read as lowercase `q`,
+        # users hit tmux's display-panes overlay instead (the red/blue 0/1
+        # blocks in a bug report).
+        self.assertIn('"ctrl+b, shift+q": quit', options["status-right"])
+        self.assertIn(f'"ctrl+b, shift+{tmux.HELP_KEY}": help',
+                      options["status-right"])
+        self.assertNotIn("shift-Q", options["status-right"])
 
-    def test_the_quit_binding_carries_a_note_so_tmux_help_lists_it(self):
-        # `prefix ?` runs `list-keys -N`, which shows ONLY noted bindings — an
-        # unnoted binding is absent from the very list meant to reveal it.
-        argv = tmux.startup_argv("poc", self.panes)
-        binding = next(a for a in argv if sub(a) == "bind-key")
-        self.assertIn("-N", binding)
-        self.assertEqual(binding[binding.index("-N") + 1], tmux.KILL_NOTE)
-
-    def test_the_help_key_is_tmuxs_own_and_is_not_rebound(self):
-        # `?` ships as list-keys -N; overriding it would break what a tmux user
-        # already knows, so we only advertise it. Read through `bindings` rather
-        # than by index: the type-through batch holds 95 bindings in one argv, and
-        # indexing would only ever inspect the first of them.
-        argv = tmux.startup_argv("poc", self.panes)
-        prefix_keys = [key for table, key, _ in bindings(argv) if table == "prefix"]
-        self.assertNotIn(tmux.HELP_KEY, prefix_keys)
+    def test_no_interactive_key_bindings_in_the_assembly(self):
+        # The quit / help / layout / mouse keys are POLICY and ship as active
+        # lines in settings/tmux.conf (TestKeyPolicyConf pins them there) — a
+        # prefix-table binding creeping back into the Python assembly would be
+        # a second home the conf silently overrides or fights. The only
+        # bindings assembled here are the generated copy-mode type-through set.
+        for shape, argv in [("cluster", tmux.startup_argv("poc", self.panes)),
+                            ("solo", tmux.solo_argv("s", a_pane(),
+                                                    shell_cwd=Path("/w")))]:
+            with self.subTest(shape=shape):
+                tables = {table for table, _, _ in bindings(argv)}
+                self.assertEqual(tables, {tmux.COPY_TABLE})
 
 
 class TestSoloSplit(unittest.TestCase):
@@ -331,7 +322,8 @@ class TestSoloSplit(unittest.TestCase):
         # The first version showed the instance name at BOTH ends of the bar.
         options = set_options(self.argv)
         self.assertNotIn("cat", options["status-right"])
-        self.assertIn(tmux.KILL_KEY, options["status-right"])
+        # The quit hint spells the key as typed: shift + lowercase q.
+        self.assertIn(f"shift+{tmux.KILL_KEY.lower()}", options["status-right"])
 
     def test_the_quit_binding_is_present_here_too(self):
         # It is the only way out now that quitting the agent no longer ends the
@@ -399,57 +391,6 @@ class TestSoloSplit(unittest.TestCase):
         options = set_options(self.argv)
         self.assertEqual(options["window-status-format"], "")
         self.assertEqual(options["window-status-current-format"], "")
-
-    def test_help_is_a_curated_popup_listing_what_matters(self):
-        # tmux's own `list-keys -N` is 85 entries — right, and useless to someone
-        # who wants to know how to switch panes and leave.
-        binding = next(a for a in self.argv
-                       if sub(a) == "bind-key" and a[a.index("-T") + 2] == tmux.HELP_KEY)
-        body = binding[-1]
-        self.assertIn("display-popup", binding)
-        for topic in ("move between the agent", "side by side", "new shell pane",
-                      "scroll back", "detach", "quit", "full key list"):
-            with self.subTest(topic=topic):
-                self.assertIn(topic, body)
-
-    def test_the_popup_text_is_printf_safe(self):
-        # It is interpolated into `printf '...'`: a stray apostrophe would end the
-        # quoting and a bare % would be read as a format specifier.
-        body = next(a for a in self.argv if sub(a) == "bind-key"
-                    and a[a.index("-T") + 2] == tmux.HELP_KEY)[-1]
-        text = body.split("printf '", 1)[1]
-        self.assertNotIn("'", text.rsplit("\n'", 1)[0])
-        for fragment in text.split("%%"):
-            self.assertNotIn("%", fragment)
-
-    def test_tmuxs_full_list_stays_reachable_on_a_genuinely_free_key(self):
-        # `/` and `-` LOOKED free until the key column was read from the right
-        # field: `/` ships as describe-key, `-` as delete-buffer.
-        keys = {a[a.index("-T") + 2]: a[-1] for a in self.argv if sub(a) == "bind-key"}
-        # A POPUP, not a bare `list-keys`: that opens a window named `[tmux]`,
-        # which is invisible in a status bar whose window list is blank for solo.
-        self.assertIn("list-keys -N", keys[tmux.FULL_KEYS_KEY])
-        self.assertNotEqual(tmux.FULL_KEYS_KEY, "/")
-
-    def test_layout_keys_chain_as_one_argument(self):
-        # REGRESSION: a bare ";" argv element ends `bind-key`, so tmux bound only
-        # the layout change and ran the resize once at setup.
-        for key in (tmux.STACK_KEY, tmux.SIDE_KEY):
-            with self.subTest(key=key):
-                value = next(a[-1] for a in self.argv if sub(a) == "bind-key"
-                             and a[a.index("-T") + 2] == key)
-                self.assertIn(";", value)
-                self.assertIn("select-layout", value)
-                self.assertIn("resize-pane", value)
-
-    def test_layout_keys_avoid_braced_pane_targets(self):
-        # REGRESSION: `{bottom}` collides with tmux's command-BLOCK syntax inside
-        # a command string — it failed with "unknown command: bottom".
-        for key in (tmux.STACK_KEY, tmux.SIDE_KEY):
-            with self.subTest(key=key):
-                value = next(a[-1] for a in self.argv if sub(a) == "bind-key"
-                             and a[a.index("-T") + 2] == key)
-                self.assertNotIn("{", value)
 
     def test_a_cluster_window_is_not_split(self):
         # Members need full height; the split is the SOLO affordance.
@@ -531,21 +472,10 @@ class TestTypeThrough(unittest.TestCase):
                   if table != "prefix"}
         self.assertEqual(tables, {tmux.COPY_TABLE})
 
-    def test_the_popup_stops_promising_that_q_leaves_the_view(self):
-        # `q` is now type-through, so the old line ("scroll back - press q to
-        # leave") became wrong the moment these bindings landed. Escape still
-        # cancels, and the popup is the only place a user is told either.
-        body = next(command for table, key, command in bindings(self.argv)
-                    if key == tmux.HELP_KEY)
-        self.assertNotIn("press q", body)
-        self.assertIn("Escape to leave", body)
-
-
-class TestMouseCopy(unittest.TestCase):
-    """REPORTED FROM A LIVE SESSION: "it seems like I can't mark the text with my
-    mouse". Marking does work — `mouse on` binds a drag to `copy-mode -M` — but
-    tmux's drag-end cancels the selection instantly and says nothing, so a copy
-    that did happen is indistinguishable from one that did not."""
+class TestClipboardPlumbing(unittest.TestCase):
+    """The launcher-owed half of copying: whether a copy is OFFERED to the
+    terminal. What the keys and mouse DO with a copy is policy and lives in
+    settings/tmux.conf (TestKeyPolicyConf)."""
 
     def setUp(self):
         self.argv = tmux.solo_argv("inst__proj", a_pane("claude", cwd="/workspace"),
@@ -570,43 +500,116 @@ class TestMouseCopy(unittest.TestCase):
     def test_the_clipboard_option_is_stated_not_inherited(self):
         self.assertEqual(set_options(self.argv)["set-clipboard"], "on")
 
-    def test_a_drag_copies_and_says_so(self):
-        command = next(c for t, k, c in bindings(self.argv)
-                       if k == "MouseDragEnd1Pane")
-        self.assertIn("copy-pipe-and-cancel", command)
-        self.assertIn("display-message", command)
-        # It names the tmux-side paste key, because the terminal-side one may be
-        # refused by the emulator and the operator needs a route that cannot be.
-        self.assertIn("^b ]", command)
 
-    def test_the_mouse_can_be_handed_to_the_terminal_and_taken_back(self):
-        # The escape hatch for terminals that refuse OSC 52 writes, and the only
-        # way to select ACROSS panes — tmux's selection is pane-aware by design.
-        command = next(c for t, k, c in bindings(self.argv) if k == tmux.MOUSE_KEY)
-        self.assertIn("set -g mouse ;", command)
-        # VALUELESS on purpose: that is what makes tmux toggle the flag (verified
-        # off → on → off). Pinning a value here would make the key one-way.
-        self.assertNotRegex(command, r"set -g mouse (on|off)")
-        self.assertIn("display-message", command)
+def conf_text() -> str:
+    return (paths.SETTINGS_DIR / "tmux.conf").read_text()
 
-    def test_the_toggle_reports_which_side_now_owns_the_mouse(self):
-        # A mode switch with no feedback is a key nobody trusts twice.
-        command = next(c for t, k, c in bindings(self.argv) if k == tmux.MOUSE_KEY)
-        branches = command.split("#{?mouse,", 1)[1].rsplit("}", 1)[0]
-        # tmux splits `#{?…}` on the FIRST comma, so a comma inside either branch
-        # truncates the message at the point it would matter most.
+
+def conf_active() -> list[str]:
+    """The conf's ACTIVE lines — what tmux actually executes on source."""
+    return [line.strip() for line in conf_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
+class TestKeyPolicyConf(unittest.TestCase):
+    """settings/tmux.conf carries the interactive KEY POLICY as active lines —
+    quit, help, layout, mouse — sourced last by the generated script so editing
+    the file IS changing the keys. These tests read the real shipped file: it
+    is executable configuration now, not a commented menu, and a deleted line
+    here is a key that stops existing in every future session."""
+
+    def find(self, *needles: str) -> str:
+        hits = [line for line in conf_active()
+                if all(needle in line for needle in needles)]
+        self.assertEqual(len(hits), 1,
+                         f"expected exactly one active line with {needles}: {hits}")
+        return hits[0]
+
+    def test_the_mouse_default_is_an_active_editable_line(self):
+        self.find("set -g mouse on")
+
+    def test_quit_confirms_and_matches_the_status_hint(self):
+        # The status bar (Python-side) says "ctrl+b, shift+q": quit — the conf
+        # must bind THAT letter, or the hint lies. confirm-before because it
+        # kills every pane at once; `-N` so tmux's own key list shows it.
+        line = self.find("confirm-before", "kill-session")
+        self.assertIn(f" {tmux.KILL_KEY} ", line)
+        self.assertIn("-N", line)
+
+    def test_help_pops_the_plain_text_file_and_matches_the_hint(self):
+        # `cat` of a mounted text file: editing the help has NO quoting rules
+        # (its printf-embedded ancestor forbade apostrophes and doubled every %).
+        line = self.find("display-popup", "muxer-help.txt")
+        self.assertIn(f"'{tmux.HELP_KEY}'", line)
+        self.assertIn(str(paths.MUXER_HELP_IN_CONTAINER.name), line)
+
+    def test_tmuxs_full_list_stays_reachable_and_names_the_socket(self):
+        # Without `-L muxer` the popup would list an empty scratch server.
+        line = self.find("list-keys -N")
+        self.assertIn("-L muxer", line)
+
+    def test_a_drag_copies_and_returns_to_the_prompt(self):
+        # tmux's stock `-and-cancel`, RESTORED after a live trial of
+        # `-no-clear`: keeping the highlight leaves the pane in copy-mode,
+        # where the wheel EXTENDS the selection as if the button were still
+        # held and typing fights the stuck mode (reported 2026-08-18). The
+        # trial stays in the file as a commented, explained alternative.
+        line = self.find("MouseDragEnd1Pane")
+        self.assertIn("copy-pipe-and-cancel", line)
+        self.assertIn("display-message", line)
+        self.assertIn("shift+drag", line)   # the copy-out path, named at the moment it matters
+        self.assertIn("copy-pipe-no-clear", conf_text())      # documented...
+        self.assertNotIn("copy-pipe-no-clear", conf_active())  # ...never active
+
+    def test_the_mouse_toggle_is_valueless_and_reports_the_owner(self):
+        # Valueless `set -g mouse` TOGGLES (verified off→on→off); a pinned
+        # value would make the key one-way. The #{?mouse,...} readback is the
+        # feedback that makes the key trustable; tmux splits the conditional
+        # on its first comma, so neither branch may contain one.
+        line = self.find("set-option -g mouse", "display-message")
+        self.assertNotRegex(line, r"set-option -g mouse (on|off)")
+        branches = line.split("#{?mouse,", 1)[1].rsplit("}", 1)[0]
         self.assertEqual(branches.count(","), 1)
-        self.assertTrue(all(branches.split(",")))
 
-    def test_the_toggle_carries_a_note_so_tmux_own_help_lists_it(self):
-        binding = next(a for a in self.argv if sub(a) == "bind-key"
-                       and tmux.MOUSE_KEY in a and "-N" in a)
-        self.assertEqual(binding[binding.index("-N") + 1], tmux.MOUSE_NOTE)
+    def test_layout_keys_chain_with_escaped_semicolons(self):
+        # In a conf line an UNESCAPED ; ends the binding early — the argv-era
+        # regression (resize ran once at setup) wears this spelling here.
+        for key, layout in (("-", "even-vertical"), ("'|'", "even-horizontal")):
+            with self.subTest(key=key):
+                line = self.find(f" {key} ", "select-layout")
+                self.assertIn("\\;", line)
+                self.assertIn(layout, line)
+                self.assertIn("resize-pane", line)
+                # `{bottom}`-style targets misparse as command blocks; `.1`
+                # says the same thing with nothing to misread.
+                self.assertNotIn("{", line.split("select-layout")[1])
 
-    def test_the_mouse_key_is_advertised_where_a_newcomer_looks(self):
-        body = next(c for t, k, c in bindings(self.argv) if k == tmux.HELP_KEY)
-        self.assertIn(f"^b {tmux.MOUSE_KEY}", body)
-        self.assertIn("drag", body)
+    def test_every_binding_carries_a_note(self):
+        # `-N` is what lists a binding in tmux's own key list (^b shift-K) —
+        # an unnoted key is invisible in the very place meant to reveal it.
+        for line in conf_active():
+            if line.startswith("bind-key") and "copy-mode" not in line:
+                with self.subTest(line=line[:60]):
+                    self.assertIn("-N", line)
+
+    def test_the_conf_teaches_the_socket_and_the_live_reload(self):
+        # The two facts without which tinkering fails silently: manual commands
+        # need `-L muxer`, and a running session needs an explicit re-source.
+        text = conf_text()
+        self.assertIn("tmux -L muxer source-file", text)
+
+    def test_the_help_file_matches_the_keys(self):
+        # The popup body is the shipped plain-text file; its content must track
+        # both the conf's keys and the launcher's type-through behavior.
+        help_text = (paths.SETTINGS_DIR / "muxer-help.txt").read_text()
+        for topic in ("hold ctrl", "tmux: C-b",       # decodes ^b, and tmux's own spelling
+                      "shift+drag",                   # the gnome-terminal copy-out path
+                      "Escape to leave",              # q is type-through now
+                      "detach", "quit",
+                      f"shift-{tmux.KILL_KEY}",
+                      "settings/tmux.conf"):          # where these keys live
+            with self.subTest(topic=topic):
+                self.assertIn(topic, help_text)
 
 
 class TestScript(unittest.TestCase):
@@ -630,6 +633,28 @@ class TestScript(unittest.TestCase):
     def test_no_unset_by_default(self):
         # PoC-0 has no messaging, so the image's privacy posture is untouched.
         self.assertNotIn("unset ", tmux.script("poc", (a_pane(),)))
+
+    def test_the_users_conf_is_sourced_last_so_their_lines_win(self):
+        # The whole point of an override file: it must come AFTER every option
+        # and binding the launcher sets, or a user's line silently loses to a
+        # default and the file reads as broken.
+        text = tmux.script("poc", (a_pane(),),
+                           user_conf=Path("/home/claude/.claude/tmux.conf"))
+        source_at = text.index("source-file")
+        for fragment in ("set-option", "bind-key"):
+            with self.subTest(before=fragment):
+                self.assertGreater(source_at, text.rindex(fragment))
+        self.assertLess(source_at, text.index("attach-session"))
+
+    def test_the_conf_is_an_offer_not_a_requirement(self):
+        # `-q`: a missing file must not kill the launch — the script runs under
+        # `set -eu`, so an unquieted source-file error would stop the container.
+        text = tmux.script("poc", (a_pane(),),
+                           user_conf=Path("/home/claude/.claude/tmux.conf"))
+        self.assertIn("source-file -q", text)
+
+    def test_no_conf_no_source_line(self):
+        self.assertNotIn("source-file", tmux.script("poc", (a_pane(),)))
 
     def test_the_type_through_batch_is_labelled_for_a_reader(self):
         # The script exists so a failed start can be READ; one 6KB line of

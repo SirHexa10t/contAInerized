@@ -5,11 +5,17 @@
 # built from the same agent and becomes part of the member's id, its tmux window
 # name, and its worktree branch. Omit `role` and it defaults to the agent's name.
 #
-# Order is launch order: members become tmux windows in the order listed here, so
-# put the one you want to land on first.
+# Listing order carries NO meaning: window and picker order are derived from
+# the same sorting the picker applies to agents (state.picker_order), so
+# there is nothing to compose here beyond who is on the team.
 #
 # Deliberately absent: team-lead (needs agent_writer first — see cluster_plan.md's
 # roadmap) and tester / security / creative / reporter, which come later.
+# `description` is the one-liner the picker's template row shows after the name
+# (the slot an agent row fills from its .md's first line). Describe what the
+# TEAM does, not who is on it — the member list lives in the row's preview.
+description = "Builds features end to end — kickoff, refactoring, adversarial research, bug-hunting"
+
 members = [
   { agent = "project-starter" },
   { agent = "refactorer" },

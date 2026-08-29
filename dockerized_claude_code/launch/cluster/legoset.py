@@ -28,12 +28,14 @@ exist?) is checked against the registry by `validate`, not here, mirroring how
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..tags.base import read_toml
-from ..tags.lego import load_lego
+from ..tags.lego import AgentBuild, load_lego
 from .member import ClusterError, Member
 
 LEGOSET_SUFFIX = ".legoset"
@@ -43,13 +45,18 @@ MEMBER_KEYS = ("agent", "role")
 
 @dataclass(frozen=True)
 class ClusterTemplate:
-    """A parsed `.legoset`: its name (the file stem) and its default members.
+    """A parsed `.legoset`: its name (the file stem), its default members, and
+    an optional one-line description (what the picker's template row shows
+    after the name — the same slot an agent row fills from its `.md`'s first
+    line; empty means the row falls back to enumerating the members).
 
-    Members keep the file's ORDER, because that is the order their tmux windows
-    are created in — a template author putting the lead first should see the
-    lead first."""
+    Members keep the file's PARSE order for determinism (the form's prefill
+    lists them as authored), but the order carries no launch meaning: window
+    and display order are DERIVED everywhere by picker-sort
+    (`state.picker_order`) — decided so ordering is one less thing to author."""
     name: str
     members: tuple[Member, ...]
+    description: str = ""
 
     @property
     def agents(self) -> frozenset[str]:
@@ -69,6 +76,10 @@ def load_legoset(path: Path) -> ClusterTemplate:
         raise ClusterError(f"no cluster template at {path}")
     data = read_toml(path)
 
+    description = data.get("description", "")
+    if not isinstance(description, str):
+        raise ClusterError(f"{path}: 'description' must be a string")
+
     raw = data.get("members")
     if not isinstance(raw, list) or not raw:
         raise ClusterError(f"{path}: 'members' must be a non-empty list")
@@ -84,7 +95,8 @@ def load_legoset(path: Path) -> ClusterTemplate:
                 f"them a distinct 'role'")
         seen[member.id] = index
         members.append(member)
-    return ClusterTemplate(name=path.stem, members=tuple(members))
+    return ClusterTemplate(name=path.stem, members=tuple(members),
+                           description=description.strip())
 
 
 def _member_from(entry: Any, path: Path, index: int) -> Member:
@@ -139,6 +151,64 @@ def instantiate(template: ClusterTemplate, agents_dir: Path) -> tuple[Member, ..
         Member(agent=member.agent, role=member.role,
                build=load_lego(agents_dir / f"{member.agent}{LEGO_SUFFIX}"))
         for member in template.members)
+
+
+def auto_roles(picks: Sequence[tuple[str, str | None]]) -> list[tuple[str, str]]:
+    """Final `(agent, role)` pairs for an ordered pick list, disambiguating
+    duplicates without asking the user anything.
+
+    The creation form deliberately has NO per-member editing (decided: role
+    fields mid-flow are noise during setup; fine detail is edited later, from
+    the picker). So when picking twice adds a second `researcher`, the roles
+    that keep member ids unique must come from somewhere — here:
+
+    - a role carried in (a template's `primary`) is kept verbatim;
+    - an agent picked ONCE with no role stays bare (`researcher`, the collapsed
+      id — the common case reads clean);
+    - unroled entries of a MULTIPLY-picked agent are numbered in pick order
+      (`golem` twice → `golem__1`, `golem__2`) — BOTH numbered, because a bare
+      `golem` beside a `golem__2` would read as the senior of the two, which a
+      duplicate is not;
+    - numbering skips any value an explicit role already claims, so a template
+      role that happens to be `"1"` cannot collide.
+
+    Pure and order-preserving (order is tmux window order), so the form can
+    call it live to PREVIEW the ids each pick will create."""
+    totals = Counter(agent for agent, _ in picks)
+    claimed: dict[str, set[str]] = defaultdict(set)
+    for agent, role in picks:
+        if role is not None:
+            claimed[agent].add(role)
+    next_number: dict[str, int] = defaultdict(int)
+    out: list[tuple[str, str]] = []
+    for agent, role in picks:
+        if role is None:
+            if totals[agent] == 1:
+                role = agent                      # collapses to the bare id
+            else:
+                number = next_number[agent] + 1
+                while str(number) in claimed[agent]:
+                    number += 1
+                next_number[agent] = number
+                role = str(number)
+                claimed[agent].add(role)
+        out.append((agent, role))
+    return out
+
+
+def assemble(picks: Sequence[tuple[str, str | None]],
+             agents_dir: Path) -> tuple[Member, ...]:
+    """Ordered form picks → members carrying their agents' `.lego` defaults —
+    the form-side sibling of `instantiate`, for a membership the user grew by
+    hand rather than a template's verbatim list. Roles come from `auto_roles`;
+    each agent's `.lego` is read once however many members it yields."""
+    builds: dict[str, AgentBuild] = {}
+    members: list[Member] = []
+    for agent, role in auto_roles(picks):
+        if agent not in builds:
+            builds[agent] = load_lego(agents_dir / f"{agent}{LEGO_SUFFIX}")
+        members.append(Member(agent=agent, role=role, build=builds[agent]))
+    return tuple(members)
 
 
 def discover_templates(agents_dir: Path) -> dict[str, Path]:

@@ -272,13 +272,23 @@ def active_warnings(checked: set[str],
 
 
 def wants_warnings(checked: set[str],
-                   wants: dict[str, tuple[tuple[str, str], ...]]) -> list[tuple[str, list[str]]]:
+                   wants: dict[str, tuple[tuple[str, str], ...]],
+                   labels: dict[str, str] | None = None) -> list[tuple[str, list[str]]]:
     """(header, body) warning entries for every checked tag whose `[wants]`
     names an UNchecked tag — e.g. {auto} ticked without {firewall}. Rendered
     in the same red zone as combo warnings, live per toggle. A want never
-    blocks confirmation — it's a request with a message, not a requirement."""
+    blocks confirmation — it's a request with a message, not a requirement.
+
+    `labels` maps a key to its DISPLAY form and exists for one reason: the
+    header must show what the user is meant to go and find. The form's rows
+    are labelled `{cowork}` / `<+bash>`, so a header saying `'cowork' wants
+    'free-bash'` names two things that appear nowhere on screen — the reader
+    has to translate. Keys missing from the map fall back to themselves, so
+    non-tag callers lose nothing by omitting it."""
+    labels = labels or {}
     return [
-        (f"'{wanter}' wants '{wanted}':", message.splitlines())
+        (f"'{labels.get(wanter, wanter)}' wants '{labels.get(wanted, wanted)}':",
+         message.splitlines())
         for wanter, entries in wants.items() if wanter in checked
         for wanted, message in entries if wanted not in checked
     ]
@@ -318,6 +328,7 @@ def checkbox_form(title: str, options: list[FormOption],
                   warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None,
                   requires: dict[str, frozenset[str]] | None = None,
                   wants: dict[str, tuple[tuple[str, str], ...]] | None = None,
+                  labels: dict[str, str] | None = None,
                   preamble: list[str] | None = None) -> list[str] | None:
     """Render a full-screen multi-select form; block until confirm or cancel.
 
@@ -336,7 +347,10 @@ def checkbox_form(title: str, options: list[FormOption],
 
     `wants` maps option keys to their (wanted-key, message) requests —
     rendered in the warning zone while the wanter is checked and the wanted
-    key isn't (see wants_warnings). Purely advisory.
+    key isn't (see wants_warnings). Purely advisory. `labels` maps keys to
+    the display form those warnings name them by — pass it when rows are
+    labelled differently than they are keyed, or the warning points the
+    user at a name that appears nowhere on screen.
 
     `preamble` lines render dim (comment-like) between the title and the
     rows — context the form was opened with (instance name, workspace).
@@ -423,7 +437,8 @@ def checkbox_form(title: str, options: list[FormOption],
     def warning_fragments() -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         checked = checked_keys()
-        entries = active_warnings(checked, warning_map) + wants_warnings(checked, wants_map)
+        entries = (active_warnings(checked, warning_map)
+                   + wants_warnings(checked, wants_map, labels))
         for header, body in entries:
             out.append((UiClass.WARNING.css, f"  {header}\n"))
             out.extend((UiClass.WARNING.css, f"  {line}\n") for line in body)
@@ -607,6 +622,15 @@ def _form_wants(registry: Registry) -> dict[str, tuple[tuple[str, str], ...]]:
     }
 
 
+def _form_labels(registry: Registry) -> dict[str, str]:
+    """{tag name: punctuated label} for EVERY tag, all four kinds. The wants
+    zone displays through this map so its header shows what the rows show —
+    `'{cowork}' wants '<+bash>'` — rather than bare manifest names the user
+    would have to translate. All kinds, not just the form's three: a want may
+    point at any real tag."""
+    return {tag.name: tag.label for tag in registry.get_all()}
+
+
 def prompt_tags(registry: Registry, current: AgentBuild, *,
                 instance: str, workspace: str) -> AgentBuild | None:
     """Run the tag form (see the module docstring for the full behavior) and
@@ -620,6 +644,7 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
                          warnings=_combo_warnings(registry),
                          requires=_form_requires(registry),
                          wants=_form_wants(registry),
+                         labels=_form_labels(registry),
                          preamble=[f"# instance:  {instance}",
                                    f"# workspace: {workspace}"])
     if keys is None:

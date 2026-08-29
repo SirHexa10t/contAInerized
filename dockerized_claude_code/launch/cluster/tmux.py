@@ -60,29 +60,21 @@ TMUX = ("tmux", "-u", "-L", SOCKET)
 BANNER_REFRESH_SECONDS = 5      # how often tmux re-runs the status-right command
 SHELL_WINDOW = "shell"          # the free terminal, always last
 SHELL_COMMAND = ("bash", "-l")  # login shell: the operator's bashrc/aliases apply
+# The interactive KEY POLICY — quit, help, layout, mouse behavior — is NOT
+# assembled here: it ships as active lines in `settings/tmux.conf`, which the
+# generated script sources LAST, so the same file is both the defaults and the
+# user's override surface (edit a line, done — no Python). This module keeps
+# what a static file cannot express: session construction, computed content
+# (labels, banner), generated bindings (type-through), and the plumbing whose
+# correctness the launcher owes (mode-keys pin, clipboard emission).
+#
+# These two key names still live here because the STATUS-BAR HINT renders them
+# ("ctrl+b, shift+q": quit) while the bindings themselves are conf lines — a
+# test pins the conf to these constants so the hint cannot drift into a lie.
 KILL_KEY = "Q"                  # prefix + this, with a confirmation, ends everything
-HELP_KEY = "?"                  # rebound to a CURATED list; tmux's own moves to FULL_KEYS_KEY
-FULL_KEYS_KEY = "K"             # tmux's own `list-keys -N` (85 bindings), kept reachable.
-                                # NOT `/`: that ships as tmux's describe-key
-                                # prompt, and `-` ships as delete-buffer — both
-                                # looked free until the key column was read from
-                                # the right field. `K` and `|` are genuinely
-                                # unbound; `-` is knowingly overridden (a buffer
-                                # deleter is worth less here than a layout key).
-STACK_KEY = "-"                 # re-stack: shell below the agent
-SIDE_KEY = "|"                  # re-split: shell to the right
-SIDE_PANE_PERCENT = 33          # width the shell gets when put side by side
-KILL_NOTE = "Kill this whole session and everything in it"
-MOUSE_KEY = "m"                 # hand the mouse to the terminal, and take it back.
-                                # Knowingly overrides `select-pane -m` (mark a pane
-                                # for join/swap), on the same reasoning as `-`
-                                # above: in a two-pane session a pane marker is
-                                # worth less than the one key that restores the
-                                # terminal's own select-and-copy.
-MOUSE_NOTE = "Mouse: tmux, or your terminal for native select and copy"
+HELP_KEY = "?"                  # the curated help popup (settings/muxer-help.txt)
 COPY_TABLE = "copy-mode"        # the key table tmux dispatches through while
                                 # scrolled back — the reason typing was swallowed
-COPY_CONFIRMATION = "copied — paste with your terminal paste key, or ^b ] here"
 # What "typing" means: every printable ASCII character. Bound one by one, because
 # tmux's scroll-back view eats every one of them that is not — see
 # `_typethrough_command`.
@@ -93,35 +85,6 @@ _PRINTABLE = tuple(chr(code) for code in range(0x20, 0x7F))
 TYPETHROUGH_LABEL = ("# Any printable key leaves the scroll-back view and lands in"
                      " the pane. One call: 95 would cost 0.7s of spawning.")
 
-# The curated help. printf-safe: no apostrophes (the binding wraps it in single
-# quotes) and every literal % doubled. Held open by `read` because the image has
-# no pager — a popup whose command exits closes instantly.
-_HELP_LINES = (
-    "  Extra terminals - the keys that matter    (prefix = Ctrl-b)",
-    "",
-    "  ^b Up / Down    move between the agent and the shell",
-    "  ^b o            cycle through panes",
-    "  ^b z            zoom the focused pane full screen (again to undo)",
-    "",
-    "  ^b -            stack: shell below the agent   (the default)",
-    "  ^b |            side by side: shell to the right",
-    "",
-    "  ^b \"            new shell pane below",
-    "  ^b %%            new shell pane to the right",
-    "  ^b c            new window — a whole extra screen",
-    "",
-    "  wheel           scroll back - type anything to come back",
-    "  drag            mark text: copied when you let go  (^b ] pastes it)",
-    "  ^b m            give the mouse to your terminal, or take it back",
-    "",
-    "  ^b [            scroll back by keyboard - Escape to leave",
-    "  ^b d            detach: leave, everything keeps running",
-    "  ^b shift-Q      quit: end the session and stop the container",
-    "",
-    "  ^b shift-K      tmux own full key list (everything)",
-    "",
-    "  press Enter to close",
-)
 AGENT_PANE = "agent"            # pane title for the window the agent owns
 SHELL_PANE_PERCENT = 22         # how much height the free shell gets in a solo split
 # Seconds to wait before re-applying the split after a terminal resize. MEASURED
@@ -249,7 +212,6 @@ def solo_argv(session: str, agent: Pane, *, shell_cwd: Path,
         (*TMUX, "select-pane", "-t", f"{session}:{agent.name}.1", "-T", SHELL_WINDOW),
     ]
     commands += _ratio_hooks(session, f"{session}:{agent.name}.1", shell_percent)
-    commands += _key_argv(shell_percent)
     # The label carries the project, matching the launch banner's shape. It must
     # be the HOST path the operator recognises — the agent's cwd is the container
     # mount (`/workspace`), which is the same string for every instance and so
@@ -355,53 +317,6 @@ def _ratio_hooks(session: str, target: str, percent: int
     ]
 
 
-def _key_argv(shell_percent: int) -> list[tuple[str, ...]]:
-    """The extra bindings a solo split wants, and the curated help that lists them.
-
-    **`?` is rebound**, unlike everywhere else here where tmux defaults are left
-    alone. Its own `list-keys -N` is 85 entries — correct, and useless to someone
-    who wants to know how to switch panes and get out. tmux's list stays one key
-    away on `/`, and the popup names it.
-
-    The layout keys use RELATIVE pane targets (`{bottom}`, `{right}`) rather than
-    a composed `session:window.pane`, so one binding works in any session and
-    survives the window being renamed. Note the ratio hooks re-assert the stacked
-    default on the next attach, so a manual re-split is for the current sitting —
-    which the popup says.
-    """
-    help_body = "\n".join(_HELP_LINES)
-    return [
-        (*TMUX, "bind-key", "-N", "Show the keys that matter here",
-         "-T", "prefix", HELP_KEY,
-         "display-popup", "-E", "-w", "76", "-h", str(len(_HELP_LINES) + 2),
-         f"printf '{help_body}\n'; read _"),
-        # A popup, not bare `list-keys`: that opens a new window named `[tmux]`,
-        # which is disorienting and invisible in a status bar whose window list is
-        # blank for a solo instance.
-        (*TMUX, "bind-key", "-N", "tmux's own full key list",
-         "-T", "prefix", FULL_KEYS_KEY,
-         "display-popup", "-E", "-w", "90", "-h", "30",
-         f'{" ".join(TMUX)} list-keys -N; read _'),
-        # Two measured parsing traps here, both silent-ish:
-        #  * a bare ";" as its own argv element does NOT chain into the binding —
-        #    tmux ends `bind-key` there and runs the rest immediately, so the key
-        #    got the layout change while the resize fired once at setup. Chained
-        #    commands must arrive as ONE argument.
-        #  * `{bottom}` / `{right}`, tmux's relative pane targets, collide with
-        #    its command-BLOCK syntax inside such a string: tmux reads the braces
-        #    as a block and fails with "unknown command: bottom". `.1` (pane 1 of
-        #    the current window) says the same thing for a two-pane layout with
-        #    no braces to misparse.
-        (*TMUX, "bind-key", "-N", "Stack the shell below the agent",
-         "-T", "prefix", STACK_KEY,
-         f"select-layout even-vertical ; resize-pane -t .1 -y {shell_percent}%"),
-        (*TMUX, "bind-key", "-N", "Put the shell beside the agent",
-         "-T", "prefix", SIDE_KEY,
-         f"select-layout even-horizontal ; resize-pane -t .1 "
-         f"-x {SIDE_PANE_PERCENT}%"),
-    ]
-
-
 def _key_token(char: str) -> str:
     """`char` as tmux spells it in the KEY position of `bind-key`.
 
@@ -478,60 +393,24 @@ def _typethrough_command() -> tuple[str, ...]:
     return (*TMUX, *chained)
 
 
-def _copy_argv() -> list[tuple[str, ...]]:
-    """Marking text with the mouse, and the way out when the terminal refuses.
-
-    **The second reported bug: "copying with mouse-marking isn't possible".**
-    Marking does in fact work — `mouse on` binds a drag to `copy-mode -M`, which
-    selects — but tmux's drag-end is `copy-pipe-and-cancel`, so the highlight
-    vanishes the instant the button comes up and nothing says a copy happened. If
-    the text then also fails to reach the system clipboard, the gesture is
-    indistinguishable from one that did nothing at all. Both halves are addressed:
-
-    * the clipboard route is stated rather than inferred. tmux emits the OSC 52
-      clipboard sequence only when the CLIENT terminal's terminfo advertises `Ms`,
-      which varies with the operator's `$TERM` and with how current their terminfo
-      database is; `*:clipboard` asserts the capability for every terminal instead.
-    * the drag now confirms itself, and names the tmux-side paste key while it is
-      there. A one-line message is the whole difference between "it copied" and "I
-      cannot tell".
-
-    Whether those bytes reach the HOST clipboard is the terminal emulator's call —
-    several refuse OSC 52 writes by default, and no multiplexer can overrule that.
-    That is what `MOUSE_KEY` is for: it hands the mouse back to the terminal, whose
-    own select-and-copy needs no cooperation from us. It doubles as the way to
-    select ACROSS both panes, which tmux's pane-aware selection deliberately will
-    not do.
-    """
-    return [
-        # `-as`: terminal-features is a server option holding a LIST, so this
-        # appends a rule rather than replacing tmux's own per-terminal entries.
-        (*TMUX, "set-option", "-as", "terminal-features", ",*:clipboard"),
-        (*TMUX, "bind-key", "-T", COPY_TABLE, "MouseDragEnd1Pane",
-         f'send -X copy-pipe-and-cancel ; display-message "{COPY_CONFIRMATION}"'),
-        # `set -g mouse` with no value TOGGLES a flag option (verified: off → on →
-        # off), and `#{?mouse,…}` reads the option back, so one binding both flips
-        # the mode and reports which side now owns the mouse. Neither branch of the
-        # conditional may contain a comma — tmux splits `#{?…}` on the first one.
-        (*TMUX, "bind-key", "-N", MOUSE_NOTE, "-T", "prefix", MOUSE_KEY,
-         "set -g mouse ; display-message "
-         '"mouse: #{?mouse,tmux — the wheel scrolls and a drag copies,'
-         'your terminal — native select and copy}"'),
-    ]
-
-
 def _option_argv(session: str, *, banner: Path | None, refresh: int,
                  pane_titles: bool = False, left_label: str | None = None,
                  show_windows: bool = True) -> list[tuple[str, ...]]:
-    """The session's options — the banner being the point of most of them.
+    """The session's options — the LAUNCHER-OWED half of the configuration:
+    computed content (labels, banner, lengths) and correctness plumbing. Taste
+    lives in settings/tmux.conf instead (`mouse on`, every interactive key),
+    where the user edits it directly.
 
     `remain-on-exit on` is the one worth justifying: without it, a member whose
     `claude` dies takes its window with it, so a crash looks like a member that
     was never started. With it the pane stays, showing the exit status — the
-    difference between a diagnosable cluster and a confusing one.
+    difference between a diagnosable cluster and a confusing one. It stays
+    Python-side as a diagnosability invariant, not a preference.
     """
     options: list[tuple[str, str]] = [
-        ("mouse", "on"),                       # click a window name to switch
+        # `mouse on` is NOT here — it is the first active line of
+        # settings/tmux.conf, the canonical example of policy belonging to the
+        # user's file.
         # PINNED, not left to tmux's default, which is derived from $EDITOR /
         # $VISUAL at server start: with `vi` in either, copy-mode dispatches
         # through the `copy-mode-vi` table instead, and the type-through bindings
@@ -565,17 +444,29 @@ def _option_argv(session: str, *, banner: Path | None, refresh: int,
         ("window-status-format", " #W " if show_windows else ""),
         ("window-status-current-format",
          f" #[{_CURRENT_STYLE}] #W #[default] " if show_windows else ""),
-        ("status-right-length", "90"),
+        # 120, up from 90: the key hints are spelled all the way out now
+        # (~56 cells), and a cluster's banner rides in front of them — tmux
+        # TRUNCATES the overflow silently, and the tail is the quit hint,
+        # the one line a newcomer most needs.
+        ("status-right-length", "120"),
         # Our own content, re-read every `refresh` seconds. A missing file must
         # not print an error into the status bar, hence the `2>/dev/null ||:`.
         # The hints ride the status line, because a binding nobody can see is a
         # binding nobody uses — and one of these is the only clean way out of the
         # session, which a user who has never met tmux would otherwise have to
-        # guess. `?` is tmux's own help (list-keys -N), left as it ships.
+        # guess. Spelled ALL the way out ("ctrl+b, shift+q"), unlike the compact
+        # `^b` inside the popup: the corner is the entry point for someone who
+        # knows no tmux notation yet, and it must be executable without a
+        # legend — the popup it leads to is where the shorthand gets taught.
+        # `shift+` on both, though `?` implies it: the quit key is where the
+        # case genuinely bites (lowercase q is tmux's display-panes overlay,
+        # met as "weird red/blue numbers" in a live session), and one spelling
+        # rule for both reads cleaner than two.
         ("status-right",
          (f"#({shlex.join(('cat', str(banner)))} 2>/dev/null ||:)"
           if banner is not None else "")
-         + f" #[dim]^b {HELP_KEY} help  ^b shift-{KILL_KEY} quit#[default] "),
+         + f' #[dim]"ctrl+b, shift+{HELP_KEY}": help  |  '
+           f'"ctrl+b, shift+{KILL_KEY.lower()}": quit#[default] '),
     ]
     if pane_titles:
         # Only the solo split shows these: in a cluster each window IS one
@@ -587,26 +478,27 @@ def _option_argv(session: str, *, banner: Path | None, refresh: int,
     commands: list[tuple[str, ...]] = [
         (*TMUX, "set-option", "-t", session, "-g", name, value)
         for name, value in options]
-    # One deliberate way to close the whole thing. `remain-on-exit on` (above)
-    # means windows LINGER when their process dies, so a session never ends by
-    # itself and "quit every member" is not a way out — this binding is the way
-    # out, and it is why the option above needs one. `confirm-before` because it
-    # kills every member's process at once.
-    # `-N` attaches a description, which is what makes the binding show up in
-    # tmux's own help list (`prefix ?` runs `list-keys -N`, verified a default in
-    # 3.5a). Without the note our binding would be invisible there — the one key
-    # a user most needs to find would be the one key not documented.
-    commands.append(
-        (*TMUX, "bind-key", "-N", KILL_NOTE, "-T", "prefix", KILL_KEY,
-         "confirm-before", "-p", "kill this whole session, all windows? (y/n)",
-         "kill-session"))
-    # Mouse and scroll-back behaviour, emitted for BOTH shapes: a cluster member's
-    # pane swallows keystrokes exactly like a solo agent's, because the fault is in
-    # a key table — which is server-global — and not in the layout. Last, so the
-    # kill binding stays the first `bind-key` in the sequence and the narrative
-    # above (options, then the one way out) reads in order.
-    commands += _copy_argv()
+    # Clipboard plumbing: assert the `clipboard` feature for every terminal, so
+    # tmux emits OSC 52 on copy regardless of how current the client's terminfo
+    # is. `-as` because terminal-features is a server option holding a LIST —
+    # assigning would drop tmux's own per-terminal entries. Plumbing, not
+    # policy, which is why it stays here rather than in settings/tmux.conf:
+    # whether a copy is OFFERED to the terminal is the launcher's correctness
+    # concern; what the keys and the mouse DO with a copy is the user's file.
+    commands.append((*TMUX, "set-option", "-as", "terminal-features",
+                     ",*:clipboard"))
+    # Type-through, emitted for BOTH shapes: a cluster member's pane swallows
+    # keystrokes exactly like a solo agent's, because the fault is in a key
+    # table — server-global — not in the layout. Generated (95 bindings), so it
+    # could never live in the static conf; its `mode-keys emacs` pin rides in
+    # the options above for the same reason — the two must move together.
     commands.append(_typethrough_command())
+    # NOT here, deliberately: the quit / help / layout / mouse bindings. Those
+    # are user-facing key POLICY and ship as active lines in settings/tmux.conf
+    # (sourced last by `script`), so changing a key is editing a config file,
+    # not this module. The status-right hint above names two of them — the
+    # KILL_KEY / HELP_KEY constants exist for that hint, and a test pins the
+    # conf's bindings to the same letters so the hint cannot drift into a lie.
     return commands
 
 
@@ -640,9 +532,11 @@ def banner_text(members: tuple[str, ...], *, project: str | None = None) -> str:
 
 def script(session: str, panes: tuple[Pane, ...], *, banner: Path | None = None,
            unset_env: tuple[str, ...] = (),
+           setup_commands: tuple[str, ...] = (),
            shell_cwd: Path | None = None,
            solo: bool = False,
-           project_label: str | None = None) -> str:
+           project_label: str | None = None,
+           user_conf: Path | None = None) -> str:
     """The whole startup as a runnable `sh` script — what a container entrypoint
     executes.
 
@@ -656,6 +550,15 @@ def script(session: str, panes: tuple[Pane, ...], *, banner: Path | None = None,
 
     `set -eu` because a half-built tmux session is worse than a failed launch —
     the user would be looking at a cluster missing members with no error.
+
+    `user_conf` names the operator's tmux config (settings/tmux.conf, mounted
+    read-only), sourced LAST — after everything assembled above — for two
+    reasons at once: it CARRIES the interactive key policy (quit, help,
+    layout, mouse behavior — those bindings exist nowhere in this module), and
+    anything else the user sets there wins over the launcher's options. `-q`
+    so a deleted conf degrades the session (no key bindings) rather than
+    killing the launch under `set -eu`; the mount ships the file with every
+    container, so that case is deliberate user action, not an accident.
     """
     shape = ("the agent plus a free shell, split in one window" if solo
              else "one window per member")
@@ -665,6 +568,14 @@ def script(session: str, panes: tuple[Pane, ...], *, banner: Path | None = None,
              "set -eu", ""]
     lines += [f"unset {name}" for name in unset_env]
     if unset_env:
+        lines.append("")
+    # Raw shell lines the caller needs run before the multiplexer exists — the
+    # cluster launch uses these for its per-member filesystem setup (the shared
+    # sessions/ symlinks and the config-dir plumbing). Verbatim: the caller owns
+    # their quoting, and they run under this script's `set -eu`, so a failed
+    # setup stops the launch instead of producing half-wired members.
+    lines += list(setup_commands)
+    if setup_commands:
         lines.append("")
     # `solo` picks the one-window split (agent + free shell, both on screen);
     # otherwise it is the cluster shape, one window per member.
@@ -682,6 +593,10 @@ def script(session: str, panes: tuple[Pane, ...], *, banner: Path | None = None,
         if argv == typethrough:
             lines.append(TYPETHROUGH_LABEL)
         lines.append(shlex.join(argv))
+    if user_conf is not None:
+        lines += ["",
+                  "# The operator's own overrides — sourced last, so they win.",
+                  shlex.join((*TMUX, "source-file", "-q", str(user_conf)))]
     # `|| echo` rather than a bare attach: under `set -e` a failed attach would
     # exit the script — i.e. stop the container — before the wait loop below ever
     # ran, with nothing said about why. Measured: attaching with no TERM set fails

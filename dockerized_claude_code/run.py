@@ -20,6 +20,8 @@ from launch.claude_code_config import print_launch_banner
 from launch.gui import (
     ask_for_workspace, prompt_session, prompt_tags, select_agent,
 )
+from launch.cluster.launching import launch as launch_cluster
+from launch.cluster.state import Cluster
 from launch.tags.identity import SESSION_SEP
 from launch.paths import AGENTS_DIR, INSTANCES_FILE
 from launch.tag_handlers import apply_tags
@@ -55,7 +57,7 @@ class LaunchOptions(NamedTuple):
                             buster — used to retry previously-failed installs).
                             Already-installed tools fast-path through their
                             package manager's no-op."""
-    picked: Agent | Instance | None
+    picked: Agent | Instance | Cluster | None   # Cluster only via the picker — a CLI target names an agent/instance
     claude_args: list[str]
     dry_run: bool
     refresh_installs: bool
@@ -210,6 +212,12 @@ def launch() -> None:
     opts, registry = gather_input()
     assert opts.picked is not None   # gather_input exits on picker cancel — narrows for the type checker
     set_dry_run(opts.dry_run)
+    if isinstance(opts.picked, Cluster):
+        # Enter on a cluster row: a whole different run shape (union image, one
+        # container, N sessions) with its own orchestrator — none of the
+        # instance stages below (resume, persist, apply_tags) apply to it.
+        launch_cluster(opts.picked, registry)
+        return
     inst = resolve_target(opts.picked, registry)
     # Refuse a second container for an already-running instance. Placed on the
     # resolved identity so ONE check covers a CLI target, a picker row whose

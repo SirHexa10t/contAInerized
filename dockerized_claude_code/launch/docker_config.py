@@ -717,6 +717,37 @@ def effort_args(conf: dict[str, str], claude_args: list[str]) -> list[str]:
     return ["--effort", effort]
 
 
+def run_cluster_container(session: str, image: str,
+                          mounts: Iterable[tuple[str, str]],
+                          entrypoint: str) -> None:
+    """The cluster variant of `run_container` — deliberately a sibling here
+    rather than a reimplementation in the cluster package (the plan's recorded
+    decision: composing a `docker run` stays with the code that owns it).
+
+    Much simpler than the instance path ON PURPOSE, and the absences are the
+    contract, not oversights:
+      - no per-tag cap_add / entrypoint chain / env forwards — the launch
+        REFUSES members whose tags carry container-level docker features
+        (launching.refusal), so there is nothing to assemble;
+      - no engine conf at container level — each member's model/effort rides
+        its own tmux window's env (the per-pane `-e` property that chose tmux);
+      - no staged global mounts — the cluster assembles its own mount PAIRS
+        (pairs, not a dict: the shared credentials file is the SOURCE of one
+        mount per member, so sources repeat legally).
+    The entrypoint is the generated cluster script (tmux session, one window
+    per member, the shell window last); it is the container's PID 1 and holds
+    the container open across detaches exactly like the solo muxer script."""
+    container_name = f"{CONTAINER_NAME_PREFIX}cluster-{session}"
+    set_terminal_title(f"cluster {session}")
+    docker_subprocess(
+        ["run", "--rm", "-it", "--name", container_name, "-e", "TERM",
+         "--entrypoint", entrypoint]
+        + [arg for source, target in mounts
+           for arg in ("-v", f"{source}:{target}")]
+        + container_env_args()   # the always-on -e set (BASH_ENV, status line)
+        + [image])
+
+
 def run_container(inst: Instance, image: str, claude_args: list[str], resume_flag: list[str],
                   *, interactive: bool = True, print_prompt: str | None = None,
                   stream_renderer: Callable[[Iterable[str]], None] | None = None) -> None:

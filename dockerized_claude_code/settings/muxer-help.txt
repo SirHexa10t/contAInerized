@@ -1,0 +1,33 @@
+  Extra terminals - the keys that matter
+  ^b = hold ctrl and press b, release, then type the key  (tmux: C-b)
+
+  ^b Up / Down    move between the agent and the shell
+  ^b o            cycle through panes
+  ^b z            zoom the focused pane full screen (again to undo)
+
+  ^b -            stack: shell below the agent   (the default)
+  ^b |            side by side: shell to the right
+
+  ^b "            new shell pane below
+  ^b %            new shell pane to the right
+  ^b c            new window - a whole extra screen
+
+  ^b n / ^b p     next / previous window - cycle a cluster's members
+  ^b 1..9         jump straight to window N (members in listed order)
+  ^b w            windows overview - pick a member from a list
+  click a name    the status bar's window list switches on click
+
+  wheel           scroll back - type anything to come back
+  drag            mark text: copied when you let go  (^b ] pastes it)
+  shift+drag      select via YOUR terminal - ctrl+shift+c copies out
+  ^b m            give the mouse to your terminal, or take it back
+
+  ^b [            scroll back by keyboard - Escape to leave
+  ^b d            detach: leave, everything keeps running
+  ^b shift-Q      quit: end the session and stop the container
+
+  ^b shift-K      tmux's own full key list (everything)
+
+  these keys live in settings/tmux.conf - edit them there
+
+  press Enter to close

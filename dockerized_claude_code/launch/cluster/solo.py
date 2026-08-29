@@ -27,7 +27,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..file_access import write_text
-from ..paths import CLAUDE_CONFIG_IN_CONTAINER, WORKSPACE_IN_CONTAINER
+from ..paths import (
+    CLAUDE_CONFIG_IN_CONTAINER, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
+)
 from ..tags.identity import Instance
 from . import tmux
 
@@ -67,6 +69,9 @@ def install_launcher(inst: Instance, agent_argv: tuple[str, ...]) -> str:
         # The HOST workspace, which is what the operator recognises; the
         # container-side cwd is `/workspace` for every instance alike.
         project_label=inst.workspace,
+        # settings/tmux.conf, mounted read-only — sourced last so the
+        # operator's overrides beat every default the script just set.
+        user_conf=TMUX_CONF_IN_CONTAINER,
     ))
     host.chmod(0o755)
     return container

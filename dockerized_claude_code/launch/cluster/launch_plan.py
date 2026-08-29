@@ -148,6 +148,7 @@ class LaunchPlan:
 
 def build(cluster: Cluster, *, env_for: dict[str, dict[str, str]] | None = None,
           command: tuple[str, ...] = DEFAULT_MEMBER_COMMAND,
+          command_for: dict[str, tuple[str, ...]] | None = None,
           personal_workspaces: bool = False) -> LaunchPlan:
     """A `LaunchPlan` for `cluster`.
 
@@ -157,11 +158,18 @@ def build(cluster: Cluster, *, env_for: dict[str, dict[str, str]] | None = None,
     integration passes `Instance.conf` per member without this signature
     changing. A member absent from the map simply gets no extra env.
 
+    `command_for` is the same shape for the member's ARGV — integration
+    resolves per-member effort flags, `--continue`, and specialty claude_args
+    (two members legitimately run different command lines). A member absent
+    from the map runs `command` (the shared default), so PoC callers and tests
+    keep passing one tuple.
+
     Every member's own id is exported as `CLUSTER_MEMBER` (and the cluster's as
     `CLUSTER_SESSION`) because a cohabiting agent otherwise has no way to know
     which member it is — its persona is shared with its siblings, and `hostname`
     is the container's, not its own."""
     env_for = env_for or {}
+    command_for = command_for or {}
     worktrees = {w.member: w for w in plan_worktrees(
         cluster.session, cluster.ids, _worktrees_root(cluster.session))}
     members = tuple(
@@ -172,7 +180,7 @@ def build(cluster: Cluster, *, env_for: dict[str, dict[str, str]] | None = None,
                  "CLUSTER_SESSION": cluster.session,
                  "CLUSTER_MEMBER": member.id,
                  "CLUSTER_ROLE": member.role},
-            command=command,
+            command=command_for.get(member.id, command),
             personal_workspace=personal_workspaces,
         )
         for member in cluster.members

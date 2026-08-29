@@ -76,6 +76,14 @@ class TestInstallLauncher(unittest.TestCase):
         self.assertIn("be terse now", text)
         self.assertIn("--append-system-prompt", text)
 
+    def test_the_operators_tmux_conf_is_wired_in(self):
+        # settings/tmux.conf rides every launch as a read-only mount; the
+        # script must source it (last — tmux.py's tests pin the ordering) or
+        # the file the user was told to tinker with silently does nothing.
+        host, _ = self.install()
+        self.assertIn(f"source-file -q {paths.TMUX_CONF_IN_CONTAINER}",
+                      host.read_text())
+
     def test_the_label_is_the_host_workspace_not_the_container_mount(self):
         host, _ = self.install(workspace="/home/someone/code/thing")
         text = host.read_text()

@@ -662,5 +662,374 @@ class TestRunningFlag(TestContinuableInstances):
         self.assertIn("red", RUNNING_HINT[0])                        # the tag itself is the red part
 
 
+class TestRowMarkers(unittest.TestCase):
+    """PickerRowMarker — the bookmark lead-ins that contrast the picker's two
+    row kinds: an agent row is a green TAB with a fading end, its instances
+    nest beneath a dim grey indented ▸. Emoji stays on the menu rows only."""
+
+    def test_the_agent_row_leads_with_a_fading_tab(self):
+        # Tab body, then tip, in that order — the Starship-segment shape. Both
+        # creation tabs lead with `+` (the verb), then name what gets created.
+        (body_style, body), (tip_style, tip) = menu_picker.PickerRowMarker.NEW.lead
+        self.assertIn("+ Agent", body)
+        self.assertIn("+ Cluster", menu_picker.PickerRowMarker.CLUSTER.lead[0][1])
+        self.assertEqual(tip, menu_picker.TAB_TIP)
+        # THE invariant that makes it a tab: the tip's foreground is the tab's
+        # background, so the ramp renders as the tab dissolving, not characters.
+        self.assertIn(f"fg:{body_style.split('bg:', 1)[1].split()[0]}", tip_style)
+
+    def test_the_tip_stays_inside_the_procedurally_drawn_set(self):
+        # The kitty insight, transplanted: an application cannot rasterize
+        # cells, but terminals (VTE/kitty/WezTerm/alacritty) rasterize the
+        # Block Elements range THEMSELVES — full-cell, font never consulted.
+        # The first tip, a triangle (▶ U+25B6, a Geometric Shape drawn from
+        # the font at text size), rendered visibly SHORTER than its row on a
+        # live launch; this fence keeps any such typographic glyph from
+        # sneaking back into the tab's shape-work.
+        for char in menu_picker.TAB_TIP:
+            with self.subTest(char=hex(ord(char))):
+                self.assertIn(ord(char), menu_picker.BLOCK_ELEMENTS)
+        # A ramp needs at least two steps to read as a fade rather than a nub.
+        self.assertGreaterEqual(len(menu_picker.TAB_TIP), 2)
+
+    def test_instances_nest_under_the_tab_not_beside_it(self):
+        ((style, text),) = menu_picker.PickerRowMarker.CONT.lead
+        self.assertTrue(text.startswith("   "), "indent is the nesting cue")
+        self.assertIn("▸", text)
+        # Dim furniture, no tab: a second tab would read as a second agent.
+        self.assertNotIn("bg:", style)
+
+    def test_the_leads_are_universal_unicode_not_private_use(self):
+        # The whole point of ▶/▸ over Nerd-Font wedges: stock fonts cover them.
+        # PUA ranges: BMP E000–F8FF, planes 15/16 F0000–10FFFD. Emoji (1F3xx)
+        # sit outside all three and stay legal for the menu rows.
+        private_use = lambda cp: (0xE000 <= cp <= 0xF8FF or
+                                  0xF0000 <= cp <= 0x10FFFD)
+        for marker in menu_picker.PickerRowMarker:
+            for _, text in marker.lead:
+                for char in text:
+                    with self.subTest(marker=marker.name, char=hex(ord(char))):
+                        self.assertFalse(private_use(ord(char)))
+
+    def test_the_alignment_suffix_never_wears_the_tab_background(self):
+        # Glued onto the last lead fragment, the suffix would smear the tab's
+        # background across the gap to the tag column.
+        *_, last = menu_picker.PickerRowMarker.NEW.fragments("  ")
+        self.assertEqual(last, ("", "  "))
+        # And no suffix means no empty trailing fragment.
+        self.assertEqual(menu_picker.PickerRowMarker.NEW.fragments(),
+                         list(menu_picker.PickerRowMarker.NEW.lead))
+
+    def test_the_kind_colours_agree_between_tab_and_accent_bar(self):
+        # The tab wears Create's kind colour (green, iterated from an all-grey
+        # first pass) and the preview's edge bar shows the same one — two
+        # different greens would read as two different meanings. Cont keeps
+        # its yellow on the accent bar only; its dim lead carries no colour.
+        tab_bg = menu_picker.STYLE_TAB.split("bg:", 1)[1].split()[0]
+        self.assertEqual(menu_picker.PickerRowMarker.NEW.accent, f"fg:{tab_bg}")
+        self.assertEqual(menu_picker.PickerRowMarker.CONT.accent, "fg:ansiyellow")
+
+
+class TestRowAssembly(unittest.TestCase):
+    """select_agent's entry building, run for real with the TUI stubbed out.
+    The markers are multi-fragment now and SPLATTED into each display list —
+    a call site still treating one as a single fragment would only blow up
+    when the picker opens interactively, which no other test does."""
+
+    def entries(self):
+        captured = {}
+
+        def fake_pick(title, entries, **kw):
+            captured["entries"] = entries
+            return (None, None)
+
+        # One real store-backed instance rides along, so the instance-row
+        # assertions below can never pass vacuously — without this, the test
+        # environment has no instances and `inst_rows` would be empty (the
+        # exact silent-guard failure a mutation run caught once already).
+        inst = make_inst("golem", "assembly", "/tmp")
+        with patch.object(menu_picker, "pick_with_preview", fake_pick), \
+             patch.object(menu_picker, "list_all_instances",
+                          return_value=[inst.instance]), \
+             patch.object(menu_picker, "instance_from_store",
+                          side_effect=lambda name, registry: inst), \
+             patch.object(menu_picker, "docker_running_instances_subprocess",
+                          return_value=None), \
+             patch("launch.tags.identity.last_history_mtime", return_value=None):
+            self.assertIsNone(menu_picker.select_agent(REGISTRY))
+        return captured["entries"]
+
+    def test_every_display_fragment_is_a_style_text_pair(self):
+        for entry in self.entries():
+            for fragment in entry.display:
+                with self.subTest(fragment=fragment):
+                    style, text = fragment          # unpacking IS the assertion
+                    self.assertIsInstance(style, str)
+                    self.assertIsInstance(text, str)
+
+    def test_agent_rows_open_with_the_tab_and_its_tip(self):
+        agent_rows = [e for e in self.entries()
+                      if isinstance(e.value, menu_picker.Agent)]
+        self.assertTrue(agent_rows)
+        for row in agent_rows:
+            with self.subTest(agent=row.value.name):
+                self.assertEqual(tuple(row.display[:2]),
+                                 menu_picker.PickerRowMarker.NEW.lead)
+
+    def test_instance_rows_open_with_the_nested_marker(self):
+        inst_rows = [e for e in self.entries()
+                     if isinstance(e.value, Instance)]
+        self.assertTrue(inst_rows, "fixture must yield at least one Cont row")
+        for row in inst_rows:
+            with self.subTest(instance=row.value.instance):
+                self.assertEqual((row.display[0],),
+                                 menu_picker.PickerRowMarker.CONT.lead)
+
+    def test_each_shipped_template_gets_a_cluster_row(self):
+        # The real tree ships devteam.legoset; its row opens the creation flow
+        # (the value carries the template path for the dispatcher).
+        rows = [e for e in self.entries()
+                if isinstance(e.value, menu_picker._ClusterTemplateRow)]
+        self.assertEqual([r.value.name for r in rows], ["devteam"])
+        (row,) = rows
+        self.assertEqual(tuple(row.display[:2]),
+                         menu_picker.PickerRowMarker.CLUSTER.lead)
+        # Agent-row anatomy: member COUNT (in creation-green) where agents
+        # show tags, then the name, then " — description" — which describes
+        # what the TEAM does (the .legoset's description key), never a member
+        # list; the enumeration lives in the preview.
+        text = "".join(t for _, t in row.display)
+        self.assertIn("(5 members)", text)
+        count_style = next(style for style, t in row.display if "members)" in t)
+        self.assertEqual(count_style, menu_picker.STYLE_MEMBER_COUNT)
+        self.assertIn("green", menu_picker.STYLE_MEMBER_COUNT)
+        self.assertIn(" — Builds features end to end", text)
+        self.assertNotIn("researcher__primary", text)
+
+    def test_the_template_name_sits_in_the_agents_name_column(self):
+        # "indented the same distance as agents' entries": the cluster tab is
+        # wider than the agent tab, so the count column is PADDED to land the
+        # template name exactly where agent names start — measured per row
+        # text, not trusted from the arithmetic that produced it.
+        entries = self.entries()
+        agent_row = next(e for e in entries
+                         if isinstance(e.value, menu_picker.Agent))
+        cluster_row = next(e for e in entries
+                           if isinstance(e.value, menu_picker._ClusterTemplateRow))
+        agent_text = "".join(t for _, t in agent_row.display)
+        cluster_text = "".join(t for _, t in cluster_row.display)
+        self.assertEqual(cluster_text.index(cluster_row.value.name),
+                         agent_text.index(agent_row.value.name))
+
+    def test_a_broken_template_renders_unselectable_not_a_crash(self):
+        # Templates are hand-authored; the picker is where the author IS, so a
+        # parse error must become a red info row naming the fault.
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "oops.legoset"
+            bad.write_text("members = []")
+            with patch.object(menu_picker, "discover_templates",
+                              return_value={"oops": bad}):
+                rows = [e for e in self.entries() if e.selectable is False
+                        and "broken template" in "".join(t for _, t in e.display)]
+        self.assertEqual(len(rows), 1)
+
+
+class TestCreateClusterFlow(unittest.TestCase):
+    """_create_cluster_flow — prompts and form stubbed, persistence real (into
+    a redirected AGENTS_STATE). What must hold: a confirm SAVES exactly the
+    picked members with template roles and auto-numbering applied, and a
+    cancel saves nothing."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # The whole cluster feature composes its paths from AGENTS_STATE at
+        # call time, so one patch on launch.paths moves it (the design
+        # test_cluster_state relies on too).
+        from launch import paths as launch_paths
+        patcher = patch.object(launch_paths, "AGENTS_STATE", Path(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def flow(self, picks):
+        template_path = AGENTS_DIR / "devteam.legoset"
+        with patch.object(menu_picker, "ask_for_workspace",
+                          return_value="/tmp/project"), \
+             patch.object(menu_picker, "_prompt_cluster_session",
+                          return_value="myteam"), \
+             patch.object(menu_picker, "prompt_members",
+                          return_value=picks) as form, \
+             patch("builtins.input", return_value=""), \
+             patch("builtins.print"):
+            menu_picker._create_cluster_flow(REGISTRY, template_path)
+        return form
+
+    def test_confirming_creates_the_cluster_with_previewed_ids(self):
+        self.flow([("golem", None), ("golem", None), ("researcher", "primary")])
+        from launch.cluster import state
+        cluster = state.load("myteam")
+        self.assertEqual(cluster.ids, ("golem__1", "golem__2",
+                                       "researcher__primary"))
+        self.assertEqual(str(cluster.project), "/tmp/project")
+        # Members carry their agents' .lego defaults, not empty builds.
+        self.assertEqual(cluster.member("researcher__primary").build.engine,
+                         "researcher")
+
+    def test_the_form_opens_prefilled_with_the_template(self):
+        form = self.flow([("golem", None)])
+        prefill = form.call_args.args[1]
+        self.assertEqual(prefill[2:4], [("researcher", "primary"),
+                                        ("researcher", "adversarial")])
+        # Unroled template entries arrive as None so duplicates can renumber.
+        self.assertEqual(prefill[0], ("project-starter", None))
+
+    def test_cancelling_the_form_saves_nothing(self):
+        self.flow(None)
+        from launch.cluster import state
+        self.assertEqual(state.discover(), [])
+
+
+class TestClusterRowsAndEditing(unittest.TestCase):
+    """Existing clusters in the picker: the rows, and the three verbs on them —
+    F2 re-tags a member, Del removes one (guarding the last), Del on the
+    cluster destroys it. Flows run against real persistence in a redirected
+    AGENTS_STATE; only the interactive pieces (form, prompts, confirm) are
+    stubbed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from launch import paths as launch_paths
+        patcher = patch.object(launch_paths, "AGENTS_STATE", Path(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        self.state = state
+        self.cluster = state.save(state.from_template(
+            "team", Path("/tmp/project"),
+            (Member.of("golem"), Member.of("researcher", "primary")),
+            template="devteam"))
+
+    def entries(self):
+        captured = {}
+        with patch.object(menu_picker, "pick_with_preview",
+                          lambda t, entries, **kw:
+                          captured.update(entries=entries) or (None, None)), \
+             patch.object(menu_picker, "list_all_instances", return_value=[]), \
+             patch.object(menu_picker, "docker_running_instances_subprocess",
+                          return_value=None):
+            menu_picker.select_agent(REGISTRY)
+        return captured["entries"]
+
+    def test_a_cluster_row_then_its_members_nested_beneath(self):
+        entries = self.entries()
+        kinds = [type(e.value).__name__ for e in entries
+                 if isinstance(e.value, (menu_picker._ClusterRow,
+                                         menu_picker._MemberRow))]
+        self.assertEqual(kinds, ["_ClusterRow", "_MemberRow", "_MemberRow"])
+        cluster_row = next(e for e in entries
+                           if isinstance(e.value, menu_picker._ClusterRow))
+        self.assertEqual(tuple(cluster_row.display[:1]),
+                         menu_picker.PickerRowMarker.CLSTR.lead)
+        self.assertFalse(cluster_row.modifiable)   # nothing to F2 at cluster level
+        self.assertTrue(cluster_row.deletable)
+
+    def test_member_rows_are_the_editing_unit(self):
+        member_rows = [e for e in self.entries()
+                       if isinstance(e.value, menu_picker._MemberRow)]
+        self.assertEqual([r.value.member_id for r in member_rows],
+                         ["golem", "researcher__primary"])
+        for row in member_rows:
+            with self.subTest(member=row.value.member_id):
+                self.assertTrue(row.modifiable)
+                self.assertTrue(row.deletable)
+                # The row shows the member's tags — {muxer}{cluster} forced at
+                # creation are the visible proof it is a cluster member.
+                text = "".join(t for _, t in row.display)
+                self.assertIn("{clstr}", text)
+
+    def test_f2_persists_the_new_build_with_forced_tags_reapplied(self):
+        with patch.object(menu_picker, "prompt_tags",
+                          return_value=AgentBuild(professions=("code",))):
+            menu_picker._edit_member_flow(REGISTRY, "team", "golem")
+        edited = self.state.load("team").member("golem")
+        self.assertEqual(edited.build.professions, ("code",))
+        # The form returned a build WITHOUT them; persistence must not.
+        self.assertEqual(edited.build.specialties, ("muxer", "cluster"))
+
+    def test_cancelling_the_tag_form_changes_nothing(self):
+        with patch.object(menu_picker, "prompt_tags", return_value=None):
+            menu_picker._edit_member_flow(REGISTRY, "team", "golem")
+        self.assertEqual(self.state.load("team"), self.cluster)
+
+    def test_del_removes_the_member_after_confirmation(self):
+        with patch.object(menu_picker, "confirm_dialog", return_value=True):
+            menu_picker._remove_member_flow("team", "researcher__primary")
+        self.assertEqual(self.state.load("team").ids, ("golem",))
+
+    def test_an_unconfirmed_removal_changes_nothing(self):
+        with patch.object(menu_picker, "confirm_dialog", return_value=False):
+            menu_picker._remove_member_flow("team", "golem")
+        self.assertEqual(self.state.load("team").ids,
+                         ("golem", "researcher__primary"))
+
+    def test_the_last_member_cannot_be_removed(self):
+        # An empty cluster is unrepresentable; the honest gesture is destroying
+        # the cluster, which the guard message points at.
+        with patch.object(menu_picker, "confirm_dialog", return_value=True), \
+             patch("builtins.input", return_value=""), \
+             patch("builtins.print") as told:
+            menu_picker._remove_member_flow("team", "researcher__primary")
+            menu_picker._remove_member_flow("team", "golem")
+        self.assertEqual(self.state.load("team").ids, ("golem",))
+        self.assertIn("only member", str(told.call_args_list))
+
+    def test_del_on_the_cluster_row_destroys_it(self):
+        with patch.object(menu_picker, "confirm_dialog", return_value=True):
+            menu_picker._destroy_cluster_flow("team")
+        self.assertFalse(self.state.exists("team"))
+
+    def test_an_unconfirmed_destroy_keeps_everything(self):
+        with patch.object(menu_picker, "confirm_dialog", return_value=False):
+            menu_picker._destroy_cluster_flow("team")
+        self.assertTrue(self.state.exists("team"))
+
+    def dispatch(self, action, value):
+        """Drive select_agent's dispatch once: the stubbed picker returns the
+        given (action, value), then cancels on the next loop iteration."""
+        answers = iter([(action, value), (None, None)])
+        with patch.object(menu_picker, "pick_with_preview",
+                          lambda *a, **kw: next(answers)), \
+             patch.object(menu_picker, "list_all_instances", return_value=[]), \
+             patch.object(menu_picker, "docker_running_instances_subprocess",
+                          return_value=None), \
+             patch.object(menu_picker, "confirm_dialog", return_value=True):
+            self.assertIsNone(menu_picker.select_agent(REGISTRY))
+
+    def test_the_delete_key_routes_a_member_row_to_member_removal(self):
+        # The DELETE branch used to assume Instance (`value.instance`) — a
+        # member row reaching it must shrink the cluster, not crash or, worse,
+        # destroy the whole cluster.
+        self.dispatch(menu_picker.PickerAction.DELETE,
+                      menu_picker._MemberRow("team", "golem"))
+        self.assertEqual(self.state.load("team").ids, ("researcher__primary",))
+
+    def test_the_modify_key_routes_a_member_row_to_the_tag_form(self):
+        with patch.object(menu_picker, "prompt_tags",
+                          return_value=AgentBuild(engine="thinker")):
+            self.dispatch(menu_picker.PickerAction.MODIFY,
+                          menu_picker._MemberRow("team", "golem"))
+        self.assertEqual(self.state.load("team").member("golem").build.engine,
+                         "thinker")
+
+    def test_the_delete_key_routes_a_cluster_row_to_destruction(self):
+        self.dispatch(menu_picker.PickerAction.DELETE,
+                      menu_picker._ClusterRow("team"))
+        self.assertFalse(self.state.exists("team"))
+
+
 if __name__ == "__main__":
     unittest.main()

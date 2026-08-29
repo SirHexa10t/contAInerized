@@ -7,14 +7,16 @@ because the alternative is a cluster that half-launches.
 """
 
 import unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from launch import paths
 from launch.cluster.legoset import (
-    discover_templates, instantiate, load_legoset, validate,
+    assemble, auto_roles, discover_templates, instantiate, load_legoset,
+    validate,
 )
-from launch.cluster.member import ClusterError
+from launch.cluster.member import ClusterError, member_id
 from launch.tags.lego import AgentBuild
 
 
@@ -171,6 +173,89 @@ members = [{ agent = "researcher", role = "a" }, { agent = "researcher", role = 
         template = load_legoset(self.write(
             'members = [{ agent = "researcher", role = "primary" }]'))
         self.assertEqual(instantiate(template, self.dir)[0].id, "researcher__primary")
+
+
+class TestAutoRoles(unittest.TestCase):
+    """`auto_roles` — how the creation form's picks become unique member ids
+    WITHOUT any mid-flow editing (decided: role fields during setup are noise;
+    members are edited later, from the picker). The rules here ARE that
+    decision, so each has its own pin."""
+
+    def test_a_single_unroled_pick_stays_bare(self):
+        # The common one-of-each cluster keeps clean ids.
+        self.assertEqual(auto_roles([("golem", None)]), [("golem", "golem")])
+
+    def test_duplicates_are_both_numbered_not_first_come_bare(self):
+        # A bare `golem` beside `golem__2` would read as the senior of the
+        # two, which a duplicate is not — so the moment an agent is picked
+        # twice, EVERY unroled entry of it gets a number.
+        self.assertEqual(auto_roles([("golem", None), ("golem", None)]),
+                         [("golem", "1"), ("golem", "2")])
+
+    def test_template_roles_are_kept_verbatim(self):
+        picks = [("researcher", "primary"), ("researcher", "adversarial")]
+        self.assertEqual(auto_roles(picks), picks)
+
+    def test_an_added_duplicate_beside_template_roles_gets_a_number(self):
+        # devteam's case: two named researchers ship; the user picks a third.
+        self.assertEqual(
+            auto_roles([("researcher", "primary"), ("researcher", "adversarial"),
+                        ("researcher", None)]),
+            [("researcher", "primary"), ("researcher", "adversarial"),
+             ("researcher", "1")])
+
+    def test_numbering_skips_a_number_an_explicit_role_claims(self):
+        # A template role that happens to BE "1" must not collide with the
+        # auto-numbering — the generated role steps over it.
+        self.assertEqual(
+            auto_roles([("golem", "1"), ("golem", None), ("golem", None)]),
+            [("golem", "1"), ("golem", "2"), ("golem", "3")])
+
+    def test_order_is_preserved_because_it_is_window_order(self):
+        picks = [("b", None), ("a", None), ("b", None)]
+        self.assertEqual([agent for agent, _ in auto_roles(picks)],
+                         ["b", "a", "b"])
+
+    def test_every_produced_id_is_unique(self):
+        # The property from_template enforces — auto_roles must never hand it
+        # a collision, whatever mix of template roles and picks arrives.
+        picks = [("r", "primary"), ("r", None), ("r", None), ("r", "1"),
+                 ("golem", None), ("s", None)]
+        ids = [member_id(agent, role) for agent, role in auto_roles(picks)]
+        self.assertEqual(len(ids), len(set(ids)))
+
+
+class TestAssemble(LegosetTmp):
+    """`assemble` — form picks to members, the form-side sibling of
+    `instantiate`: same .lego inheritance, roles from auto_roles."""
+
+    def test_members_carry_their_agents_lego_defaults(self):
+        (self.dir / "refactorer.lego").write_text(
+            'engine = "thinker"\nprofessions = ["code"]')
+        (member,) = assemble([("refactorer", None)], self.dir)
+        self.assertEqual(member.id, "refactorer")
+        self.assertEqual(member.build.engine, "thinker")
+        self.assertEqual(member.build.professions, ("code",))
+
+    def test_duplicates_share_one_lego_read_and_differ_only_in_role(self):
+        (self.dir / "researcher.lego").write_text('engine = "researcher"')
+        members = assemble([("researcher", None), ("researcher", None)], self.dir)
+        self.assertEqual([m.id for m in members],
+                         ["researcher__1", "researcher__2"])
+        self.assertEqual(members[0].build, members[1].build)
+
+    def test_assembled_picks_survive_from_template(self):
+        # End to end: whatever the form confirms must be creatable — the
+        # duplicate-id refusal in from_template can never fire on form output.
+        from launch.cluster import state
+        members = assemble([("golem", None), ("golem", None),
+                            ("researcher", "primary"), ("researcher", None)],
+                           self.dir)
+        with TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(paths, "AGENTS_STATE", Path(tmp)):
+            cluster = state.from_template("form", Path("/tmp/p"), members)
+            self.assertEqual(cluster.ids, ("golem__1", "golem__2",
+                                           "researcher__primary", "researcher__1"))
 
 
 class TestDiscovery(LegosetTmp):

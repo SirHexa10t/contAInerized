@@ -1,19 +1,18 @@
-"""`cluster`'s command line — the PoC's operator surface.
+"""`cluster`'s command line — the operator surface.
 
-Five subcommands, each the only entry point to one operation:
+Six subcommands, each the only entry point to one operation:
 
     create    instantiate a `.legoset` as a cluster (state + git worktrees)
     list      what clusters exist, and who is in them
     plan      the exact command sequence a launch would run — the review artifact
     script    write the container entrypoint's tmux script
     destroy   remove a cluster's worktrees and state
+    launch    build the union image and run the cluster (--dry-run projects)
 
-**What is deliberately missing: a command that starts the container.** Building a
-cluster image (the union of its members' build steps) and running it belongs to
-`docker_config`, which already owns image and container assembly; adding a second
-implementation here to make the PoC feel complete would be exactly the layered
-drift this project keeps cleaning up. `plan` and `script` emit everything the
-integration will need, so the gap is a wiring step rather than a missing design.
+`launch` keeps the layering the earlier PoC note demanded: assembly lives in
+`launching`, and the docker invocation itself in `docker_config`
+(`ensure_image` + `run_cluster_container`) — this file only resolves, gates,
+and dispatches.
 
 Every subcommand prints a human-readable result and returns an exit code; none of
 them raise on ordinary refusals (a name already taken, a project that is not a
@@ -27,7 +26,8 @@ from pathlib import Path
 
 from ..file_access import write_text
 from ..paths import (
-    AGENTS_DIR, cluster_banner_path, cluster_path, cluster_worktrees_dir,
+    AGENTS_DIR, TMUX_CONF_IN_CONTAINER, cluster_banner_path,
+    cluster_worktrees_dir,
 )
 from ..utils import shell_returncode
 from . import launch_plan, state, tmux, worktree
@@ -73,6 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     removing = subs.add_parser("destroy", help="remove a cluster's worktrees and state")
     removing.add_argument("session")
+
+    running = subs.add_parser(
+        "launch", help="build the union image and run the cluster in one container")
+    running.add_argument("session")
+    running.add_argument("--dry-run", action="store_true",
+                         help="assemble everything and print the docker "
+                              "commands instead of running them")
     return parser
 
 
@@ -85,7 +92,7 @@ def main(argv: list[str]) -> int:
     duplicate id), so printing it beats a traceback at every call site."""
     args = build_parser().parse_args(argv)
     handlers = {"create": _create, "list": _list, "plan": _plan,
-                "script": _script, "destroy": _destroy}
+                "script": _script, "destroy": _destroy, "launch": _launch}
     try:
         return handlers[args.command](args)
     except ClusterError as error:
@@ -201,6 +208,7 @@ def _plan(args: argparse.Namespace) -> int:
     cluster = _resolve(args.session)
     if cluster is None:
         return EXIT_REFUSED
+    cluster = _picker_ordered(cluster)
     plan = launch_plan.build(cluster, personal_workspaces=_has_worktrees(cluster))
 
     print(f"  cluster '{plan.session}' — {len(plan.members)} member(s)")
@@ -234,11 +242,15 @@ def _script(args: argparse.Namespace) -> int:
     cluster = _resolve(args.session)
     if cluster is None:
         return EXIT_REFUSED
+    cluster = _picker_ordered(cluster)
     plan = launch_plan.build(cluster, personal_workspaces=_has_worktrees(cluster))
     # Written host-side, read container-side — two paths for one file.
     banner = cluster_banner_path(cluster.session)
     text = tmux.script(plan.session, plan.panes(), banner=plan.container_banner,
-                       shell_cwd=plan.container_shell_cwd)
+                       shell_cwd=plan.container_shell_cwd,
+                       # The key policy (quit, help, mouse) lives in this file —
+                       # without it a cluster session would have no quit binding.
+                       user_conf=TMUX_CONF_IN_CONTAINER)
 
     write_text(banner, tmux.banner_text(cluster.ids, project=str(cluster.project)))
     if args.out:
@@ -251,24 +263,32 @@ def _script(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _destroy(args: argparse.Namespace) -> int:
-    """Remove the worktrees, then the state. Branches are deliberately KEPT —
-    `git worktree remove` drops the checkout, not the commits, so work a member
-    committed stays reachable under `cluster/<session>/*`."""
+def _launch(args: argparse.Namespace) -> int:
+    """Build the union image and run the cluster. The heavy lifting lives in
+    `launching` (assembly) and `docker_config` (execution); this verb resolves,
+    gates on docker, and dispatches. `--dry-run` rides docker_config's own
+    projection: everything host-side (installs, script, banner) happens for
+    real, and the docker commands print instead of running — same contract as
+    `run.py --dry-run`."""
+    from ..docker_config import require_docker, set_dry_run
+    from ..tags import scan_all
+    from . import launching
     cluster = _resolve(args.session)
     if cluster is None:
         return EXIT_REFUSED
-    trees = worktree.plan(cluster.session, cluster.ids,
-                          cluster_worktrees_dir(cluster.session))
-    existing = {p.resolve() for p in worktree.existing_worktrees(cluster.project)}
-    for tree in trees:
-        if tree.path.resolve() in existing:
-            shell_returncode(*worktree.remove_argv(cluster.project, tree))
-    shell_returncode(*worktree.prune_argv(cluster.project))
+    set_dry_run(args.dry_run)
+    require_docker()
+    launching.launch(cluster, scan_all(AGENTS_DIR))
+    return EXIT_OK
 
-    directory = cluster_path(cluster.session)
-    from ..file_access import force_remove
-    force_remove(directory)
+
+def _destroy(args: argparse.Namespace) -> int:
+    """Remove the worktrees, then the state — the one definition lives in
+    `state.destroy` (the picker's Del shares it); this verb only narrates."""
+    cluster = _resolve(args.session)
+    if cluster is None:
+        return EXIT_REFUSED
+    state.destroy(cluster)
     print(f"  '{cluster.session}' destroyed — worktrees removed, state deleted. "
           f"Its branches (cluster/{cluster.session}/*) are kept.")
     return EXIT_OK
@@ -282,6 +302,17 @@ def _has_worktrees(cluster: state.Cluster) -> bool:
     with them after a manual cleanup. Cheap, and it makes `plan` describe the
     cluster as it actually is."""
     return any(cluster.worktree(identifier).is_dir() for identifier in cluster.ids)
+
+
+def _picker_ordered(cluster: state.Cluster) -> state.Cluster:
+    """The cluster with members in the DERIVED display/window order — what the
+    real launch uses (launching reorders the same way), so these preview verbs
+    never show a sequence the launch would then contradict."""
+    import dataclasses
+    from ..tags import scan_all
+    return dataclasses.replace(
+        cluster,
+        members=state.picker_order(cluster.members, scan_all(AGENTS_DIR)))
 
 
 def _resolve(session: str) -> state.Cluster | None:

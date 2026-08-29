@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git -C /workspace log --oneline -3)",
-      "Bash(git -C /workspace branch --show-current)"
-    ]
-  }
-}

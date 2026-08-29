@@ -323,6 +323,19 @@ Full sourced findings: the closed socket_protocol group's `socket_protocol.md`
 and agent_comms_research's `findings.md`; survey context:
 `agent_cross_comm_propositions.md`'s 2026-08-11 addendum.
 
+**2026-08-29 update (Claude Code 2.1.245, probed live):** the WAIT verdict
+above is for COWORK's hub — a HOST process writing into a session's socket —
+and it stands (wire format still undocumented). But the IN-CONTAINER path the
+cluster needs is now verified working with no wire-format knowledge at all:
+two sessions in one launcher container, kill-switch unset, exchanged a message
+via their own `ListAgents`/`SendMessage` tools with native wake, through the
+live firewall, named via `CLAUDE_CODE_SESSION_NAME`. The model is the client;
+no host ingress is involved. Mechanics that supersede the older notes:
+registration is `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` (+ peer-token
+`.key`), the socket is `/tmp/cc-socks/<pid>.sock`, and points (a)+(b) of the
+early-check recipe above are hereby done. Full results:
+plans/cluster_plan.md, "Research spike — CLOSED".
+
 ## Known issues — launcher
 
 - **A tag cannot mount a file into `~/.claude/commands/` — FIXED, and worth

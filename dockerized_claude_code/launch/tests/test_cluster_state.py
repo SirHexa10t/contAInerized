@@ -136,19 +136,125 @@ class TestForcedTags(ClusterTmp):
                 self.assertIn(name, registry.specialties)
 
 
-class TestRoundTrip(ClusterTmp):
-    def test_save_then_load_is_identical(self):
-        saved = state.save(self.a_cluster())
-        self.assertEqual(state.load("poc"), saved)
+class TestWithBuild(ClusterTmp):
+    """`Cluster.with_build` — the picker's F2 edit, persisted through one
+    method so its guarantees live in one place."""
 
-    def test_member_order_survives_the_round_trip(self):
-        # The tables are key-sorted for a canonical file, so order rides in the
-        # explicit `order` list. Choose an order that sorting would destroy.
-        cluster = state.save(state.from_template(
+    def test_replaces_exactly_one_members_tags(self):
+        cluster = self.a_cluster()
+        edited = cluster.with_build("researcher__primary",
+                                    AgentBuild(engine="thinker"))
+        self.assertEqual(edited.member("researcher__primary").build.engine,
+                         "thinker")
+        # The sibling with the same agent is untouched.
+        self.assertEqual(edited.member("researcher__adversarial").build,
+                         cluster.member("researcher__adversarial").build)
+
+    def test_order_is_untouched_because_it_is_window_order(self):
+        cluster = self.a_cluster()
+        self.assertEqual(cluster.with_build("refactorer", AgentBuild()).ids,
+                         cluster.ids)
+
+    def test_the_forced_specialties_survive_an_edit_that_unticked_them(self):
+        # The tag form lets a user untick anything; an edit is the SECOND place
+        # a member's build enters the file, so it gets the same guarantee
+        # from_template gives the first — no path produces a member unaware it
+        # is one.
+        cluster = self.a_cluster()
+        edited = cluster.with_build("refactorer", AgentBuild(professions=("code",)))
+        self.assertEqual(edited.member("refactorer").build.specialties,
+                         ("muxer", "cluster"))
+
+    def test_an_unknown_member_is_a_loud_stop(self):
+        # The edit came from a row naming a member; missing means the file
+        # changed underneath.
+        with self.assertRaises(ClusterError):
+            self.a_cluster().with_build("nobody", AgentBuild())
+
+
+class TestDestroy(ClusterTmp):
+    def test_a_shared_workspace_cluster_is_removed_without_touching_git(self):
+        # No worktrees were ever made, and the project may not even be a git
+        # repo — destroy must not shell out to git at all in that case.
+        from unittest.mock import patch as mock_patch
+        cluster = state.save(self.a_cluster())
+        self.assertTrue(paths.cluster_state_path("poc").is_file())
+        with mock_patch.object(state, "shell_returncode",
+                               side_effect=AssertionError("git was called")) :
+            state.destroy(cluster)
+        self.assertFalse(paths.cluster_path("poc").exists())
+
+    def test_destroy_is_what_makes_exists_false(self):
+        cluster = state.save(self.a_cluster())
+        self.assertTrue(state.exists("poc"))
+        state.destroy(cluster)
+        self.assertFalse(state.exists("poc"))
+        self.assertEqual(state.discover(), [])
+
+
+class TestPickerOrder(ClusterTmp):
+    """`picker_order` — THE member ordering, derived from the same logic that
+    sorts the picker's agent rows. Every sequence consumer (windows, rows,
+    previews, summaries) goes through it, so `^b 3` and the third row can
+    never name different members."""
+
+    def order(self, *members: Member) -> list[str]:
+        from launch.tags import scan_all
+        from launch.paths import AGENTS_DIR
+        registry = scan_all(AGENTS_DIR)
+        return [m.id for m in state.picker_order(tuple(members), registry)]
+
+    def test_members_follow_the_agent_rows_order(self):
+        # Same agents, same order as the picker's + Agent rows — verified
+        # against the REAL ordering function, not a re-derivation of its rules.
+        from launch.agents_crud import creatable_agents
+        from launch.tags import scan_all
+        from launch.paths import AGENTS_DIR
+        registry = scan_all(AGENTS_DIR)
+        agent_names = [a.name for a in creatable_agents(registry)]
+        members = tuple(Member.of(name) for name in reversed(agent_names))
+        self.assertEqual(self.order(*members), agent_names)
+
+    def test_same_agent_members_group_and_sort_by_id(self):
+        ordered = self.order(Member.of("researcher", "primary"),
+                             Member.of("golem"),
+                             Member.of("researcher", "adversarial"))
+        researchers = [i for i in ordered if i.startswith("researcher")]
+        self.assertEqual(researchers,
+                         ["researcher__adversarial", "researcher__primary"])
+        # Grouped: nothing sits between two members of one agent.
+        first = ordered.index(researchers[0])
+        self.assertEqual(ordered[first:first + 2], researchers)
+
+    def test_an_unknown_agent_sinks_last_instead_of_crashing(self):
+        # A stale member is a problem the ROWS display; ordering is not the
+        # place to die.
+        ordered = self.order(Member.of("ghost-agent"), Member.of("golem"))
+        self.assertEqual(ordered[-1], "ghost-agent")
+
+
+class TestRoundTrip(ClusterTmp):
+    def test_a_round_trip_is_lossless_up_to_canonical_order(self):
+        # Loading is CANONICAL (members id-sorted) — nothing else may change.
+        saved = state.save(self.a_cluster())
+        loaded = state.load("poc")
+        self.assertEqual({m.id: m for m in loaded.members},
+                         {m.id: m for m in saved.members})
+        self.assertEqual((loaded.session, loaded.project, loaded.template),
+                         (saved.session, saved.project, saved.template))
+        # And canonical means a second trip changes nothing at all.
+        self.assertEqual(state.load(state.save(loaded).session), loaded)
+
+    def test_authored_order_is_deliberately_not_stored(self):
+        # DECIDED: no `order` field — window/display order is DERIVED by
+        # picker-sort at use time (see picker_order below), "one less small
+        # decision for the user". Storage is id-sorted, so an order sorting
+        # would destroy… gets destroyed, and the file carries no order key.
+        state.save(state.from_template(
             "poc", Path("/tmp/p"),
             (Member.of("zebra"), Member.of("alpha"), Member.of("mid"))))
-        self.assertEqual(state.load("poc").ids, ("zebra", "alpha", "mid"))
-        self.assertEqual(state.load("poc").ids, cluster.ids)
+        self.assertEqual(state.load("poc").ids, ("alpha", "mid", "zebra"))
+        self.assertNotIn("order", paths.cluster_state_path("poc").read_text())
 
     def test_tags_survive_per_member(self):
         loaded = state.load(state.save(self.a_cluster()).session)
@@ -190,14 +296,14 @@ class TestCorruption(ClusterTmp):
         with self.assertRaises(ClusterError):
             state.load("poc")
 
-    def test_order_disagreeing_with_the_tables_raises(self):
-        # A hand-edit that removed a table but not its order entry: better to
-        # refuse than to launch a cluster missing a member.
+    def test_a_legacy_order_key_is_ignored_not_validated(self):
+        # Files written before the field was dropped carry `order` — including
+        # one naming ids that no longer match. The MEMBERS are the truth now,
+        # so such a file loads from its tables and the stale key means nothing.
         paths.cluster_state_path("poc").parent.mkdir(parents=True)
         paths.cluster_state_path("poc").write_text(
             'project = "/tmp/p"\norder = ["golem", "ghost"]\n\n[golem]\n')
-        with self.assertRaises(ClusterError):
-            state.load("poc")
+        self.assertEqual(state.load("poc").ids, ("golem",))
 
     def test_absent_cluster_loads_as_none(self):
         # "No cluster called that" is an answer a CLI prints, not a fault.

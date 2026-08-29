@@ -404,6 +404,73 @@ Form:
         "You didn't change anything. Be aware that [SPACE] fills the form; [ENTER] finalizes it. Are you sure that you want to exit? [Y/n]"
 
 
+Move commands for working with other AI from `/commands` into harness-calls
+    more relevant for clusters than remote workers
+    not Claude Code's harness; a new self-implemented harness
+        seems to be passed as "system" field in claude_client.messages.create()
+        use `Researcher` to check on this project first; estimate whether it'd be different than using an addendum, and whether the `command` would remain available in some form of user-suggestion
+    should all addendums be moved out as harness steps?
+    reference on building a harness:  https://www.mihaileric.com/The-Emperor-Has-No-Clothes/
+
+
+add flag to `quick_question.py`: `--resume-last` (applies `--resume` to the last ID, the one that appears last when running `--history`)
+    also: `--answer-last`
+
+
+tag bug? for <+bash>
+    Error: Permission to use Bash with command timeout 180 sudo apt-get install -y xvfb xdotool 2>&1 has been denied.
+    is it an error, or is this denied since the command isn't recognized?
+
+next AI to implement:
+    Gemini (has free-tier)
+    Muse (from Meta; works with similar systems as Claude, operating just like Claude Code)
+
+
+/unspagghetify:
+    High level: SEPARATE stuff. Categorizing different sections of the program naturally helps box problems into smaller scopes (making the "untangling" process much easier)
+        - Make the program LOOK the way it runs. The file-structure should reflect the behavior
+        -- Comprehensive sets of files; if you have an enum for some data, make sure that similar data would get its enum too, so that readers would get a clear picture of the code from observing base-structures (looks the way it runs)
+        -- Make the functions general and the code dynamic, so expansion would be easy ; unless the program is super-specific (looks the way it runs)
+        - When something gets over-complicated, consider offloading some responsibilities to the utility modules
+
+/refactor:
+    make functions be more "honest":
+        - don't ask for more than necessary (if an arg is just "iterable", don't ask for a list ; if the order doesn't matter, ask for a "collection"...)
+        - concise args: if you need 2 fields from 2 objects for a total of 4 args, go all the way in one direction rather than remain ambiguous :
+        -- Option 1: you may as well just receive the 2 objects in full
+        -- Option 2: run as a math/util function that's blind to the existance of such objects, and only cares about those values
+        - does the function name make sense? 
+        - does it make sense that the function returns its specific types? ('yes' if they're produced during the function's run)
+        -- can the function return just one item and have the other items inferred from the returned one? Return more than one item if they're *complementary*, not derivative
+        - does the function compute/fetch something that gets recomputed/refetched by following function calls? If so, consider passing the computing/fetching as an arg, outside the function, for the sake of efficiency (depends on your code layout...)
+    add functions:
+        Every "if" is a potential function. It defines a split in the code.
+        Whenever you add a function, check if it can be reused in other places within your code.
+    function-definition considerations (not hard rules):
+        - single-responsibility principle (Uncle Bob)
+        - seperate functions for producing data / acting on it (Tony Van Eerd)
+        - no raw loops: loops with non-trivial bodies should be pulled into their own functions or expressed through generic algorithms (Sean Parent)
+    Conceptually, what parts of the program could run in parallel? (think about the code as tasks, and consider which are required at the same time and have no overlap/co-dependencies)
+        If the program NEEDS to be fast, consider building up your data as lists of fields rather than a list of object-with-fields to support SIMD
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 CANCELLED:

@@ -80,6 +80,33 @@ class TestTagHandlerArtifacts(unittest.TestCase):
         self.assertFalse(hasattr(tag_handlers, "_apply_base"))
 
 
+class TestMuxerUserConf(unittest.TestCase):
+    """settings/tmux.conf + settings/muxer-help.txt — the muxer's key policy
+    and its help text, both user-editable files mounted into every container.
+    Existence and mounts are pinned HERE; what the conf's active lines must say
+    is pinned with the rest of the muxer behavior, in test_cluster_tmux's
+    TestKeyPolicyConf."""
+
+    CONF = paths.SETTINGS_DIR / "tmux.conf"
+    HELP = paths.SETTINGS_DIR / "muxer-help.txt"
+
+    def test_the_conf_exists_and_rides_every_launch(self):
+        # Without the mount, every session would launch with NO quit or help
+        # binding — the conf carries the key policy, not just overrides.
+        self.assertTrue(self.CONF.is_file())
+        self.assertIn(self.CONF, paths.DOCKER_BASE_MOUNTS)
+        self.assertIn(str(paths.TMUX_CONF_IN_CONTAINER),
+                      paths.DOCKER_BASE_MOUNTS[self.CONF])
+
+    def test_the_help_text_exists_and_rides_every_launch(self):
+        # The conf's `^b ?` binding cats this file; absent, the popup opens
+        # onto a cat error.
+        self.assertTrue(self.HELP.is_file())
+        self.assertIn(self.HELP, paths.DOCKER_BASE_MOUNTS)
+        self.assertIn(str(paths.MUXER_HELP_IN_CONTAINER),
+                      paths.DOCKER_BASE_MOUNTS[self.HELP])
+
+
 class TestUserExtrasTemplates(unittest.TestCase):
     """Template files that the launcher plants into ~/.claude-agents/user_extras/
     on first launch."""

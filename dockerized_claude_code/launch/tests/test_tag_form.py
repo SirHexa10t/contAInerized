@@ -249,6 +249,42 @@ class TestActiveWarnings(unittest.TestCase):
         self.assertEqual(active_warnings(set(), self.warnings), [])
 
 
+class TestWantsWarnings(unittest.TestCase):
+    """wants_warnings — the advisory zone. Keys stay manifest NAMES (they must
+    match the checked set); `labels` is display-only, and it exists because a
+    header naming 'cowork' and 'free-bash' points the user at two strings that
+    appear nowhere on screen — the rows say {cowork} and <+bash>."""
+
+    WANTS = {"cowork": (("free-bash", "coworkers get auto-denied without it"),)}
+
+    def test_fires_only_while_the_wanted_tag_is_unchecked(self):
+        self.assertEqual(len(tag_form.wants_warnings({"cowork"}, self.WANTS)), 1)
+        self.assertEqual(tag_form.wants_warnings({"cowork", "free-bash"},
+                                                 self.WANTS), [])
+        self.assertEqual(tag_form.wants_warnings(set(), self.WANTS), [])
+
+    def test_the_header_shows_labels_when_given(self):
+        labels = {"cowork": "{cowrk}", "free-bash": "<+bash>"}
+        (header, _), = tag_form.wants_warnings({"cowork"}, self.WANTS, labels)
+        self.assertEqual(header, "'{cowrk}' wants '<+bash>':")
+
+    def test_a_key_missing_from_the_map_falls_back_to_itself(self):
+        # Non-tag callers of checkbox_form lose nothing by omitting labels.
+        (header, _), = tag_form.wants_warnings({"cowork"}, self.WANTS,
+                                               {"cowork": "{cowrk}"})
+        self.assertEqual(header, "'{cowrk}' wants 'free-bash':")
+
+    def test_the_forms_label_map_is_punctuated_for_every_kind(self):
+        # The real registry, all four kinds — a want may point at any tag.
+        labels = tag_form._form_labels(REGISTRY)
+        self.assertEqual(labels["cowork"], "{cowrk}")
+        self.assertEqual(labels["free-bash"], "<+bash>")
+        self.assertEqual(labels["code"], "[code]")
+        # Engines included (a want may point at one) — asserted via the tag's
+        # own label because engine shortnames are expressive (thinker is 🧠).
+        self.assertEqual(labels["thinker"], REGISTRY.engines["thinker"].label)
+
+
 class TestPromptTags(unittest.TestCase):
     """prompt_tags' post-form processing: the flat key list splits back into
     axes (registry order) and the engine rides through untouched. The form

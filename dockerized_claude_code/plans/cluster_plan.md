@@ -486,6 +486,55 @@ are per-cluster, not per-launcher):**
 > only needs the shared mount we already control. Another reason the queue is
 > attractive: it sidesteps the one question that could block the feature.
 
+### Research spike — CLOSED (2026-08-29, empirical, Claude Code 2.1.245)
+
+Every blocking question above was answered by probing inside a live
+launcher-built container (this instance's own — `{firewall}` active, disposable
+sibling sessions on the agent's scratch tmux server), not from docs:
+
+- **Kill-switch recipe CONFIRMED.** A sibling launched with
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` genuinely UNSET had `ListAgents`
+  loaded and `SendMessage` working; the control sibling (var still set) had no
+  `ListAgents` at all. The planned entrypoint `unset` (already supported via
+  `tmux.script`'s `unset_env`) is exactly the right mechanism.
+- **OPEN #2 (firewall) CLOSED — no whitelist change needed.** Activation and a
+  full exchange worked under the live firewall. The transport is a local unix
+  socket (no egress), and whatever remote fetch activation performed
+  (`remote-settings.json` appeared) passed the existing whitelist.
+- **Exchange + native wake PROVEN** (the docs' "two sessions inside the same
+  container" case). `SendMessage` delivered into the sibling's pane as a prompt
+  (`@ workspace-e4❯ ping from labA…`) and the IDLE sibling woke and processed
+  the turn. No inbound hold fired: local same-uid peers exchanged with zero
+  `crossSessionInbound` configuration on 2.1.245 defaults.
+- **OPEN #3 (discovery vs isolation) — mechanism mapped.** Registration is
+  per-CONFIG-DIR: `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` plus a
+  `<pid>.<hash>.key` peer-token file; the socket itself is machine-scoped
+  (`/tmp/cc-socks/<pid>.sock`). Shared config dir → discovery proven live.
+  Separate per-member config dirs → separate registries BY CONSTRUCTION — so
+  the cluster entrypoint symlinks every member's `sessions/` to one shared
+  dir (`/cluster/sessions/`) before launching members. Symlink-follow is plain
+  POSIX path resolution and should be invisible to the app; it is the one
+  residual to verify at the first real cluster launch. The message-queue's
+  shared-mount direction above is unchanged and still queue-sufficient.
+- **Member naming SOLVED: `CLAUDE_CODE_SESSION_NAME=<member-id>`.** Verified:
+  a sibling launched with `…=researcher__primary` appears in a peer's
+  `ListAgents` as `researcher__primary [f0b12a]`. Naming is therefore one more
+  per-window `-e` variable — the exact property that chose tmux. `/rename`
+  exists for live changes; auto-derived names (`workspace-e4`) are the
+  fallback.
+- **Bonus, better than the plan hoped:** every session (messaging-enabled or
+  not) self-registers `name`, `status: idle|busy`, and its OWN TMUX PANE ID
+  (`"tmux":"labC:@2.%2"`) in `sessions/<pid>.json`, and peers advertise a
+  `notify_idle` feature. Claude Code natively maintains the per-member state
+  herdr was being watched for — the banner and the queue's wake (OPEN #4) can
+  READ this instead of us building telemetry. Stale records from dead sessions
+  are filtered by `ListAgents` (procStart validation), so no cleanup falls on
+  us.
+- One probe was fenced, and the fence is itself a finding: an agent cannot
+  copy `.credentials.json` even to test an isolated config dir (permission
+  engine). Harmless to the design — the LAUNCHER places credentials host-side
+  into every member state dir, as it already does for solo instances.
+
 ---
 
 ## Turn-taking and the shared "chat"
@@ -644,12 +693,13 @@ State these at the top of the eventual feature so nobody reads them as bugs:
 
 ## Roadmap
 
-1. **Research spike (blocks the feature path, not the queue path):** OPEN #3
-   (can the feature's registration dir be relocated into the shared cluster
-   mount, keeping per-member `~/.claude`?), OPEN #2 (flag endpoint to
-   whitelist), OPEN #4 (which wake backs the queue), and confirm the
-   kill-switch-unset recipe activates the socket in our image. Doubles as checks
-   (a)+(b) from ISSUES.md's socket early-check recipe. → the researcher.
+1. ~~**Research spike**~~ **CLOSED (2026-08-29)** — done empirically in a live
+   container rather than delegated; full results under "Research spike —
+   CLOSED" in Communications. Kill-switch recipe confirmed, OPEN #2 closed (no
+   whitelist change), exchange + native wake proven, OPEN #3 mechanism mapped
+   (per-config-dir `sessions/` registry; shared symlink target for members),
+   naming solved (`CLAUDE_CODE_SESSION_NAME`). One residual rides PoC-1: verify
+   the sessions-dir symlink is followed.
 2. **PoC-0 — BUILT (2026-08-12).** `agents/devteam.legoset`, the
    `launch/cluster/` package (member / legoset / state / worktree / tmux /
    launch_plan / cli), and a root `cluster.py` entry. 131 tests. What is
@@ -671,9 +721,54 @@ State these at the top of the eventual feature so nobody reads them as bugs:
    via the feature; prerequisites wired. Prove two members exchange a message
    in-container. (OR: prototype the message-queue instead, if the spike says the
    feature path is blocked or the queue is preferred for privacy.)
-4. **The form:** project/session prompt → growing member-picker with role
-   fields (pre-filled from the legoset's multiplicity + default roles); pick
-   adds another of a type; per-member tag editing via the picker.
+4. **The form — CREATION HALF BUILT (2026-08-29).** The picker now carries one
+   cyan-tab row per `.legoset`; selecting it prompts project + session name,
+   then opens the membership form (`gui/cluster_form.py`): every agent listed,
+   **Space adds another of the focused agent** (×N chip), Backspace removes its
+   last, a live panel previews the exact member ids, Enter persists via
+   `legoset.assemble` + `state.save`. One deliberate change from the sketch
+   above: **no role fields** — decided with the operator that per-member
+   editing mid-flow is noise during setup. Roles auto-derive instead
+   (`legoset.auto_roles`): template roles verbatim; a unique unroled pick stays
+   bare; duplicates ALL get numbered (`golem__1`/`golem__2` — a bare `golem`
+   beside a `golem__2` would read senior), numbering skipping claimed values;
+   the live id panel is what makes the invisible rule acceptable. A broken
+   `.legoset` renders as an unselectable red row naming the fault rather than
+   crashing the picker. **EDITING HALF BUILT TOO (same day):** existing
+   clusters appear beneath the template rows (`▸ Clstr` line, members nested
+   with their tag labels); **F2 on a member opens the ordinary tag form** and
+   persists via `Cluster.with_build`, which re-applies the forced
+   `{muxer}`/`{cluster}` (the form lets anyone untick them; no path may
+   produce a member unaware it is one); Del removes a member (last member
+   guarded — destroy instead) or destroys the cluster (via `state.destroy`,
+   extracted from the CLI so both share one teardown; worktree removal only
+   runs when worktrees exist, so a shared-workspace cluster never shells git).
+   STILL PENDING from this milestone: nothing — what remains is LAUNCH (the
+   docker integration; Enter on a cluster row explains that today).
+5. **LAUNCH — BUILT (2026-08-29).** `launch/cluster/launching.py` (assembly) +
+   `docker_config.run_cluster_container` (execution, per the recorded
+   split). Enter on a picker cluster row and `cluster.py launch <session>
+   [--dry-run]` both run it: members resolve to ordinary Instances (personas /
+   settings / commands installed into `clusters/<s>/members/<id>` by the
+   normal agents_crud pipeline), the UNION image builds via the ordinary
+   `ensure_image`, and the generated entrypoint (`/cluster/cluster-start.sh`)
+   bakes in the spike's recipes — kill-switch unset (messaging ON; the
+   accepted telemetry cost is announced at every launch), per-member
+   `CLAUDE_CONFIG_DIR=/cluster/members/<id>` riding the one /cluster mount,
+   `sessions/` symlinked to shared `/cluster/sessions/`, skills/keybindings
+   symlinked from ~/.claude, `CLAUDE_CODE_SESSION_NAME=<member-id>` per
+   window. Per-member engine conf and effort/`--continue`/claude_args ride
+   each WINDOW's env/argv (`launch_plan` grew `command_for`). Credentials
+   mount per member — mounts are (source, target) PAIRS because the shared
+   credential file is the source of N mounts (a source-keyed dict silently
+   served only the last member; caught by its test). Members whose tags carry
+   container-level docker features ({firewall}, {dood}) are REFUSED by name
+   rather than launched degraded. Cycling: tmux native (^b n/p, numbers, ^b w,
+   click the status-bar name), now listed in the help popup. Verified: full
+   CLI dry-run end-to-end (base→code→muxer builds, the run command, the
+   script's recipes) + 6 mutation-checked guards. NOT yet verified: a real
+   `docker run` on a docker-equipped host — first live boot checks the
+   sessions-symlink follow and CLAUDE_CONFIG_DIR account-file relocation.
 5. **Protocol + shared chat:** the team dynamic on the queue — broadcast
    questions, any-who-knows answers, all-nop handling, the step-up protocol, and
    a stop rule; moderator first, then round-table; the queue is the journal.
@@ -702,6 +797,16 @@ State these at the top of the eventual feature so nobody reads them as bugs:
   not implement early.
 - **Multiplexer:** tmux for the PoC (zellij as ergonomic fallback; prompt_toolkit
   switcher as the long-term "our UI" path).
+- **Member/window order (2026-08-29): DERIVED, never authored.** No `order`
+  field in cluster.toml (legacy files' key is ignored); `state.picker_order`
+  — the picker's own agent-row sorting, same-agent members id-grouped — is
+  the one ordering every consumer uses (windows, `^b 1..9`, picker rows,
+  previews, summaries, the form's panel). Template file order and form pick
+  order carry no meaning (pick sequence only drives duplicate numbering).
+  Rationale, verbatim: "The user has enough small decisions to make, this
+  doesn't need to be one of those." Accepted cost: a template cannot choose
+  its landing window (devteam opens on bug-investigator, not
+  project-starter).
 
 **Queued, not yet done (2026-08-12):**
 

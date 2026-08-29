@@ -81,15 +81,21 @@ from ..agents_crud import (
     creatable_agents, delete_instance, instance_from_store, invalid_tags_report,
     list_all_instances, modify_instance,
 )
+from ..cluster import state as cluster_state
+from ..cluster.legoset import (
+    ClusterTemplate, assemble, discover_templates, load_legoset, validate,
+)
+from ..cluster.member import ClusterError, valid_label
 from ..docker_config import docker_running_instances_subprocess
 from ..file_access import (
     expand_user_path, is_dir, last_prompt_in_state, path_exists, read_text,
     resolved_cwd, resolved_path, tab_complete_paths,
 )
 from ..paths import (
-    AGENTS_COMMANDS_DIR, DEFAULT_WORKSPACE, DEFAULTING_DIRS,
+    AGENTS_COMMANDS_DIR, AGENTS_DIR, DEFAULT_WORKSPACE, DEFAULTING_DIRS,
     instance_state_dir_path,
 )
+from .cluster_form import prefill_picks, prompt_members
 from .tag_form import (
     RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _fragment_source,
     _normalize, _plain,
@@ -168,6 +174,36 @@ CONFIRM_DELETE_FMT = "Delete '{name}'?"
 # ============================================================
 
 STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
+# The bookmark shapes the picker's two CONTRASTED row kinds lead with (see
+# PickerRowMarker): an agent row is a green tab with a fading end, its
+# instances nest beneath behind a dim grey ▸. Green by request (iterated from
+# an all-grey first pass) — it is also Create's KIND colour, the same green
+# the preview's accent bar shows, so the tab and the bar agree.
+STYLE_TAB            = "bg:ansigreen fg:black bold"         # the tab body behind "Create" — black text on the green art, per request
+STYLE_TAB_TIP        = "fg:ansigreen"                       # its fading end: foreground == tab background, so the shade ramp reads as the tab dissolving, not as characters
+STYLE_NEST_MARK      = "fg:ansibrightblack"                 # instance rows: dim marker, indented under the agent's tab
+# The cluster-template rows wear the same tab shape in CYAN — a third kind
+# beside create-green and continue-yellow, same colour its preview accent shows.
+# Existing clusters nest beneath in the CONT shape (also cyan), their members a
+# level deeper still — shape says create/continue, colour says cluster.
+STYLE_CLUSTER_TAB     = "bg:ansicyan fg:black bold"
+STYLE_CLUSTER_TAB_TIP = "fg:ansicyan"
+STYLE_CLUSTER_NEST    = "fg:ansicyan"
+STYLE_MEMBER_COUNT    = "fg:ansigreen"    # the "(N members)" column on a template row
+# The tab's end, as a shade ramp (▓▒░ — Block Elements, U+2580–259F). NOT a
+# triangle: ▶ is a Geometric Shape, i.e. a TYPOGRAPHIC character the font
+# renders at text size, so it sat visibly shorter than the row (reported from
+# a live launch). Block elements are the one shape family terminal emulators
+# rasterize THEMSELVES — kitty's box_drawing module, and the same procedural
+# drawing in VTE/gnome-terminal, WezTerm, and alacritty — full-cell and
+# seam-free with the font never consulted. That is the transplantable half of
+# "kitty stops trusting fonts": an application cannot draw pixels, but it can
+# emit only the code points the emulator draws procedurally. The ramp is the
+# classic powerline "fade" separator, built from universal characters.
+TAB_TIP = "▓▒░"
+# The set the tip must stay inside — tested, so a prettier font glyph cannot
+# sneak back in and reintroduce the short-triangle rendering.
+BLOCK_ELEMENTS = range(0x2580, 0x25A0)
 STYLE_DEL_NAME       = "bold fg:ansired"
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
 
@@ -189,33 +225,64 @@ class PickerAction(Enum):
 
 
 class PickerRowMarker(Enum):
-    """Row prefix marker — pairs the glyph that prefixes a row with the style
-    applied to it. Bundling so that 'kind of row' is one named thing instead of
-    a (glyph, style) pair manually assembled at each call site. The shared
-    DEL_MARKER style is preserved by giving DELMNU and DLET the same colour
-    string — they're two different *markers* that happen to render the same.
+    """Row lead-in — the fragments that prefix a row, bundled with the accent
+    colour the preview's edge bar shows while that row is selected. Bundled so
+    'kind of row' is one named thing instead of parallel constants assembled
+    at each call site.
+
+    The two row kinds the picker CONTRASTS — agents (Create) and their
+    instances (Cont) — wear bookmark shapes instead of emoji: the agent row
+    leads with a grey tab dissolving through a shade ramp (the Starship
+    segment look, fade variant), and its instances nest beneath it behind a
+    dim, indented ▸. The shape-work is confined to characters terminals draw
+    PROCEDURALLY (see TAB_TIP) — two font lessons paid for this: the
+    private-use powerline wedges () are tofu on stock fonts, and even the
+    universally-COVERED triangle ▶ renders at typographic size, visibly
+    shorter than the row (both observed live). Cell backgrounds and block
+    elements are the only full-height primitives an application can rely on.
+    ▸ on the Cont rows is deliberately exempt: it is a bullet next to text,
+    not furniture that must span the row.
+    The tab wears Create's KIND colour (green, matching the preview's accent
+    bar) with black text; the nest marker stays dim grey — so colour, shape,
+    and depth all separate the two kinds the same way.
 
     Members expose:
-      .glyph      — the marker text (emoji + label)
-      .style      — prompt_toolkit style applied to the glyph
-      .fragment() — (style, glyph+suffix) tuple ready for a FormattedText segment
+      .lead        — tuple of (style, text) fragments that start the row
+      .accent      — preview accent-bar style while the row is selected
+      .fragments() — the lead plus an optional alignment suffix, ready to
+                     splat into a FormattedText list
     """
-    NEW    = ("✨ Create",       "fg:ansigreen")
-    CONT   = ("🏷️ Cont.",        "fg:ansiyellow")
-    TOOLS  = ("🧰 Toolkits",     "fg:ansicyan")
-    DELMNU = ("⚠️ DELETE‼️",     "fg:ansired")
-    DLET   = ("🗑 DELETE",       "fg:ansired")
-    BACK   = ("🚪  Back",        "")
+    # Both creation tabs lead with `+` — the creation intent in one glyph, and
+    # the two tab NAMES then say what gets created (an agent instance; a
+    # cluster) instead of one saying the verb and the other the noun.
+    NEW     = (((STYLE_TAB, " + Agent "), (STYLE_TAB_TIP, TAB_TIP)), "fg:ansigreen")
+    CONT    = (((STYLE_NEST_MARK, "   ▸ Cont."),),              "fg:ansiyellow")
+    CLUSTER = (((STYLE_CLUSTER_TAB, " + Cluster "), (STYLE_CLUSTER_TAB_TIP, TAB_TIP)),
+               "fg:ansicyan")
+    CLSTR   = (((STYLE_CLUSTER_NEST, "   ▸ Clstr"),),           "fg:ansicyan")
+    MEMBER  = (((STYLE_NEST_MARK, "        · "),),              "fg:ansicyan")
+    TOOLS  = ((("fg:ansicyan", "🧰 Toolkits"),),               "")
+    DELMNU = ((("fg:ansired", "⚠️ DELETE‼️"),),                "")
+    DLET   = ((("fg:ansired", "🗑 DELETE"),),                  "")
+    BACK   = ((("", "🚪  Back"),),                             "")
 
-    def __init__(self, glyph: str, style: str) -> None:
-        self.glyph = glyph
-        self.style = style
+    def __init__(self, lead: tuple[tuple[str, str], ...], accent: str) -> None:
+        self.lead = lead
+        self.accent = accent
 
-    def fragment(self, suffix: str = "") -> tuple[str, str]:
-        """Build the (style, text) tuple FormattedText expects — glyph then an
-        arbitrary suffix (spacing for column alignment, or extra trailing text
-        like the back-row's label) in this marker's style."""
-        return (self.style, f"{self.glyph}{suffix}")
+    def fragments(self, suffix: str = "") -> list[tuple[str, str]]:
+        """The lead fragments plus `suffix` (alignment spacing, or trailing
+        text like the back-row's label) as its OWN default-styled fragment —
+        never glued onto the last lead fragment, whose style may carry a
+        background that would smear across the gap."""
+        return [*self.lead, ("", suffix)] if suffix else list(self.lead)
+
+    def width(self, suffix: str = "") -> int:
+        """The lead's width in cells (every lead character is single-width —
+        ASCII plus Block Elements). What cross-marker column alignment
+        computes from: the cluster tab is wider than the agent tab, so landing
+        both rows' NAMES in one column means measuring, not guessing."""
+        return sum(len(text) for _, text in self.lead) + len(suffix)
 
 
 class PickerCwdHint(Enum):
@@ -379,6 +446,32 @@ class PickerEntry:
 # identities with extra metadata.
 _OPEN_DELMENU = object()
 _OPEN_TOOLKITS = object()
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClusterTemplateRow:
+    """A cluster-template row's value: which `.legoset` to open the membership
+    form on. A dataclass rather than a singleton because there is one row PER
+    template — the dispatcher matches by type, then reads the path."""
+    name: str
+    path: Path
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClusterRow:
+    """An EXISTING cluster's row value. Carries only the session name: every
+    handler reloads the cluster from disk, so a row built before some other
+    handler mutated the cluster cannot act on a stale member list."""
+    session: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _MemberRow:
+    """One member's row value — the unit the picker EDITS (F2 re-tags, Del
+    removes from the cluster). Session + member id; same reload-on-act rule
+    as _ClusterRow."""
+    session: str
+    member_id: str
 
 
 def continuable_instances(registry: Registry) -> list[ContEntry]:
@@ -1069,9 +1162,9 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             return UiClass.DIVIDER.css
         value = entries[state["cursor"]].value
         if isinstance(value, Instance):             # cont row
-            return PickerRowMarker.CONT.style       # fg:ansiyellow
+            return PickerRowMarker.CONT.accent      # yellow — the kind colour the grey lead no longer carries
         if isinstance(value, Agent):                # new row
-            return PickerRowMarker.NEW.style        # fg:ansigreen
+            return PickerRowMarker.NEW.accent       # green
         return UiClass.DIVIDER.css
 
     body = HSplit([
@@ -1146,10 +1239,13 @@ def _path_completer(text: str, state: int) -> str | None:
     return matches[state] if state < len(matches) else None
 
 
-def ask_for_workspace(agent: str, default: str | None = None) -> str:
+def ask_for_workspace(agent: str, default: str | None = None,
+                      noun: str = "instance") -> str:
     """Prompt for a workspace path; Enter uses `default` (or DEFAULT_WORKSPACE).
     Tab completes against the host filesystem. Returns the absolute path with `~`
-    expanded but symlinks preserved — the form the user typed is what gets stored."""
+    expanded but symlinks preserved — the form the user typed is what gets stored.
+    `noun` is only prompt wording — the cluster flow shares this prompt and
+    "instance" would misname what is being created."""
     default = default if default is not None else DEFAULT_WORKSPACE
     prior_completer = readline.get_completer()
     prior_delims = readline.get_completer_delims()
@@ -1162,7 +1258,7 @@ def ask_for_workspace(agent: str, default: str | None = None) -> str:
     try:
         while True:
             entered = input(
-                f"Workspace path for '{agent}' instance [{default}]: "
+                f"Workspace path for '{agent}' {noun} [{default}]: "
             ).strip() or default
             absolute = expand_user_path(entered)
             if is_dir(absolute):
@@ -1193,9 +1289,209 @@ def prompt_session(agent: str, workspace: str, current: str | None = None) -> st
         return suffix
 
 
-def select_agent(registry: Registry) -> Agent | Instance | None:
+def _template_preview(template: ClusterTemplate, path: Path) -> str:
+    """The cluster-template row's preview: what a cluster is, who the default
+    members are (names in the picker's blue), and what Enter will actually do —
+    including that launching is not wired yet, which would otherwise be
+    discovered as a surprise."""
+    description = f"{template.description}\n\n" if template.description else ""
+    members = Text()
+    for m in template.members:
+        members.append("  • ", style="dim")
+        members.append(m.id, style=RICH_MEMBER_NAME)
+        members.append("\n")
+    members.rstrip()
+    return _render_parts(
+        Markdown(f"*Create a cluster from `agents/{path.name}`*\n\n---\n\n"
+                 f"{description}"
+                 f"A **cluster** is N agents cohabiting one container on one "
+                 f"project, each in its own tmux window, able to message each "
+                 f"other by name.\n\nDefault members:"),
+        Text(),
+        members,
+        Markdown(
+            "\nEnter asks for the project and a session name, then opens the "
+            "member picker: **Space adds another of an agent** (duplicates get "
+            "numbered roles), Backspace removes. Per-member tags are edited "
+            "later, from the picker — not during setup.\n\n"
+            "*Launching a cluster is not wired into the picker yet — "
+            "`python3 cluster.py plan <name>` previews what a launch will run.*"))
+
+
+# The rich twin of STYLE_AGENT_NAME: previews render through rich, the rows
+# through prompt_toolkit, and member names must wear the same blue in both.
+RICH_MEMBER_NAME = "bold bright_blue"
+
+
+def _render_parts(*parts: Any) -> str:
+    """Markdown and rich renderables interleaved into one ANSI preview string —
+    `_render_md`'s console, accepting prepared renderables. Exists because
+    markdown cannot colour a SPAN, and the cluster previews colour member
+    names and tag labels inline."""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, color_system="truecolor",
+                      width=80)
+    for part in parts:
+        console.print(part)
+    return buf.getvalue()
+
+
+def _member_line(registry: Registry, identifier: str, build: AgentBuild) -> Text:
+    """One preview line for a member: bullet, BLUE name (the colour agent names
+    wear everywhere in the picker), then its tag labels in their legend colours
+    — a name that no longer resolves renders alert-style rather than vanishing."""
+    line = Text("  • ", style="dim")
+    line.append(identifier, style=RICH_MEMBER_NAME)
+    names = (*((build.engine,) if build.engine else ()),
+             *build.professions, *build.specialties, *build.policies)
+    for name in names:
+        line.append("  ")
+        if (tag := registry.get(name)) is not None:
+            line.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
+        else:
+            line.append(name, style="black on red")
+    return line
+
+
+def _cluster_preview(registry: Registry, cluster: "cluster_state.Cluster") -> str:
+    """An existing cluster's preview: who is in it, wearing what, and what the
+    keys do here — including that launching is not wired yet."""
+    origin = f" (from `{cluster.template}.legoset`)" if cluster.template else ""
+    return _render_parts(
+        Markdown(f"*Cluster `{cluster.session}`{origin}*\n\n---\n\n"
+                 f"project: `{cluster.project}`"),
+        Text(),
+        *[_member_line(registry, m.id, m.build)
+          for m in cluster_state.picker_order(cluster.members, registry)],
+        Markdown(
+            "\n**F2 on a member** edits its tags · **Del on a member** removes "
+            "it · **Del here** destroys the whole cluster (worktrees removed, "
+            "branches kept).\n\n"
+            f"*Launching a cluster is not wired into the picker yet — "
+            f"`python3 cluster.py plan {cluster.session}` previews the run.*"))
+
+
+def _member_preview(registry: Registry, cluster: "cluster_state.Cluster",
+                    member: "cluster_state.Member") -> str:
+    """One member's preview: its agent, its tags, and its edit affordances."""
+    tags = _member_line(registry, member.id, member.build)
+    return _render_parts(
+        Markdown(f"*`{member.id}` — member of cluster `{cluster.session}`*"
+                 f"\n\n---\n\n"
+                 f"agent: `{member.agent}` · role: `{member.role}`"),
+        Text(),
+        tags,
+        Markdown(
+            "\n**F2** edits this member's tags (`{muxer}` and `{cluster}` are "
+            "re-applied if unticked — every member carries them) · **Del** "
+            "removes it from the cluster."))
+
+
+def _edit_member_flow(registry: Registry, session: str, member_id: str) -> None:
+    """F2 on a member: the ordinary tag form, persisted into cluster.toml.
+
+    Reloads the cluster (rows may be stale — see _ClusterRow) and saves through
+    `Cluster.with_build`, which re-applies the forced specialties; the form
+    happily lets a user untick them, and silently losing {cluster} would make
+    the member introduce itself wrongly on its next launch."""
+    cluster = cluster_state.load(session)
+    if cluster is None or (member := cluster.member(member_id)) is None:
+        print(f"\n  Cluster '{session}' changed on disk — no member '{member_id}'.")
+        input("  Press Enter to return to the picker… ")
+        return
+    new_build = prompt_tags(registry, member.build,
+                            instance=f"{member_id}  (cluster: {session})",
+                            workspace=str(cluster.project))
+    if new_build is None:
+        return
+    cluster_state.save(cluster.with_build(member_id, new_build))
+
+
+def _remove_member_flow(session: str, member_id: str) -> None:
+    """Del on a member: shrink the cluster by one, guarding the last member —
+    an empty cluster is unrepresentable (Cluster refuses it), and the honest
+    gesture for 'remove the only member' is destroying the cluster."""
+    cluster = cluster_state.load(session)
+    if cluster is None or cluster.member(member_id) is None:
+        return
+    if len(cluster.members) == 1:
+        print(f"\n  '{member_id}' is the only member — a cluster cannot be "
+              f"empty.\n  Del on the cluster row destroys '{session}' instead.")
+        input("  Press Enter to return to the picker… ")
+        return
+    if confirm_dialog(f"Remove member '{member_id}' from cluster '{session}'?"):
+        cluster_state.save(cluster.without_member(member_id))
+
+
+def _destroy_cluster_flow(session: str) -> None:
+    """Del on a cluster row: the shared teardown (`state.destroy` — worktrees
+    removed, branches kept, state dir deleted), behind a confirmation naming
+    everything it takes with it."""
+    cluster = cluster_state.load(session)
+    if cluster is None:
+        return
+    if confirm_dialog(f"Destroy cluster '{session}' and its "
+                      f"{len(cluster.members)} member(s)? (branches are kept)"):
+        cluster_state.destroy(cluster)
+
+
+def _prompt_cluster_session(default: str) -> str:
+    """The cluster's session name — its directory under clusters/, its tmux
+    session, half of every member's path. Same loop shape as `prompt_session`:
+    re-ask on anything unusable, return only a name that can be created."""
+    while True:
+        name = input(f"Cluster session name [{default}]: ").strip() or default
+        try:
+            valid_label(name, "session name")
+        except ClusterError as error:
+            print(f"  {error}")
+            continue
+        if cluster_state.exists(name):
+            print(f"  Cluster '{name}' already exists. Pick another name.")
+            continue
+        return name
+
+
+def _create_cluster_flow(registry: Registry, template_path: Path) -> None:
+    """The whole creation flow for one template: prompts, membership form,
+    persist. Returns to the picker whatever happens — a cluster cannot be
+    LAUNCHED from here yet, so unlike the agent rows there is nothing to hand
+    back to run.py.
+
+    Prompt order mirrors instance creation (workspace and name first, then the
+    form, which shows both as its preamble) — the form is where the user
+    lingers, so the cheap questions come first."""
+    template = load_legoset(template_path)   # row-build already validated it
+    workspace = ask_for_workspace(template.name, noun="cluster")
+    session = _prompt_cluster_session(template.name)
+    agents = creatable_agents(registry)
+    picks = prompt_members(
+        [(a.name, _agent_description(read_text(a.md_path))) for a in agents],
+        prefill_picks(template),
+        title="Cluster members  (Space adds one more of an agent):",
+        preamble=[f"# cluster:   {session}",
+                  f"# project:   {workspace}"])
+    if picks is None:
+        return
+    cluster = cluster_state.save(cluster_state.from_template(
+        session, Path(workspace), assemble(picks, AGENTS_DIR),
+        template=template.name))
+    print(f"\n  Cluster '{cluster.session}' created — {len(cluster.members)} "
+          f"member(s), project {workspace}:")
+    for member in cluster_state.picker_order(cluster.members, registry):
+        print(f"    {member.id}")
+    print("\n  Members share ONE checkout at /workspace — don't have two edit"
+          "\n  files at the same time. Per-member tags: edit from the picker."
+          "\n  Launching clusters isn't wired into the picker yet;"
+          f"\n  `python3 cluster.py plan {cluster.session}` previews the run.")
+    input("\n  Press Enter to return to the picker… ")
+
+
+def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluster | None":
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
-    Caller must ensure at least one agent .md exists before invoking."""
+    Returns an Agent (create), an Instance (continue), a Cluster (launch it),
+    or None (cancel). Caller must ensure at least one agent .md exists before
+    invoking."""
     legend_text = _build_composition_legend(registry)   # built once per call — the loop below only re-scans instances
     while True:
         agents = creatable_agents(registry)
@@ -1232,7 +1528,7 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
             tag_frags, tag_len = tag_by_agent[agent.name]
             entries.append(PickerEntry(
                 display=[
-                    PickerRowMarker.NEW.fragment("  "),
+                    *PickerRowMarker.NEW.fragments("  "),
                     *tag_frags,
                     ("", " " * (tag_col_width - tag_len)),
                     (STYLE_AGENT_NAME, f"{agent.name:<{agent_name_width}}"),
@@ -1247,7 +1543,7 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                 identity = inst.identity
                 cont_frags, cont_len = tag_by_inst[identity.instance]
                 cont_display = [
-                    PickerRowMarker.CONT.fragment("      "),
+                    *PickerRowMarker.CONT.fragments("      "),
                     *cont_frags,
                     ("", " " * (cont_col_width - cont_len)),
                     (STYLE_RUNNING_NAME if inst.is_running else STYLE_AGENT_NAME,
@@ -1278,10 +1574,87 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
                     modifiable=not inst.is_running,
                 ))
 
+        # One row per `.legoset` — a cluster is CREATED from here (the
+        # membership form), though launching one is not wired into the picker
+        # yet. A template that fails to parse or names unknown agents renders
+        # as an unselectable red row instead of crashing the picker: templates
+        # are hand-authored files, and the picker is where the author is.
+        known_agents = frozenset(a.name for a in agents)
+        for template_name, template_path in discover_templates(AGENTS_DIR).items():
+            try:
+                template = load_legoset(template_path)
+                validate(template, known_agents)
+            except ClusterError as error:
+                entries.append(PickerEntry(
+                    display=[*PickerRowMarker.CLUSTER.fragments("  "),
+                             (STYLE_TAG_INVALID, template_name),
+                             ("", f" — broken template: {error}")],
+                    preview=_render_md(f"*`agents/{template_path.name}` failed to "
+                                       f"load:*\n\n```\n{error}\n```"),
+                    value=None, selectable=False, deletable=False, modifiable=False,
+                ))
+                continue
+            # Same anatomy as an agent row — lead, a metadata column, the NAME
+            # in the agents' name column, then " — description". The metadata
+            # column holds the member count where agent rows hold tags, padded
+            # so the name lands exactly where agent names do (the cluster tab
+            # is wider, so the pad is measured, not copied).
+            count = f"({len(template.members)} members)"
+            name_column = PickerRowMarker.NEW.width("  ") + tag_col_width
+            pad = max(name_column - PickerRowMarker.CLUSTER.width("  ")
+                      - len(count), 1)
+            entries.append(PickerEntry(
+                display=[
+                    *PickerRowMarker.CLUSTER.fragments("  "),
+                    (STYLE_MEMBER_COUNT, count),
+                    ("", " " * pad),
+                    (STYLE_AGENT_NAME, f"{template_name:<{agent_name_width}}"),
+                    ("", f" — {template.description or ', '.join(m.id for m in template.members)}"),
+                ],
+                preview=_template_preview(template, template_path),
+                value=_ClusterTemplateRow(template_name, template_path),
+                deletable=False,
+                modifiable=False,
+            ))
+
+        # Existing clusters nest under the template rows, their members one
+        # level deeper — the same parent/child shape agents and instances use.
+        # A cluster row cannot LAUNCH yet (Enter explains), but Del destroys
+        # it; a member row is the editing unit: F2 re-tags, Del removes.
+        for cluster in cluster_state.discover():
+            entries.append(PickerEntry(
+                display=[
+                    *PickerRowMarker.CLSTR.fragments("  "),
+                    (STYLE_AGENT_NAME, cluster.session),
+                    ("", f"  ({len(cluster.members)} members)    "),
+                    (STYLE_WORKSPACE_HINT, str(cluster.project)),
+                ],
+                preview=_cluster_preview(registry, cluster),
+                value=_ClusterRow(cluster.session),
+                deletable=True,
+                modifiable=False,
+            ))
+            # Rows in picker order — the same derived order the windows will
+            # launch in, so the list here IS the `^b 1..9` numbering.
+            for member in cluster_state.picker_order(cluster.members, registry):
+                member_tags, _ = _tags_column(build_tags(member.build))
+                entries.append(PickerEntry(
+                    display=[
+                        *PickerRowMarker.MEMBER.fragments(""),
+                        (STYLE_AGENT_NAME, member.id),
+                        ("", "  "),
+                        *member_tags,
+                    ],
+                    preview=_member_preview(registry, cluster, member),
+                    value=_MemberRow(cluster.session, member.id),
+                    deletable=True,
+                    modifiable=True,
+                ))
+
         if any(p.toolkit_path for p in registry.professions.values()):
             entries.append(PickerEntry(
                 display=[
-                    PickerRowMarker.TOOLS.fragment("  "),
+                    *PickerRowMarker.TOOLS.fragments("  "),
                     ("", TOOLKITS_LABEL),
                 ],
                 preview=TOOLKITS_PREVIEW,
@@ -1292,7 +1665,7 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
 
         entries.append(PickerEntry(
             display=[
-                PickerRowMarker.DELMNU.fragment("  "),
+                *PickerRowMarker.DELMNU.fragments("  "),
                 ("", DELMENU_LABEL),
             ],
             preview=DELMENU_PREVIEW,
@@ -1305,12 +1678,20 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
         if action is None:
             return None
 
-        if action == PickerAction.DELETE:  # picker enforces deletability — only cont rows (Instance) reach here
-            if confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
+        if action == PickerAction.DELETE:  # picker enforces deletability — cont, cluster, and member rows reach here
+            if isinstance(value, _ClusterRow):
+                _destroy_cluster_flow(value.session)
+            elif isinstance(value, _MemberRow):
+                _remove_member_flow(value.session, value.member_id)
+            elif confirm_dialog(CONFIRM_DELETE_FMT.format(name=value.instance)):
                 delete_instance(value)
             continue
 
-        if action == PickerAction.MODIFY:  # picker enforces modifiability — only cont rows reach here
+        if action == PickerAction.MODIFY and isinstance(value, _MemberRow):
+            _edit_member_flow(registry, value.session, value.member_id)
+            continue
+
+        if action == PickerAction.MODIFY:  # instance cont rows — the only other modifiable kind
             old_inst = value
             # Same prompt order as creation (resolve_target): workspace →
             # session → tags. The session prompt is the shared one — with
@@ -1338,6 +1719,30 @@ def select_agent(registry: Registry) -> Agent | Instance | None:
             _delete_submenu(registry, legend_text)
             continue
 
+        if isinstance(value, _ClusterTemplateRow):
+            _create_cluster_flow(registry, value.path)
+            continue   # created (or cancelled) — back to the picker either way
+
+        if isinstance(value, _ClusterRow):
+            # Enter on a cluster LAUNCHES it — run.py owns docker, so hand the
+            # loaded cluster back the same way an Agent/Instance is handed.
+            # Reloaded from disk (the row may predate an edit); vanished means
+            # someone destroyed it underneath — explain, don't crash.
+            if (picked_cluster := cluster_state.load(value.session)) is not None:
+                return picked_cluster
+            print(f"\n  Cluster '{value.session}' is gone from disk.")
+            input("  Press Enter to return to the picker… ")
+            continue
+
+        if isinstance(value, _MemberRow):
+            # A member alone is not launchable — say what the row is FOR
+            # instead of silently ignoring the key.
+            print("\n  A member launches with its cluster — Enter on the"
+                  "\n  cluster row above. Here: F2 edits this member's tags,"
+                  "\n  Del removes it from the cluster.")
+            input("\n  Press Enter to return to the picker… ")
+            continue
+
         if isinstance(value, Instance) and not value.is_startable:
             # A Cont row whose stored tags no longer resolve — explain and
             # bounce back to the picker (F2 re-picks; Del removes it) rather
@@ -1359,7 +1764,7 @@ def _delete_submenu(registry: Registry, legend_text: str) -> None:
         entries: list[PickerEntry] = []
         for inst in instances:
             identity = inst.identity
-            row = [PickerRowMarker.DLET.fragment("  "),
+            row = [*PickerRowMarker.DLET.fragments("  "),
                    (STYLE_RUNNING_NAME if inst.is_running else STYLE_DEL_NAME, identity.instance)]
             if inst.is_running:
                 row.append(("", "  "))
@@ -1376,7 +1781,7 @@ def _delete_submenu(registry: Registry, legend_text: str) -> None:
                 modifiable=not inst.is_running,
             ))
         entries.append(PickerEntry(
-            display=[PickerRowMarker.BACK.fragment(f"  {BACK_LABEL}")],
+            display=PickerRowMarker.BACK.fragments(f"  {BACK_LABEL}"),
             preview=BACK_PREVIEW,
             value=None,
             deletable=False,
