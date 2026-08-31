@@ -244,13 +244,18 @@ class TestFreeShellAndQuit(unittest.TestCase):
         options = set_options(argv)
         # Spelled ALL the way out: the corner must be executable by someone who
         # knows no tmux notation — `^b` shorthand is taught inside the popup it
-        # leads to, not here. And `shift+q` explicitly: read as lowercase `q`,
-        # users hit tmux's display-panes overlay instead (the red/blue 0/1
-        # blocks in a bug report).
-        self.assertIn('"ctrl+b, shift+q": quit', options["status-right"])
+        # leads to, not here. The quit chord is hardcoded HERE deliberately, in
+        # its human spelling: tmux's own "M-q" reads as noise in a corner hint,
+        # so it may never leak there.
+        self.assertIn('"alt+q": quit', options["status-right"])
         self.assertIn(f'"ctrl+b, shift+{tmux.HELP_KEY}": help',
                       options["status-right"])
-        self.assertNotIn("shift-Q", options["status-right"])
+        self.assertNotIn("M-q", options["status-right"])
+        # Hints BEFORE the banner: tmux clips the tail of an over-long
+        # status-right, and the banner carries the arbitrarily-long project
+        # path — banner-first cost a real launch its visible quit hint.
+        self.assertLess(options["status-right"].index("quit"),
+                        options["status-right"].index("cat"))
 
     def test_no_interactive_key_bindings_in_the_assembly(self):
         # The quit / help / layout / mouse keys are POLICY and ship as active
@@ -322,8 +327,8 @@ class TestSoloSplit(unittest.TestCase):
         # The first version showed the instance name at BOTH ends of the bar.
         options = set_options(self.argv)
         self.assertNotIn("cat", options["status-right"])
-        # The quit hint spells the key as typed: shift + lowercase q.
-        self.assertIn(f"shift+{tmux.KILL_KEY.lower()}", options["status-right"])
+        # The quit hint spells the chord humanly, never in tmux notation.
+        self.assertIn(f'"{tmux.KILL_KEY_HUMAN}": quit', options["status-right"])
 
     def test_the_quit_binding_is_present_here_too(self):
         # It is the only way out now that quitting the agent no longer ends the
@@ -529,11 +534,16 @@ class TestKeyPolicyConf(unittest.TestCase):
         self.find("set -g mouse on")
 
     def test_quit_confirms_and_matches_the_status_hint(self):
-        # The status bar (Python-side) says "ctrl+b, shift+q": quit — the conf
-        # must bind THAT letter, or the hint lies. confirm-before because it
-        # kills every pane at once; `-N` so tmux's own key list shows it.
+        # The status bar (Python-side) says "alt+o": quit — the conf must bind
+        # THAT chord (tmux spelling: M-o), or the hint lies; and it must bind
+        # it in the ROOT table (`-n`), because the hint names no prefix, so
+        # requiring one would be the same lie. confirm-before because it kills
+        # every pane at once; `-y` is the operator's Y/n spec (Enter accepts);
+        # `-N` so tmux's own key list shows it.
         line = self.find("confirm-before", "kill-session")
         self.assertIn(f" {tmux.KILL_KEY} ", line)
+        self.assertIn(" -n ", line)
+        self.assertIn(" -y ", line)
         self.assertIn("-N", line)
 
     def test_help_pops_the_plain_text_file_and_matches_the_hint(self):
@@ -606,7 +616,7 @@ class TestKeyPolicyConf(unittest.TestCase):
                       "shift+drag",                   # the gnome-terminal copy-out path
                       "Escape to leave",              # q is type-through now
                       "detach", "quit",
-                      f"shift-{tmux.KILL_KEY}",
+                      tmux.KILL_KEY_HUMAN,
                       "settings/tmux.conf"):          # where these keys live
             with self.subTest(topic=topic):
                 self.assertIn(topic, help_text)

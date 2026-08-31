@@ -338,6 +338,79 @@ plans/cluster_plan.md, "Research spike — CLOSED".
 
 ## Known issues — launcher
 
+- **`--continue` silently started a FRESH conversation over a ~92 MB transcript
+  (Claude Code 2.1.245, observed 2026-08-29).** The launcher's side was right —
+  the container ran `claude --effort max --continue` with cwd `/workspace` —
+  and claude even picked the correct predecessor (the new session file
+  inherited the old session's ai-title), but loaded none of its messages: the
+  new session's first user entry has `parentUuid: null`. The same binary had
+  appended to that transcript 16 minutes before the relaunch, and had resumed
+  it after a 266-hour gap that same morning (file then ~75–85 MB), so the
+  trigger sits somewhere in the size region, not in a version change. The
+  transcript itself is intact — every line parses (`jq -e . <file>` exits 0) —
+  so the conversation is unloaded, not lost. Upstream problem space, not ours:
+  anthropics/claude-code #21022 (accessing >50 MB session files hangs), #30302
+  (resume crash on a large multi-day session); the sessions docs (checked
+  2026-08-29) document no size cap and no fresh-start fallback.
+  What would close it: an upstream fix, or a documented cap to design against.
+  Launcher-side mitigation BUILT 2026-08-29 (operator's nod):
+  `compute_resume_flag` warns past `RESUME_SIZE_WARN_BYTES` (50 MB) while
+  still resuming — the surprise is at least a stated one now.
+- **herdr 0.8.2 as a daily driver: three operator-reported "crashes" in one
+  day, zero server-side evidence — UNRESOLVED; the operator dropped `{muxer}`
+  from the instance.** What IS known: in both containers whose logs were
+  inspected before the next relaunch replaced them, `herdr-server.log` held
+  no panic and no client disconnect — server and attach were alive at
+  inspection time. So what the operator saw was either the CLIENT dying later
+  (its evidence dies with the container; never captured), a popup reading as
+  a freeze (popups swallow every key including Escape until their command
+  exits — Enter is the way out), or the relaunch itself killing in-flight
+  work. The reports correlate with the pre-1.0 UI surfaces adopted the same
+  day (alt+q / alt+/ popups, a text tab-bar entry, window_title, metadata
+  sidebar rows) — plausible client-bug triggers, none proven. On rendering,
+  the score settled at: `$keys` sidebar rows never draw on 0.8.2 (token
+  lands in `workspace list`, no row — the one confirmed
+  accepted-but-invisible surface); `pane rename` labels DO render, on the
+  split frame (screenshot 2026-08-30 — an earlier "draws nothing" reading
+  from a mid-session rename was wrong), which is why the shell pane's label
+  is a plain "shell"; and the TAB ROW's right corner (tab_bar_right) renders
+  and is the hint's settled home — hotkeys anywhere else (typed greeting,
+  frame label) were reversed as clutter. The row therefore stays visible
+  even for solo's single tab (renamed "agent"); tests pin the row-stays +
+  corner-hint + plain-label set in both configs.
+  What would close it: capturing the client side of one crash (run the attach
+  under `script -f`/`tee`, or find a herdr client log, BEFORE relaunching),
+  and re-probing label/row rendering on the next herdr release (version
+  pinned in `profession/_muxer/Dockerfile`). Until then the measured advice:
+  `{muxer}` with tmux is the fully-verified stable path — since 2026-08-30 a
+  persisted preference (`herdr_instead_of_tmux = false` in
+  `~/.claude-agents/ui_profile.toml`, edited from the picker's
+  "(Edit Toolkits & UI)" form), which replaced the earlier `MUXER_BACKEND`
+  env var and the flip-the-default option.
+- **A file mount's auto-created parent dir is ROOT-owned — FIXED for herdr,
+  and worth remembering as a class.** Mounting `settings/herdr.toml` at
+  `~/.config/herdr/config.toml` made docker create `~/.config/herdr/` as
+  root:root at run time, and herdr binds its socket (plus session.json and
+  logs) BESIDE its config — so every herdr-backend launch died at the
+  readiness gate, server never bound. Found the day herdr became the default
+  backend, by checking the live dir's ownership (the earlier live probe
+  predated the config mount, which is why it had passed). Fixed in the
+  `_muxer` image layer: `mkdir -p` + `chown` the dir at build time — a file
+  mount into an EXISTING dir leaves the dir's ownership alone; a test pins
+  the two lines. The general rule joins the RO-nested-mount one below:
+  **when a single-FILE mount's parent must be written by the container user,
+  the image has to create and own that parent first.**
+- **An in-container edit of a RO-mounted settings file does not reach the
+  running container.** The `settings/*` files are single-FILE bind mounts,
+  which pin an INODE; an editor that writes atomically (temp file + rename —
+  Claude Code's Edit tool does) replaces the inode under the host path, so the
+  mounted view keeps showing the pre-edit content until the next launch.
+  Directory mounts (`/workspace` itself) are immune — only file mounts bite.
+  Live-applying a key-policy change therefore means issuing the equivalent
+  `tmux -L muxer` commands by hand (or relaunching); `source-file` on the
+  mounted conf would re-read the STALE inode. Recorded 2026-08-29 after
+  exactly that: an edited tmux.conf verified clean in `/workspace` while its
+  mounted copy stayed old.
 - **A tag cannot mount a file into `~/.claude/commands/` — FIXED, and worth
   remembering as a class.** `{manager}` shipping `/cowork` via a `tag.docker`
   mount killed every launch of it: *"create mountpoint … read-only file system"*.

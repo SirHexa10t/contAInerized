@@ -14,7 +14,7 @@
 # launcher from one of two DISJOINT mechanisms (test_essential_files.py
 # cross-checks the split and the manifest↔ARG lockstep):
 #   - Language toolchains (rust / node / cmake / go / java / kotlin /
-#     ruby) — the picker's "Edit Toolkits" form, persisted at
+#     ruby) — the picker's "(Edit Preferences)" form, persisted at
 #     ~/.claude-agents/code_profile.toml; each `ARG` name below is declared
 #     by its entry's `build_arg` in the sibling template.form, so the
 #     manifest→ARG pairing is defined in THIS directory

@@ -848,11 +848,27 @@ State these at the top of the eventual feature so nobody reads them as bugs:
   topic, and `{cowork}`'s and `{cluster}`'s are each doing multiple jobs in one
   block (protocol + trust + economy). One topic per addendum reads better and
   lets a reader skip what does not apply.
-- **Probe herdr in a container before more tmux polish.** One throwaway
-  container: does it run as PID 1, does its server survive, does the socket API
-  work. The swap costs one module plus five call sites (measured), so the probe
-  is the cheap way to decide rather than accumulating fixes on a backend we may
-  drop.
+- ~~**Probe herdr in a container before more tmux polish.**~~ **PROBED AND
+  IMPLEMENTED (2026-08-29, v0.8.2, live in a launcher container).** Every
+  recorded blocker fell: the server runs HEADLESS and holds the PTYs (panes
+  built, driven, and read with no client ever attached — the PID-1 worry is
+  gone; state even persists across server restarts via session.json);
+  `tab create --env/--cwd/--label` reaches the tab's shell (echoed from
+  inside), matching tmux's decisive per-window env; and `agent start <name>
+  --kind claude` gets the member DETECTED — `agent list` reports it by
+  member id with live idle/working state, the native version of the banner
+  roster. Shipped as `launch/cluster/herdr.py` (script assembly, tested),
+  selected per launch with `MUXER_BACKEND=herdr` (tmux stays default until a
+  real cluster launch vouches); binary version- AND sha256-pinned in the
+  `_muxer` layer (pre-1.0, bus factor ≈1 — exact pins non-negotiable);
+  `settings/herdr.toml` is the user-editable config at herdr's default path.
+  Keys: same ctrl+b prefix; prefix+n/p cycle members, prefix+1..9 jump,
+  prefix+b sidebar, prefix+? help, **detach is prefix+q**; the deliberate
+  way out is `herdr server stop`. One bug only LIVE EXECUTION of the
+  generated script caught: `herdr status server` exits 0 whether or not the
+  server runs (it reports, it doesn't probe) — exit-code loops made the
+  readiness gate a no-op and the stopped container immortal; both loops now
+  grep "status: running", pinned by test.
 
 **Still open:**
 

@@ -500,6 +500,19 @@ def has_continuable_jsonl(state_dir: Path) -> bool:
     return any(jsonl.stat().st_size > 0 for jsonl in state_workspace_jsonls(state_dir))
 
 
+def continuable_jsonl_bytes(state_dir: Path) -> int:
+    """Size in bytes of the transcript `claude --continue` would load — the
+    most recently modified non-empty session JSONL — or 0 when the dir holds
+    none. The size matters because `--continue` has been observed silently
+    starting a FRESH conversation over a ~92 MB transcript (ISSUES.md,
+    2026-08-29): compute_resume_flag warns past a threshold instead of letting
+    a launch discover it. Instance.continuable_history_bytes is the thin
+    wrapper, same split as `has_continuable_jsonl` above."""
+    stats = [jsonl.stat() for jsonl in state_workspace_jsonls(state_dir)]
+    live = [stat for stat in stats if stat.st_size > 0]
+    return max(live, key=lambda stat: stat.st_mtime).st_size if live else 0
+
+
 def last_history_mtime(state_dir: Path) -> float | None:
     """Mtime of `<state_dir>/history.jsonl` (the per-launch input log), or
     None if it doesn't exist yet. `state_history_path` encodes the layout

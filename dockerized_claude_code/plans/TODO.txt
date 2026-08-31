@@ -454,7 +454,8 @@ next AI to implement:
         If the program NEEDS to be fast, consider building up your data as lists of fields rather than a list of object-with-fields to support SIMD
 
 
-
+`--list-instances` flag, listing available instances that can be input as arg. Should print list of 1 per line:
+    <instance_name>  ("INVALID"/"RUNNING"/"CURRENT DIR") ( <instance_path> ) 
 
 
 

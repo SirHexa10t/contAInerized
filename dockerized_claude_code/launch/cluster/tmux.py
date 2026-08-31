@@ -68,10 +68,12 @@ SHELL_COMMAND = ("bash", "-l")  # login shell: the operator's bashrc/aliases app
 # (labels, banner), generated bindings (type-through), and the plumbing whose
 # correctness the launcher owes (mode-keys pin, clipboard emission).
 #
-# These two key names still live here because the STATUS-BAR HINT renders them
-# ("ctrl+b, shift+q": quit) while the bindings themselves are conf lines — a
-# test pins the conf to these constants so the hint cannot drift into a lie.
-KILL_KEY = "Q"                  # prefix + this, with a confirmation, ends everything
+# These key names still live here because the STATUS-BAR HINT renders them
+# ("alt+q": quit) while the bindings themselves are conf lines — a test pins
+# the conf to these constants so the hint cannot drift into a lie.
+KILL_KEY = "M-q"                # tmux's spelling of alt+q: a DIRECT chord (root
+                                # table, no prefix) that confirms, then ends everything
+KILL_KEY_HUMAN = "alt+q"        # the hint's spelling — "M-q" reads as noise there
 HELP_KEY = "?"                  # the curated help popup (settings/muxer-help.txt)
 COPY_TABLE = "copy-mode"        # the key table tmux dispatches through while
                                 # scrolled back — the reason typing was swallowed
@@ -167,7 +169,7 @@ def solo_argv(session: str, agent: Pane, *, shell_cwd: Path,
     **Consequence worth knowing:** with the agent inside tmux, quitting it no
     longer ends the container — the session outlives it, deliberately, so the
     shell survives to poke at whatever the agent left behind. The way out is the
-    same advertised binding as in a cluster (prefix + Q).
+    same advertised binding as in a cluster (alt+q, confirmed).
 
     `project_label` is what appears beside the instance name in the status bar:
     the HOST workspace path, passed in because this module cannot know it (the
@@ -454,19 +456,23 @@ def _option_argv(session: str, *, banner: Path | None, refresh: int,
         # The hints ride the status line, because a binding nobody can see is a
         # binding nobody uses — and one of these is the only clean way out of the
         # session, which a user who has never met tmux would otherwise have to
-        # guess. Spelled ALL the way out ("ctrl+b, shift+q"), unlike the compact
-        # `^b` inside the popup: the corner is the entry point for someone who
-        # knows no tmux notation yet, and it must be executable without a
-        # legend — the popup it leads to is where the shorthand gets taught.
-        # `shift+` on both, though `?` implies it: the quit key is where the
-        # case genuinely bites (lowercase q is tmux's display-panes overlay,
-        # met as "weird red/blue numbers" in a live session), and one spelling
-        # rule for both reads cleaner than two.
+        # guess. Spelled ALL the way out ("ctrl+b, shift+?", "alt+o"), unlike
+        # the compact `^b` inside the popup: the corner is the entry point for
+        # someone who knows no tmux notation yet, and it must be executable
+        # without a legend — the popup it leads to is where the shorthand gets
+        # taught. The quit key renders as KILL_KEY_HUMAN, never tmux's "M-o":
+        # the corner and the conf must name the SAME chord in their own
+        # languages, and a test holds the pair together.
+        # HINTS FIRST, banner second — tmux truncates status-right's TAIL when
+        # content exceeds status-right-length, and a cluster banner carries the
+        # project path, which is arbitrarily long. With the old order (banner
+        # first) the quit hint was exactly what got clipped — reported from a
+        # real cluster launch as "I can't see the key shortcut for quitting".
         ("status-right",
-         (f"#({shlex.join(('cat', str(banner)))} 2>/dev/null ||:)"
-          if banner is not None else "")
-         + f' #[dim]"ctrl+b, shift+{HELP_KEY}": help  |  '
-           f'"ctrl+b, shift+{KILL_KEY.lower()}": quit#[default] '),
+         f' #[dim]"ctrl+b, shift+{HELP_KEY}": help  |  '
+         f'"{KILL_KEY_HUMAN}": quit#[default] '
+         + (f"#({shlex.join(('cat', str(banner)))} 2>/dev/null ||:) "
+            if banner is not None else "")),
     ]
     if pane_titles:
         # Only the solo split shows these: in a cluster each window IS one

@@ -10,18 +10,30 @@ full_description  = "Runs a terminal multiplexer inside the container, so one wi
 # specialty.scan). At the profession ROOT deliberately, so this tag carries no
 # [code] requirement — a multiplexer is useful to any instance.
 #
-# The backend is tmux TODAY, chosen on researched grounds (cluster_plan.md's
-# "Multiplexer options" table). It is deliberately not named in the tag: herdr is
-# the watched alternative — agent-native, with pane state and a documented socket
-# API — and swapping to it should not require renaming a tag that users have in
-# their .lego files. That is why this is `{muxer}` and not `{tmux}`.
+# The backend is HERDR by default since 2026-08-29 (operator decision) — the
+# agent-native one: live member roster, pane state, a documented socket API.
+# tmux (the original pick, cluster_plan.md's "Multiplexer options" table) stays
+# an operator PREFERENCE away: `herdr_instead_of_tmux = false` in
+# ~/.claude-agents/ui_profile.toml, edited from the picker's
+# "(Edit Preferences)" form — the switch is
+# `launch/cluster/__init__.backend()`, shared by solo and cluster launches.
+# Neither backend is named in the tag, deliberately: swapping them must never
+# require renaming a tag that users have in their .lego files. That is why this
+# is `{muxer}` and not `{tmux}`.
 
 [addendum]
 title = "Extra terminals"
-body  = """A terminal multiplexer (currently tmux) is installed in this container, so the operator can hold several shells here and detach without stopping the work. Whether a multiplexer session is actually running depends on how this instance was started — in cluster mode it always is; solo, the operator may start one. `tmux -L muxer list-sessions` tells you (note the socket — see below).
+body  = """A terminal multiplexer is installed in this container (two backends ship: herdr — the default — and tmux, the operator's persisted preference chosen at launch), so the operator can hold several shells here and detach without stopping the work. Which one is actually running depends on how this instance was started: `herdr status server` and `tmux -L muxer list-sessions` tell you, and the bullets below are grouped by backend.
 
 - **You may not be alone in this terminal.** When a session is running, the human can switch to another shell in this same container at any moment, and may be watching from more than one place. Anything you leave running is visible to them.
-- **Long-running work can be backgrounded properly.** For something that should outlive your turn — a dev server, a watch task, a long build — giving it its own window beats blocking your own session, and it stays alive between your turns: `tmux -L muxer new-window -d '<command>'` (see the socket note below).
+
+Under HERDR (the default):
+
+- **Long-running work gets its own tab.** For something that should outlive your turn — a dev server, a watch task, a long build — `herdr tab create --label <task> --no-focus` prints the new pane's id (JSON, key `pane_id`), and `herdr pane run <pane-id> '<command>'` starts the work there, alive between your turns. Run `herdr --skill` once if you need the full control surface.
+- **NEVER run `herdr server stop` (nor `herdr update`).** herdr has ONE server: the session hosting you — there is no scratch-server safety net, every `herdr` command you run talks to the live one. Stopping it ends every pane including the operator's shell, and — the session being the container's main process — the container itself, mid-turn. Ending the whole thing is the human's decision, and they have a key for it; versions are an image concern.
+
+Under TMUX (the operator's alternative preference):
+
 - **Your own `tmux` is a scratch server — experiment freely.** The session hosting you runs on a SEPARATE socket, and `$TMUX` is unset in your pane, so a plain `tmux` command (including `kill-server`) talks to an empty server of your own and cannot touch the session you are living in. This is deliberate: an earlier version shared one socket, and a single `tmux kill-server` run while testing killed the agent's own session and its container, twice.
-- **To touch your OWN session, name the socket: `tmux -L muxer …`.** That is how you would add a window for a long-running task (`tmux -L muxer new-window -d '<command>'`) or check what is running (`tmux -L muxer list-panes`). The extra flag is the point: destroying the session is now something you can only do on purpose.
+- **To touch your OWN session, name the socket: `tmux -L muxer …`.** That is how you background a long-running task (`tmux -L muxer new-window -d '<command>'`) or check what is running (`tmux -L muxer list-panes`). The extra flag is the point: destroying the session is now something you can only do on purpose.
 - **Do not tear that session down.** `tmux -L muxer kill-server` (or `kill-session`) ends every pane with it, including the operator's own shell, and in cluster mode it stops every member — and because the session is the container's main process, the container stops too. Closing the whole thing is the human's decision, and they have a key binding for it."""

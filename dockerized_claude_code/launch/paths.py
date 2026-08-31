@@ -152,6 +152,26 @@ TMUX_CONF_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "tmux.conf"
 # apostrophes and doubled every %). settings/tmux.conf's help binding names
 # this path; the two ride the same mount set below.
 MUXER_HELP_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "muxer-help.txt"
+# Its herdr twin, popped by alt+/ (settings/herdr.toml names this path) — one
+# help file per backend because the keys barely overlap.
+HERDR_HELP_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "herdr-help.txt"
+# The herdr backend's config, at herdr's OWN default lookup path — mounting
+# there (rather than a launcher landmark + env) means zero plumbing: the
+# binary just finds it. The parent dir stays writable for herdr's logs and
+# sockets; only the config file itself is pinned read-only.
+HERDR_CONF_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".config/herdr/config.toml"
+# The two host-side herdr config files. herdr reads exactly one config path
+# and has no override flag, so per-shape policy means per-launch MOUNT
+# selection: the shared file rides DOCKER_BASE_MOUNTS; docker_config swaps the
+# solo variant (collapsed sidebar) in for {muxer}+herdr solo launches — same
+# container target, which is why the variant is deliberately NOT in the base
+# set (two sources may never stage one target: add_docker_mount's guard).
+HERDR_CONF_SOURCE = SETTINGS_DIR / "herdr.toml"
+HERDR_SOLO_CONF = SETTINGS_DIR / "herdr-solo.toml"
+# The launcher-UI form manifest (tags/ui_profile.py parses it) — beside the
+# muxer policy files above because its one entry today chooses between them.
+# Host-side data, never mounted.
+UI_FORM = SETTINGS_DIR / "ui.form"
 # {cowork}'s per-instance group-hosting dir inside the container. Deliberately at
 # the root rather than under CLAUDE_CONFIG_IN_CONTAINER: that path is Claude Code's
 # own namespace (projects/, skills/, commands/, todos/), and the `_cowork` policy
@@ -206,7 +226,9 @@ DOCKER_BASE_MOUNTS = {
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
     SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
     SETTINGS_DIR / "tmux.conf":                 f"{TMUX_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                      # the muxer's KEY POLICY (quit/help/layout/mouse) + user overrides — sourced last by the generated startup script, so its lines win; inert without {muxer}
-    SETTINGS_DIR / "muxer-help.txt":            f"{MUXER_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the `^b ?` popup body — plain text, cat into the popup; inert without {muxer}
+    SETTINGS_DIR / "muxer-help.txt":            f"{MUXER_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the `^b ?` popup body (tmux backend) — plain text, cat into the popup; inert without {muxer}
+    SETTINGS_DIR / "herdr-help.txt":            f"{HERDR_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the alt+/ popup body (herdr backend) — same plain-text contract; inert without {muxer}
+    HERDR_CONF_SOURCE:                          f"{HERDR_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the herdr backend's key/theme policy at herdr's default path; solo herdr launches swap in HERDR_SOLO_CONF instead (docker_config); inert without {muxer}
 }
 
 
@@ -277,7 +299,7 @@ CACHE_MOUNTS = {CACHE_ROOT / rel: CLAUDE_HOME_IN_CONTAINER / rel for rel in CACH
 # need to refresh tokens / write cache; presence on host is the opt-in.
 # (The matching INSTALL_<TOOL> build-arg semantics — install_creds_flags in
 # container_env — are spread into the container env in set_container_env.
-# Creds-presence is the ONLY driver for these CLIs; the "Edit Toolkits" form
+# Creds-presence is the ONLY driver for these CLIs; the "(Edit Preferences)" form
 # covers language toolchains, a disjoint set.)
 #
 # Value tuple: (container_mount_target, cli_name). `cli_name` is the binary
@@ -458,6 +480,12 @@ quickie_state_dir_path:     Callable[[str], Path]      = lambda session: quickie
 # not per-instance: it configures the one shared image every instance of that
 # profession builds from (e.g. every [code] launch reuses claude-agents:code).
 toolkit_profile_path:    Callable[[str], Path]         = lambda profession: AGENTS_STATE / f"{profession}_profile.toml"
+# The launcher-UI profile — profession-INDEPENDENT preferences (the muxer
+# backend pick), same flat-bool shape as the toolkit profiles beside it (the
+# name follows their `<x>_profile.toml` pattern although "ui" is no
+# profession). A call-time builder like its siblings, so one AGENTS_STATE
+# patch redirects it in tests.
+ui_profile_path:         Callable[[], Path]            = lambda: AGENTS_STATE / "ui_profile.toml"
 
 # Optional credentials per service (service ∈ OPTIONAL_CREDS_MOUNTS keys).
 # `optional_creds_token_path` points at `<service>/token` — a plain-text

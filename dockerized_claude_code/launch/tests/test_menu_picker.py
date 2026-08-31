@@ -14,7 +14,7 @@ from launch.gui import menu_picker
 from launch.gui.menu_picker import (
     RUNNING_HINT, STYLE_RUNNING_NAME, PickerEntry, _agent_description,
     _cont_tags_column, _cursor_step, _focusable_indices, _tags_column,
-    continuable_instances, prompt_session,
+    continuable_instances,
 )
 from launch.gui.tag_form import STYLE_TAG_SAFE, STYLE_TAG_WARN
 from launch.paths import AGENTS_DIR
@@ -252,33 +252,62 @@ class TestContinuableInstances(unittest.TestCase):
         self.assertEqual(entries[0].last_used_display, "(never)")
 
 
-class TestPromptSession(unittest.TestCase):
-    """One shared collision loop for both flows: create (default = workspace
-    basename) and modify (default = current name, which is always accepted)."""
+class TestInstanceFields(unittest.TestCase):
+    """The instance form's fields — prompt_session's old behaviors, as a
+    validator plus the auto-fill rule (no terminal prompt survives)."""
 
-    def _run(self, answers, existing=(), **kwargs):
-        answer_iter = iter(answers)
-        with patch("builtins.input", side_effect=lambda _prompt: next(answer_iter)), \
-             patch.object(menu_picker, "path_exists",
-                          side_effect=lambda p: any(str(p).endswith(f"golem__{e}") for e in existing)), \
-             patch("builtins.print"):
-            return prompt_session("golem", "/some/workspace/myproj", **kwargs)
+    def error(self, value, existing=(), current=None):
+        with patch.object(menu_picker, "path_exists",
+                          side_effect=lambda p: any(
+                              str(p).endswith(f"golem__{e}") for e in existing)):
+            return menu_picker._suffix_field_error("golem", value, current)
 
-    def test_enter_accepts_workspace_basename_default(self):
-        self.assertEqual(self._run([""]), "myproj")
+    def test_the_name_autofills_from_the_workspace_basename(self):
+        # prompt_session's old default, now live: path first, name follows.
+        workspace, session = menu_picker.instance_fields("golem")
+        self.assertEqual(workspace.key, "workspace")   # path is the FIRST field
+        self.assertIsNotNone(session.auto)
+        self.assertEqual(session.auto({"workspace": "/some/workspace/myproj"}),
+                         "myproj")
 
-    def test_collision_reprompts_until_free(self):
-        self.assertEqual(self._run(["taken", "free"], existing=["taken"]), "free")
+    def test_an_empty_path_falls_back_to_the_agent_name(self):
+        # GUARDED before expanding: expand_user_path("") resolves to the CWD,
+        # so an emptied field would otherwise derive from wherever the
+        # launcher happens to run.
+        _, session = menu_picker.instance_fields("golem")
+        self.assertEqual(session.auto({"workspace": ""}), "golem")
 
-    def test_modify_flow_defaults_to_current_name(self):
-        # Enter keeps the existing session even though its state dir exists.
-        self.assertEqual(self._run([""], existing=["mysess"], current="mysess"), "mysess")
+    def test_the_cluster_name_derivation_has_the_same_empty_guard(self):
+        fields = menu_picker._cluster_fields("", "devteam", derive="devteam")
+        self.assertEqual(fields[1].auto({"project": ""}), "devteam")
+        self.assertEqual(fields[1].auto({"project": "/code/thing"}),
+                         "devteam__thing")
 
-    def test_modify_flow_rejects_other_existing_names(self):
-        self.assertEqual(self._run(["other", "free"], existing=["mysess", "other"], current="mysess"), "free")
+    def test_editing_pins_the_name(self):
+        # A modify arrives with `current`: the name field sits still (renames
+        # are deliberate) — no auto derivation.
+        _, session = menu_picker.instance_fields(
+            "golem", workspace="/w", suffix="mysess", current="mysess")
+        self.assertIsNone(session.auto)
+        self.assertEqual(session.value, "mysess")
 
-    def test_rename_to_fresh_name_accepted(self):
-        self.assertEqual(self._run(["newname"], existing=["mysess"], current="mysess"), "newname")
+    def test_collision_is_an_error(self):
+        self.assertIsNotNone(self.error("taken", existing=["taken"]))
+
+    def test_keeping_your_own_name_is_not_a_collision(self):
+        self.assertIsNone(self.error("mysess", existing=["mysess"],
+                                     current="mysess"))
+
+    def test_renaming_onto_another_existing_name_is_an_error(self):
+        self.assertIsNotNone(self.error("other", existing=["mysess", "other"],
+                                        current="mysess"))
+
+    def test_a_fresh_rename_is_fine(self):
+        self.assertIsNone(self.error("newname", existing=["mysess"],
+                                     current="mysess"))
+
+    def test_empty_is_an_error(self):
+        self.assertIsNotNone(self.error(""))
 
 
 class TestContTagsColumn(unittest.TestCase):
@@ -854,13 +883,13 @@ class TestCreateClusterFlow(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def flow(self, picks):
+        # The form now carries name + path as TEXT FIELDS; its return is
+        # (field values, picks) — None still means cancel.
         template_path = AGENTS_DIR / "devteam.legoset"
-        with patch.object(menu_picker, "ask_for_workspace",
-                          return_value="/tmp/project"), \
-             patch.object(menu_picker, "_prompt_cluster_session",
-                          return_value="myteam"), \
-             patch.object(menu_picker, "prompt_members",
-                          return_value=picks) as form, \
+        answer = None if picks is None else (
+            {"session": "myteam", "project": "/tmp/project"}, picks)
+        with patch.object(menu_picker, "prompt_members",
+                          return_value=answer) as form, \
              patch("builtins.input", return_value=""), \
              patch("builtins.print"):
             menu_picker._create_cluster_flow(REGISTRY, template_path)
@@ -884,6 +913,16 @@ class TestCreateClusterFlow(unittest.TestCase):
                                         ("researcher", "adversarial")])
         # Unroled template entries arrive as None so duplicates can renumber.
         self.assertEqual(prefill[0], ("project-starter", None))
+        # And the fields ride in prefilled: template name, default workspace.
+        # Project FIRST — it feeds the name's auto-fill; the name derives
+        # <template>__<basename> live once the form opens.
+        fields = form.call_args.kwargs["fields"]
+        self.assertEqual([(f.key, f.value) for f in fields],
+                         [("project", menu_picker.DEFAULT_WORKSPACE),
+                          ("session", "devteam")])
+        self.assertIsNotNone(fields[1].auto)
+        self.assertEqual(fields[1].auto({"project": "/code/thing"}),
+                         "devteam__thing")
 
     def test_cancelling_the_form_saves_nothing(self):
         self.flow(None)
@@ -913,14 +952,14 @@ class TestClusterRowsAndEditing(unittest.TestCase):
             (Member.of("golem"), Member.of("researcher", "primary")),
             template="devteam"))
 
-    def entries(self):
+    def entries(self, running=None):
         captured = {}
         with patch.object(menu_picker, "pick_with_preview",
                           lambda t, entries, **kw:
                           captured.update(entries=entries) or (None, None)), \
              patch.object(menu_picker, "list_all_instances", return_value=[]), \
              patch.object(menu_picker, "docker_running_instances_subprocess",
-                          return_value=None):
+                          return_value=running):
             menu_picker.select_agent(REGISTRY)
         return captured["entries"]
 
@@ -934,7 +973,7 @@ class TestClusterRowsAndEditing(unittest.TestCase):
                            if isinstance(e.value, menu_picker._ClusterRow))
         self.assertEqual(tuple(cluster_row.display[:1]),
                          menu_picker.PickerRowMarker.CLSTR.lead)
-        self.assertFalse(cluster_row.modifiable)   # nothing to F2 at cluster level
+        self.assertTrue(cluster_row.modifiable)   # F2: rename / repoint / membership
         self.assertTrue(cluster_row.deletable)
 
     def test_member_rows_are_the_editing_unit(self):
@@ -950,6 +989,31 @@ class TestClusterRowsAndEditing(unittest.TestCase):
                 # creation are the visible proof it is a cluster member.
                 text = "".join(t for _, t in row.display)
                 self.assertIn("{clstr}", text)
+
+    def test_a_running_cluster_locks_its_row_and_its_members(self):
+        # The live container is named claude-code_cluster-team, so the probe's
+        # stripped set carries "cluster-team" — the same detection instances
+        # get. All three keys go dark on the cluster row (Enter → docker name
+        # conflict; F2 rename / Del would move or delete the state dir the
+        # container has mounted) and on every member row (their edits write
+        # into that same dir), and the row wears the red RUNNING tag.
+        rows = [e for e in self.entries(running=frozenset({"cluster-team"}))
+                if isinstance(e.value, (menu_picker._ClusterRow,
+                                        menu_picker._MemberRow))]
+        self.assertEqual(len(rows), 3)   # the cluster and both members
+        for row in rows:
+            with self.subTest(value=row.value):
+                self.assertFalse(row.selectable)
+                self.assertFalse(row.deletable)
+                self.assertFalse(row.modifiable)
+        self.assertIn(menu_picker.RUNNING_HINT, rows[0].display)
+
+    def test_a_different_running_cluster_locks_nothing_here(self):
+        cluster_row = next(e for e in self.entries(
+            running=frozenset({"cluster-other"}))
+            if isinstance(e.value, menu_picker._ClusterRow))
+        self.assertTrue(cluster_row.selectable)
+        self.assertNotIn(menu_picker.RUNNING_HINT, cluster_row.display)
 
     def test_f2_persists_the_new_build_with_forced_tags_reapplied(self):
         with patch.object(menu_picker, "prompt_tags",
@@ -1029,6 +1093,195 @@ class TestClusterRowsAndEditing(unittest.TestCase):
         self.dispatch(menu_picker.PickerAction.DELETE,
                       menu_picker._ClusterRow("team"))
         self.assertFalse(self.state.exists("team"))
+
+
+class TestEditClusterFlow(TestClusterRowsAndEditing):
+    """F2 on the cluster row — one form edits name, project, and membership.
+    Inherits the fixture (cluster 'team': golem + researcher__primary in a
+    redirected AGENTS_STATE); the form itself is stubbed, everything it
+    returns is applied for real."""
+
+    def edit(self, session="team", values=None, picks=None):
+        answer = None if values is None else (values, picks)
+        with patch.object(menu_picker, "prompt_members",
+                          return_value=answer) as form, \
+             patch("builtins.input", return_value=""), \
+             patch("builtins.print"):
+            menu_picker._edit_cluster_flow(REGISTRY, session)
+        return form
+
+    def keep_picks(self):
+        return [("golem", None), ("researcher", "primary")]
+
+    def test_the_form_opens_prefilled_with_the_cluster(self):
+        form = self.edit(values={"session": "team", "project": "/tmp/project"},
+                         picks=self.keep_picks())
+        self.assertEqual(form.call_args.args[1],
+                         [("golem", None), ("researcher", "primary")])
+        fields = form.call_args.kwargs["fields"]
+        self.assertEqual([(f.key, f.value) for f in fields],
+                         [("project", "/tmp/project"), ("session", "team")])
+        # Editing pins the name — no auto derivation on a rename form.
+        self.assertIsNone(fields[1].auto)
+        # Keeping your own name must not read as a collision.
+        self.assertIsNone(fields[1].validate("team"))
+        self.assertIsNotNone(menu_picker._session_field_error("team", None))
+
+    def test_renaming_moves_the_whole_directory(self):
+        # Member state dirs ride the move — a rename must not orphan them.
+        from launch import paths as launch_paths
+        member_file = (launch_paths.cluster_member_dir("team", "golem")
+                       / "CLAUDE.md")
+        member_file.parent.mkdir(parents=True)
+        member_file.write_text("persona")
+        self.edit(values={"session": "crew", "project": "/tmp/project"},
+                  picks=self.keep_picks())
+        self.assertFalse(self.state.exists("team"))
+        renamed = self.state.load("crew")
+        self.assertEqual(renamed.ids, ("golem", "researcher__primary"))
+        self.assertEqual((launch_paths.cluster_member_dir("crew", "golem")
+                          / "CLAUDE.md").read_text(), "persona")
+
+    def test_repointing_the_project(self):
+        self.edit(values={"session": "team", "project": "/tmp"},
+                  picks=self.keep_picks())
+        self.assertEqual(str(self.state.load("team").project), "/tmp")
+
+    def test_surviving_members_keep_their_edited_builds(self):
+        # THE reassemble guarantee: an unrelated edit (rename, membership
+        # change) must not wipe a member's F2-edited tags back to .lego.
+        self.state.save(self.cluster.with_build(
+            "golem", AgentBuild(engine="thinker")))
+        self.edit(values={"session": "team", "project": "/tmp/project"},
+                  picks=self.keep_picks() + [("poet", None)])
+        edited = self.state.load("team")
+        self.assertEqual(edited.member("golem").build.engine, "thinker")
+        # The newcomer starts from its .lego plus the forced tags.
+        self.assertEqual(edited.member("poet").build.specialties,
+                         ("muxer", "cluster"))
+
+    def test_membership_shrinks_when_a_pick_is_dropped(self):
+        self.edit(values={"session": "team", "project": "/tmp/project"},
+                  picks=[("golem", None)])
+        self.assertEqual(self.state.load("team").ids, ("golem",))
+
+    def test_cancel_changes_nothing(self):
+        self.edit(values=None)
+        self.assertEqual(self.state.load("team"), self.cluster)
+
+    def test_the_modify_key_routes_a_cluster_row_here(self):
+        with patch.object(menu_picker, "prompt_members",
+                          return_value=({"session": "crew",
+                                         "project": "/tmp/project"},
+                                        self.keep_picks())), \
+             patch("builtins.input", return_value=""):
+            self.dispatch(menu_picker.PickerAction.MODIFY,
+                          menu_picker._ClusterRow("team"))
+        self.assertTrue(self.state.exists("crew"))
+
+
+class TestPromptStop(unittest.TestCase):
+    """prompt_stop — the `--stop` flag's selector. Running rows only, wearing
+    the picker's Cont-row anatomy WITHOUT the (RUNNING) hint (everything here
+    runs by definition), `{muxer}` emphasized wherever present, clusters and
+    stray container ids included, and the checked keys returned verbatim in
+    the running-snapshot's prefix-stripped spelling."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.ws = self.tmpdir.name
+        patcher = patch("launch.tags.identity.last_history_mtime", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, insts, running, clusters=(), picked=None):
+        captured = {}
+
+        def fake_form(title, options, **kwargs):
+            captured["title"] = title
+            captured["options"] = options
+            return picked
+
+        by_id = {i.instance: i for i in insts}
+        with patch.object(menu_picker, "list_all_instances",
+                          return_value=list(by_id)), \
+             patch.object(menu_picker, "instance_from_store",
+                          side_effect=lambda name, registry: by_id.get(name)), \
+             patch.object(menu_picker, "docker_running_instances_subprocess",
+                          return_value=frozenset(running)), \
+             patch.object(menu_picker, "resolved_cwd",
+                          return_value=Path("/nowhere")), \
+             patch.object(menu_picker.cluster_state, "discover",
+                          return_value=list(clusters)), \
+             patch.object(menu_picker, "checkbox_form",
+                          side_effect=fake_form), \
+             patch("builtins.print"):
+            result = menu_picker.prompt_stop(REGISTRY)
+        return result, captured
+
+    @staticmethod
+    def _row_text(option):
+        return "".join(text for _, text in option.label)
+
+    def test_only_running_instances_are_offered(self):
+        insts = [make_inst("golem", "up", self.ws),
+                 make_inst("golem", "down", self.ws)]
+        _, captured = self._run(insts, running={"golem__up"})
+        self.assertEqual([o.key for o in captured["options"]], ["golem__up"])
+
+    def test_no_running_hint_and_the_row_keeps_the_picker_anatomy(self):
+        # tags · name · workspace — but never "(RUNNING)": in this list it
+        # would say nothing.
+        insts = [make_inst("golem", "up", self.ws, specialties=["auto"])]
+        _, captured = self._run(insts, running={"golem__up"})
+        row = self._row_text(captured["options"][0])
+        self.assertIn("golem__up", row)
+        self.assertIn(self.ws, row)
+        self.assertNotIn("(RUNNING)", row)
+
+    def test_muxer_is_emphasized_other_tags_are_not(self):
+        insts = [make_inst("golem", "up", self.ws,
+                           specialties=["auto", "muxer"])]
+        _, captured = self._run(insts, running={"golem__up"})
+        styles = {text: style for style, text in captured["options"][0].label}
+        self.assertIn(menu_picker.TAG_EMPHASIS, styles["{mux}"])
+        self.assertNotIn(menu_picker.TAG_EMPHASIS, styles["{auto}"])
+
+    def test_running_clusters_get_a_row_keyed_by_container_id(self):
+        from types import SimpleNamespace
+        cluster = SimpleNamespace(session="team", members=[1, 2],
+                                  project=Path("/proj"), ids=("a", "b"))
+        _, captured = self._run([], running={"cluster-team"},
+                                clusters=[cluster])
+        (row,) = captured["options"]
+        self.assertEqual(row.key, "cluster-team")
+        self.assertIn("team", self._row_text(row))
+        self.assertIn("/proj", self._row_text(row))
+
+    def test_a_stray_running_id_still_gets_a_stoppable_row(self):
+        # A container with no store entry and no cluster is exactly what
+        # someone reaching for --stop most needs to be able to stop.
+        _, captured = self._run([], running={"mystery__leftover"})
+        (row,) = captured["options"]
+        self.assertEqual(row.key, "mystery__leftover")
+
+    def test_esc_stops_nothing(self):
+        insts = [make_inst("golem", "up", self.ws)]
+        result, _ = self._run(insts, running={"golem__up"}, picked=None)
+        self.assertEqual(result, [])
+
+    def test_picked_keys_come_back_verbatim(self):
+        insts = [make_inst("golem", "up", self.ws)]
+        result, _ = self._run(insts, running={"golem__up"},
+                              picked=["golem__up"])
+        self.assertEqual(result, ["golem__up"])
+
+    def test_nothing_running_skips_the_form_entirely(self):
+        result, captured = self._run([make_inst("golem", "s", self.ws)],
+                                     running=set())
+        self.assertEqual(result, [])
+        self.assertNotIn("options", captured)   # checkbox_form never opened
 
 
 if __name__ == "__main__":

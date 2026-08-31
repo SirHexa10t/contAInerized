@@ -174,15 +174,30 @@ def install_latest_md(inst: Instance) -> None:
     write_text(inst.state_md, f"{body}\n\n{addendum}" if addendum else body)
 
 
+# Where "big transcript" starts to bite: `claude --continue` was observed
+# silently starting a FRESH conversation over a ~92 MB transcript (resumes of
+# the same file at ~75-85 MB still worked), and upstream reports hangs from
+# ~50 MB — plans/ISSUES.md, 2026-08-29. The launch still resumes as asked;
+# the warning turns a silent surprise into a stated risk.
+RESUME_SIZE_WARN_BYTES = 50 * 1024 * 1024
+
+
 def compute_resume_flag(inst: Instance) -> list[str]:
     """The claude args to resume an existing conversation (`["--continue"]`) or
     `[]` for a fresh session — shared by run.py's launch and quickie's
     `--resume`. A continuing instance with no transcript prints a notice and
     starts fresh, because `--continue` against history-only state crashes
-    claude with 'No conversation found'."""
+    claude with 'No conversation found'. A huge transcript still resumes, but
+    behind a warning — see RESUME_SIZE_WARN_BYTES."""
     if inst.is_brand_new:
         return []
     if inst.has_continuable_history:
+        size = inst.continuable_history_bytes
+        if size > RESUME_SIZE_WARN_BYTES:
+            print(f"  WARNING: this instance's transcript is {size / 2**20:.0f} MB. "
+                  f"claude has silently DROPPED the history of a ~92 MB one at "
+                  f"launch (plans/ISSUES.md) — if this conversation matters, "
+                  f"consider retiring it for a fresh session soon.")
         return ["--continue"]
     print(f"  (Instance '{inst.instance}' has no prior conversation; starting fresh.)")
     return []

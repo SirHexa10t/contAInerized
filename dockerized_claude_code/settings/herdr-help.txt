@@ -1,0 +1,32 @@
+  Extra terminals (herdr) - the keys that matter
+  "prefix" means: press ctrl+b, let it go, then press the next key
+
+  prefix+n / p    next / previous tab - cycle a cluster's members
+  prefix+1..9     jump straight to tab N (members in listed order)
+  prefix+b        sidebar on/off - the live agent roster
+  prefix+w        workspace picker
+  mouse           panes, tabs, spaces, agents are clickable; borders drag
+
+  prefix+c        new tab - a whole extra screen (asks for a name)
+  prefix+v        split: new pane to the right
+  prefix+minus    split: new pane below
+  prefix+x        close the focused pane
+  prefix+z        zoom the focused pane full screen (again to undo)
+  prefix+h/j/k/l  move between panes
+
+  wheel           scroll back
+  prefix+[        copy mode - scroll and mark by keyboard
+  drag, dbl-click copies by itself - the small toast confirms. The copy
+                  is offered to YOUR terminal (OSC 52); many terminals
+                  refuse it, and ctrl+shift+v then pastes stale content.
+  shift+drag      select via YOUR terminal (shift+wheel scrolls it) -
+                  ctrl+shift+c copies; that path always works
+
+  alt+/           this help  (a direct chord - no prefix)
+  alt+q           quit: end the session and stop the container  (Y/n)
+  prefix+q        detach: leave, everything keeps running
+
+  prefix+?        herdr's own key list (everything)
+
+  these keys live in settings/herdr.toml - edit them there
+  press Enter to close

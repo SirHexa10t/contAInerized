@@ -249,6 +249,154 @@ class TestActiveWarnings(unittest.TestCase):
         self.assertEqual(active_warnings(set(), self.warnings), [])
 
 
+class TestRefreshAuto(unittest.TestCase):
+    """The auto-fill contract: a derived field FOLLOWS its source until the
+    user touches it, then never again — 'the name follows the path until you
+    type your own'."""
+
+    def fields(self):
+        path = tag_form.TextField(key="path", label="path", value="/code/thing")
+        name = tag_form.TextField(
+            key="name", label="name", value="",
+            auto=lambda values: f"golem__{values['path'].rsplit('/', 1)[-1]}")
+        return path, name
+
+    def test_untouched_fields_follow_their_source(self):
+        path, name = self.fields()
+        tag_form.refresh_auto([path, name])
+        self.assertEqual(name.value, "golem__thing")
+        path.insert("2")
+        tag_form.refresh_auto([path, name])
+        self.assertEqual(name.value, "golem__thing2")
+
+    def test_one_keystroke_in_the_field_stops_the_following(self):
+        path, name = self.fields()
+        tag_form.refresh_auto([path, name])
+        name.insert("!")                      # the user typed their own
+        path.insert("2")
+        tag_form.refresh_auto([path, name])
+        self.assertEqual(name.value, "golem__thing!")
+
+    def test_backspace_counts_as_touching_too(self):
+        # Deleting part of the suggestion IS choosing a name.
+        path, name = self.fields()
+        tag_form.refresh_auto([path, name])
+        name.backspace()
+        tag_form.refresh_auto([path, name])
+        self.assertEqual(name.value, "golem__thin")
+
+    def test_cursor_motion_does_not_count_as_touching(self):
+        # Arrowing around a suggestion is LOOKING, not choosing — the field
+        # keeps following its source, and the rewrite snaps the cursor back
+        # to the end (there was no user cursor position worth preserving).
+        path, name = self.fields()
+        tag_form.refresh_auto([path, name])
+        name.home()
+        name.word_right()
+        path.insert("2")
+        tag_form.refresh_auto([path, name])
+        self.assertEqual(name.value, "golem__thing2")
+        self.assertEqual(name.cursor, len("golem__thing2"))
+
+    def test_fields_without_auto_never_move(self):
+        path, name = self.fields()
+        name.auto = None
+        name.value = "pinned"
+        tag_form.refresh_auto([path, name])
+        self.assertEqual(name.value, "pinned")
+
+
+class TestFormDrivenHeadless(unittest.TestCase):
+    """checkbox_form driven for real — keystrokes through a pipe input, no
+    terminal. This is where the interactive-only guarantees live: the confirm
+    gate on invalid fields is unreachable from pure helpers, and a mutation
+    run proved it was unpinned until these."""
+
+    def drive(self, keys, fields=None, options=None):
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                # Trailing double ctrl-C is a TRIPWIRE, not part of any test's
+                # script: a form still open after its keys (e.g. the really-
+                # done? question arming when it shouldn't) cancels to None and
+                # FAILS loudly — without it such a regression hangs the suite.
+                # Two, because the first may be consumed as the question's
+                # answer. A correctly-exited form never reads them.
+                pipe.send_text(keys + "\x03\x03")
+                return tag_form.checkbox_form(
+                    "t", options or [tag_form.FormOption(key="o", label="opt")],
+                    fields=fields)
+
+    def test_confirm_refuses_while_a_field_is_invalid(self):
+        # First Enter must be REFUSED (field empty + validator says so); the
+        # typed x then makes it valid and the second Enter lands. If the gate
+        # dies, the first Enter exits with the empty value instead.
+        result = self.drive("\rx\r", fields=[
+            tag_form.TextField(key="f", label="name", value="",
+                               validate=lambda v: "empty" if not v else None)])
+        self.assertEqual(result, ({"f": "x"}, []))
+
+    def test_space_is_a_literal_in_a_field(self):
+        result = self.drive("a b\r", fields=[
+            tag_form.TextField(key="f", label="name", value="")])
+        self.assertEqual(result, ({"f": "a b"}, []))
+
+    def test_backspace_edits_the_field(self):
+        result = self.drive("ab\x7f\r", fields=[
+            tag_form.TextField(key="f", label="name", value="")])
+        self.assertEqual(result, ({"f": "a"}, []))
+
+    def test_options_below_the_fields_still_toggle(self):
+        # Down-arrow onto the option row, Space toggles it, Enter confirms —
+        # the field rows must not have broken the row offset arithmetic.
+        result = self.drive("\x1b[B \r", fields=[
+            tag_form.TextField(key="f", label="name", value="ok")])
+        self.assertEqual(result, ({"f": "ok"}, ["o"]))
+
+    def test_arrows_never_edit_a_field(self):
+        # ← once ate a character in a live form (a remove handler fell through
+        # to backspace). Left and right on a focused field must change nothing
+        # — which makes this form UNCHANGED, so Enter asks and `y` closes it.
+        result = self.drive("\x1b[D\x1b[C\ry", fields=[
+            tag_form.TextField(key="f", label="name", value="abc")])
+        self.assertEqual(result, ({"f": "abc"}, []))
+
+    def test_left_arrow_moves_the_cursor_so_typing_lands_mid_string(self):
+        result = self.drive("\x1b[Dx\r", fields=[
+            tag_form.TextField(key="f", label="name", value="ab")])
+        self.assertEqual(result, ({"f": "axb"}, []))
+
+    def test_ctrl_left_jumps_a_word_in_a_path(self):
+        # ctrl+← from the end of /tmp/proj lands before `proj` (path
+        # separators end a word), so the x goes in front of the basename.
+        result = self.drive("\x1b[1;5Dx\r", fields=[
+            tag_form.TextField(key="f", label="path", value="/tmp/proj")])
+        self.assertEqual(result, ({"f": "/tmp/xproj"}, []))
+
+    def test_home_and_the_delete_key_erase_at_the_cursor(self):
+        # Home to column 0, Delete eats the char AT the cursor (not before).
+        result = self.drive("\x1b[H\x1b[3~\r", fields=[
+            tag_form.TextField(key="f", label="name", value="abc")])
+        self.assertEqual(result, ({"f": "bc"}, []))
+
+    def test_an_unchanged_confirm_asks_and_any_other_key_stays(self):
+        # Enter on an untouched form arms the really-done? question. The next
+        # key ANSWERS it and is consumed — the `n` here must not land in the
+        # field as text; the x afterwards proves the form is still live.
+        result = self.drive("\rnx\r", fields=[
+            tag_form.TextField(key="f", label="name", value="abc")])
+        self.assertEqual(result, ({"f": "abcx"}, []))
+
+    def test_a_changed_confirm_never_asks(self):
+        # One real edit and Enter closes directly — no `y` is queued, so if
+        # the question wrongly armed, the tripwire would cancel to None.
+        result = self.drive("x\r", fields=[
+            tag_form.TextField(key="f", label="name", value="abc")])
+        self.assertEqual(result, ({"f": "abcx"}, []))
+
+
 class TestWantsWarnings(unittest.TestCase):
     """wants_warnings — the advisory zone. Keys stay manifest NAMES (they must
     match the checked set); `labels` is display-only, and it exists because a
@@ -358,7 +506,7 @@ class TestFormRequires(unittest.TestCase):
 
 
 class TestToolkitFormOptions(unittest.TestCase):
-    """_toolkit_form_options — the pure assembly behind the "Edit Toolkits"
+    """_toolkit_form_options — the pure assembly behind the "(Edit Preferences)"
     menu: one row per manifest entry, key-sorted; toggleable rows checked from
     the current profile (falling back to the entry's own default for a key the
     profile doesn't mention); locked rows grayed + fixed to their default;
@@ -418,22 +566,71 @@ class TestToolkitFormOptions(unittest.TestCase):
         self.assertEqual(len(second), 1)
 
 
-class TestToolkitFormDisclaimer(unittest.TestCase):
-    """The size disclaimer rides into the toolkit form as a preamble line."""
+class TestProfilesFormAssembly(unittest.TestCase):
+    """The merged preferences form (the "middle-handler"): any number of
+    profile sections concatenated into ONE checkbox form — the first
+    section's title is the form title, every later section a header row —
+    each saving to its own file on confirm, none on Esc."""
 
-    def test_size_note_passed_as_preamble(self):
+    def _captured(self):
         captured = {}
 
         def fake_form(title, options, **kwargs):
+            captured["title"] = title
+            captured["options"] = options
             captured.update(kwargs)
             return None   # cancel — nothing persisted
 
-        code = scan_all(AGENTS_DIR).professions["code"]
         with patch("launch.gui.tag_form.toolkit_profile_path",
                    return_value=Path("/nonexistent/code_profile.toml")), \
+             patch("launch.gui.tag_form.ui_profile_path",
+                   return_value=Path("/nonexistent/ui_profile.toml")), \
              patch("launch.gui.tag_form.checkbox_form", side_effect=fake_form):
-            tag_form._edit_profession_toolkit(code)
-        self.assertIn(tag_form.TOOLKIT_SIZE_NOTE, captured.get("preamble", []))
+            tag_form.edit_profiles_menu(scan_all(AGENTS_DIR))
+        return captured
+
+    def test_size_note_passed_as_preamble(self):
+        # The size disclaimer belongs to the toolkit rows and rides along
+        # whenever a toolkit section is present.
+        self.assertIn(tag_form.TOOLKIT_SIZE_NOTE,
+                      self._captured().get("preamble", []))
+
+    def test_first_section_titles_the_form_and_later_ones_become_headers(self):
+        captured = self._captured()
+        code = scan_all(AGENTS_DIR).professions["code"]
+        self.assertEqual(captured["title"],
+                         f"Edit {code.label} toolkit  (Space to toggle):")
+        headers = ["".join(text for _, text in option.label)
+                   for option in captured["options"] if option.header]
+        self.assertIn("Edit UI configs  (Space to toggle):", headers)
+
+    def test_three_newlines_separate_sections(self):
+        # The next section's title lands three newlines after the previous
+        # section's last row — two blank header rows, then the title row
+        # (operator's spec, 2026-08-30). Blanks are headers, so navigation
+        # skips straight across the gap.
+        options = self._captured()["options"]
+
+        def text(option):
+            return option.label if isinstance(option.label, str) \
+                else "".join(part for _, part in option.label)
+
+        ui_at = next(index for index, option in enumerate(options)
+                     if option.header and "Edit UI configs" in text(option))
+        for blank in (options[ui_at - 1], options[ui_at - 2]):
+            self.assertTrue(blank.header)
+            self.assertEqual(text(blank), "")
+        self.assertFalse(options[ui_at - 3].header)   # the toolkit's last row
+
+    def test_the_muxer_toggle_rides_the_ui_section_checked_by_default(self):
+        # The UI section is ALWAYS present (profession-independent), its keys
+        # namespaced per section so profile files may reuse a name; with no
+        # profile on disk the manifest default (herdr) shows checked.
+        captured = self._captured()
+        (muxer,) = [option for option in captured["options"]
+                    if option.key.endswith(":herdr_instead_of_tmux")]
+        self.assertTrue(muxer.checked)
+        self.assertIn("tmux", "".join(text for _, text in muxer.body))
 
 
 if __name__ == "__main__":

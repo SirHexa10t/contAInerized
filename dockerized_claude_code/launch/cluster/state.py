@@ -258,6 +258,27 @@ def exists(session: str) -> bool:
     return is_file(cluster_state_path(session))
 
 
+def rename(cluster: Cluster, new_session: str) -> Cluster:
+    """The cluster under a new name: its whole directory moves (member state
+    dirs, banner, script, any worktrees ride along) and the state saves under
+    the new session. Refuses a collision rather than merging two clusters.
+
+    KNOWN LIMITATION, deliberate: worktree BRANCH names embed the old session
+    (`cluster/<old>/*`) and are not rewritten — git branches are the user's
+    history, and silently renaming them is how work gets lost. A worktree
+    cluster that must be branch-consistent is destroy-and-recreate territory."""
+    valid_label(new_session, "session name")
+    if new_session == cluster.session:
+        return save(cluster)
+    if exists(new_session):
+        raise ClusterError(
+            f"a cluster named {new_session!r} already exists — renaming "
+            f"{cluster.session!r} onto it would merge two clusters")
+    from ..file_access import move_path
+    move_path(cluster_path(cluster.session), cluster_path(new_session))
+    return save(replace(cluster, session=new_session))
+
+
 def picker_order(members: tuple[Member, ...],
                  registry: "Registry") -> tuple[Member, ...]:
     """Members in the picker's order — THE member ordering, everywhere.

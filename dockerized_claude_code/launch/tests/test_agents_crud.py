@@ -16,8 +16,9 @@ import json
 
 from launch import paths
 from launch.agents_crud import (
-    delete_instance, install_latest_md, install_settings, invalid_tags_report,
-    modify_instance, persist_instance,
+    RESUME_SIZE_WARN_BYTES, compute_resume_flag, delete_instance,
+    install_latest_md, install_settings, invalid_tags_report, modify_instance,
+    persist_instance,
 )
 from launch.tags import AgentBuild, Instance, TagError, scan_all, store
 from launch.tags.identity import resolve_build
@@ -440,6 +441,74 @@ class TestInvalidTagsReport(unittest.TestCase):
         report = invalid_tags_report(self._instance(AgentBuild(policies=("nope",))))
         self.assertIn("~/", report)
         self.assertNotIn(str(Path.home()), report)
+
+
+# ============================================================
+# compute_resume_flag — resume vs fresh, and the big-transcript warning
+# ============================================================
+
+
+class TestComputeResumeFlag(unittest.TestCase):
+    """`--continue` only when a transcript exists — and a WARNING once that
+    transcript is big enough to be at risk: claude silently dropped the
+    history of a ~92 MB one at launch (plans/ISSUES.md, 2026-08-29), so the
+    launch must state the risk instead of letting the operator discover it."""
+
+    def _instance(self, *, transcript_bytes: int | None,
+                  brand_new: bool = False) -> Instance:
+        registry = scan_all(paths.AGENTS_DIR)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        if transcript_bytes is not None:
+            sessions = root / "projects" / "-workspace"
+            sessions.mkdir(parents=True)
+            # truncate, not write: st_size is what the check reads, and a
+            # sparse 60 MB costs nothing.
+            with open(sessions / "session.jsonl", "wb") as jsonl:
+                jsonl.truncate(transcript_bytes)
+        return Instance(agent="refactorer",
+                        md_path=paths.AGENTS_DIR / "refactorer.md",
+                        session="proj", workspace="/w", is_brand_new=brand_new,
+                        state_dir_override=root,
+                        **resolve_build(AgentBuild(), "refactorer", registry))
+
+    def _printed(self, mock) -> str:
+        return " ".join(str(call.args[0]) for call in mock.call_args_list)
+
+    def test_brand_new_starts_fresh_without_touching_disk_or_printing(self):
+        with patch("builtins.print") as printed:
+            flag = compute_resume_flag(self._instance(transcript_bytes=1024,
+                                                      brand_new=True))
+        self.assertEqual(flag, [])
+        printed.assert_not_called()
+
+    def test_no_transcript_prints_the_notice_and_starts_fresh(self):
+        # `--continue` against history-only state crashes claude with
+        # 'No conversation found' — the notice is the difference between a
+        # deliberate fresh start and a mystery.
+        with patch("builtins.print") as printed:
+            flag = compute_resume_flag(self._instance(transcript_bytes=None))
+        self.assertEqual(flag, [])
+        self.assertIn("starting fresh", self._printed(printed))
+
+    def test_a_small_transcript_resumes_silently(self):
+        with patch("builtins.print") as printed:
+            flag = compute_resume_flag(self._instance(transcript_bytes=1024))
+        self.assertEqual(flag, ["--continue"])
+        printed.assert_not_called()
+
+    def test_a_huge_transcript_still_resumes_but_says_the_risk_out_loud(self):
+        # Still resumes — the operator asked to continue, and most launches
+        # survive it — but the warning names the observed failure and the size.
+        size = RESUME_SIZE_WARN_BYTES + 2**20
+        with patch("builtins.print") as printed:
+            flag = compute_resume_flag(self._instance(transcript_bytes=size))
+        self.assertEqual(flag, ["--continue"])
+        text = self._printed(printed)
+        self.assertIn("WARNING", text)
+        self.assertIn("51 MB", text)
+        self.assertIn("ISSUES.md", text)
 
 
 if __name__ == "__main__":

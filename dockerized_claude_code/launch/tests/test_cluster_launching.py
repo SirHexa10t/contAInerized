@@ -23,6 +23,13 @@ from launch.tags import AgentBuild, scan_all
 REGISTRY = scan_all(paths.AGENTS_DIR)
 
 
+def write_ui_profile(*, herdr: bool) -> None:
+    """Pin the muxer preference inside this test's redirected AGENTS_STATE —
+    the file `cluster.backend()` reads (the MUXER_BACKEND env var is retired)."""
+    paths.ui_profile_path().write_text(
+        f"herdr_instead_of_tmux = {'true' if herdr else 'false'}\n")
+
+
 class LaunchingTmp(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -85,6 +92,11 @@ class TestRefusal(LaunchingTmp):
 class TestPrepare(LaunchingTmp):
     def setUp(self):
         super().setUp()
+        # Pinned to the TMUX backend via the ui profile, written into this
+        # test's redirected AGENTS_STATE: one test here asserts the tmux
+        # cluster shape, and the rest must not flap with the operator's real
+        # preference. TestBackendSwitch owns the herdr twin and the default.
+        write_ui_profile(herdr=False)
         # print silenced: compute_resume_flag narrates "starting fresh" per
         # member, which is launch-time information and test-time noise.
         with patch("builtins.print"):
@@ -236,6 +248,54 @@ class TestPrepare(LaunchingTmp):
     def test_the_banner_names_the_members_and_project(self):
         banner = paths.cluster_banner_path("team").read_text()
         self.assertIn("2 member(s)", banner)
+
+
+class TestBackendSwitch(LaunchingTmp):
+    """The ui_profile.toml preference selects the multiplexer per launch —
+    herdr by default (a fresh profile is generated on first launch), tmux a
+    persisted `herdr_instead_of_tmux = false` away. The switch is
+    package-level (`cluster.backend()` → tags/ui_profile.muxer_backend,
+    shared with the solo path); this class pins the CLUSTER script following
+    it, plus the strict launch-read semantics the operator specified."""
+
+    def prepared(self):
+        with patch("builtins.print"):
+            return launching.prepare(self.cluster, REGISTRY)
+
+    def test_herdr_is_the_default_and_first_launch_writes_the_profile(self):
+        # No profile file yet → the launch generates one from settings/
+        # ui.form defaults (so the operator finds it editable afterwards) and
+        # herdr assembles.
+        text = self.prepared().script_host.read_text()
+        self.assertIn("herdr server", text)
+        self.assertNotIn("new-session", text)
+        self.assertIn("herdr_instead_of_tmux = true",
+                      paths.ui_profile_path().read_text())
+
+    def test_tmux_stays_one_profile_edit_away(self):
+        write_ui_profile(herdr=False)
+        text = self.prepared().script_host.read_text()
+        self.assertIn("tmux -u -L muxer new-session", text)
+        self.assertNotIn("herdr server", text)
+
+    def test_herdr_assembles_the_herdr_script(self):
+        write_ui_profile(herdr=True)
+        text = self.prepared().script_host.read_text()
+        self.assertIn("herdr server", text)
+        self.assertIn("herdr agent start", text)
+        self.assertNotIn("new-session", text)
+        # The shared contracts ride BOTH backends: messaging activation and
+        # the sessions-symlink plumbing are backend-independent.
+        self.assertIn(f"unset {launching.MESSAGING_KILL_SWITCH}", text)
+        self.assertIn(f"mkdir -p {launching.SHARED_SESSIONS}", text)
+
+    def test_a_profile_that_lost_the_field_is_a_loud_stop(self):
+        # The operator's spec: a hand-edit that dropped the field must never
+        # silently flip the muxer — the stop names the field and the fix
+        # (rename the file away; the next launch regenerates it).
+        paths.ui_profile_path().write_text("some_other_toggle = true\n")
+        with self.assertRaisesRegex(SystemExit, "herdr_instead_of_tmux"):
+            self.prepared()
 
 
 class TestLaunch(LaunchingTmp):

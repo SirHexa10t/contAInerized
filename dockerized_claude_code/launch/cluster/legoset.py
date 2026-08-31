@@ -36,7 +36,7 @@ from typing import Any
 
 from ..tags.base import read_toml
 from ..tags.lego import AgentBuild, load_lego
-from .member import ClusterError, Member
+from .member import ClusterError, Member, member_id
 
 LEGOSET_SUFFIX = ".legoset"
 LEGO_SUFFIX = ".lego"      # the per-agent build file each member inherits
@@ -205,6 +205,30 @@ def assemble(picks: Sequence[tuple[str, str | None]],
     builds: dict[str, AgentBuild] = {}
     members: list[Member] = []
     for agent, role in auto_roles(picks):
+        if agent not in builds:
+            builds[agent] = load_lego(agents_dir / f"{agent}{LEGO_SUFFIX}")
+        members.append(Member(agent=agent, role=role, build=builds[agent]))
+    return tuple(members)
+
+
+def reassemble(existing: tuple[Member, ...],
+               picks: Sequence[tuple[str, str | None]],
+               agents_dir: Path) -> tuple[Member, ...]:
+    """Form picks applied to an EXISTING membership — the edit-flow sibling of
+    `assemble`. The distinction it exists for: a surviving member keeps its
+    CURRENT build (per-member tag edits made via F2 must not be wiped back to
+    the agent's `.lego` defaults by an unrelated rename), while a newly picked
+    member starts from its `.lego` exactly as creation would. A pick whose
+    derived id matches nobody is new; an existing member no pick derives is
+    dropped."""
+    current = {member.id: member for member in existing}
+    builds: dict[str, AgentBuild] = {}
+    members: list[Member] = []
+    for agent, role in auto_roles(picks):
+        identifier = member_id(agent, role)
+        if identifier in current:
+            members.append(current[identifier])
+            continue
         if agent not in builds:
             builds[agent] = load_lego(agents_dir / f"{agent}{LEGO_SUFFIX}")
         members.append(Member(agent=agent, role=role, build=builds[agent]))

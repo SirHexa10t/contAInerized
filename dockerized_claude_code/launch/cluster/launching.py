@@ -49,13 +49,16 @@ from ..paths import (
     cluster_path, state_settings_path,
 )
 from ..tags import Instance, Registry, resolve_build
-from . import launch_plan, tmux
+from . import backend, herdr, launch_plan, tmux
 from .member import ClusterError, Member
 from .state import Cluster, picker_order
 
 # The generated entrypoint, beside the banner in the cluster dir — so it rides
 # the /cluster mount and the exact script that ran is readable afterwards.
 SCRIPT_NAME = "cluster-start.sh"
+# Which multiplexer assembles it: `backend()` — the package-level switch
+# (the operator's ui_profile.toml preference, herdr by default), shared with
+# the solo path so one setting steers every {muxer} shape alike.
 # Sticky kill-switch (see the module docstring): unset at the entrypoint, per
 # the spike. This re-admits Statsig flag/usage traffic FOR CLUSTER CONTAINERS —
 # accepted knowingly (plan: "Telemetry re-admitted"); solo instances keep the
@@ -279,13 +282,21 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
     write_text(cluster_banner_path(cluster.session),
                tmux.banner_text(cluster.ids, project=str(cluster.project)))
     script_host = cluster_path(cluster.session) / SCRIPT_NAME
-    write_text(script_host, tmux.script(
-        cluster.session, plan.panes(),
-        banner=plan.container_banner,
-        shell_cwd=plan.container_shell_cwd,
-        unset_env=(MESSAGING_KILL_SWITCH,),
-        setup_commands=_setup_commands(cluster),
-        user_conf=TMUX_CONF_IN_CONTAINER))
+    if backend() == "herdr":
+        text = herdr.script(
+            cluster.session, plan.panes(),
+            shell_cwd=plan.container_shell_cwd,
+            unset_env=(MESSAGING_KILL_SWITCH,),
+            setup_commands=_setup_commands(cluster))
+    else:
+        text = tmux.script(
+            cluster.session, plan.panes(),
+            banner=plan.container_banner,
+            shell_cwd=plan.container_shell_cwd,
+            unset_env=(MESSAGING_KILL_SWITCH,),
+            setup_commands=_setup_commands(cluster),
+            user_conf=TMUX_CONF_IN_CONTAINER)
+    write_text(script_host, text)
     script_host.chmod(0o755)
     return PreparedLaunch(
         cluster=cluster, image_probe=_union_probe(cluster, pairs, registry),
@@ -308,9 +319,17 @@ def launch(cluster: Cluster, registry: Registry) -> None:
     for member in prepared.cluster.members:   # picker order — window order
         print(f"    {member.id}")
     print("  Sibling messaging is ON (kill-switch unset for this container —\n"
-          "  accepts Anthropic flag/usage traffic; solo instances are unaffected).\n"
-          "  Cycle members: ^b n / ^b p, ^b <number>, or click a name in the\n"
-          "  status bar. ^b d detaches; everything keeps running.")
+          "  accepts Anthropic flag/usage traffic; solo instances are unaffected).")
+    if backend() == "herdr":
+        print("  Backend: HERDR — members listed by name in the sidebar\n"
+              "  (prefix+b), live idle/working state; the prefix is ctrl+b:\n"
+              "  press it, release, then the key. Cycle members: prefix+n/p\n"
+              "  or prefix+1..9. prefix+q DETACHES (everything keeps\n"
+              "  running); alt+/ is the help. alt+q (Y/n popup, Enter\n"
+              "  confirms) or `herdr server stop` ends the cluster.")
+    else:
+        print("  Cycle members: ^b n / ^b p, ^b <number>, or click a name in the\n"
+              "  status bar. ^b d detaches; everything keeps running.")
     image = ensure_image(prepared.image_probe)
     run_cluster_container(cluster.session, image, prepared.mounts,
                           prepared.script_container)

@@ -270,7 +270,7 @@ def _launch(args: argparse.Namespace) -> int:
     projection: everything host-side (installs, script, banner) happens for
     real, and the docker commands print instead of running — same contract as
     `run.py --dry-run`."""
-    from ..docker_config import require_docker, set_dry_run
+    from ..docker_config import require_docker, running_cluster_report, set_dry_run
     from ..tags import scan_all
     from . import launching
     cluster = _resolve(args.session)
@@ -278,6 +278,11 @@ def _launch(args: argparse.Namespace) -> int:
         return EXIT_REFUSED
     set_dry_run(args.dry_run)
     require_docker()
+    # Same already-running refusal run.py's cluster branch applies — this verb
+    # is the other route to a launch, and must not race the live container.
+    if (report := running_cluster_report(cluster.session)) is not None:
+        print(report)
+        return EXIT_REFUSED
     launching.launch(cluster, scan_all(AGENTS_DIR))
     return EXIT_OK
 

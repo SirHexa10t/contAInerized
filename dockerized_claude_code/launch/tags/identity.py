@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
-from ..file_access import agent_md_index, has_continuable_jsonl, last_history_mtime
+from ..file_access import (
+    agent_md_index, continuable_jsonl_bytes, has_continuable_jsonl,
+    last_history_mtime,
+)
 from ..paths import instance_state_dir_path, state_md_path
 from .base import DockerContribution, Tag
 from .engine import Engine
@@ -273,6 +276,10 @@ class Instance:
     @property
     def has_continuable_history(self) -> bool:
         return has_continuable_jsonl(self.state_dir)
+
+    @property
+    def continuable_history_bytes(self) -> int:
+        return continuable_jsonl_bytes(self.state_dir)
 
     @property
     def last_used_mtime(self) -> float | None:

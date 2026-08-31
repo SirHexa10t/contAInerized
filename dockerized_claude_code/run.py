@@ -12,17 +12,19 @@ from launch.agents_crud import (
 from launch.container_env import set_container_env
 from launch.cowork.lifecycle import ensure_hub_running
 from launch.docker_config import (
-    ensure_image, prompt_install_failures, require_docker, run_container,
+    docker_stop_subprocess, ensure_image, prompt_install_failures,
+    require_docker, run_container, running_cluster_report,
     running_instance_report, set_container_mounts, set_dry_run,
 )
-from launch.file_access import agent_md_index, ensure_shared_oauth_files, is_dir
+from launch.file_access import (
+    agent_md_index, ensure_shared_oauth_files, expand_user_path, is_dir,
+)
 from launch.claude_code_config import print_launch_banner
 from launch.gui import (
-    ask_for_workspace, prompt_session, prompt_tags, select_agent,
+    ask_for_workspace, instance_fields, prompt_stop, prompt_tags, select_agent,
 )
 from launch.cluster.launching import launch as launch_cluster
 from launch.cluster.state import Cluster
-from launch.tags.identity import SESSION_SEP
 from launch.paths import AGENTS_DIR, INSTANCES_FILE
 from launch.tag_handlers import apply_tags
 from launch.tags import (
@@ -56,11 +58,16 @@ class LaunchOptions(NamedTuple):
                             install in the [code] Dockerfile re-runs (cache
                             buster — used to retry previously-failed installs).
                             Already-installed tools fast-path through their
-                            package manager's no-op."""
+                            package manager's no-op.
+        stop              — `--stop` flag. Instead of launching anything, open
+                            the multi-select of RUNNING containers and stop
+                            the picked ones (gather_input short-circuits
+                            before the picker)."""
     picked: Agent | Instance | Cluster | None   # Cluster only via the picker — a CLI target names an agent/instance
     claude_args: list[str]
     dry_run: bool
     refresh_installs: bool
+    stop: bool = False        # defaulted: launch-stage helpers build LaunchOptions without it
 
 
 def parse_cli(registry: Registry) -> LaunchOptions:
@@ -91,12 +98,20 @@ def parse_cli(registry: Registry) -> LaunchOptions:
              "FORCE_INSTALLS_REFRESH and SOFTWARE_STACK_REFRESH layer caches). Used "
              "to retry installs that failed in a prior launch.",
     )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="Stop running agent containers instead of launching: opens a multi-select "
+             "of every running instance/cluster. Stopping ends the container only — "
+             "state and conversations persist, and the next launch resumes as usual.",
+    )
     args, claude_args = parser.parse_known_args()
     picked = resolve_pick(args.target, registry)
     if args.target is not None and picked is None:
         # Unknown name — pass it through to claude as a positional, picker still runs.
         claude_args = [args.target] + claude_args
-    return LaunchOptions(picked, claude_args, args.dry_run, args.refresh_installs)
+    return LaunchOptions(picked, claude_args, args.dry_run,
+                         args.refresh_installs, args.stop)
 
 
 def gather_input() -> tuple[LaunchOptions, Registry]:
@@ -119,10 +134,27 @@ def gather_input() -> tuple[LaunchOptions, Registry]:
     exit_if_missing(agent_md_index(), f"No agents found. Create an .md file in {AGENTS_DIR}/.")
     opts = parse_cli(registry)
     require_docker()
+    if opts.stop:
+        stop_running(registry)     # a terminal mode, not a launch
+        sys.exit(0)
     picked = opts.picked or select_agent(registry)
     if picked is None:
         sys.exit(0)
     return opts._replace(picked=picked), registry
+
+
+def stop_running(registry: Registry) -> None:
+    """`--stop` — pick any of the running containers and stop them. The form
+    (gui.prompt_stop) wears the picker's row anatomy with `{muxer}`
+    emphasized: sticky muxer sessions outlive their terminal, so this flag is
+    how one is ended without re-attaching. Stopping IS removal (`--rm`);
+    state dirs and conversations persist host-side, so a stopped instance
+    relaunches with `--continue` exactly as if its session had ended from
+    inside."""
+    for target in prompt_stop(registry):
+        print(f"  stopping {target} …", flush=True)
+        if not docker_stop_subprocess(target):
+            print(f"  ! docker reported a problem stopping {target}")
 
 
 def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
@@ -147,19 +179,22 @@ def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
         if not picked.workspace:           # stale / missing store entry (None or "") — re-prompt
             return dataclasses.replace(picked, workspace=ask_for_workspace(picked.agent))
         return picked
-    # new — Agent only; prompt workspace, session, then tags. The engine
-    # radio pre-dots the RESOLVED engine (`.lego` → agent-named → default),
-    # not the raw `.lego` value, so the form shows what would actually run.
-    workspace = ask_for_workspace(picked.name)
-    session = prompt_session(picked.name, workspace)
+    # new — Agent only; ONE form carries workspace + name as text fields above
+    # the tags (no terminal prompt precedes it — the shape cluster creation
+    # set). The name auto-fills `<agent>__<workspace-basename>` until typed
+    # into. The engine radio pre-dots the RESOLVED engine (`.lego` →
+    # agent-named → default), so the form shows what would actually run.
     engine = effective_engine_name(picked.build, picked.name, registry)
-    build = prompt_tags(registry, dataclasses.replace(picked.build, engine=engine),
-                        instance=f"{picked.name}{SESSION_SEP}{session}",
-                        workspace=workspace)
-    if build is None:
+    result = prompt_tags(registry, dataclasses.replace(picked.build, engine=engine),
+                         instance=picked.name,
+                         fields=instance_fields(picked.name))
+    if result is None:
         sys.exit(0)
-    return Instance(agent=picked.name, md_path=picked.md_path, session=session,
-                    workspace=workspace, is_brand_new=True,
+    values, build = result
+    return Instance(agent=picked.name, md_path=picked.md_path,
+                    session=values["session"],
+                    workspace=expand_user_path(values["workspace"]),
+                    is_brand_new=True,
                     **resolve_build(build, picked.name, registry))
 
 
@@ -216,6 +251,10 @@ def launch() -> None:
         # Enter on a cluster row: a whole different run shape (union image, one
         # container, N sessions) with its own orchestrator — none of the
         # instance stages below (resume, persist, apply_tags) apply to it.
+        # Same already-running refusal as instances get below, same placement
+        # rationale: fresh probe, before anything is built.
+        if (cluster_report := running_cluster_report(opts.picked.session)) is not None:
+            sys.exit(cluster_report)
         launch_cluster(opts.picked, registry)
         return
     inst = resolve_target(opts.picked, registry)

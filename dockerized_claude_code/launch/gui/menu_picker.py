@@ -1,5 +1,5 @@
 """The full-screen picker (launch/gui): main menu, deletion submenu, the
-"Edit Toolkits" opener, plus supporting line-prompt helpers for workspace
+"Edit Preferences" opener, plus supporting line-prompt helpers for workspace
 path and session suffix. Pulls picker-entry builders and state lookups from
 agents_crud; has no agent-domain logic. Every *form* (tag form, toolkit
 form, checkbox_form) and the shared TUI style system live in the sibling
@@ -9,7 +9,7 @@ Public API:
 
   select_agent(registry)
       Run the agent/session picker (main menu + nested deletion submenu +
-      "Edit Toolkits" submenu) until the user picks something or cancels.
+      "Edit Preferences" submenu) until the user picks something or cancels.
       Discovers agents/instances and handles deletions + toolkit-profile
       edits internally.
       -> Agent (new) | Instance (cont) | None on cancel/empty
@@ -18,7 +18,6 @@ Public API:
       Line prompt for a workspace path; tab-completes against the host filesystem.
       -> absolute path string
 
-  prompt_session(agent, workspace, current=None)
       Line prompt for a session suffix; rejects collisions with existing
       instances (except `current` — the modify flow's keep-the-name case).
       -> session suffix string
@@ -83,10 +82,13 @@ from ..agents_crud import (
 )
 from ..cluster import state as cluster_state
 from ..cluster.legoset import (
-    ClusterTemplate, assemble, discover_templates, load_legoset, validate,
+    ClusterTemplate, assemble, discover_templates, load_legoset, reassemble,
+    validate,
 )
 from ..cluster.member import ClusterError, valid_label
-from ..docker_config import docker_running_instances_subprocess
+from ..docker_config import (
+    cluster_container_id, docker_running_instances_subprocess,
+)
 from ..file_access import (
     expand_user_path, is_dir, last_prompt_in_state, path_exists, read_text,
     resolved_cwd, resolved_path, tab_complete_paths,
@@ -95,11 +97,12 @@ from ..paths import (
     AGENTS_COMMANDS_DIR, AGENTS_DIR, DEFAULT_WORKSPACE, DEFAULTING_DIRS,
     instance_state_dir_path,
 )
-from .cluster_form import prefill_picks, prompt_members
+from .cluster_form import TextField, prefill_picks, prompt_members
 from .tag_form import (
-    RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, UiClass, _fragment_source,
-    _normalize, _plain,
-    edit_toolkits_menu, prompt_tags, squashed_tag_style, tag_style,
+    RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, FormOption, UiClass,
+    _fragment_source, _normalize, _plain,
+    checkbox_form, edit_profiles_menu, prompt_tags, squashed_tag_style,
+    tag_style,
 )
 from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
 from ..tags.base import SQUASH_AT, first_glyph
@@ -156,15 +159,17 @@ TITLE_DELETE_MENU  = "‼️  DELETE AGENT INSTANCES  ‼️"
 # Cwd-relation labels ("(CURRENT DIR) " / "(DEFAULT DIR) ") live on
 # PickerCwdHint there too.
 
-TOOLKITS_LABEL  = "(Edit Toolkits)"
+PREFERENCES_LABEL  = "(Edit Preferences)"
 DELMENU_LABEL  = "(Move onto deletions menu)"
 BACK_LABEL     = "(Move back to Agent Selection)"
-TOOLKITS_PREVIEW = ("Choose which language toolchains a configurable profession's shared image "
-                    "installs (today: [code]'s Rust / Node / CMake) — edits "
-                    "~/.claude-agents/<profession>_profile.toml; a changed toggle rebuilds only that "
-                    "tool's Docker layer on the next launch. Service CLIs (gh, gcloud, aws, ...) are "
-                    "not chosen here — they install when matching creds exist under "
-                    "user_extras/optional_creds/.")
+PREFERENCES_PREVIEW = ("One merged form, one section per profile file. Toolkits: which language "
+                    "toolchains a configurable profession's shared image installs (today: [code]'s "
+                    "Rust / Node / CMake) — edits ~/.claude-agents/<profession>_profile.toml; a "
+                    "changed toggle rebuilds only that tool's Docker layer on the next launch. "
+                    "UI configs: launcher preferences — the {mux} backend, herdr vs tmux — edits "
+                    "~/.claude-agents/ui_profile.toml, read at every launch. Service CLIs "
+                    "(gh, gcloud, aws, ...) are not chosen here — they install when matching creds "
+                    "exist under user_extras/optional_creds/.")
 DELMENU_PREVIEW = "Open the deletion sub-menu to remove agent instances and their state directories."
 BACK_PREVIEW    = "Return to the main agent picker."
 CONFIRM_DELETE_FMT = "Delete '{name}'?"
@@ -213,6 +218,7 @@ STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"
 # column, so non-running rows keep their tighter spacing.
 STYLE_RUNNING_NAME   = "fg:ansibrightblack"                      # grey — this instance can't be launched right now
 RUNNING_HINT         = ("bold fg:ansibrightred", "(RUNNING) ")   # (style, label) fragment, same shape as PickerCwdHint.fragment
+TAG_EMPHASIS         = "bold underline"   # style SUFFIX for tags an emphasize set names (see _tags_column) — on top of the tag's own color, so the color language survives the shout
 
 
 class PickerAction(Enum):
@@ -259,7 +265,9 @@ class PickerRowMarker(Enum):
     CONT    = (((STYLE_NEST_MARK, "   ▸ Cont."),),              "fg:ansiyellow")
     CLUSTER = (((STYLE_CLUSTER_TAB, " + Cluster "), (STYLE_CLUSTER_TAB_TIP, TAB_TIP)),
                "fg:ansicyan")
-    CLSTR   = (((STYLE_CLUSTER_NEST, "   ▸ Clstr"),),           "fg:ansicyan")
+    # "Cont.", the same word instance rows use — an existing cluster IS a
+    # continuation; the cyan is what says "cluster" (kind = colour, verb = word).
+    CLSTR   = (((STYLE_CLUSTER_NEST, "   ▸ Cont."),),           "fg:ansicyan")
     MEMBER  = (((STYLE_NEST_MARK, "        · "),),              "fg:ansicyan")
     TOOLS  = ((("fg:ansicyan", "🧰 Toolkits"),),               "")
     DELMNU = ((("fg:ansired", "⚠️ DELETE‼️"),),                "")
@@ -445,7 +453,7 @@ class PickerEntry:
 # singletons let the dispatcher match by `is` rather than tagging
 # identities with extra metadata.
 _OPEN_DELMENU = object()
-_OPEN_TOOLKITS = object()
+_OPEN_PREFERENCES = object()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -474,7 +482,8 @@ class _MemberRow:
     member_id: str
 
 
-def continuable_instances(registry: Registry) -> list[ContEntry]:
+def continuable_instances(registry: Registry,
+                          running: frozenset[str] | None = None) -> list[ContEntry]:
     """ContEntry list for the picker's Cont/DELETE rows. Orphans (missing .md)
     skipped — instance_from_store returns None for those. Sorted by active
     tag set (tag-less first, then registry order: specialties dominate,
@@ -487,10 +496,12 @@ def continuable_instances(registry: Registry) -> list[ContEntry]:
     raises) — `python -m launch.audit` reports the same defect non-fatally
     when the picker is the wrong place to crash on a typo.
 
-    Also flags which instances are running right now (`is_running`) from ONE
-    `docker ps`, taken per menu build rather than per render — so the marks
-    refresh whenever the menu is rebuilt (including on return from the delete /
-    toolkits submenus) without costing a subprocess per keystroke. An
+    Also flags which instances are running right now (`is_running`). `running`
+    is the docker_running_instances_subprocess snapshot to flag from — pass it
+    when the caller already probed (select_agent shares ONE `docker ps` per
+    menu build between these rows and the cluster rows); None probes here, so
+    the marks still refresh per menu rebuild (including on return from the
+    delete / toolkits submenus) without costing a subprocess per keystroke. An
     undeterminable docker state marks nothing, deliberately: over-flagging
     would wrongly lock rows the user can actually launch."""
     # Symlinks normalized via .resolve() so e.g. /home/<user> matches /var/users/<user>
@@ -499,7 +510,8 @@ def continuable_instances(registry: Registry) -> list[ContEntry]:
     cwd = resolved_cwd()
     defaulting_dir_active = cwd in {resolved_path(d) for d in DEFAULTING_DIRS}
     default_workspace_resolved = resolved_path(DEFAULT_WORKSPACE)
-    running = docker_running_instances_subprocess() or frozenset()   # None (can't tell) → flag nothing
+    if running is None:
+        running = docker_running_instances_subprocess() or frozenset()   # None (can't tell) → flag nothing
 
     out = []
     for dir_name in list_all_instances():
@@ -806,12 +818,16 @@ def _create_preview(agent: Agent) -> str:
     )
 
 
-def _tags_column(tags: Iterable[Tag]) -> tuple[list[tuple[str, str]], int]:
+def _tags_column(tags: Iterable[Tag],
+                 emphasize: frozenset[str] = frozenset(),
+                 ) -> tuple[list[tuple[str, str]], int]:
     """Render a tag set for cont-row / Create-row display as prompt_toolkit
     `(style, text)` fragments. Returns (fragments, visible width); empty input
     → ([], 0). A trailing space fragment is appended to non-empty output so
     the widest row in the column gets a built-in separator before its right
-    neighbor (the agent / instance name).
+    neighbor (the agent / instance name). Tags named in `emphasize` get
+    TAG_EMPHASIS on top of their usual color, both forms — the stop selector
+    uses it to make `{muxer}` jump out.
 
     Two forms, chosen by how crowded the row is. Below SQUASH_AT tags: each
     tag's kind-punctuated label in its warn-aware color. At SQUASH_AT or more,
@@ -828,14 +844,19 @@ def _tags_column(tags: Iterable[Tag]) -> tuple[list[tuple[str, str]], int]:
     for tag in tag_list:
         if fragments:
             fragments.append(("", " "))
-        fragments.append((squashed_tag_style(tag_style(tag)), tag.squash_glyph)
-                         if squash else (tag_style(tag), tag.label))
+        style, text = ((squashed_tag_style(tag_style(tag)), tag.squash_glyph)
+                       if squash else (tag_style(tag), tag.label))
+        if tag.name in emphasize:
+            style = f"{style} {TAG_EMPHASIS}"
+        fragments.append((style, text))
     fragments.append(("", " "))   # trailing separator — bakes into the column width
     visible = sum(len(text) for _, text in fragments)
     return fragments, visible
 
 
-def _cont_tags_column(inst: Instance) -> tuple[list[tuple[str, str]], int]:
+def _cont_tags_column(inst: Instance,
+                      emphasize: frozenset[str] = frozenset(),
+                      ) -> tuple[list[tuple[str, str]], int]:
     """A Cont row's tag column: the resolved tags (via `_tags_column`)
     followed by any `invalid_tags` — stored names that no longer resolve —
     in the red-background/black-foreground alert style so a stale/typo'd tag
@@ -850,7 +871,9 @@ def _cont_tags_column(inst: Instance) -> tuple[list[tuple[str, str]], int]:
     valid tag uses."""
     problems = inst.invalid_tags
     if len(inst.active_tags) + len(problems) >= SQUASH_AT:
-        chips = [(squashed_tag_style(tag_style(tag)), tag.squash_glyph)
+        chips = [(squashed_tag_style(tag_style(tag))
+                  + (f" {TAG_EMPHASIS}" if tag.name in emphasize else ""),
+                  tag.squash_glyph)
                  for tag in inst.active_tags]
         chips += [(STYLE_TAG_INVALID, first_glyph(problem.name))
                   for problem in problems]
@@ -861,7 +884,7 @@ def _cont_tags_column(inst: Instance) -> tuple[list[tuple[str, str]], int]:
             fragments.append(chip)
         fragments.append(("", " "))
         return fragments, sum(len(text) for _, text in fragments)
-    fragments, width = _tags_column(inst.active_tags)
+    fragments, width = _tags_column(inst.active_tags, emphasize)
     for problem in problems:
         if fragments:
             fragments.append(("", " "))
@@ -1239,13 +1262,10 @@ def _path_completer(text: str, state: int) -> str | None:
     return matches[state] if state < len(matches) else None
 
 
-def ask_for_workspace(agent: str, default: str | None = None,
-                      noun: str = "instance") -> str:
+def ask_for_workspace(agent: str, default: str | None = None) -> str:
     """Prompt for a workspace path; Enter uses `default` (or DEFAULT_WORKSPACE).
     Tab completes against the host filesystem. Returns the absolute path with `~`
-    expanded but symlinks preserved — the form the user typed is what gets stored.
-    `noun` is only prompt wording — the cluster flow shares this prompt and
-    "instance" would misname what is being created."""
+    expanded but symlinks preserved — the form the user typed is what gets stored."""
     default = default if default is not None else DEFAULT_WORKSPACE
     prior_completer = readline.get_completer()
     prior_delims = readline.get_completer_delims()
@@ -1258,7 +1278,7 @@ def ask_for_workspace(agent: str, default: str | None = None,
     try:
         while True:
             entered = input(
-                f"Workspace path for '{agent}' {noun} [{default}]: "
+                f"Workspace path for '{agent}' instance [{default}]: "
             ).strip() or default
             absolute = expand_user_path(entered)
             if is_dir(absolute):
@@ -1269,31 +1289,10 @@ def ask_for_workspace(agent: str, default: str | None = None,
         readline.set_completer_delims(prior_delims)
 
 
-def prompt_session(agent: str, workspace: str, current: str | None = None) -> str:
-    """Prompt for a session suffix. Default = `current` (the modify flow —
-    keep the existing name) or the last segment of the workspace path (the
-    create flow). Rejects collisions with existing `{agent}__{suffix}` state
-    dirs — except `current` itself, which is always accepted (keeping your
-    own name isn't a collision). Shared by both flows so the collision loop
-    exists exactly once."""
-    default = current if current is not None else Path(workspace).name
-    while True:
-        suffix = input(f"Session suffix for '{agent}' [{default}]: ").strip() or default
-        if not suffix:
-            print("Session suffix cannot be empty.")
-            continue
-        candidate = f"{agent}{SESSION_SEP}{suffix}"
-        if suffix != current and path_exists(instance_state_dir_path(candidate)):
-            print(f"Instance '{candidate}' already exists. Pick another name.")
-            continue
-        return suffix
-
-
 def _template_preview(template: ClusterTemplate, path: Path) -> str:
-    """The cluster-template row's preview: what a cluster is, who the default
-    members are (names in the picker's blue), and what Enter will actually do —
-    including that launching is not wired yet, which would otherwise be
-    discovered as a surprise."""
+    """The cluster-template row's preview: what a cluster is and who the
+    default members are (names in the picker's blue). No key tutorial — the
+    picker's status bar and F8 legend own the keys, same as every other row."""
     description = f"{template.description}\n\n" if template.description else ""
     members = Text()
     for m in template.members:
@@ -1305,17 +1304,10 @@ def _template_preview(template: ClusterTemplate, path: Path) -> str:
         Markdown(f"*Create a cluster from `agents/{path.name}`*\n\n---\n\n"
                  f"{description}"
                  f"A **cluster** is N agents cohabiting one container on one "
-                 f"project, each in its own tmux window, able to message each "
-                 f"other by name.\n\nDefault members:"),
+                 f"project, each in its own multiplexer window, able to message "
+                 f"each other by name.\n\nDefault members:"),
         Text(),
-        members,
-        Markdown(
-            "\nEnter asks for the project and a session name, then opens the "
-            "member picker: **Space adds another of an agent** (duplicates get "
-            "numbered roles), Backspace removes. Per-member tags are edited "
-            "later, from the picker — not during setup.\n\n"
-            "*Launching a cluster is not wired into the picker yet — "
-            "`python3 cluster.py plan <name>` previews what a launch will run.*"))
+        members)
 
 
 # The rich twin of STYLE_AGENT_NAME: previews render through rich, the rows
@@ -1354,26 +1346,22 @@ def _member_line(registry: Registry, identifier: str, build: AgentBuild) -> Text
 
 
 def _cluster_preview(registry: Registry, cluster: "cluster_state.Cluster") -> str:
-    """An existing cluster's preview: who is in it, wearing what, and what the
-    keys do here — including that launching is not wired yet."""
+    """An existing cluster's preview: who is in it, wearing what. Keys are the
+    status bar's and legend's job, same as every other row."""
     origin = f" (from `{cluster.template}.legoset`)" if cluster.template else ""
     return _render_parts(
         Markdown(f"*Cluster `{cluster.session}`{origin}*\n\n---\n\n"
                  f"project: `{cluster.project}`"),
         Text(),
         *[_member_line(registry, m.id, m.build)
-          for m in cluster_state.picker_order(cluster.members, registry)],
-        Markdown(
-            "\n**F2 on a member** edits its tags · **Del on a member** removes "
-            "it · **Del here** destroys the whole cluster (worktrees removed, "
-            "branches kept).\n\n"
-            f"*Launching a cluster is not wired into the picker yet — "
-            f"`python3 cluster.py plan {cluster.session}` previews the run.*"))
+          for m in cluster_state.picker_order(cluster.members, registry)])
 
 
 def _member_preview(registry: Registry, cluster: "cluster_state.Cluster",
                     member: "cluster_state.Member") -> str:
-    """One member's preview: its agent, its tags, and its edit affordances."""
+    """One member's preview: its agent, its tags — plus the one member-specific
+    fact worth stating (the forced tags), with the generic key tutorial gone
+    like every other preview's."""
     tags = _member_line(registry, member.id, member.build)
     return _render_parts(
         Markdown(f"*`{member.id}` — member of cluster `{cluster.session}`*"
@@ -1381,10 +1369,8 @@ def _member_preview(registry: Registry, cluster: "cluster_state.Cluster",
                  f"agent: `{member.agent}` · role: `{member.role}`"),
         Text(),
         tags,
-        Markdown(
-            "\n**F2** edits this member's tags (`{muxer}` and `{cluster}` are "
-            "re-applied if unticked — every member carries them) · **Del** "
-            "removes it from the cluster."))
+        Markdown("\n*`{muxer}` and `{cluster}` are re-applied on every edit — "
+                 "every member carries them.*"))
 
 
 def _edit_member_flow(registry: Registry, session: str, member_id: str) -> None:
@@ -1404,6 +1390,7 @@ def _edit_member_flow(registry: Registry, session: str, member_id: str) -> None:
                             workspace=str(cluster.project))
     if new_build is None:
         return
+    assert isinstance(new_build, AgentBuild)   # fieldless call — narrow the union
     cluster_state.save(cluster.with_build(member_id, new_build))
 
 
@@ -1435,56 +1422,231 @@ def _destroy_cluster_flow(session: str) -> None:
         cluster_state.destroy(cluster)
 
 
-def _prompt_cluster_session(default: str) -> str:
-    """The cluster's session name — its directory under clusters/, its tmux
-    session, half of every member's path. Same loop shape as `prompt_session`:
-    re-ask on anything unusable, return only a name that can be created."""
-    while True:
-        name = input(f"Cluster session name [{default}]: ").strip() or default
-        try:
-            valid_label(name, "session name")
-        except ClusterError as error:
-            print(f"  {error}")
-            continue
-        if cluster_state.exists(name):
-            print(f"  Cluster '{name}' already exists. Pick another name.")
-            continue
-        return name
+def _session_field_error(value: str, current: str | None = None) -> str | None:
+    """The cluster-name field's live complaint, or None. `current` is the name
+    an EDIT arrived with — keeping your own name is never a collision (the
+    same allowance prompt_session gives instances)."""
+    if not value:
+        return "cannot be empty"
+    try:
+        valid_label(value, "session name")
+    except ClusterError as error:
+        return str(error)
+    if value != current and cluster_state.exists(value):
+        return "a cluster of this name already exists"
+    return None
+
+
+def _project_field_error(value: str) -> str | None:
+    """The project-path field's live complaint, or None. Same rule the
+    workspace prompt enforces: it must BE a directory, `~` welcome."""
+    if not value:
+        return "cannot be empty"
+    if not is_dir(expand_user_path(value)):
+        return f"not a directory: {expand_user_path(value)}"
+    return None
+
+
+def _cluster_fields(project: str, session: str, *,
+                    current: str | None = None,
+                    derive: str | None = None) -> "list[TextField]":
+    """The two text fields both cluster forms carry, live-validated. One
+    builder so create and edit cannot drift in what they accept.
+
+    PROJECT FIRST — it is what the name derives from: with `derive` (the
+    template name, creation only), the name field auto-fills
+    `<template>__<workspace-basename>` and keeps following the path as it is
+    typed, until the user touches the name field — the same shape instance
+    ids have (`<agent>__<session>`), and the same "basename is the default
+    name" rule prompt_session used. An edit passes no `derive`: the existing
+    name sits still, renames are deliberate."""
+    def auto_name(values: dict[str, str]) -> str:
+        raw = values.get("project", "").strip()
+        base = Path(expand_user_path(raw)).name if raw else ""
+        return f"{derive}__{base}" if base else str(derive)
+    return [
+        TextField(key="project", label="project path", value=project,
+                  validate=_project_field_error),
+        TextField(key="session", label="cluster name", value=session,
+                  validate=lambda v: _session_field_error(v, current),
+                  auto=auto_name if derive is not None else None),
+    ]
+
+
+def _agent_rows(registry: Registry) -> list[tuple[str, str]]:
+    """Every pickable agent as (name, one-liner) — the membership form's list,
+    in picker order (which the form's panel uses as its sort rank)."""
+    return [(a.name, _agent_description(read_text(a.md_path)))
+            for a in creatable_agents(registry)]
+
+
+def _suffix_field_error(agent: str, value: str,
+                        current: str | None = None) -> str | None:
+    """The instance-name field's live complaint, or None — the collision rule
+    prompt_session enforced, as a validator: `<agent>__<value>` must not name
+    an existing instance, except the one an edit arrived as."""
+    if not value:
+        return "cannot be empty"
+    candidate = f"{agent}{SESSION_SEP}{value}"
+    if value != current and path_exists(instance_state_dir_path(candidate)):
+        return f"instance '{candidate}' already exists"
+    return None
+
+
+def instance_fields(agent: str, *, workspace: str | None = None,
+                    suffix: str | None = None,
+                    current: str | None = None) -> "list[TextField]":
+    """The instance form's two text fields — project path FIRST, then the
+    session name that completes `<agent>__<name>`, auto-derived from the
+    path's basename until the user types their own (exactly the cluster
+    form's rule, exactly prompt_session's old default). An edit passes the
+    stored values plus `current`, which pins the name (renames stay
+    deliberate) and exempts it from its own collision check."""
+    def auto_suffix(values: dict[str, str]) -> str:
+        raw = values.get("workspace", "").strip()
+        return (Path(expand_user_path(raw)).name if raw else "") or agent
+    return [
+        TextField(key="workspace", label="project path",
+                  value=workspace if workspace is not None else DEFAULT_WORKSPACE,
+                  validate=_project_field_error),
+        TextField(key="session", label=f"name  ({agent}__…)",
+                  value=suffix or "",
+                  validate=lambda v: _suffix_field_error(agent, v, current),
+                  auto=auto_suffix if current is None else None),
+    ]
 
 
 def _create_cluster_flow(registry: Registry, template_path: Path) -> None:
-    """The whole creation flow for one template: prompts, membership form,
-    persist. Returns to the picker whatever happens — a cluster cannot be
-    LAUNCHED from here yet, so unlike the agent rows there is nothing to hand
-    back to run.py.
-
-    Prompt order mirrors instance creation (workspace and name first, then the
-    form, which shows both as its preamble) — the form is where the user
-    lingers, so the cheap questions come first."""
+    """The whole creation flow for one template — ONE form: the cluster's
+    name and project path as text fields above the agent list, membership by
+    picking. Returns to the picker whatever happens; Enter on the created
+    cluster's own row is what launches it."""
     template = load_legoset(template_path)   # row-build already validated it
-    workspace = ask_for_workspace(template.name, noun="cluster")
-    session = _prompt_cluster_session(template.name)
-    agents = creatable_agents(registry)
-    picks = prompt_members(
-        [(a.name, _agent_description(read_text(a.md_path))) for a in agents],
-        prefill_picks(template),
-        title="Cluster members  (Space adds one more of an agent):",
-        preamble=[f"# cluster:   {session}",
-                  f"# project:   {workspace}"])
-    if picks is None:
+    result = prompt_members(
+        _agent_rows(registry), prefill_picks(template),
+        title="New cluster  (type into the fields; Space adds an agent):",
+        fields=_cluster_fields(DEFAULT_WORKSPACE, template.name,
+                               derive=template.name))
+    if result is None:
         return
-    cluster = cluster_state.save(cluster_state.from_template(
-        session, Path(workspace), assemble(picks, AGENTS_DIR),
+    values, picks = result
+    project = expand_user_path(values["project"])
+    cluster_state.save(cluster_state.from_template(
+        values["session"], Path(project), assemble(picks, AGENTS_DIR),
         template=template.name))
-    print(f"\n  Cluster '{cluster.session}' created — {len(cluster.members)} "
-          f"member(s), project {workspace}:")
-    for member in cluster_state.picker_order(cluster.members, registry):
-        print(f"    {member.id}")
-    print("\n  Members share ONE checkout at /workspace — don't have two edit"
-          "\n  files at the same time. Per-member tags: edit from the picker."
-          "\n  Launching clusters isn't wired into the picker yet;"
-          f"\n  `python3 cluster.py plan {cluster.session}` previews the run.")
-    input("\n  Press Enter to return to the picker… ")
+    # No summary, no Enter-pause: the picker redraws with the new cluster row
+    # (and its member rows) — that IS the confirmation, same as editing.
+
+
+def _edit_cluster_flow(registry: Registry, session: str) -> None:
+    """F2 on a cluster row: the SAME form as creation, prefilled — rename in
+    the name field (the whole cluster directory moves), repoint the project,
+    grow or shrink the membership. Surviving members keep their CURRENT
+    builds (a rename must not wipe per-member tag edits back to `.lego`
+    defaults — `legoset.reassemble` is that guarantee); added ones start from
+    their agent's `.lego` plus the forced tags, exactly as creation would."""
+    cluster = cluster_state.load(session)
+    if cluster is None:
+        print(f"\n  Cluster '{session}' is gone from disk.")
+        input("  Press Enter to return to the picker… ")
+        return
+    prefill = [(m.agent, None if m.role == m.agent else m.role)
+               for m in cluster_state.picker_order(cluster.members, registry)]
+    result = prompt_members(
+        _agent_rows(registry), prefill,
+        title=f"Edit cluster '{session}'  (fields + membership):",
+        fields=_cluster_fields(str(cluster.project), cluster.session,
+                               current=cluster.session))
+    if result is None:
+        return
+    values, picks = result
+    members = tuple(cluster_state.with_forced_tags(m)
+                    for m in reassemble(cluster.members, picks, AGENTS_DIR))
+    updated = dataclasses.replace(
+        cluster, project=Path(expand_user_path(values["project"])),
+        members=members)
+    if values["session"] != cluster.session:
+        cluster_state.rename(updated, values["session"])
+    else:
+        cluster_state.save(updated)
+    # No summary, no Enter-pause: the picker redraws with the edited row, and
+    # that IS the confirmation (the pause here was reported as noise).
+
+
+STOP_FORM_TITLE = "Stop running containers  (Space to mark, Enter to stop):"
+
+
+def prompt_stop(registry: Registry) -> list[str]:
+    """The `--stop` selector: every RUNNING instance and cluster as a checkbox
+    row wearing the picker's own Cont-row anatomy — tags · instance name ·
+    cwd hint · workspace — minus the `(RUNNING)` hint, which would say nothing
+    in a list that is running by definition. `{muxer}` is emphasized wherever
+    present: sticky sessions are this flag's reason to exist (a muxer
+    container outlives its terminal, so this list is how one is ended without
+    re-attaching). Returns the picked docker ids, CONTAINER_NAME_PREFIX
+    already stripped (the running-snapshot's spelling) — empty on Esc or when
+    nothing runs.
+
+    A running id that matches no store entry and no cluster still gets a bare
+    row (id only): a stray is exactly what someone reaching for --stop most
+    needs to be able to stop."""
+    running = docker_running_instances_subprocess() or frozenset()
+    options: list[FormOption] = []
+    matched: set[str] = set()
+
+    live = [e for e in continuable_instances(registry, running) if e.is_running]
+    columns = {e.identity.instance:
+               _cont_tags_column(e.identity, emphasize=frozenset({"muxer"}))
+               for e in live}
+    col_width = max((w for _, w in columns.values()), default=0)
+    name_width = max((len(e.identity.instance) for e in live), default=0)
+    for entry in live:
+        matched.add(entry.identity.instance)
+        fragments, width = columns[entry.identity.instance]
+        display = [*fragments, ("", " " * (col_width - width)),
+                   (STYLE_AGENT_NAME,
+                    f"{entry.identity.instance:<{name_width}}"),
+                   ("", "    ")]
+        if entry.is_current_dir:
+            display.append(PickerCwdHint.CURRENT.fragment)
+        elif entry.is_default_dir:
+            display.append(PickerCwdHint.DEFAULT.fragment)
+        elif entry.is_invalid_dir:
+            display.append(PickerCwdHint.INVALID.fragment)
+        display.append((STYLE_WORKSPACE_HINT, entry.workspace_display))
+        options.append(FormOption(
+            key=entry.identity.instance, label=display,
+            body=[("", f"last used {entry.last_used_display}   ·   stopping "
+                       "ends the container; the conversation resumes on the "
+                       "next launch")]))
+
+    for cluster in cluster_state.discover():
+        container_id = cluster_container_id(cluster.session)
+        if container_id not in running:
+            continue
+        matched.add(container_id)
+        options.append(FormOption(
+            key=container_id,
+            label=[(STYLE_MEMBER_COUNT, f"({len(cluster.members)} members)"),
+                   ("", "  "),
+                   (STYLE_AGENT_NAME, cluster.session), ("", "    "),
+                   (STYLE_WORKSPACE_HINT, str(cluster.project))],
+            body=[("", "members: " + ", ".join(cluster.ids))]))
+
+    for stray in sorted(running - matched):
+        options.append(FormOption(
+            key=stray, label=[(STYLE_AGENT_NAME, stray)],
+            body=[("", "a running launcher container with no store entry — "
+                       "stoppable, not otherwise known here")]))
+
+    if not options:
+        print("  Nothing is running.")
+        return []
+    result = checkbox_form(STOP_FORM_TITLE, options)
+    # No text fields ride this form, so a non-None return IS the checked-key
+    # list — the tuple variant exists only for field-carrying forms. The
+    # isinstance narrows for mypy rather than assumes.
+    return result if isinstance(result, list) else []
 
 
 def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluster | None":
@@ -1495,7 +1657,10 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
     legend_text = _build_composition_legend(registry)   # built once per call — the loop below only re-scans instances
     while True:
         agents = creatable_agents(registry)
-        instances = continuable_instances(registry)
+        # ONE `docker ps` per menu build, shared by the instance rows and the
+        # cluster rows below — a running row of either kind greys out.
+        running = docker_running_instances_subprocess() or frozenset()
+        instances = continuable_instances(registry, running)
 
         instances_by_agent: dict[str, list[ContEntry]] = {}
         for inst in instances:
@@ -1575,10 +1740,10 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                 ))
 
         # One row per `.legoset` — a cluster is CREATED from here (the
-        # membership form), though launching one is not wired into the picker
-        # yet. A template that fails to parse or names unknown agents renders
-        # as an unselectable red row instead of crashing the picker: templates
-        # are hand-authored files, and the picker is where the author is.
+        # membership form). A template that fails to parse or names unknown
+        # agents renders as an unselectable red row instead of crashing the
+        # picker: templates are hand-authored files, and the picker is where
+        # the author is.
         known_agents = frozenset(a.name for a in agents)
         for template_name, template_path in discover_templates(AGENTS_DIR).items():
             try:
@@ -1619,20 +1784,30 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
 
         # Existing clusters nest under the template rows, their members one
         # level deeper — the same parent/child shape agents and instances use.
-        # A cluster row cannot LAUNCH yet (Enter explains), but Del destroys
-        # it; a member row is the editing unit: F2 re-tags, Del removes.
+        # Enter on the cluster row launches it, Del destroys it; a member row
+        # is the editing unit: F2 re-tags, Del removes.
         for cluster in cluster_state.discover():
+            cluster_running = cluster_container_id(cluster.session) in running
+            cluster_display = [
+                *PickerRowMarker.CLSTR.fragments("  "),
+                (STYLE_RUNNING_NAME if cluster_running else STYLE_AGENT_NAME,
+                 cluster.session),
+                ("", f"  ({len(cluster.members)} members)    "),
+            ]
+            if cluster_running:
+                cluster_display.append(RUNNING_HINT)
+            cluster_display.append((STYLE_WORKSPACE_HINT, str(cluster.project)))
             entries.append(PickerEntry(
-                display=[
-                    *PickerRowMarker.CLSTR.fragments("  "),
-                    (STYLE_AGENT_NAME, cluster.session),
-                    ("", f"  ({len(cluster.members)} members)    "),
-                    (STYLE_WORKSPACE_HINT, str(cluster.project)),
-                ],
+                display=cluster_display,
                 preview=_cluster_preview(registry, cluster),
                 value=_ClusterRow(cluster.session),
-                deletable=True,
-                modifiable=False,
+                # The same information-only rule running instances get: the
+                # live container owns the name (Enter → docker name conflict)
+                # and has the state dir mounted at /cluster (F2's rename would
+                # move it out from under the container; Del would delete it).
+                selectable=not cluster_running,
+                deletable=not cluster_running,
+                modifiable=not cluster_running,
             ))
             # Rows in picker order — the same derived order the windows will
             # launch in, so the list here IS the `^b 1..9` numbering.
@@ -1641,27 +1816,33 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                 entries.append(PickerEntry(
                     display=[
                         *PickerRowMarker.MEMBER.fragments(""),
-                        (STYLE_AGENT_NAME, member.id),
+                        (STYLE_RUNNING_NAME if cluster_running else STYLE_AGENT_NAME,
+                         member.id),
                         ("", "  "),
                         *member_tags,
                     ],
                     preview=_member_preview(registry, cluster, member),
                     value=_MemberRow(cluster.session, member.id),
-                    deletable=True,
-                    modifiable=True,
+                    # Members follow their cluster: F2/Del write cluster.toml
+                    # inside the very dir the live container has mounted.
+                    selectable=not cluster_running,
+                    deletable=not cluster_running,
+                    modifiable=not cluster_running,
                 ))
 
-        if any(p.toolkit_path for p in registry.professions.values()):
-            entries.append(PickerEntry(
-                display=[
-                    *PickerRowMarker.TOOLS.fragments("  "),
-                    ("", TOOLKITS_LABEL),
-                ],
-                preview=TOOLKITS_PREVIEW,
-                value=_OPEN_TOOLKITS,
-                deletable=False,
-                modifiable=False,
-            ))
+        # Unconditional, unlike the toolkit-only era: the form's UI section
+        # (the {mux} backend pick) is profession-independent, so the row must
+        # exist even when no configurable profession does.
+        entries.append(PickerEntry(
+            display=[
+                *PickerRowMarker.TOOLS.fragments("  "),
+                ("", PREFERENCES_LABEL),
+            ],
+            preview=PREFERENCES_PREVIEW,
+            value=_OPEN_PREFERENCES,
+            deletable=False,
+            modifiable=False,
+        ))
 
         entries.append(PickerEntry(
             display=[
@@ -1687,32 +1868,38 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                 delete_instance(value)
             continue
 
+        if action == PickerAction.MODIFY and isinstance(value, _ClusterRow):
+            _edit_cluster_flow(registry, value.session)
+            continue
+
         if action == PickerAction.MODIFY and isinstance(value, _MemberRow):
             _edit_member_flow(registry, value.session, value.member_id)
             continue
 
         if action == PickerAction.MODIFY:  # instance cont rows — the only other modifiable kind
             old_inst = value
-            # Same prompt order as creation (resolve_target): workspace →
-            # session → tags. The session prompt is the shared one — with
-            # current= it accepts keeping the existing name.
-            new_workspace = ask_for_workspace(old_inst.agent, default=old_inst.workspace)
-            new_session = prompt_session(old_inst.agent, new_workspace, current=old_inst.session)
-            new_build = prompt_tags(registry, old_inst.build,
-                                    instance=f"{old_inst.agent}{SESSION_SEP}{new_session}",
-                                    workspace=new_workspace)
-            if new_build is None:   # Esc on the tag form — abort the modify, back to the picker
+            # ONE form: workspace + name as text fields above the tags — the
+            # same no-terminal-prompt shape cluster editing has.
+            result = prompt_tags(
+                registry, old_inst.build, instance=old_inst.agent,
+                fields=instance_fields(old_inst.agent,
+                                       workspace=old_inst.workspace,
+                                       suffix=old_inst.session,
+                                       current=old_inst.session))
+            if result is None:   # Esc — abort the modify, back to the picker
                 continue
+            values, new_build = result
             new_inst = dataclasses.replace(
-                old_inst, session=new_session, workspace=new_workspace,
+                old_inst, session=values["session"],
+                workspace=expand_user_path(values["workspace"]),
                 invalid_tags=(),   # re-picking against the live registry clears any stale/typo'd tags
                 **resolve_build(new_build, old_inst.agent, registry),
             )  # is_brand_new stays False via the dataclass replace
             modify_instance(old_inst, new_inst)
             continue
 
-        if value is _OPEN_TOOLKITS:
-            edit_toolkits_menu(registry)
+        if value is _OPEN_PREFERENCES:
+            edit_profiles_menu(registry)
             continue
 
         if value is _OPEN_DELMENU:

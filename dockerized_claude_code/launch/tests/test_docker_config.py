@@ -767,6 +767,28 @@ class TestEnsureImage(unittest.TestCase):
             _container_env.update(snapshot)
 
 
+class TestDockerStopSubprocess(unittest.TestCase):
+    """docker_stop_subprocess — the `--stop` flow's one docker verb. Callers
+    speak the prefix-STRIPPED id (the running-snapshot's spelling); the
+    prefix is re-attached here and nowhere else. Short grace deliberately:
+    a {muxer} entrypoint ignores SIGTERM, so every stop of one rides out the
+    whole timeout before docker KILLs."""
+
+    def test_argv_reattaches_the_prefix_and_success_is_rc_zero(self):
+        # `-t` exactly: `--time` warns "deprecated" on newer docker
+        # (operator-observed) and `--timeout` doesn't exist on the 20.10
+        # floor — the short flag is the only spelling both accept silently.
+        with patch("launch.docker_config.shell_returncode",
+                   return_value=0) as run_:
+            self.assertTrue(docker_config.docker_stop_subprocess("golem__a"))
+        run_.assert_called_once_with(
+            "docker", "stop", "-t", "3", "claude-code_golem__a")
+
+    def test_nonzero_rc_reports_false(self):
+        with patch("launch.docker_config.shell_returncode", return_value=1):
+            self.assertFalse(docker_config.docker_stop_subprocess("x"))
+
+
 class TestDockerRunningInstances(unittest.TestCase):
     """docker_running_instances_subprocess maps `docker ps` output back to
     instance ids. The prefix check is done in Python (docker's name filter is
@@ -828,6 +850,46 @@ class TestRunningInstanceReport(unittest.TestCase):
     def test_undeterminable_state_passes(self):
         # Can't tell → don't block; docker itself still refuses a name clash.
         self.assertIsNone(self._report(None))
+
+
+class TestRunningClusterReport(unittest.TestCase):
+    """The cluster twin of the launch guard, plus the container-id symmetry it
+    rests on: run_cluster_container names with the prefix + cluster_container_id,
+    the probe strips the prefix — so `cluster_container_id(session) in probe()`
+    is exact by construction, and a test pins the two ends together."""
+
+    def _report(self, running):
+        with patch.object(docker_config, "docker_running_instances_subprocess",
+                          return_value=running):
+            return docker_config.running_cluster_report("team")
+
+    def test_the_probe_returns_exactly_the_cluster_container_id(self):
+        # A live cluster container as `docker ps` prints it, through the real
+        # strip — the round trip the picker's and the guard's checks rely on.
+        out = (f"{docker_config.CONTAINER_NAME_PREFIX}"
+               f"{docker_config.cluster_container_id('team')}\n")
+        with patch.object(docker_config, "shell_capture",
+                          return_value=SimpleNamespace(returncode=0, stdout=out)):
+            probed = docker_config.docker_running_instances_subprocess()
+        self.assertEqual(probed, frozenset({docker_config.cluster_container_id("team")}))
+
+    def test_running_cluster_reported_with_its_container_name(self):
+        report = self._report(frozenset({"cluster-team"}))
+        self.assertIsNotNone(report)
+        self.assertIn("'team'", report)
+        self.assertIn(f"{docker_config.CONTAINER_NAME_PREFIX}cluster-team", report)
+
+    def test_idle_cluster_passes(self):
+        self.assertIsNone(self._report(frozenset({"cluster-other", "poet__x"})))
+
+    def test_undeterminable_state_passes(self):
+        self.assertIsNone(self._report(None))
+
+    def test_an_instance_can_never_shadow_a_cluster(self):
+        # Instance ids are `<agent>__<session>`; the `cluster-` infix contains
+        # a hyphen an agent name cannot carry before `__`, so a running
+        # instance never trips the cluster guard.
+        self.assertIsNone(self._report(frozenset({"cluster__team"})))
 
 
 class TestRequireDocker(unittest.TestCase):

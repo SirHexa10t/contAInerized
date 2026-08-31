@@ -1,0 +1,140 @@
+# ============================================================================
+# herdr.toml — the {muxer} HERDR backend's config. THIS FILE IS LIVE: edit it.
+# ============================================================================
+#
+#   The tmux sibling of this file is settings/tmux.conf; which one a launch
+#   reads depends on the backend (herdr is the DEFAULT; the ui_profile.toml
+#   preference switches away). Mounted read-only at herdr's own default path,
+#   ~/.config/herdr/config.toml, so no env plumbing is needed. SOLO launches
+#   mount settings/herdr-solo.toml there instead — this file's twin, equal
+#   except the sidebar starting collapsed (a test pins the pair; edit shared
+#   lines in BOTH).
+#
+#   Same prefix as tmux — ctrl+b — so muscle memory carries over. The keys
+#   that differ, learned the probed way (herdr v0.8.2 defaults):
+#
+#       detach            prefix+q      (tmux: prefix+d — q is the trap here)
+#       next / prev tab   prefix+n / p  (same as tmux windows — member cycling)
+#       jump to tab N     prefix+1..9   (same)
+#       sidebar toggle    prefix+b      (the live member/agent roster)
+#       help              prefix+?      (herdr's own)
+#       end EVERYTHING    `herdr server stop` from any pane — the one
+#                         deliberate way out; there is no kill KEY by default.
+#
+#   Uncommented lines below are the launcher's shipped policy; everything
+#   else documents the defaults it deliberately keeps.
+
+# First-run onboarding prompt: never in a container — nobody is there to
+# answer it, and it would swallow the first attach.
+onboarding = false
+
+[theme]
+# "terminal" inherits the outer terminal's own palette — the same neutrality
+# tmux had. Swap for catppuccin / nord / gruvbox / … if you want herdr loud.
+name = "terminal"
+
+[update]
+# The launcher PINS herdr's version (and checksum) in the {muxer} image layer;
+# a container must never self-update — versions are an image concern.
+version_check = false
+manifest_check = false
+
+[server]
+# Pre-attach size of every pane's virtual terminal. `claude --continue`
+# REPLAYS the resumed conversation at THIS size, seconds before the first
+# client attaches and the panes resize — at the 120x40 default a whole
+# history arrived wrapped for a terminal half as wide (operator report;
+# server log showed spawn at cols=120, attach at cols=238 four seconds
+# later). Match or slightly exceed the terminal you actually attach from.
+headless_cols = 240
+headless_rows = 60
+
+[ui]
+# The tab row STAYS — even for a solo launch's single tab (renamed "agent" by
+# the startup script). Hiding it was tried (hide_tab_bar_when_single_tab) and
+# REVERSED by the operator 2026-08-29: the row's right corner is the key
+# hint's home (CONFIRMED rendering, screenshot 2026-08-30), and the hint
+# belongs at the top with the agent tabs — the sidebar row never drew on
+# 0.8.2, and what DID render elsewhere didn't belong (a greeting typed into
+# the shell; hotkeys on the shell pane's frame).
+#
+# Two hint surfaces, then: the tab bar's right corner (primary), and the
+# outer terminal's title for terminals that show one (replaces the default
+# "{hostname}: {workspace}", whose hostname is a container id and says
+# nothing). Human spellings only: a newcomer must be able to run these from
+# the hint alone.
+tab_bar_right = [ { type = "text", text = '"alt+/": help  |  "alt+q": quit' } ]
+window_title = "{workspace} · alt+/ help · alt+q quit"
+
+# BEST-EFFORT: the same hint as a sidebar row under the workspace entry.
+# `$keys` is workspace metadata the generated startup script reports
+# (`--token keys=…` — launch/cluster/herdr.py's HINT_TOKEN, a test holds the
+# pair together). OBSERVED NOT RENDERING on 0.8.2 despite the token landing
+# (workspace list shows it) — kept because it is correct per the config
+# reference and may light up in a later herdr; the hint the operator can
+# RELY on is the solo shell pane's border label (SHELL_LABEL, script-side).
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status"], [{ token = "$keys", dim = true }]]
+
+# NOT configurable away (checked against 0.8.2's full config reference): the
+# sidebar's Spaces section itself. A space is herdr's per-project container
+# and this launcher mounts ONE project per container, so the section always
+# holds exactly one entry — solo AND cluster alike (members are TABS inside
+# the space). Since 0.8.2 offers no hide switch, the section at least EARNS
+# its rows now: the launcher parks the key hint under it (above). Re-check on
+# herdr releases for a hide-when-single option.
+
+# [keys]
+# prefix = "ctrl+b"        # rebindable to anything — "f12", "esc", "-" …
+# detach = "prefix+q"
+# next_tab = "prefix+n"
+# previous_tab = "prefix+p"
+# switch_tab = "prefix+1..9"
+# toggle_sidebar = "prefix+b"
+# help = "prefix+?"
+# Full syntax and every action: `herdr --default-config`. Direct chords
+# (no prefix) also work: "ctrl+alt+x" style — most reliable are ctrl+letter,
+# function keys, and explicit modified chords.
+
+# herdr ships NO quit-everything key — ending the cluster is the CLI verb
+# `herdr server stop` (from any pane; the entrypoint's wait loop then ends the
+# container). The binding below puts it on alt+q, behind a Y/n popup where
+# ENTER (or y) confirms and anything else cancels (an instant-kill key would
+# be a footgun; the popup is herdr's confirm-before). `read a &&` gates on a
+# real Enter, so a dismissed popup or EOF kills nothing. Operator's pick
+# (2026-08-29), superseding ctrl+alt+q, and the SAME chord the tmux backend
+# binds (settings/tmux.conf) — one quit key regardless of backend.
+#
+# Why this chord:
+#   alt+letter      — arrives as ESC + letter, which every ordinary terminal
+#                     delivers (unlike the shifted-ctrl chords rejected from a
+#                     live probe earlier: a legacy terminal sends the UNshifted
+#                     control byte — the key silently did nothing — and
+#                     gnome-terminal claims ctrl+shift+q itself).
+#   q, not o        — a direct muxer binding consumes the key before any pane
+#                     sees it, and Claude Code owns alt+o (fast-mode toggle;
+#                     its alt defaults are alt+p/o/t). alt+q is clear of them.
+#   macOS           — Option+q types "œ" unless the terminal treats Option as
+#                     Meta (Terminal.app: "Use Option as Meta key"; iTerm2:
+#                     Option sends Esc+).
+[[keys.command]]
+key = "alt+q"
+# What prefix+? lists this binding as — without it, herdr says "custom command".
+description = "quit: end the session and its container"
+type = "popup"
+command = "sh -c 'printf \"End the whole cluster and its container? [Y/n] \"; read a && case \"$a\" in \"\"|y|Y) herdr server stop;; esac'"
+width = "60%"
+height = "20%"
+
+# Help: the curated key list on alt+/ (plain text mounted read-only from
+# settings/herdr-help.txt — edit it freely; herdr's own exhaustive list stays
+# on prefix+?). Same chord shape as quit: direct, one modifier, ESC-encoded so
+# every terminal delivers it; nothing in the panes needs it beyond readline's
+# obscure M-/ (complete-filename), shadowed knowingly — Tab covers it.
+[[keys.command]]
+key = "alt+/"
+description = "help: the keys that matter"
+type = "popup"
+command = "sh -c 'cat /home/claude/.claude/herdr-help.txt; read _'"
+width = 76
+height = 34

@@ -192,6 +192,30 @@ class TestDestroy(ClusterTmp):
         self.assertEqual(state.discover(), [])
 
 
+class TestRename(ClusterTmp):
+    def test_rename_moves_the_state_and_returns_the_new_identity(self):
+        renamed = state.rename(state.save(self.a_cluster()), "crew")
+        self.assertEqual(renamed.session, "crew")
+        self.assertFalse(state.exists("poc"))
+        # Loading is canonical (id-sorted) — compare membership, not sequence.
+        self.assertEqual(set(state.load("crew").ids), set(renamed.ids))
+
+    def test_rename_refuses_a_collision_rather_than_merging(self):
+        # The form validator blocks this upstream, but rename is a public
+        # function — its own guard must hold without the form in front of it.
+        cluster = state.save(self.a_cluster())
+        state.save(state.from_template("other", Path("/tmp/p"),
+                                       (Member.of("golem"),)))
+        with self.assertRaises(ClusterError):
+            state.rename(cluster, "other")
+        self.assertTrue(state.exists("poc"))       # nothing moved
+        self.assertEqual(state.load("other").ids, ("golem",))   # nothing merged
+
+    def test_renaming_to_the_same_name_is_a_plain_save(self):
+        cluster = state.save(self.a_cluster())
+        self.assertEqual(state.rename(cluster, "poc"), cluster)
+
+
 class TestPickerOrder(ClusterTmp):
     """`picker_order` — THE member ordering, derived from the same logic that
     sorts the picker's agent rows. Every sequence consumer (windows, rows,

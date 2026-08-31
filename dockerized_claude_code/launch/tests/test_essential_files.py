@@ -253,12 +253,165 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertFalse(self.reg.specialties["muxer"].warn)
         self.assertFalse(self.reg.specialties["cluster"].warn)
 
-    def test_the_muxer_layer_installs_a_multiplexer_and_nothing_else(self):
-        # Thin on purpose: swapping the backend (herdr is the watched candidate)
-        # should be this file plus cluster/tmux.py, not a tag-tree rebuild.
+    def test_the_muxer_layer_installs_the_multiplexers_and_nothing_else(self):
+        # Thin on purpose: multiplexers only, so backend policy stays a
+        # launch-time switch (the ui-profile preference) rather than an image
+        # decision.
         text = (self.reg.specialties["muxer"].layer.path / "Dockerfile").read_text()
         self.assertIn("tmux", text)
         self.assertNotIn("docker-ce", text)
+        # herdr is pre-1.0 with weekly prereleases and bus factor ≈1 — the
+        # recorded risk profile that makes EXACT pins non-negotiable: version
+        # AND checksum, verified before the binary becomes executable.
+        self.assertIn("HERDR_VERSION=", text)
+        self.assertIn("HERDR_SHA256=", text)
+        self.assertIn("sha256sum -c", text)
+        self.assertLess(text.index("sha256sum -c"), text.index("chmod 0755"))
+
+    def test_the_ui_form_manifest_exists_and_defaults_to_herdr(self):
+        # The picker's "(Edit Preferences)" UI section and the launch-path
+        # backend read (cluster.backend → tags/ui_profile.muxer_backend) both
+        # build on settings/ui.form; herdr-by-default is the operator's
+        # 2026-08-29 call, seeded per user into ui_profile.toml at first
+        # launch and a checkbox away thereafter.
+        from launch.tags.ui_profile import MUXER_FIELD, load_ui_form
+        entries = load_ui_form()
+        self.assertIn(MUXER_FIELD, entries)
+        self.assertTrue(entries[MUXER_FIELD].default)
+
+    def test_the_herdr_config_exists_and_rides_every_launch(self):
+        # Sibling of tmux.conf: the herdr backend's keys/theme policy, mounted
+        # at herdr's own default lookup path. Two lines are load-bearing:
+        # onboarding off (a first-run prompt would swallow the first attach,
+        # with nobody attached to answer it) and self-update off (versions are
+        # an image concern, pinned above).
+        conf = paths.SETTINGS_DIR / "herdr.toml"
+        self.assertTrue(conf.is_file())
+        self.assertIn(conf, paths.DOCKER_BASE_MOUNTS)
+        text = conf.read_text()
+        self.assertIn("onboarding = false", text)
+        self.assertIn("version_check = false", text)
+
+    def test_the_quit_key_is_bound_behind_a_confirmation(self):
+        # alt+q — the operator's pick (2026-08-29), superseding the earlier
+        # ctrl+alt+q-by-elimination, and the SAME chord the tmux backend binds
+        # (test_cluster_tmux pins that side) — one quit key across backends.
+        # alt+letter rides ESC-encoding, which every ordinary terminal
+        # delivers; q rather than the operator's first pick alt+o because a
+        # muxer chord swallows the key for every pane and Claude Code owns
+        # alt+o (fast-mode toggle). An INSTANT kill on a keystroke would be a
+        # footgun — the popup confirms, Y/n with Enter accepting per the
+        # operator's spec, gated on `read` succeeding so a dismissed popup
+        # kills nothing.
+        text = (paths.SETTINGS_DIR / "herdr.toml").read_text()
+        self.assertIn('key = "alt+q"', text)
+        self.assertIn("herdr server stop", text)
+        self.assertIn("[Y/n]", text)
+
+    def test_the_muxer_layer_pre_owns_herdrs_config_dir(self):
+        # herdr binds its socket BESIDE its config, and the launcher
+        # RO-file-mounts herdr.toml at ~/.config/herdr/config.toml — docker
+        # creates a missing mountpoint parent ROOT-owned, and a server that
+        # cannot bind its socket fails every herdr launch at the readiness
+        # gate (live-verified: the dir arrived root:root). The image must
+        # therefore create and chown the dir before any mount lands in it.
+        text = (paths.AGENTS_DIR / "profession" / "_muxer"
+                / "Dockerfile").read_text()
+        self.assertIn("mkdir -p /home/claude/.config/herdr", text)
+        self.assertIn("chown claude:claude /home/claude/.config", text)
+
+    def test_the_herdr_help_exists_and_rides_every_launch(self):
+        # alt+/'s popup cats this file; absent, the binding opens onto a cat
+        # error — muxer-help.txt (the tmux twin) carries the same pin in
+        # TestMuxerUserConf.
+        help_file = paths.SETTINGS_DIR / "herdr-help.txt"
+        self.assertTrue(help_file.is_file())
+        self.assertIn(help_file, paths.DOCKER_BASE_MOUNTS)
+        self.assertIn(str(paths.HERDR_HELP_IN_CONTAINER),
+                      paths.DOCKER_BASE_MOUNTS[help_file])
+
+    def test_the_help_key_is_bound_and_both_chords_are_advertised(self):
+        # A binding nobody can see is a binding nobody uses. The tab bar's
+        # right corner is the hint's home (the row stays for it — see the
+        # tab-row test below); the window title is the copy for terminals
+        # that show one. BOTH surfaces must name BOTH direct chords, and each
+        # binding carries a description or herdr's own key list (prefix+?)
+        # shows a nameless "custom command". All were operator reports from
+        # the first live herdr launches.
+        text = (paths.SETTINGS_DIR / "herdr.toml").read_text()
+        self.assertIn('key = "alt+/"', text)
+        self.assertIn(paths.HERDR_HELP_IN_CONTAINER.name, text)
+        for surface in ("tab_bar_right", "window_title"):
+            line = next(ln for ln in text.splitlines()
+                        if ln.startswith(surface))
+            with self.subTest(surface=surface):
+                self.assertIn("alt+/", line)
+                self.assertIn("alt+q", line)
+        self.assertIn('description = "help', text)
+        self.assertIn('description = "quit', text)
+
+    def test_the_sidebar_hint_row_matches_the_scripts_metadata_token(self):
+        # herdr.toml renders `$keys` in the spaces rows; the generated startup
+        # script REPORTS that token as workspace metadata. Either side alone
+        # is an invisible no-op, so the pair is pinned across the two files —
+        # and the hint text itself must name both direct chords.
+        from launch.cluster import herdr
+        text = (paths.SETTINGS_DIR / "herdr.toml").read_text()
+        self.assertIn(f'"${herdr.HINT_TOKEN}"', text)
+        for chord in ("alt+/", "alt+q"):
+            self.assertIn(chord, herdr.HINT_TEXT)
+
+    def test_the_solo_herdr_config_tracks_the_shared_one(self):
+        # herdr reads exactly one config path and has no override flag, so the
+        # solo variant (collapsed sidebar) is a second FULL file that
+        # docker_config mounts instead — a drift risk this pins at PARSE level:
+        # the pair must be equal except the one known delta, so editing a
+        # shared line in either file fails until the twin follows.
+        import tomllib
+        shared = tomllib.loads(paths.HERDR_CONF_SOURCE.read_text())
+        solo_conf = tomllib.loads(paths.HERDR_SOLO_CONF.read_text())
+        self.assertIs(solo_conf["ui"].pop("sidebar_start_collapsed"), True)
+        self.assertEqual(solo_conf["ui"].pop("sidebar_collapsed_mode"),
+                         "hidden")
+        self.assertEqual(solo_conf, shared)
+
+    def test_panes_spawn_at_attach_width_not_the_120_col_default(self):
+        # `claude --continue` replays history at the HEADLESS pane size,
+        # seconds before the first client attaches — at the 120-col default a
+        # 238-col operator got the whole conversation wrapped at half width
+        # (server log: spawn cols=120, attach cols=238). Both configs carry
+        # the widened virtual terminal.
+        for name in ("herdr.toml", "herdr-solo.toml"):
+            text = (paths.SETTINGS_DIR / name).read_text()
+            with self.subTest(config=name):
+                self.assertIn("headless_cols = 240", text)
+
+    def test_the_tab_row_stays_because_it_carries_the_hint(self):
+        # Hiding the row for solo's single tab was SHIPPED and then REVERSED
+        # by the operator (2026-08-29): the row's right corner is the key
+        # hint's home — "the shortcuts belong at the top, with the agent
+        # tabs" — and every relocation attempt either didn't render on 0.8.2
+        # or didn't belong (a greeting in the shell). Re-hiding the row would
+        # silently orphan tab_bar_right again, in BOTH configs.
+        for name in ("herdr.toml", "herdr-solo.toml"):
+            text = (paths.SETTINGS_DIR / name).read_text()
+            with self.subTest(config=name):
+                self.assertNotIn("hide_tab_bar_when_single_tab = true", text)
+
+    def test_the_herdr_help_matches_the_keys(self):
+        # The popup body must track the conf's chords and teach the mouse-copy
+        # path: drag auto-copies (herdr's copy_on_select) but the OUTER
+        # terminal may refuse the clipboard write (OSC 52) — shift+drag is the
+        # fallback that needs no cooperation, same lesson the tmux help
+        # carries.
+        help_text = (paths.SETTINGS_DIR / "herdr-help.txt").read_text()
+        for topic in ('"prefix" means', "alt+q", "detach", "quit",
+                      "shift+drag", "OSC 52", "settings/herdr.toml"):
+            with self.subTest(topic=topic):
+                self.assertIn(topic, help_text)
+        # herdr's OWN notation (prefix+n), never tmux's ^b — the operator
+        # read ^b as a simultaneous chord, and herdr marks keys prefix-style.
+        self.assertNotIn("^b", help_text)
 
     def test_cluster_addendum_teaches_the_member_its_own_identity(self):
         # A member shares its persona with any sibling built from the same agent,
@@ -270,14 +423,16 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertIn("no authority", body.lower())
 
     def test_muxer_addendum_does_not_promise_a_session_that_may_not_exist(self):
-        # {muxer} installs the multiplexer; nothing in the SOLO launch path starts
-        # one (run_container execs claude directly). An addendum asserting "this
-        # container runs a multiplexer" would therefore be false for every solo
-        # instance carrying the tag — so it must describe availability, and tell
-        # the agent how to check.
+        # A launcher-driven {muxer} container always starts a session, but the
+        # addendum cannot know WHICH backend (the ui-profile preference is
+        # per operator), so it must teach both probes — and warn off the herdr verb that ends
+        # the container mid-turn, since that side has no scratch-server net
+        # (tmux got its socket split after exactly that accident, twice).
         _, body = self.reg.specialties["muxer"].addendum
         self.assertIn("installed", body)
         self.assertIn("list-sessions", body)
+        self.assertIn("herdr status server", body)
+        self.assertIn("herdr server stop", body)
 
     def test_manager_nests_inside_cowork(self):
         # The role tag: shipped inside cowork/, so recruiting power implies
@@ -616,7 +771,7 @@ class TestFirewallSpecialtyArtifacts(unittest.TestCase):
 
 class TestCodeToolkitManifest(unittest.TestCase):
     """[code]'s template.form — the configurable-installs manifest behind the
-    "Edit Toolkits" menu. Guards the scope decisions: the form offers the
+    "(Edit Preferences)" menu. Guards the scope decisions: the form offers the
     LANGUAGE TOOLCHAINS only (all default on, matching the pre-toggle
     unconditional installs); the service CLIs are creds-driven and never
     manifest entries; every Dockerfile INSTALL_* ARG is owned by exactly one

@@ -10,10 +10,26 @@ its entrypoint, and dies with a docker error that names neither tag nor module.
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from launch import paths
 from launch.cluster import solo
 from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+
+
+def pin_backend(case: unittest.TestCase, *, herdr: bool | None) -> None:
+    """Redirect AGENTS_STATE to a fresh tmp for this test and persist the
+    muxer preference there (None = no file: the first-launch default path).
+    The profile file is what `cluster.backend()` reads — the MUXER_BACKEND
+    env var is retired."""
+    state_tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(state_tmp.cleanup)
+    patcher = patch.object(paths, "AGENTS_STATE", Path(state_tmp.name))
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    if herdr is not None:
+        paths.ui_profile_path().write_text(
+            f"herdr_instead_of_tmux = {'true' if herdr else 'false'}\n")
 
 
 def a_muxer_instance(specialties=("muxer",), workspace="/home/someone/code/thing",
@@ -51,10 +67,15 @@ class TestEntrypointAgreement(unittest.TestCase):
 
 
 class TestInstallLauncher(unittest.TestCase):
+    """The TMUX solo shape — pinned via a redirected ui profile so the
+    assertions cannot flap with the operator's real preference; TestHerdrSolo
+    owns the herdr twin and the first-launch default."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
+        pin_backend(self, herdr=False)
 
     def install(self, argv=("claude", "--continue"), **kw):
         inst = a_muxer_instance(state_root=self.root, **kw)
@@ -113,12 +134,92 @@ class TestComposition(unittest.TestCase):
 
     def test_the_generated_script_does_not_expect_arguments(self):
         # Being last, nothing is passed to it — the agent's argv is baked in. A
-        # `"$@"` here would silently drop the agent command.
-        with tempfile.TemporaryDirectory() as tmp:
-            inst = a_muxer_instance(state_root=Path(tmp))
-            solo.install_launcher(inst, ("claude", "--continue"))
+        # `"$@"` here would silently drop the agent command. Both backends must
+        # hold the property, so both scripts are checked.
+        for herdr_value in (False, True):
+            with self.subTest(herdr=herdr_value), \
+                 tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(paths, "AGENTS_STATE", Path(tmp)):
+                paths.ui_profile_path().write_text(
+                    f"herdr_instead_of_tmux = "
+                    f"{'true' if herdr_value else 'false'}\n")
+                inst = a_muxer_instance(state_root=Path(tmp))
+                solo.install_launcher(inst, ("claude", "--continue"))
+                host, _ = solo.script_paths(inst)
+                self.assertNotIn('"$@"', host.read_text())
+
+
+class TestHerdrSolo(unittest.TestCase):
+    """The DEFAULT backend's solo shape: herdr server + one detected agent
+    tab, the workspace root pane as the free shell — and the cluster-only
+    trades staying out of it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def script_with(self, herdr: bool | None,
+                    argv=("claude", "--continue")) -> str:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(paths, "AGENTS_STATE", Path(tmp)):
+            if herdr is not None:
+                paths.ui_profile_path().write_text(
+                    f"herdr_instead_of_tmux = {'true' if herdr else 'false'}\n")
+            inst = a_muxer_instance(state_root=self.root)
+            solo.install_launcher(inst, argv)
             host, _ = solo.script_paths(inst)
-            self.assertNotIn('"$@"', host.read_text())
+            return host.read_text()
+
+    def test_herdr_is_the_default_for_solo_launches_too(self):
+        # The operator decision (2026-08-29) covers every {muxer} shape, not
+        # just clusters — no ui profile on disk yet means the herdr script.
+        text = self.script_with(None)
+        self.assertIn("herdr server", text)
+        self.assertNotIn("new-session", text)
+
+    def test_the_agent_is_the_root_pane_and_the_shell_splits_below(self):
+        # `agent start --kind claude` into the workspace's own root pane puts
+        # the agent in herdr's sidebar with live idle/working state; the free
+        # shell is a split beneath it (both visible — the tmux solo layout)
+        # in ONE tab, which the script renames after the agent: the tab row
+        # stays, carrying the key hint in its right corner.
+        text = self.script_with(True)
+        self.assertIn("workspace create --cwd /workspace "
+                      "--label refactorer__proj", text)
+        self.assertIn("herdr agent start agent --kind claude", text)
+        self.assertIn("pane split", text)
+        self.assertNotIn("tab create", text)
+
+    def test_the_argv_is_baked_in_quoted_here_too(self):
+        text = self.script_with(
+            True, argv=("claude", "--append-system-prompt", "be terse now"))
+        self.assertIn("be terse now", text)
+        self.assertIn("--append-system-prompt", text)
+
+    def test_solo_keeps_the_messaging_kill_switch(self):
+        # Unsetting it — and accepting the telemetry it re-admits — is a
+        # CLUSTER trade; a solo script must carry no unsets at all.
+        self.assertNotIn("unset CLAUDE_CODE", self.script_with(True))
+
+    def test_tmux_stays_one_profile_edit_away(self):
+        self.assertIn("tmux -u -L muxer new-session", self.script_with(False))
+
+    def test_herdr_solo_rides_its_own_config(self):
+        # The collapsed-sidebar variant mounts at the SAME container path as
+        # the shared config, so the override is a swap docker_config performs
+        # — this pins the (source, target) the swap uses, per backend.
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(paths, "AGENTS_STATE", Path(tmp)):
+            paths.ui_profile_path().write_text("herdr_instead_of_tmux = true\n")
+            override = solo.herdr_conf_override()
+            self.assertIsNotNone(override)
+            source, target = override
+            self.assertEqual(source, paths.HERDR_SOLO_CONF)
+            self.assertEqual(
+                target, f"{paths.HERDR_CONF_IN_CONTAINER}:{paths.RO_MOUNT_OPTION}")
+            paths.ui_profile_path().write_text("herdr_instead_of_tmux = false\n")
+            self.assertIsNone(solo.herdr_conf_override())
 
 
 if __name__ == "__main__":

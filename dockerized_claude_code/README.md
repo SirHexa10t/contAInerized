@@ -140,7 +140,7 @@ isolated Docker container with persistent per-instance state.
   `~/.claude-agents/user_extras/optional_creds/` and the matching CLI
   inside the container picks it up automatically. See *Optional Host
   Mounts* below for the full table.
-- **"Edit Toolkits" menu** — a row in the picker (above the delete menu)
+- **"(Edit Preferences)" menu** — a row in the picker (above the delete menu)
   for professions that expose a configurable install set (today: `[code]`).
   Toggle language toolchains on or off: Rust, Node, and CMake (on by
   default — they were always part of `[code]`), plus opt-in Go, Java,
@@ -537,7 +537,7 @@ host also flips an `INSTALL_<TOOL>=1` build-arg, and the `[code]`
 Dockerfile (`agents/profession/code/Dockerfile`) installs the CLI on the
 next `[code]` build. Each tool gets its own ARG, so adding a new credential
 only invalidates that tool's layer (downstream layers re-run as no-ops).
-Creds-presence is the only driver for these CLIs — the "Edit Toolkits" form
+Creds-presence is the only driver for these CLIs — the "(Edit Preferences)" form
 covers the language toolchains, a disjoint set.
 Removing a credential reverses it on the next build. Auto-install only
 happens for `[code]` agents; others get the credentials passthrough but no
@@ -596,10 +596,10 @@ from the failure log so the warning clears once a retry actually works.
 ## Project Layout
 
 ```
-run.py                               # entry point + staged launch() orchestrator (scan tags → migrate store → resolve → resume? → persist → apply tags → setup → build → run)
+run.py                               # entry point + staged launch() orchestrator (scan tags → migrate store → resolve → resume? → persist → apply tags → setup → build → run). --stop opens a multi-select of RUNNING instances/clusters and stops the picked containers ({mux} highlighted — sticky sessions are the ones that outlive their terminal)
 quick_question.py                    # entry point for the `q` quickie tool → launch.quickie.main (argparse; --explain/--research/--history/--answer/--resume; print-mode one-shot)
 Dockerfile                           # base image — Claude Code + uv + ripgrep + iptables/sudo ({firewall} prerequisites); built with `network: host` to dodge BuildKit DNS issues
-cluster.py                           # entry point for CLUSTER mode (PoC) — N cohabiting agents in one container, switched between with tmux → launch.cluster.cli. Design record: cluster_plan.md
+cluster.py                           # entry point for CLUSTER mode (PoC) — N cohabiting agents in one container, switched between in one multiplexer (herdr or tmux — the ui_profile.toml preference, editable from the picker's "(Edit Preferences)" form) → launch.cluster.cli. Design record: cluster_plan.md
 check.sh                             # the quality gate — see "Quality gate" below
 .github/workflows/ci.yml             # CI — sets up an environment and calls check.sh
 launch/
@@ -614,7 +614,7 @@ launch/
     lego.py                          #   AgentBuild + `.lego` loading (an agent's default tag selections)
     identity.py                      #   Agent (pickable) + Instance (fully-resolved launch: chain, build_steps, docker_contributions, conf, claude_args, unmet_wants)
     store.py                         #   instances.toml load/save (stdlib tomllib in; small TOML emitter out)
-    toolkit_profile.py               #   per-profession <profession>_profile.toml — "Edit Toolkits" install toggles ([code]); same tomllib-in / emitter-out shape as store
+    toolkit_profile.py               #   per-profession <profession>_profile.toml — "(Edit Preferences)" install toggles ([code]); same tomllib-in / emitter-out shape as store
     migrations.py                    #   ISOLATED one-shot conversions from retired on-disk formats (legacy two-map JSON → instances.toml)
     addendums.py                     #   chain-keyed CLAUDE.md addendum copy + compose()
   container_env.py                   # env staging — ContainerEnvKey enum, the staged-value accumulator, `-e`/build-arg formatters, set_container_env orchestrator.
@@ -623,9 +623,9 @@ launch/
   firewall/                          # {firewall} subsystem (package): __init__ facade + resolver.py (two-phase DNS resolution — sync Phase 1 → streaming Phase 2 via docker exec iptables -I, CDN widening, cross-launch resolved-IP cache; getent on Linux, socket.getaddrinfo fallback where absent e.g. macOS) + whitelist.py (entry expansion) + status.py (agent-visible domains_pending_resolve.yml). Host caches live in ~/.claude-agents/firewall_cache/; curated domain list in template_code/firewall_domains.py.
   agents_crud.py                     # instance-state CRUD — instances.toml writers (persist/delete/modify), install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker-entry factories, engine sort keys.
   user_additions.py                  # optional_creds mounts + plant_user_extras (readme always; firewall_whitelist.txt under {firewall}).
-  gui/                               # TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py (kind-sectioned tag form + toolkit form + generic checkbox_form + shared style system) + menu_picker.py (picker + F8 legend + workspace/session prompts + banner + "Edit Toolkits" opener + stale-tag guard).
+  gui/                               # TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports): tag_form.py (kind-sectioned tag form + toolkit form + generic checkbox_form + shared style system) + menu_picker.py (picker + F8 legend + workspace/session prompts + banner + "(Edit Preferences)" opener + stale-tag guard).
   cowork/                            # {cowork}/{manager} multi-agent group hosting — leaf consumer of the core: group (durable state) + mailbox (messages + capture attribution) + sync (file plane) + journal + roster + control (agent-facing verbs) + lifecycle (hub singleton) + relay (the loop) + cli. Owns no docker calls; injection lives in docker_config. cowork.py at the repo root is its thin entry.
-  cluster/                           # {mux}/{clstr} COHABITING agents (PoC) — leaf consumer too: member (identity + name legality) + legoset (cluster templates) + state (cluster.toml) + worktree (writer safety) + tmux (multiplexer assembly) + launch_plan + cli. No docker calls yet; cluster.py at the root is its entry, cluster_plan.md the design record.
+  cluster/                           # {mux}/{clstr} COHABITING agents (PoC) — leaf consumer too: member (identity + name legality) + legoset (cluster templates) + state (cluster.toml) + worktree (writer safety) + tmux/herdr (multiplexer assembly — herdr by default; the switch is ~/.claude-agents/ui_profile.toml's herdr_instead_of_tmux, edited from the picker) + launch_plan + cli. cluster.py at the root is its entry, cluster_plan.md the design record.
   quickie/                           # the `q` one-shot-question tool — leaf consumer of the core: cli.py (argparse dispatch) → ask.py (fixed-build Instance under quickie/<gibberish>, stream-json run) + render.py (thinking ticker + streamed answer) + history.py (--history listing / --answer replay). quick_question.py at the repo root is its thin entry.
   claude_code_config.py              # Claude-Code-side UX — build_status_line(instance) + set_terminal_title(name). Leaf-shaped.
   audit.py                           # state-correctness checker (run as `python -m launch.audit`).
@@ -640,7 +640,7 @@ agents/                              # agent definitions + the tag tree
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
   specialty/cowork/manager/          #   {manager} nests inside {cowork} — nesting IS the requires mechanism, so ticking the inner tag brings the outer one
-  specialty/muxer/cluster/           #   {clstr} nests inside {mux} (a cluster is multiplexing); {mux} claims the hidden profession/_muxer layer that installs tmux
+  specialty/muxer/cluster/           #   {clstr} nests inside {mux} (a cluster is multiplexing); {mux} claims the hidden profession/_muxer layer that installs both backends (herdr — the default — and tmux)
   <name>.legoset                     #   a CLUSTER template — which agents, how many of each, default roles (agents/devteam.legoset)
   policy/{web-research,no-sudo,plan-first,…}/ #   <policy> members — tag.info + policy.json settings fragment (also no-net, no-git, vcs-safe, free-bash, all-actions, hidden _read-only)
 custom_commands/                     # launcher-bundled slash commands (mounted into every container)

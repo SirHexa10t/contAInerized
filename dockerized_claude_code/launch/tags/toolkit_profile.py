@@ -13,7 +13,7 @@ One flat bool per `ToolkitEntry` in the profession's `template.form`
 (`Profession.load_toolkit()`) — global, not per-instance: it configures the
 one shared image every instance of that profession builds from, same as
 `instances.toml` is per-instance but this is per-profession. Edited via the
-picker's "Edit Toolkits" menu (menu_picker._edit_profession_toolkit); a hand
+picker's "(Edit Preferences)" menu (gui/tag_form.edit_profiles_menu); a hand
 edit works too, since load() re-reads the file fresh each call.
 
 Schema evolution: a key present in the manifest but missing from the user's
@@ -75,7 +75,7 @@ def save_profile(path: Path, values: dict[str, bool], entries: dict[str, Toolkit
     stale prior file after a manifest change) are dropped: the file always
     matches the CURRENT toggleable manifest."""
     lines = [
-        "# Toolkit install toggles — edit via the picker's \"Edit Toolkits\" menu,",
+        "# Toolkit install toggles — edit via the picker's \"(Edit Preferences)\" menu,",
         "# or by hand (booleans only). Re-launch to apply: a changed value feeds a",
         "# fresh --build-arg, so only that tool's Docker layer rebuilds.",
         "",

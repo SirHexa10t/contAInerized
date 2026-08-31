@@ -71,7 +71,7 @@ def _load_toolkit(path: Path) -> dict[str, ToolkitEntry]:
     missing required field, a malformed `build_arg` (it becomes a docker
     `--build-arg` verbatim), or two entries claiming the same build-arg — a
     manifest typo should surface at scan time, not silently drop a tool from
-    the "Edit Toolkits" form or no-op its toggle. Locked entries carry
+    the "(Edit Preferences)" form or no-op its toggle. Locked entries carry
     neither `build_arg` nor `approx_size_mb` (see ToolkitEntry)."""
     out: dict[str, ToolkitEntry] = {}
     claimed: dict[str, str] = {}
@@ -139,7 +139,7 @@ class Profession(Tag):
     def load_toolkit(self) -> dict[str, ToolkitEntry]:
         """This profession's configurable installs — `{}` if it has no
         `template.form`. Parsed fresh each call (small file, no cache) so the
-        picker's "Edit Toolkits" menu always sees a just-edited manifest."""
+        picker's "(Edit Preferences)" menu always sees a just-edited manifest."""
         return _load_toolkit(self.toolkit_path) if self.toolkit_path else {}
 
     @classmethod

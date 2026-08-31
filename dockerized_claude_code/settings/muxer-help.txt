@@ -24,7 +24,7 @@
 
   ^b [            scroll back by keyboard - Escape to leave
   ^b d            detach: leave, everything keeps running
-  ^b shift-Q      quit: end the session and stop the container
+  alt+q           quit: end the session and stop the container  (Y/n)
 
   ^b shift-K      tmux's own full key list (everything)
 

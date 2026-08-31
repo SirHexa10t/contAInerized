@@ -30,67 +30,74 @@ REGISTRY = scan_all(AGENTS_DIR)
 
 class TestParseCliFlags(unittest.TestCase):
     """parse_cli returns a LaunchOptions NamedTuple — (picked, claude_args,
-    dry_run, refresh_installs); tuple-unpacking keeps working. Both boolean
-    flags default False; each is exposed as its own CLI arg."""
+    dry_run, refresh_installs, stop), read by attribute since the tuple grew
+    past comfortable unpacking width. Every boolean flag defaults False; each
+    is exposed as its own CLI arg."""
 
     def _parse(self, argv):
         with patch.object(sys, "argv", argv):
             return run.parse_cli(REGISTRY)
 
     def test_default_false(self):
-        _, _, dry_run, refresh = self._parse(["run.py"])
-        self.assertFalse(dry_run)
-        self.assertFalse(refresh)
+        opts = self._parse(["run.py"])
+        self.assertFalse(opts.dry_run)
+        self.assertFalse(opts.refresh_installs)
+        self.assertFalse(opts.stop)
 
     def test_flag_sets_true(self):
-        _, _, dry_run, refresh = self._parse(["run.py", "--dry-run"])
-        self.assertTrue(dry_run)
-        self.assertFalse(refresh)
+        opts = self._parse(["run.py", "--dry-run"])
+        self.assertTrue(opts.dry_run)
+        self.assertFalse(opts.refresh_installs)
 
     def test_refresh_installs_sets_true(self):
-        _, _, dry_run, refresh = self._parse(["run.py", "--refresh-installs"])
-        self.assertFalse(dry_run)
-        self.assertTrue(refresh)
+        opts = self._parse(["run.py", "--refresh-installs"])
+        self.assertFalse(opts.dry_run)
+        self.assertTrue(opts.refresh_installs)
+
+    def test_stop_sets_true_and_stays_out_of_claude_args(self):
+        opts = self._parse(["run.py", "--stop"])
+        self.assertTrue(opts.stop)
+        self.assertIsNone(opts.picked)
+        self.assertEqual(opts.claude_args, [])
 
     def test_both_flags_independent(self):
-        _, _, dry_run, refresh = self._parse(["run.py", "--dry-run", "--refresh-installs"])
-        self.assertTrue(dry_run)
-        self.assertTrue(refresh)
+        opts = self._parse(["run.py", "--dry-run", "--refresh-installs"])
+        self.assertTrue(opts.dry_run)
+        self.assertTrue(opts.refresh_installs)
 
     def test_flag_with_unknown_target(self):
         # Unknown target → picked=None, target string flows into claude_args.
-        picked, claude_args, dry_run, _ = self._parse(["run.py", "bogus_agent_name", "--dry-run"])
-        self.assertIsNone(picked)
-        self.assertIn("bogus_agent_name", claude_args)
-        self.assertTrue(dry_run)
+        opts = self._parse(["run.py", "bogus_agent_name", "--dry-run"])
+        self.assertIsNone(opts.picked)
+        self.assertIn("bogus_agent_name", opts.claude_args)
+        self.assertTrue(opts.dry_run)
 
     def test_dry_run_before_target(self):
         # Order shouldn't matter (argparse handles position-independence).
-        _, _, dry_run, _ = self._parse(["run.py", "--dry-run", "bogus"])
-        self.assertTrue(dry_run)
+        self.assertTrue(self._parse(["run.py", "--dry-run", "bogus"]).dry_run)
 
     def test_flag_doesnt_leak_into_claude_args(self):
         # Both flags are OURS; must not appear in the passthrough.
-        _, claude_args, _, _ = self._parse(["run.py", "--dry-run", "--refresh-installs"])
+        _, claude_args, _, *_ = self._parse(["run.py", "--dry-run", "--refresh-installs"])
         self.assertNotIn("--dry-run", claude_args)
         self.assertNotIn("--refresh-installs", claude_args)
 
     def test_unknown_flags_still_passthrough(self):
         # Unknown flags (claude's) get passed through as claude_args.
-        _, claude_args, _, _ = self._parse(["run.py", "--print"])
+        _, claude_args, _, *_ = self._parse(["run.py", "--print"])
         self.assertIn("--print", claude_args)
 
     def test_known_target_resolves_and_name_doesnt_leak(self):
         # Known agent name → picked is set; the name doesn't reach claude_args
         # (otherwise claude would receive it as a positional duplicate). "golem"
         # exists in agents/ so resolve_pick finds it via agent_md_index().
-        picked, claude_args, _, _ = self._parse(["run.py", "golem"])
+        picked, claude_args, _, *_ = self._parse(["run.py", "golem"])
         self.assertIsNotNone(picked)
         self.assertNotIn("golem", claude_args)
 
     def test_known_target_combines_with_dry_run(self):
         # Known target + --dry-run — both register; target doesn't leak.
-        picked, claude_args, dry_run, _ = self._parse(["run.py", "golem", "--dry-run"])
+        picked, claude_args, dry_run, *_ = self._parse(["run.py", "golem", "--dry-run"])
         self.assertIsNotNone(picked)
         self.assertTrue(dry_run)
         self.assertNotIn("golem", claude_args)
@@ -99,7 +106,7 @@ class TestParseCliFlags(unittest.TestCase):
         # `python3 run.py golem -- --dry-run` — `--` ends argparse's optional
         # parsing, so --dry-run goes through to claude rather than firing
         # our flag. Important because some claude flags share names with ours.
-        _, claude_args, dry_run, _ = self._parse(["run.py", "golem", "--", "--dry-run"])
+        _, claude_args, dry_run, *_ = self._parse(["run.py", "golem", "--", "--dry-run"])
         self.assertFalse(dry_run)
         self.assertIn("--dry-run", claude_args)
 
@@ -115,7 +122,7 @@ class TestParseCliFlags(unittest.TestCase):
         with patch.object(sys, "argv", ["run.py", instance_name]), \
              patch("launch.agents_crud.is_dir", return_value=True), \
              patch("launch.tags.store.load", return_value={instance_name: entry}):
-            picked, claude_args, _, _ = run.parse_cli(REGISTRY)
+            picked, claude_args, *_ = run.parse_cli(REGISTRY)
         self.assertIsInstance(picked, Instance)
         self.assertEqual(picked.agent, "golem")
         self.assertEqual(picked.session, "test_fixture")
@@ -126,7 +133,7 @@ class TestParseCliFlags(unittest.TestCase):
     def test_no_target_doesnt_crash_resolve_pick(self):
         # Bare `run.py` → args.target is None; resolve_pick must accept it and
         # return None without exploding. Regression guard for the None-safe contract.
-        picked, claude_args, _, _ = self._parse(["run.py"])
+        picked, claude_args, _, *_ = self._parse(["run.py"])
         self.assertIsNone(picked)
         self.assertEqual(claude_args, [])
 
@@ -264,6 +271,33 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks["prompt_install_failures"].assert_called_once()
 
 
+class TestStopRunning(unittest.TestCase):
+    """stop_running — the `--stop` flow: whatever prompt_stop hands back gets
+    one docker-stop call each, in order; a refused stop is reported, never
+    raised (the loop must reach the remaining picks)."""
+
+    def test_stops_each_picked_container(self):
+        with patch.object(run, "prompt_stop",
+                          return_value=["golem__a", "cluster-team"]) as picker, \
+             patch.object(run, "docker_stop_subprocess",
+                          return_value=True) as stop, \
+             patch("builtins.print"):
+            run.stop_running(REGISTRY)
+        picker.assert_called_once_with(REGISTRY)
+        self.assertEqual([c.args[0] for c in stop.call_args_list],
+                         ["golem__a", "cluster-team"])
+
+    def test_a_failed_stop_is_reported_not_raised(self):
+        with patch.object(run, "prompt_stop", return_value=["x", "y"]), \
+             patch.object(run, "docker_stop_subprocess",
+                          side_effect=[False, True]) as stop, \
+             patch("builtins.print") as printed:
+            run.stop_running(REGISTRY)
+        self.assertEqual(stop.call_count, 2)   # the failure didn't stop the loop
+        self.assertTrue(any("problem" in str(call)
+                            for call in printed.call_args_list))
+
+
 class TestGatherInput(unittest.TestCase):
     """gather_input owns the docker gate: it must fire after parse_cli (so
     `--help` still works on a docker-less machine) but before select_agent
@@ -297,6 +331,22 @@ class TestGatherInput(unittest.TestCase):
         self.assertEqual(calls, ["require_docker", "select_agent"])
         self.assertIs(opts.picked, picked)
         self.assertIs(registry, REGISTRY)
+
+    def test_stop_mode_short_circuits_before_the_picker(self):
+        # --stop is a terminal mode: gather_input must run the stop flow and
+        # exit 0 — never open the picker, never fall through to a launch.
+        active = self._gather(
+            run.LaunchOptions(None, [], False, False, stop=True),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent"),
+            stop_running=patch.object(run, "stop_running"),
+        )
+        with self.assertRaises(SystemExit) as caught:
+            run.gather_input()
+        self.assertEqual(caught.exception.code, 0)
+        active["stop_running"].assert_called_once_with(REGISTRY)
+        active["select_agent"].assert_not_called()
+        active["require_docker"].assert_called_once()   # stopping needs docker too
 
     def test_docker_gate_fires_even_with_direct_target(self):
         # A CLI-named target skips the picker but not the docker gate.

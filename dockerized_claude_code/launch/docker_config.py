@@ -59,9 +59,9 @@ from .firewall import (
 from .paths import (
     BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, COWORK_IN_CONTAINER,
     DEFAULT_WORKSPACE, DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT,
-    FIREWALL_DONE_IN_CONTAINER, INSTALL_FAILURES_LOG_IN_CONTAINER,
-    LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION, cowork_dir_path,
-    state_commands_dir, state_settings_path,
+    FIREWALL_DONE_IN_CONTAINER, HERDR_CONF_SOURCE,
+    INSTALL_FAILURES_LOG_IN_CONTAINER, LOCAL_BIN_IN_CONTAINER,
+    RO_MOUNT_OPTION, cowork_dir_path, state_commands_dir, state_settings_path,
 )
 from .tags import DockerContribution, Instance
 from .template_code.docker_prompts import (
@@ -361,6 +361,25 @@ def docker_running_instances_subprocess() -> frozenset[str] | None:
                      if (name := line.strip()).startswith(CONTAINER_NAME_PREFIX))
 
 
+def docker_stop_subprocess(container_id: str, timeout_seconds: int = 3) -> bool:
+    """`docker stop` one launcher container; True when docker reports success.
+    Takes the PREFIX-STRIPPED id — the spelling of
+    docker_running_instances_subprocess results and cluster_container_id, so
+    the `--stop` flow never re-derives names. The short grace period is
+    deliberate: a `{muxer}` entrypoint is a plain `sh` script that ignores
+    SIGTERM, so stopping one always rides out the full timeout before docker
+    KILLs — and containers run `--rm`, so stopped IS removed (state dirs and
+    conversations live host-side and persist regardless).
+
+    `-t`, on purpose: the long spelling is a version trap — newer docker
+    deprecates `--time` with a warning (operator-observed, 2026-08-31) while
+    its replacement `--timeout` is UNKNOWN to the Docker 20.10 floor
+    install_dependencies.sh enforces. The short flag is the one spelling
+    every supported docker accepts silently."""
+    return shell_returncode("docker", "stop", "-t", str(timeout_seconds),
+                            f"{CONTAINER_NAME_PREFIX}{container_id}") == 0
+
+
 def docker_check_any_agent_running_subprocess() -> bool:
     """True if any agent container is currently running, OR if the running
     state couldn't be determined (conservative — treat the unknown as 'might
@@ -368,6 +387,32 @@ def docker_check_any_agent_running_subprocess() -> bool:
     tag_handlers.prune_caches as the 'is it safe to delete cache files' guard."""
     running = docker_running_instances_subprocess()
     return running is None or bool(running)
+
+
+def cluster_container_id(session: str) -> str:
+    """A cluster container's identity with CONTAINER_NAME_PREFIX stripped —
+    the form a cluster takes in docker_running_instances_subprocess results
+    (the probe strips the prefix and keeps the rest, whatever kind of launch
+    named the container). One definition, so run_cluster_container's naming
+    and every is-it-running check cannot drift. The `cluster-` infix is also
+    what keeps the id disjoint from instance ids: those are
+    `<agent>__<session>` and an agent name cannot contain `-<anything>`
+    before the separator."""
+    return f"cluster-{session}"
+
+
+def running_cluster_report(session: str) -> str | None:
+    """`running_instance_report`'s cluster twin: a refusal message when the
+    cluster already has a live container, else None. Same rationale — one
+    fresh probe at launch time covers a picker row whose running-snapshot
+    went stale while the menu sat open, and turns docker's late duplicate
+    `--name` error into an early, readable one."""
+    running = docker_running_instances_subprocess()
+    if running is None or cluster_container_id(session) not in running:
+        return None
+    return (f"  Cluster '{session}' is already running "
+            f"(container {CONTAINER_NAME_PREFIX}{cluster_container_id(session)}).\n"
+            f"  Stop that container, or switch to the terminal that's attached to it.")
 
 
 def running_instance_report(inst: Instance) -> str | None:
@@ -737,7 +782,7 @@ def run_cluster_container(session: str, image: str,
     The entrypoint is the generated cluster script (tmux session, one window
     per member, the shell window last); it is the container's PID 1 and holds
     the container open across detaches exactly like the solo muxer script."""
-    container_name = f"{CONTAINER_NAME_PREFIX}cluster-{session}"
+    container_name = f"{CONTAINER_NAME_PREFIX}{cluster_container_id(session)}"
     set_terminal_title(f"cluster {session}")
     docker_subprocess(
         ["run", "--rm", "-it", "--name", container_name, "-e", "TERM",
@@ -819,6 +864,14 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
         # value with spaces would come apart), so nothing follows it.
         from .cluster import solo
         solo.install_launcher(inst, tuple(agent_argv))
+        if (override := solo.herdr_conf_override()) is not None:
+            # A solo herdr launch rides its own config (collapsed sidebar) at
+            # the SAME container path as the shared one — swap the staged
+            # mount; the target guard rightly refuses shadowing, so pop the
+            # shared source first.
+            source, target = override
+            _docker_mounts.pop(str(HERDR_CONF_SOURCE), None)
+            add_docker_mount(source, target)
 
     entry_flags, inner_links = entrypoint_chain(contributions)
     # What the container is actually told to run, after the image name:

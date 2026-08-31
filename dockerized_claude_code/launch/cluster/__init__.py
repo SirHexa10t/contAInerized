@@ -25,9 +25,25 @@ This package imports `paths`, `file_access`, `utils`, and `tags`; nothing in
 `launch/` imports it back. It owns no docker calls.
 """
 
+from ..tags.ui_profile import muxer_backend
 from .legoset import ClusterTemplate, load_legoset
 from .member import ClusterError, Member, member_id, split_member_id
 from .state import Cluster
 
-__all__ = ["Cluster", "ClusterError", "ClusterTemplate", "Member",
+
+def backend() -> str:
+    """The multiplexer backend for this launch — SOLO launches and cluster
+    launches alike, which is why the switch lives here on the package rather
+    than in either integrator. The choice is the OPERATOR'S PREFERENCE,
+    persisted in `~/.claude-agents/ui_profile.toml` (`herdr_instead_of_tmux`,
+    herdr by default; edited from the picker's "(Edit Preferences)" form or
+    by hand) and read fresh each launch. It superseded a `MUXER_BACKEND` env
+    var, retired 2026-08-30 because files-and-flags is this launcher's house
+    pattern — nothing else steers behavior through the environment. The
+    strict/lenient read semantics live with the profile:
+    `tags/ui_profile.muxer_backend`."""
+    return muxer_backend()
+
+
+__all__ = ["Cluster", "ClusterError", "ClusterTemplate", "Member", "backend",
            "load_legoset", "member_id", "split_member_id"]

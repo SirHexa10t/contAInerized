@@ -1,4 +1,4 @@
-# [code]'s configurable installs — the picker's "Edit Toolkits" form is built
+# [code]'s configurable installs — the picker's "(Edit Preferences)" form is built
 # from this file: one table per tool. A toggleable tool names the Dockerfile
 # build-arg it drives (`build_arg`) — the sibling Dockerfile gates that tool's
 # install behind `ARG <build_arg>`, so the whole install definition lives in

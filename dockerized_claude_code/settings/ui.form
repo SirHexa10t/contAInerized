@@ -1,0 +1,17 @@
+# The launcher-UI form manifest — the "(Edit Preferences)" form's UI section
+# is built from this file: one table per preference, the same grammar as a
+# profession's template.form (a `description` row line, a `default` that only
+# seeds the profile's first generation, a `body` flavor line for the focused
+# row's panel). It lives HERE, beside the muxer policy files it arbitrates
+# between (tmux.conf vs herdr.toml/herdr-solo.toml). User values persist in
+# ~/.claude-agents/ui_profile.toml.
+#
+# Parsed by launch/tags/ui_profile.py — deliberately NOT profession.py's
+# template.form parser: that parser's strictness (mandatory build_arg +
+# approx_size_mb) protects the Dockerfile build-arg pipeline, and these
+# entries gate launcher behavior only, with no image consequences.
+
+[herdr_instead_of_tmux]
+description = "muxer backend: herdr instead of tmux"
+default = true
+body = "herdr: agent-aware (live roster, pane state), mouse-native, pre-1.0. tmux: battle-tested - the usual pick for servers and for hands that already know it."

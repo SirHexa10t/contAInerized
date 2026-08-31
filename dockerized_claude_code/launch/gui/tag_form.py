@@ -1,7 +1,7 @@
 """Every launcher form + the shared TUI style system (launch/gui).
 
 Owns the kind-sectioned tag form (prompt_tags), the per-profession toolkit
-form (edit_toolkits_menu), and the generic checkbox_form primitive behind
+form (edit_profiles_menu), and the generic checkbox_form primitive behind
 both. Sibling menu_picker imports from here (one-way: this module never
 imports the picker).
 
@@ -46,26 +46,28 @@ menu_picker imports these from here (one-way: this module never imports the
 picker).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Callable, Iterable, cast
+from typing import Any, Callable, Iterable, cast, overload
 
 from prompt_toolkit import Application                                     # dep — declared in pyproject.toml [project]
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import AnyFormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
-from ..paths import toolkit_profile_path
+from ..paths import toolkit_profile_path, ui_profile_path
 from ..tags import (
     AgentBuild, Engine, Policy, PolicyStance, Profession, Registry, Specialty,
     Tag, ToolkitEntry,
 )
 from ..tags.engine import sorted_engines
 from ..tags.toolkit_profile import load_profile, save_profile
+from ..tags.ui_profile import load_ui_form, load_ui_profile, save_ui_profile
 
 # ============================================================
 # UI strings + layout
@@ -271,6 +273,145 @@ def active_warnings(checked: set[str],
     return [entry for combo, entry in warnings.items() if combo <= checked]
 
 
+def _is_word(char: str) -> bool:
+    """Word characters for ctrl+arrow jumps — alphanumerics and underscore, so
+    a jump in a path stops at every `/`, `-`, and `.` (component boundaries),
+    the same feel as readline's default word motion."""
+    return char.isalnum() or char == "_"
+
+
+@dataclass
+class TextField:
+    """One editable text row in a form — how forms carry a name or a path
+    instead of a serial input() prompt before them.
+
+    Mutable on purpose: the app edits `value` in place while the form runs,
+    with a real `cursor`: printable keys insert AT it, Backspace/Delete erase
+    around it, ←/→ move it, ctrl+←/→ jump words, Home/End its extremes.
+    Movement is never an edit (a form once ate a character on ← — the fix is
+    that editing and motion are separate methods, wired to separate keys).
+    `validate` returns an error STRING or None; while any field is invalid
+    the error shows in the warning zone and confirm refuses, so a bad value
+    cannot be committed, only corrected or cancelled.
+
+    `auto` derives the value from the OTHER fields' values (e.g. a session
+    name from the workspace path's basename) — live, after every edit, but
+    only while this field is UNTOUCHED: the first manual EDIT in it sets
+    `touched` and the derivation stops, because a user who typed a name meant
+    that name (cursor motion doesn't count — looking is not typing). See
+    `refresh_auto`, which also snaps the cursor to the end of any value it
+    rewrites."""
+    key: str
+    label: str
+    value: str
+    validate: Callable[[str], str | None] = lambda _: None
+    auto: "Callable[[dict[str, str]], str] | None" = None
+    touched: bool = False
+    cursor: int = -1        # -1 = "end of the initial value", resolved below
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.cursor <= len(self.value):
+            self.cursor = len(self.value)
+
+    @property
+    def error(self) -> str | None:
+        return self.validate(self.value.strip())
+
+    def insert(self, char: str) -> None:
+        self.value = self.value[:self.cursor] + char + self.value[self.cursor:]
+        self.cursor += len(char)
+        self.touched = True
+
+    def backspace(self) -> None:
+        if self.cursor:
+            self.value = self.value[:self.cursor - 1] + self.value[self.cursor:]
+            self.cursor -= 1
+        self.touched = True   # even at column 0 — reaching for erase is edit intent
+
+    def delete(self) -> None:
+        self.value = self.value[:self.cursor] + self.value[self.cursor + 1:]
+        self.touched = True
+
+    def left(self) -> None:
+        self.cursor = max(0, self.cursor - 1)
+
+    def right(self) -> None:
+        self.cursor = min(len(self.value), self.cursor + 1)
+
+    def home(self) -> None:
+        self.cursor = 0
+
+    def end(self) -> None:
+        self.cursor = len(self.value)
+
+    def word_left(self) -> None:
+        i = self.cursor
+        while i and not _is_word(self.value[i - 1]):
+            i -= 1
+        while i and _is_word(self.value[i - 1]):
+            i -= 1
+        self.cursor = i
+
+    def word_right(self) -> None:
+        i, size = self.cursor, len(self.value)
+        while i < size and not _is_word(self.value[i]):
+            i += 1
+        while i < size and _is_word(self.value[i]):
+            i += 1
+        self.cursor = i
+
+
+def field_errors(fields: list[TextField]) -> list[str]:
+    """Every field's current complaint, labelled — the warning zone's content
+    and the confirm gate share this one source."""
+    return [f"{field.label}: {error}" for field in fields
+            if (error := field.error) is not None]
+
+
+def refresh_auto(fields: list[TextField]) -> None:
+    """Re-derive every untouched auto field from the current values — called
+    once when a form opens and after every field edit, which is what makes
+    'the name follows the path until you type your own' true. A rewritten
+    field's cursor snaps to its end: the user has never edited it (that is
+    what untouched means), so there is no cursor position worth preserving."""
+    values = {fld.key: fld.value.strip() for fld in fields}
+    for fld in fields:
+        if fld.auto is not None and not fld.touched:
+            fld.value = fld.auto(values)
+            fld.cursor = len(fld.value)
+
+
+FIELD_VALUE_STYLE = "bold fg:ansibrightblue"   # field values wear the picker's agent-name blue
+FIELD_END_MARK    = "▏"                        # marks the value's end; IS the cursor when it sits there
+# The really-done? question a no-change confirm raises (see `confirm` in
+# checkbox_form) — module-level so both forms ask with the same words.
+UNCHANGED_QUESTION = "nothing was changed — really done?  (y closes · any other key stays)"
+
+
+def field_row_fragments(fld: TextField, focused: bool,
+                        label_width: int) -> list[tuple[str, str]]:
+    """One TextField's display row: dim label column, the value in blue, the
+    end-mark. Focused rows get the forms' shared treatment — every fragment
+    reversed — and the character AT the cursor un-reverses (`noreverse` wins
+    over the class, prompt_toolkit resolves style tokens left to right), so it
+    reads as the classic block cursor punched into the highlighted row. With
+    the cursor at the end, the end-mark plays that role. Trailing newline is
+    the caller's."""
+    label = (UiClass.STATUS.css, f"    {fld.label:<{label_width}}  ")
+    if not focused:
+        return [label, (FIELD_VALUE_STYLE, fld.value), ("", FIELD_END_MARK)]
+    at = fld.value[fld.cursor:fld.cursor + 1]
+    frags = [label, (FIELD_VALUE_STYLE, fld.value[:fld.cursor])]
+    if at:
+        frags += [(f"{FIELD_VALUE_STYLE} noreverse", at),
+                  (FIELD_VALUE_STYLE, fld.value[fld.cursor + 1:]),
+                  ("", FIELD_END_MARK)]
+    else:
+        frags.append(("noreverse", FIELD_END_MARK))
+    return [(f"{UiClass.CURSOR.css} {style}".strip(), text)
+            for style, text in frags]
+
+
 def wants_warnings(checked: set[str],
                    wants: dict[str, tuple[tuple[str, str], ...]],
                    labels: dict[str, str] | None = None) -> list[tuple[str, list[str]]]:
@@ -329,7 +470,9 @@ def checkbox_form(title: str, options: list[FormOption],
                   requires: dict[str, frozenset[str]] | None = None,
                   wants: dict[str, tuple[tuple[str, str], ...]] | None = None,
                   labels: dict[str, str] | None = None,
-                  preamble: list[str] | None = None) -> list[str] | None:
+                  preamble: list[str] | None = None,
+                  fields: list[TextField] | None = None,
+                  ) -> "list[str] | tuple[dict[str, str], list[str]] | None":
     """Render a full-screen multi-select form; block until confirm or cancel.
 
     ↑↓ cycle through the rows (options first, then the [ Confirm ] button,
@@ -359,7 +502,16 @@ def checkbox_form(title: str, options: list[FormOption],
     a `group` behave as radios; rows with `locked=True` render grayed and
     ignore Space (see FormOption).
 
-    Returns the checked options' keys in display order, or None on cancel."""
+    `fields` (TextField rows) render ABOVE the options and are edited by
+    typing while focused — Space is a literal there, a toggle on option rows;
+    Backspace/Delete erase around the cursor, ←/→ move it (ctrl+←/→ by word,
+    Home/End to the extremes) and never edit. Confirm additionally refuses
+    while any field is invalid (the warning zone shows why), and a confirm
+    that changed NOTHING asks `really done? (y/N)` first — Enter is easily
+    mistaken for a field-navigation key.
+
+    Returns the checked options' keys in display order — as
+    `(field values, keys)` when `fields` were given — or None on cancel."""
     if not options:
         raise ValueError("options must be non-empty")
     rows = ordered_form_options(options)
@@ -367,11 +519,21 @@ def checkbox_form(title: str, options: list[FormOption],
     req_map = requires or {}
     wants_map = wants or {}
     preamble_lines = preamble or []
+    field_rows: list[TextField] = list(fields or [])
+    fields_at = len(field_rows)            # option row i renders at index fields_at + i
     by_key = {o.key: o for o in rows if not o.header}
-    confirm_index = len(rows)              # the confirm button is the last navigable row
-    # Navigation stops: every non-header row, then the confirm button.
-    stops = [i for i, o in enumerate(rows) if not o.header] + [confirm_index]
-    state: dict[str, Any] = {"cursor": stops[0], "confirmed": False}
+    confirm_index = fields_at + len(rows)  # the confirm button is the last navigable row
+    # Navigation stops: the text fields, every non-header row, then confirm.
+    stops = (list(range(fields_at))
+             + [fields_at + i for i, o in enumerate(rows) if not o.header]
+             + [confirm_index])
+    state: dict[str, Any] = {"cursor": stops[0], "confirmed": False,
+                             "asked": False}
+
+    def focused_field() -> TextField | None:
+        if state["cursor"] < fields_at:
+            return field_rows[state["cursor"]]
+        return None
 
     def cascade(toggled: FormOption) -> None:
         """Keep the checked set requires-consistent after `toggled` flips.
@@ -405,8 +567,14 @@ def checkbox_form(title: str, options: list[FormOption],
 
     def option_fragments() -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
+        label_width = max((len(f.label) for f in field_rows), default=0)
+        for i, fld in enumerate(field_rows):
+            out.extend(field_row_fragments(fld, i == state["cursor"], label_width))
+            out.append(("", "\n"))
+        if field_rows:
+            out.append(("", "\n"))
         for i, opt in enumerate(rows):
-            frags: list[tuple[str, str]] = []
+            frags = []
             if opt.header:
                 frags.extend(_normalize(opt.label))
             else:
@@ -419,7 +587,7 @@ def checkbox_form(title: str, options: list[FormOption],
                 frags.extend(_normalize(opt.label))
             if opt.locked:   # gray the whole row — a fixed, un-toggleable entry
                 frags = [(STYLE_LOCKED, text) for _, text in frags]
-            if i == state["cursor"]:
+            if i + fields_at == state["cursor"]:
                 frags = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
                          for style, text in frags]
             out.extend(frags)
@@ -429,19 +597,22 @@ def checkbox_form(title: str, options: list[FormOption],
         return out
 
     def body_fragments() -> list[tuple[str, str]]:
-        if state["cursor"] >= confirm_index:
+        if not fields_at <= state["cursor"] < confirm_index:
             return []
-        body = rows[state["cursor"]].body
+        body = rows[state["cursor"] - fields_at].body
         return _indent_fragments(body) if body else []
 
     def warning_fragments() -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         checked = checked_keys()
         entries = (active_warnings(checked, warning_map)
-                   + wants_warnings(checked, wants_map, labels))
+                   + wants_warnings(checked, wants_map, labels)
+                   + [(complaint, []) for complaint in field_errors(field_rows)])
         for header, body in entries:
             out.append((UiClass.WARNING.css, f"  {header}\n"))
             out.extend((UiClass.WARNING.css, f"  {line}\n") for line in body)
+        if state["asked"]:
+            out.append((UiClass.TITLE.css, f"  {UNCHANGED_QUESTION}\n"))
         if out:
             out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
         return out
@@ -460,39 +631,113 @@ def checkbox_form(title: str, options: list[FormOption],
         return [(UiClass.STATUS.css, FORM_HINT_TEXT)]
 
     def cursor_pos() -> Point:
-        return Point(0, min(state["cursor"], len(rows) - 1))
+        # Field rows render one line each; a blank line follows them.
+        line = state["cursor"] + (1 if field_rows and state["cursor"] >= fields_at else 0)
+        return Point(0, min(line, fields_at + (1 if field_rows else 0) + len(rows) - 1))
 
     def move(delta: int) -> None:
         i = stops.index(state["cursor"])
         state["cursor"] = stops[(i + delta) % len(stops)]
 
+    refresh_auto(field_rows)    # the initial derivation, before any keystroke
+    # The really-done? baseline, snapshotted AFTER that derivation: a confirm
+    # that changed nothing against it asks before closing — some users press
+    # Enter expecting field navigation. Only forms WITH fields ask (a
+    # fieldless form's Enter is unambiguous, and open-look-Enter should stay
+    # one keystroke there).
+    baseline = (tuple(f.value for f in field_rows),
+                tuple(o.checked for o in rows))
+
+    def unchanged() -> bool:
+        return baseline == (tuple(f.value for f in field_rows),
+                            tuple(o.checked for o in rows))
+
     def confirm(event: KeyPressEvent) -> None:
+        if field_errors(field_rows):
+            return              # the warning zone is already explaining
+        if field_rows and unchanged() and not state["asked"]:
+            state["asked"] = True    # UNCHANGED_QUESTION renders; `answers` consumes the reply
+            return
         state["confirmed"] = True
+        event.app.exit()
+
+    def answers(event: KeyPressEvent) -> bool:
+        """While the really-done? question is up, the NEXT key is its answer
+        and is CONSUMED — `y` closes, anything else stays — so an `n` cannot
+        leak into a field as text. True = this key was the answer."""
+        if not state["asked"]:
+            return False
+        state["asked"] = False
+        if event.data in ("y", "Y"):
+            state["confirmed"] = True
+            event.app.exit()
+        return True
+
+    def field_edit(edit: Callable[[TextField], None]) -> Callable[[KeyPressEvent], None]:
+        """Handler for a key that EDITS the focused field (and re-derives the
+        auto fields) — a no-op anywhere else."""
+        def handler(event: KeyPressEvent) -> None:
+            if (fld := focused_field()) is not None:
+                edit(fld)
+                refresh_auto(field_rows)
+        return handler
+
+    def field_motion(motion: Callable[[TextField], None]) -> Callable[[KeyPressEvent], None]:
+        """Handler for a key that MOVES the focused field's cursor — no edit,
+        no auto refresh, a no-op anywhere else. Kept separate from field_edit
+        so a motion key can never change text (a form once ate characters
+        on ←)."""
+        def handler(event: KeyPressEvent) -> None:
+            if (fld := focused_field()) is not None:
+                motion(fld)
+        return handler
+
+    def space(event: KeyPressEvent) -> None:
+        if (fld := focused_field()) is not None:
+            fld.insert(" ")
+            refresh_auto(field_rows)
+        elif state["cursor"] == confirm_index:
+            confirm(event)
+        else:
+            toggle(rows[state["cursor"] - fields_at])
+
+    def type_char(event: KeyPressEvent) -> None:
+        # Printable keys type into a focused field; elsewhere they fall
+        # through unused, exactly as before fields existed. Specials carry
+        # escape sequences (unprintable) and are filtered out.
+        if (fld := focused_field()) is not None and event.data \
+                and event.data.isprintable():
+            fld.insert(event.data)
+            refresh_auto(field_rows)
+
+    def cancel(event: KeyPressEvent) -> None:
         event.app.exit()
 
     kb = KeyBindings()
 
-    @kb.add("up")
-    def _(event: KeyPressEvent) -> None: move(-1)
+    def bind(key: Keys | str, handler: Callable[[KeyPressEvent], None]) -> None:
+        """Every binding runs behind the really-done? interception, so the
+        answer key — whatever it is — never doubles as its usual action."""
+        def wrapped(event: KeyPressEvent) -> None:
+            if not answers(event):
+                handler(event)
+        kb.add(key)(wrapped)
 
-    @kb.add("down")
-    def _(event: KeyPressEvent) -> None: move(1)
-
-    @kb.add(" ")
-    def _(event: KeyPressEvent) -> None:
-        if state["cursor"] == confirm_index:
-            confirm(event)
-        else:
-            toggle(rows[state["cursor"]])
-
-    @kb.add("enter")
-    def _(event: KeyPressEvent) -> None: confirm(event)
-
-    @kb.add("escape")
-    def _(event: KeyPressEvent) -> None: event.app.exit()
-
-    @kb.add("c-c")
-    def _(event: KeyPressEvent) -> None: event.app.exit()
+    bind("up", lambda event: move(-1))
+    bind("down", lambda event: move(1))
+    bind(" ", space)
+    bind("backspace", field_edit(TextField.backspace))
+    bind("delete", field_edit(TextField.delete))
+    bind("left", field_motion(TextField.left))
+    bind("right", field_motion(TextField.right))
+    bind("c-left", field_motion(TextField.word_left))
+    bind("c-right", field_motion(TextField.word_right))
+    bind("home", field_motion(TextField.home))
+    bind("end", field_motion(TextField.end))
+    bind("enter", confirm)
+    bind("escape", cancel)
+    bind("c-c", cancel)
+    bind(Keys.Any, type_char)
 
     header_windows = [Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT)]
     if preamble_lines:
@@ -523,7 +768,10 @@ def checkbox_form(title: str, options: list[FormOption],
 
     if not state["confirmed"]:
         return None
-    return [o.key for o in rows if o.checked]
+    keys = [o.key for o in rows if o.checked]
+    if fields is None:
+        return keys
+    return {f.key: f.value.strip() for f in field_rows}, keys
 
 
 # ============================================================
@@ -631,34 +879,57 @@ def _form_labels(registry: Registry) -> dict[str, str]:
     return {tag.name: tag.label for tag in registry.get_all()}
 
 
+@overload
 def prompt_tags(registry: Registry, current: AgentBuild, *,
-                instance: str, workspace: str) -> AgentBuild | None:
+                instance: str, workspace: str | None = None,
+                fields: None = None) -> "AgentBuild | None": ...
+@overload
+def prompt_tags(registry: Registry, current: AgentBuild, *,
+                instance: str, workspace: str | None = None,
+                fields: list[TextField],
+                ) -> "tuple[dict[str, str], AgentBuild] | None": ...
+def prompt_tags(registry: Registry, current: AgentBuild, *,
+                instance: str, workspace: str | None = None,
+                fields: list[TextField] | None = None,
+                ) -> "AgentBuild | tuple[dict[str, str], AgentBuild] | None":
     """Run the tag form (see the module docstring for the full behavior) and
-    return the selection as a new AgentBuild, or None when the user cancels
-    (Esc) — callers abort their create / modify flow on None rather than
-    persisting anything. `instance` + `workspace` are the already-answered
-    prompts, echoed as the form's preamble so the user sees the full context
-    they're configuring."""
+    return the selection as a new AgentBuild — as `(field values, build)` when
+    `fields` were given — or None when the user cancels (Esc); callers abort
+    their create / modify flow on None rather than persisting anything.
+
+    Two shapes, one form: WITHOUT fields, `instance` + `workspace` are
+    already-answered prompts echoed as the preamble (the member-tag-edit call
+    site). WITH fields, the workspace/name ARE the fields — no terminal
+    prompt precedes the form — and the preamble only names the agent."""
     options = _tag_form_options(registry, current)
-    keys = checkbox_form(TITLE_TAGS_FORM, options,
-                         warnings=_combo_warnings(registry),
-                         requires=_form_requires(registry),
-                         wants=_form_wants(registry),
-                         labels=_form_labels(registry),
-                         preamble=[f"# instance:  {instance}",
-                                   f"# workspace: {workspace}"])
-    if keys is None:
+    preamble = ([f"# agent:  {instance}"] if fields is not None
+                else [f"# instance:  {instance}",
+                      f"# workspace: {workspace}"])
+    result = checkbox_form(TITLE_TAGS_FORM, options,
+                           warnings=_combo_warnings(registry),
+                           requires=_form_requires(registry),
+                           wants=_form_wants(registry),
+                           labels=_form_labels(registry),
+                           preamble=preamble,
+                           fields=fields)
+    if result is None:
         return None
+    values: dict[str, str] = {}
+    if fields is not None:
+        values, keys = cast("tuple[dict[str, str], list[str]]", result)
+    else:
+        keys = cast("list[str]", result)
     picked = set(keys)
     # Always-on (static) tags come back checked — they're locked rows — but
     # are never part of the build: applied unconditionally, never persisted.
-    return AgentBuild(
+    build = AgentBuild(
         engine=next((n for n in registry.engines if n in picked), current.engine),
         professions=tuple(n for n in registry.professions if n in picked),
         specialties=tuple(n for n in registry.specialties if n in picked),
         policies=tuple(n for n, p in registry.policies.items()
                        if n in picked and not p.always_on),
     )
+    return build if fields is None else (values, build)
 
 def _toolkit_size_text(entry: ToolkitEntry) -> str:
     """The size column for a toolkit row: `~NNNMb` for an install, `included`
@@ -693,30 +964,97 @@ def _toolkit_form_options(entries: dict[str, ToolkitEntry], profile: dict[str, b
     return out
 
 
-def _edit_profession_toolkit(profession: Profession) -> None:
-    """Open the toolkit form for one configurable profession and persist the
-    result. Esc leaves the on-disk profile untouched. Only the toggleable
-    rows' states are saved — locked rows (e.g. Python) carry no toggle. No-op
-    if the profession has no template.form — the caller already filters, but
-    this stays safe called standalone."""
+@dataclass(frozen=True)
+class ProfileSection:
+    """One profile-backed slice of the merged preferences form: its
+    comment-title, its rows, and where its checked set lands on confirm —
+    each section saves to its OWN file, which is what lets the one form front
+    any number of them."""
+    title: str
+    options: list[FormOption]
+    save: Callable[[set[str]], None]
+
+
+def _toolkit_section(profession: Profession) -> ProfileSection | None:
+    """The toolkit slice for one configurable profession — None without a
+    template.form. Saves to that profession's own profile; only the
+    toggleable rows' states persist (locked rows, e.g. Python, carry no
+    toggle)."""
     entries = profession.load_toolkit()
     if not entries:
-        return
+        return None
     path = toolkit_profile_path(profession.name)
     current = load_profile(path, entries)   # toggleable keys only
-    result = checkbox_form(f"Edit {profession.label} toolkit  (Space to toggle):",
-                           _toolkit_form_options(entries, current),
-                           preamble=[TOOLKIT_SIZE_NOTE])
-    if result is None:   # Esc — cancel, no changes written
+    return ProfileSection(
+        title=f"Edit {profession.label} toolkit  (Space to toggle):",
+        options=_toolkit_form_options(entries, current),
+        save=lambda checked: save_profile(
+            path, {key: key in checked for key in current}, entries),
+    )
+
+
+def _ui_section() -> ProfileSection:
+    """The launcher-UI slice — `settings/ui.form` rendered over
+    `ui_profile.toml`. ALWAYS present, unlike the toolkit slices: its
+    preferences (the muxer backend) are profession-independent, which is why
+    the picker row that opens this form no longer hides when no profession is
+    configurable."""
+    entries = load_ui_form()
+    path = ui_profile_path()
+    current = load_ui_profile(path, entries)
+    return ProfileSection(
+        title="Edit UI configs  (Space to toggle):",
+        options=[FormOption(key=key,
+                            label=[("", entry.description)],
+                            body=[("", entry.body)],
+                            checked=current.get(key, entry.default))
+                 for key, entry in sorted(entries.items())],
+        save=lambda checked: save_ui_profile(
+            path, {key: key in checked for key in current}, entries),
+    )
+
+
+def edit_profiles_form(sections: list[ProfileSection],
+                       preamble: list[str] | None = None) -> None:
+    """The middle-handler the profiles menu rides: concatenate ANY number of
+    sections into ONE checkbox form — the first section's title is the form's
+    title, every later one becomes a `header=True` row — then fan the
+    confirmed set back out, each section saving to its own file. Esc saves
+    nothing anywhere. Option keys are namespaced per section internally, so
+    two files may reuse a name without colliding (`attached_to` is not
+    remapped — no profile row uses it)."""
+    merged: list[FormOption] = []
+    for index, section in enumerate(sections):
+        if index:
+            # The next section's title lands three newlines after the
+            # previous section's last row (operator's spec): two blank
+            # header rows — skipped by navigation like any header — then
+            # the title row itself.
+            merged += [FormOption(key=f"#gap{index}-{blank}", label="",
+                                  header=True)
+                       for blank in range(2)]
+            merged.append(FormOption(
+                key=f"#section{index}",
+                label=[(UiClass.TITLE.css, section.title)],
+                header=True))
+        merged += [replace(option, key=f"{index}:{option.key}")
+                   for option in section.options]
+    result = checkbox_form(sections[0].title, merged, preamble=preamble)
+    if result is None:   # Esc — cancel, no file touched
         return
-    save_profile(path, {key: key in result for key in current}, entries)
+    checked = set(result)
+    for index, section in enumerate(sections):
+        section.save({option.key for option in section.options
+                      if f"{index}:{option.key}" in checked})
 
 
-def edit_toolkits_menu(registry: Registry) -> None:
-    """Open the toolkit form for every configurable profession, one after
-    another. Only [code] has a template.form today, so this opens exactly one
-    form; no chooser UI is built for a hypothetical second profession — if
-    one ever ships, this just opens twice, back to back."""
-    for profession in registry.professions.values():
-        if profession.toolkit_path:
-            _edit_profession_toolkit(profession)
+def edit_profiles_menu(registry: Registry) -> None:
+    """Open the ONE merged preferences form: a toolkit section per
+    configurable profession (today: [code] alone) plus the always-present UI
+    section. The size-ballpark preamble only rides along when a toolkit
+    section shows sizes."""
+    sections = [section for profession in registry.professions.values()
+                if (section := _toolkit_section(profession)) is not None]
+    preamble = [TOOLKIT_SIZE_NOTE] if sections else None
+    sections.append(_ui_section())
+    edit_profiles_form(sections, preamble=preamble)

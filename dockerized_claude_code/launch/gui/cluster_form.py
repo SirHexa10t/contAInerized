@@ -21,19 +21,23 @@ pure helper the tests exercise directly, and the app is a thin loop over them.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any
+from typing import Any, Callable
 
 from prompt_toolkit import Application
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
 from ..cluster.legoset import ClusterTemplate, auto_roles
 from ..cluster.member import member_id
-from .tag_form import STYLE_DICT, TITLE_HEIGHT, UiClass, _fragment_source
+from .tag_form import (
+    STYLE_DICT, TITLE_HEIGHT, UNCHANGED_QUESTION, TextField, UiClass,
+    _fragment_source, field_errors, field_row_fragments, refresh_auto,
+)
 
 # One pick = (agent, role | None). None means "the form added this one" — the
 # role is auto-derived at confirm; a string is a role a TEMPLATE shipped, kept
@@ -100,45 +104,75 @@ def preview_ids(picks: list[Pick], agent_rank: dict[str, int] | None = None) -> 
     return [identifier for _, identifier in ids]
 
 
+# TextField and its helpers live in tag_form (the shared form machinery, used
+# by both this form and the instance/tag form); re-exported here because this
+# module introduced them and its callers import them from here.
+
+
 def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
                    title: str, preamble: list[str] | None = None,
-                   ) -> list[Pick] | None:
-    """Run the membership form; return the ordered picks, or None on cancel.
+                   fields: list[TextField] | None = None,
+                   ) -> tuple[dict[str, str], list[Pick]] | None:
+    """Run the membership form; return `(field values, ordered picks)`, or
+    None on cancel.
 
     `agents` is every pickable agent as (name, one-line description) — the
     caller derives it from the registry exactly as the picker's Create rows do.
-    `initial` is the template prefill (possibly empty for a from-scratch
-    cluster). Keys follow the house convention set by checkbox_form: Space is
-    the row action (here: add), Enter confirms from anywhere, Esc cancels —
-    plus Backspace as add's inverse. Confirming an EMPTY membership is refused
-    silently while the panel says why: a cluster with no members is nothing.
+    `initial` is the prefill (a template's members, or an existing cluster's
+    when editing). `fields` render ABOVE the agent list and are edited by
+    typing while focused — which is why key handling branches on the focused
+    row's kind: Space ADDS on an agent row but is a literal space in a path;
+    same for `+`/`-`, and arrows MOVE THE CURSOR on a field (ctrl+arrows by
+    word) while adding/removing on an agent row. Enter confirms from
+    anywhere, Esc cancels, exactly the checkbox_form conventions. Confirm
+    refuses while the membership is empty or any field is invalid — the
+    warning zone is already saying why — and asks `really done? (y/N)` when
+    nothing was changed, exactly checkbox_form's rule.
     """
     if not agents:
         raise ValueError("agents must be non-empty")
     preamble_lines = preamble or []
-    confirm_index = len(agents)
+    field_rows: list[TextField] = list(fields or [])
+    agents_at = len(field_rows)
+    confirm_index = agents_at + len(agents)
     # `agents` arrives in picker order (creatable_agents), so its indices ARE
     # the rank the members panel sorts by — the panel then previews the actual
     # window order, not the meaningless pick sequence.
     agent_rank = {name: index for index, (name, _) in enumerate(agents)}
     state: dict[str, Any] = {"cursor": 0, "confirmed": False,
-                             "picks": list(initial)}
+                             "asked": False, "picks": list(initial)}
 
     def counts() -> Counter:
         return Counter(agent for agent, _ in state["picks"])
 
+    def focused_field() -> TextField | None:
+        if state["cursor"] < agents_at:
+            return field_rows[state["cursor"]]
+        return None
+
+    def focused_agent() -> str | None:
+        index = state["cursor"] - agents_at
+        return agents[index][0] if 0 <= index < len(agents) else None
+
     def option_fragments() -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
+        label_width = max((len(f.label) for f in field_rows), default=0)
+        for index, field in enumerate(field_rows):
+            out.extend(field_row_fragments(field, index == state["cursor"],
+                                           label_width))
+            out.append(("", "\n"))
+        if field_rows:
+            out.append(("", "\n"))
         tally = counts()
         width = max(len(name) for name, _ in agents)
         for index, (name, description) in enumerate(agents):
             count = tally.get(name, 0)
-            frags: list[tuple[str, str]] = [
+            frags = [
                 (STYLE_COUNT, f"  ×{count} ") if count else (STYLE_COUNT_ZERO, "   · "),
                 (STYLE_MEMBER_NAME, f" {name:<{width}}"),
                 (UiClass.STATUS.css, f"  {description}"),
             ]
-            if index == state["cursor"]:
+            if index + agents_at == state["cursor"]:
                 frags = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
                          for style, text in frags]
             out.extend(frags)
@@ -148,14 +182,20 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
 
     def members_fragments() -> list[tuple[str, str]]:
         picks = state["picks"]
+        out: list[tuple[str, str]] = []
         if not picks:
-            return [(UiClass.WARNING.css, EMPTY_WARNING)]
-        ids = preview_ids(picks, agent_rank)
-        out: list[tuple[str, str]] = [("", f"  members ({len(ids)}):  ")]
-        for i, identifier in enumerate(ids):
-            if i:
-                out.append((UiClass.STATUS.css, " · "))
-            out.append((STYLE_MEMBER_NAME, identifier))
+            out.append((UiClass.WARNING.css, EMPTY_WARNING))
+        else:
+            ids = preview_ids(picks, agent_rank)
+            out.append(("", f"  members ({len(ids)}):  "))
+            for i, identifier in enumerate(ids):
+                if i:
+                    out.append((UiClass.STATUS.css, " · "))
+                out.append((STYLE_MEMBER_NAME, identifier))
+        for complaint in field_errors(field_rows):
+            out.append((UiClass.WARNING.css, f"\n  {complaint}"))
+        if state["asked"]:
+            out.append((UiClass.TITLE.css, f"\n  {UNCHANGED_QUESTION}"))
         return out
 
     def confirm_fragments() -> list[tuple[str, str]]:
@@ -164,40 +204,142 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
         return [("", "  "), (style, CONFIRM_LABEL)]
 
     def cursor_pos() -> Point:
-        return Point(0, min(state["cursor"], len(agents) - 1))
+        return Point(0, min(state["cursor"], confirm_index - 1))
 
     def move(delta: int) -> None:
         state["cursor"] = (state["cursor"] + delta) % (confirm_index + 1)
 
-    def focused_agent() -> str | None:
-        return agents[state["cursor"]][0] if state["cursor"] < confirm_index else None
+    def typed(field: TextField, char: str) -> None:
+        field.insert(char)
+        refresh_auto(field_rows)
 
     def add(event: KeyPressEvent) -> None:
+        # Space/+: literal in a text field, "one more of this agent" on an
+        # agent row, confirm on the button — the branch that makes fields and
+        # accumulator rows coexist under one key map.
+        if (field := focused_field()) is not None:
+            if event.data and event.data.isprintable():
+                typed(field, event.data)
+            return
         if (agent := focused_agent()) is not None:
             add_pick(state["picks"], agent)
         else:
-            confirm(event)   # Space on the confirm row confirms, as in checkbox_form
+            confirm(event)
 
-    def remove(_: KeyPressEvent) -> None:
+    def erase(event: KeyPressEvent) -> None:
+        """Backspace: delete before the cursor on a field, remove that
+        agent's last entry on an agent row."""
+        if (field := focused_field()) is not None:
+            field.backspace()
+            refresh_auto(field_rows)
+            return
         if (agent := focused_agent()) is not None:
             remove_last(state["picks"], agent)
 
+    def delete_key(event: KeyPressEvent) -> None:
+        """Delete: erase AT the cursor on a field, remove on an agent row."""
+        if (field := focused_field()) is not None:
+            field.delete()
+            refresh_auto(field_rows)
+            return
+        if (agent := focused_agent()) is not None:
+            remove_last(state["picks"], agent)
+
+    def minus(event: KeyPressEvent) -> None:
+        """`-`: a literal character in a field (paths carry them), the remove
+        action on an agent row."""
+        if (field := focused_field()) is not None:
+            typed(field, "-")
+            return
+        if (agent := focused_agent()) is not None:
+            remove_last(state["picks"], agent)
+
+    def arrow(motion: Callable[[TextField], None],
+              act: Callable[[list[Pick], str], None]) -> Callable[[KeyPressEvent], None]:
+        """←/→ (and their ctrl+ word variants): CURSOR MOTION on a field,
+        add/remove on an agent row, nothing on the confirm button.
+
+        REGRESSION GUARD in prose: an earlier version routed every remove-ish
+        key through one handler whose field branch fell through to
+        backspace() — so pressing ← while a field was focused ATE CHARACTERS
+        (reported from a live form). An arrow on a field only ever MOVES."""
+        def handler(event: KeyPressEvent) -> None:
+            if (field := focused_field()) is not None:
+                motion(field)
+            elif (agent := focused_agent()) is not None:
+                act(state["picks"], agent)
+        return handler
+
+    def field_motion(motion: Callable[[TextField], None]) -> Callable[[KeyPressEvent], None]:
+        """Home/End: cursor extremes on a field, nothing anywhere else."""
+        def handler(event: KeyPressEvent) -> None:
+            if (field := focused_field()) is not None:
+                motion(field)
+        return handler
+
+    def type_char(event: KeyPressEvent) -> None:
+        """Catch-all for printable keys — text entry on a focused field,
+        ignored everywhere else (agent rows only answer their action keys)."""
+        if (field := focused_field()) is not None and event.data \
+                and event.data.isprintable():
+            typed(field, event.data)
+
+    refresh_auto(field_rows)   # the initial derivation, before any keystroke
+    # The really-done? baseline — same rule as checkbox_form: a confirm that
+    # changed neither a field nor the membership asks first, fields-only forms
+    # excepted (there are none here in practice, but the tests drive some).
+    baseline = (tuple(f.value for f in field_rows), tuple(state["picks"]))
+
+    def unchanged() -> bool:
+        return baseline == (tuple(f.value for f in field_rows),
+                            tuple(state["picks"]))
+
     def confirm(event: KeyPressEvent) -> None:
-        if not state["picks"]:
-            return           # nothing to create; the panel is already saying so
+        if not state["picks"] or field_errors(field_rows):
+            return           # the warning zone is already explaining
+        if field_rows and unchanged() and not state["asked"]:
+            state["asked"] = True   # UNCHANGED_QUESTION renders; `answers` consumes the reply
+            return
         state["confirmed"] = True
         event.app.exit()
 
+    def answers(event: KeyPressEvent) -> bool:
+        """While the really-done? question is up, the NEXT key is its answer
+        and is CONSUMED — `y` closes, anything else stays — so an `n` cannot
+        leak into a field as text. True = this key was the answer."""
+        if not state["asked"]:
+            return False
+        state["asked"] = False
+        if event.data in ("y", "Y"):
+            state["confirmed"] = True
+            event.app.exit()
+        return True
+
     kb = KeyBindings()
-    kb.add("up")(lambda event: move(-1))
-    kb.add("down")(lambda event: move(1))
-    for key in (" ", "+", "right"):
-        kb.add(key)(add)
-    for key in ("backspace", "-", "left", "delete"):
-        kb.add(key)(remove)
-    kb.add("enter")(confirm)
-    kb.add("escape")(lambda event: event.app.exit())
-    kb.add("c-c")(lambda event: event.app.exit())
+
+    def bind(key: Keys | str, handler: Callable[[KeyPressEvent], None]) -> None:
+        def wrapped(event: KeyPressEvent) -> None:
+            if not answers(event):
+                handler(event)
+        kb.add(key)(wrapped)
+
+    bind("up", lambda event: move(-1))
+    bind("down", lambda event: move(1))
+    for key in (" ", "+"):
+        bind(key, add)
+    bind("right", arrow(TextField.right, add_pick))
+    bind("left", arrow(TextField.left, remove_last))
+    bind("c-right", arrow(TextField.word_right, add_pick))
+    bind("c-left", arrow(TextField.word_left, remove_last))
+    bind("home", field_motion(TextField.home))
+    bind("end", field_motion(TextField.end))
+    bind("backspace", erase)
+    bind("delete", delete_key)
+    bind("-", minus)
+    bind("enter", confirm)
+    bind("escape", lambda event: event.app.exit())
+    bind("c-c", lambda event: event.app.exit())
+    bind(Keys.Any, type_char)
 
     header: list[Window] = [Window(FormattedTextControl(
         _fragment_source(lambda: [(UiClass.TITLE.css, title)])), height=TITLE_HEIGHT)]
@@ -205,6 +347,8 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
         header.append(Window(FormattedTextControl(_fragment_source(
             lambda: [(UiClass.STATUS.css, "\n".join(preamble_lines))])),
             height=len(preamble_lines)))
+    hint = (("  type into the focused field · " if field_rows else "  ")
+            + HINT_TEXT.strip())
     Application(
         layout=Layout(HSplit([
             *header,
@@ -221,10 +365,12 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
             Window(height=1, char=" "),
             Window(FormattedTextControl(_fragment_source(confirm_fragments)), height=1),
             Window(FormattedTextControl(_fragment_source(
-                lambda: [(UiClass.STATUS.css, HINT_TEXT)])), height=2),
+                lambda: [(UiClass.STATUS.css, hint)])), height=2),
         ])),
         key_bindings=kb,
         style=Style.from_dict(STYLE_DICT),
         full_screen=True,
     ).run()
-    return state["picks"] if state["confirmed"] else None
+    if not state["confirmed"]:
+        return None
+    return {f.key: f.value.strip() for f in field_rows}, state["picks"]
