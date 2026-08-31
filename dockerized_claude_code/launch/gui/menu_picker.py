@@ -108,7 +108,7 @@ from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
 from ..tags.base import SQUASH_AT, first_glyph
 from ..tags.engine import engine_sort_key, sorted_engines
 from ..tags.identity import SESSION_SEP
-from ..utils import ordering_index_or_end, relative_time
+from ..utils import ordering_index_or_end, relative_time, reset_terminal
 
 
 # ============================================================
@@ -1246,6 +1246,12 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         app.run()
     finally:
         loader.shutdown()
+        # mouse_support means the terminal streams `\e[<35;x;yM` reports the
+        # whole time the picker is open. prompt_toolkit turns the mode off on
+        # exit, but reports already IN FLIGHT land on the tty after it stops
+        # reading — and echo as `35;77;15M` garbage at whatever prompt comes
+        # next. Repairing + draining here closes that race (Esc included).
+        reset_terminal(drain_input=True)
 
     return state["result"]
 

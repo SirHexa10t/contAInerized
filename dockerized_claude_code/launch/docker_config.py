@@ -67,7 +67,10 @@ from .tags import DockerContribution, Instance
 from .template_code.docker_prompts import (
     BUILDING_STEP, FIREWALL_WAITING, INSTALL_FAILURES_BODY, INSTALL_FAILURES_HEADER,
 )
-from .utils import call_or_exit, exit_if_missing, prompt_keypress, shell_capture, shell_returncode
+from .utils import (
+    call_or_exit, exit_if_missing, prompt_keypress, reset_terminal,
+    shell_capture, shell_returncode,
+)
 
 
 # ============================================================
@@ -313,6 +316,26 @@ def docker_subprocess(args: list[str]) -> None:
         print(f"  (dry-run: would invoke `docker {' '.join(args)}`)")
         return
     if (ret := shell_returncode("docker", *args)) != 0:
+        sys.exit(ret)
+
+
+def _interactive_docker_run(args: list[str]) -> None:
+    """docker_subprocess for the terminal-OWNING runs (solo `-it`, cluster),
+    with the tty repaired on the way out — crucially BEFORE the nonzero-rc
+    exit, because a container that died out from under this terminal
+    (`--stop` from another session, a crash, `herdr server stop`) IS the
+    nonzero case: docker restores the tty's termios but knows nothing of the
+    escape-sequence modes the in-container TUI set on the EMULATOR (mouse
+    tracking, alt screen, hidden cursor). Left set, every mouse move echoes
+    as endless `35;77;15M` garbage at the shell. The repair also drains
+    already-queued mouse reports; on a healthy teardown it is a handful of
+    idempotent no-op sequences."""
+    if _dry_run:
+        docker_subprocess(args)     # prints the would-run line, nothing to repair
+        return
+    ret = shell_returncode("docker", *args)
+    reset_terminal(drain_input=True)
+    if ret != 0:
         sys.exit(ret)
 
 
@@ -784,7 +807,7 @@ def run_cluster_container(session: str, image: str,
     the container open across detaches exactly like the solo muxer script."""
     container_name = f"{CONTAINER_NAME_PREFIX}{cluster_container_id(session)}"
     set_terminal_title(f"cluster {session}")
-    docker_subprocess(
+    _interactive_docker_run(
         ["run", "--rm", "-it", "--name", container_name, "-e", "TERM",
          "--entrypoint", entrypoint]
         + [arg for source, target in mounts
@@ -902,5 +925,7 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     )
     if stream_renderer is not None:
         docker_stream_subprocess(args, stream_renderer)
+    elif interactive:
+        _interactive_docker_run(args)   # owns the terminal → repair it after
     else:
         docker_subprocess(args)

@@ -43,7 +43,7 @@ class TestRunContainerMuxer(unittest.TestCase):
         from launch.tags.base import DockerContribution
         recorded = []
         contribution = DockerContribution(entrypoint=CONTAINER_SCRIPT)
-        with patch.object(docker_config, "docker_subprocess",
+        with patch.object(docker_config, "_interactive_docker_run",
                           side_effect=lambda a: recorded.append(a)), \
              patch.object(docker_config, "start_firewall_updater"), \
              patch("launch.cluster.solo.install_launcher",
@@ -70,7 +70,7 @@ class TestRunContainerMuxer(unittest.TestCase):
         recorded = []
         contributions = [DockerContribution(entrypoint="firewall-entrypoint.sh"),
                          DockerContribution(entrypoint=CONTAINER_SCRIPT)]
-        with patch.object(docker_config, "docker_subprocess",
+        with patch.object(docker_config, "_interactive_docker_run",
                           side_effect=lambda a: recorded.append(a)), \
              patch.object(docker_config, "start_firewall_updater"), \
              patch("launch.cluster.solo.install_launcher",
@@ -90,7 +90,7 @@ class TestRunContainerMuxer(unittest.TestCase):
         # `claude` has to be named — it used to be hardcoded in firewall's script.
         from launch.tags.base import DockerContribution
         recorded = []
-        with patch.object(docker_config, "docker_subprocess",
+        with patch.object(docker_config, "_interactive_docker_run",
                           side_effect=lambda a: recorded.append(a)), \
              patch.object(docker_config, "start_firewall_updater"):
             docker_config.run_container(
@@ -104,7 +104,7 @@ class TestRunContainerMuxer(unittest.TestCase):
 
     def test_a_non_muxer_launch_is_untouched(self):
         recorded = []
-        with patch.object(docker_config, "docker_subprocess",
+        with patch.object(docker_config, "_interactive_docker_run",
                           side_effect=lambda a: recorded.append(a)), \
              patch.object(docker_config, "start_firewall_updater"):
             docker_config.run_container(_run_inst(), "claude-agents:base",
@@ -124,9 +124,13 @@ class TestRunContainerModes(unittest.TestCase):
              patch.object(docker_config, "is_critical_pending", return_value=False), \
              patch.object(docker_config, "wait_for_critical_addresses", return_value=None), \
              patch.object(docker_config, "start_firewall_updater"), \
-             patch.object(docker_config, "docker_subprocess") as run:
+             patch.object(docker_config, "docker_subprocess") as plain, \
+             patch.object(docker_config, "_interactive_docker_run") as owned:
             docker_config.run_container(_run_inst(), "claude-agents:base", [], [], **run_kw)
-        return run.call_args.args[0]
+        # interactive runs land on the terminal-owning wrapper, print mode on
+        # the plain one — the argv under test is the same either way.
+        called = owned if owned.called else plain
+        return called.call_args.args[0]
 
     def test_interactive_default_allocates_tty(self):
         self.assertIn("-it", self._capture())
@@ -765,6 +769,39 @@ class TestEnsureImage(unittest.TestCase):
         finally:
             _container_env.clear()
             _container_env.update(snapshot)
+
+
+class TestInteractiveDockerRun(unittest.TestCase):
+    """_interactive_docker_run — the terminal-owning run tail. The property
+    that matters: the tty repair happens BEFORE the nonzero-rc exit, because
+    a container stopped out from under its terminal (`--stop` from another
+    session) IS the nonzero case — the old tail sys.exited first and the
+    terminal stayed in mouse-tracking mode, echoing endless `35;77;15M`."""
+
+    def test_repairs_the_terminal_even_when_the_container_died_nonzero(self):
+        with patch("launch.docker_config.shell_returncode",
+                   return_value=137), \
+             patch("launch.docker_config.reset_terminal") as repair:
+            with self.assertRaises(SystemExit) as caught:
+                docker_config._interactive_docker_run(["run", "x"])
+        repair.assert_called_once_with(drain_input=True)
+        self.assertEqual(caught.exception.code, 137)
+
+    def test_clean_exit_still_repairs_and_returns(self):
+        with patch("launch.docker_config.shell_returncode",
+                   return_value=0), \
+             patch("launch.docker_config.reset_terminal") as repair:
+            docker_config._interactive_docker_run(["run", "x"])
+        repair.assert_called_once_with(drain_input=True)
+
+    def test_dry_run_prints_and_repairs_nothing(self):
+        docker_config.set_dry_run(True)
+        self.addCleanup(docker_config.set_dry_run, False)
+        with patch("launch.docker_config.reset_terminal") as repair, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            docker_config._interactive_docker_run(["run", "x"])
+        repair.assert_not_called()
+        self.assertIn("dry-run", out.getvalue())
 
 
 class TestDockerStopSubprocess(unittest.TestCase):

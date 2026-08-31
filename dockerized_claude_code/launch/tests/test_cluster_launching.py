@@ -316,7 +316,7 @@ class TestLaunch(LaunchingTmp):
 
 class TestRunClusterContainer(unittest.TestCase):
     def test_the_docker_invocation_shape(self):
-        with patch("launch.docker_config.docker_subprocess") as docker, \
+        with patch("launch.docker_config._interactive_docker_run") as docker, \
              patch("launch.docker_config.set_terminal_title"), \
              patch("launch.docker_config.container_env_args", return_value=["-e", "X=1"]):
             run_cluster_container("team", "img:tag",

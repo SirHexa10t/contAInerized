@@ -146,3 +146,44 @@ def prompt_keypress(header: str, body: list[str]) -> None:
     except (ImportError, OSError):   # non-Linux/macOS or no tty → fallback requires Enter
         input()
     print()
+
+
+# === Terminal hygiene ===
+
+# The escape-sequence MODES a dead full-screen TUI leaves set on the terminal
+# EMULATOR — beyond termios's reach, which is why `stty sane` (and docker's
+# own tty restore) can't fix them. Each is the "off/normal" spelling and an
+# idempotent no-op on a healthy terminal:
+#   ?1000/?1002/?1003 l  mouse tracking off (click / drag / any-motion grades)
+#   ?1006 l              SGR mouse encoding off (the `35;77;15M` report format)
+#   ?2004 l              bracketed paste off
+#   ?1049 l              leave the alternate screen
+#   ?25 h                cursor visible again
+#   [<u                  pop the kitty keyboard-protocol flags (Claude Code
+#                        pushes them; unknown CSIs are ignored elsewhere)
+#   [0m                  attribute reset
+TERMINAL_MODE_RESET = (
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+    "\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[<u\x1b[0m"
+)
+
+
+def reset_terminal(drain_input: bool = False) -> None:
+    """Repair the controlling terminal after a full-screen app may have died
+    without cleaning up — emit TERMINAL_MODE_RESET, and optionally DRAIN
+    queued input (the mouse-move reports already buffered on the tty print as
+    `35;77;15M` garbage the moment a cooked-mode shell echoes them).
+
+    No-op when stdout isn't a tty: print/piped runs (quickie) must never find
+    escape bytes in their captured output."""
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(TERMINAL_MODE_RESET)
+    sys.stdout.flush()
+    if not drain_input:
+        return
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (ImportError, OSError, ValueError):   # no termios / no tty stdin — nothing queued to drop
+        pass
