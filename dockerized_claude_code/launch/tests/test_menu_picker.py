@@ -888,7 +888,12 @@ class TestCreateClusterFlow(unittest.TestCase):
         template_path = AGENTS_DIR / "devteam.legoset"
         answer = None if picks is None else (
             {"session": "myteam", "project": "/tmp/project"}, picks)
-        with patch.object(menu_picker, "prompt_members",
+        # Step 1 is the cluster-tag form (stubbed to the locked pair, as
+        # confirming it unchanged would return); step 2 is this form.
+        with patch.object(menu_picker, "prompt_cluster_tags",
+                          return_value=AgentBuild(
+                              specialties=("muxer", "cluster"))), \
+             patch.object(menu_picker, "prompt_members",
                           return_value=answer) as form, \
              patch("builtins.input", return_value=""), \
              patch("builtins.print"):
@@ -985,10 +990,13 @@ class TestClusterRowsAndEditing(unittest.TestCase):
             with self.subTest(member=row.value.member_id):
                 self.assertTrue(row.modifiable)
                 self.assertTrue(row.deletable)
-                # The row shows the member's tags — {muxer}{cluster} forced at
-                # creation are the visible proof it is a cluster member.
+                # The row shows the member's OWN tags only: the cluster's
+                # tags moved to the CLUSTER row (2026-09-02), because
+                # repeating {mux}{clstr} on every member was noise —
+                # "visual duplication", in the operator's words.
                 text = "".join(t for _, t in row.display)
-                self.assertIn("{clstr}", text)
+                self.assertNotIn("{clstr}", text)
+                self.assertNotIn("{mux}", text)
 
     def test_a_running_cluster_locks_its_row_and_its_members(self):
         # The live container is named claude-code_cluster-team, so the probe's
@@ -1015,14 +1023,33 @@ class TestClusterRowsAndEditing(unittest.TestCase):
         self.assertTrue(cluster_row.selectable)
         self.assertNotIn(menu_picker.RUNNING_HINT, cluster_row.display)
 
-    def test_f2_persists_the_new_build_with_forced_tags_reapplied(self):
+    def test_f2_persists_only_the_members_OWN_tags(self):
+        # The member form shows the cluster's tags locked-and-checked, so a
+        # confirm returns them — persistence subtracts them again (they live
+        # on the cluster, once) while the member still LAUNCHES with them.
         with patch.object(menu_picker, "prompt_tags",
-                          return_value=AgentBuild(professions=("code",))):
+                          return_value=AgentBuild(
+                              professions=("code",),
+                              specialties=("muxer", "cluster", "auto"))):
             menu_picker._edit_member_flow(REGISTRY, "team", "golem")
-        edited = self.state.load("team").member("golem")
+        cluster = self.state.load("team")
+        edited = cluster.member("golem")
         self.assertEqual(edited.build.professions, ("code",))
-        # The form returned a build WITHOUT them; persistence must not.
-        self.assertEqual(edited.build.specialties, ("muxer", "cluster"))
+        self.assertEqual(edited.build.specialties, ("auto",))
+        self.assertEqual(cluster.member_build(edited).specialties,
+                         ("muxer", "cluster", "auto"))
+
+    def test_f2_shows_the_clusters_tags_locked_so_a_member_sees_its_real_build(self):
+        # What the member form is HANDED matters: the cluster's tags must
+        # arrive checked AND named as locked, or the member row's form would
+        # imply the member isn't carrying them.
+        with patch.object(menu_picker, "prompt_tags",
+                          return_value=None) as form:
+            menu_picker._edit_member_flow(REGISTRY, "team", "golem")
+        current = form.call_args.args[1]
+        self.assertEqual(current.specialties, ("muxer", "cluster"))
+        self.assertEqual(form.call_args.kwargs["locked"],
+                         frozenset({"muxer", "cluster"}))
 
     def test_cancelling_the_tag_form_changes_nothing(self):
         with patch.object(menu_picker, "prompt_tags", return_value=None):
@@ -1070,6 +1097,9 @@ class TestClusterRowsAndEditing(unittest.TestCase):
              patch.object(menu_picker, "list_all_instances", return_value=[]), \
              patch.object(menu_picker, "docker_running_instances_subprocess",
                           return_value=None), \
+             patch.object(menu_picker, "prompt_cluster_tags",
+                          return_value=AgentBuild(
+                              specialties=("muxer", "cluster"))), \
              patch.object(menu_picker, "confirm_dialog", return_value=True):
             self.assertIsNone(menu_picker.select_agent(REGISTRY))
 
@@ -1101,9 +1131,12 @@ class TestEditClusterFlow(TestClusterRowsAndEditing):
     redirected AGENTS_STATE); the form itself is stubbed, everything it
     returns is applied for real."""
 
-    def edit(self, session="team", values=None, picks=None):
+    def edit(self, session="team", values=None, picks=None, tags=None):
         answer = None if values is None else (values, picks)
-        with patch.object(menu_picker, "prompt_members",
+        with patch.object(menu_picker, "prompt_cluster_tags",
+                          return_value=tags or AgentBuild(
+                              specialties=("muxer", "cluster"))), \
+             patch.object(menu_picker, "prompt_members",
                           return_value=answer) as form, \
              patch("builtins.input", return_value=""), \
              patch("builtins.print"):
@@ -1156,8 +1189,11 @@ class TestEditClusterFlow(TestClusterRowsAndEditing):
                   picks=self.keep_picks() + [("poet", None)])
         edited = self.state.load("team")
         self.assertEqual(edited.member("golem").build.engine, "thinker")
-        # The newcomer starts from its .lego plus the forced tags.
-        self.assertEqual(edited.member("poet").build.specialties,
+        # The newcomer stores its .lego minus the cluster's tags — and still
+        # launches with them, which is what member_build is for.
+        newcomer = edited.member("poet")
+        self.assertEqual(newcomer.build.specialties, ())
+        self.assertEqual(edited.member_build(newcomer).specialties,
                          ("muxer", "cluster"))
 
     def test_membership_shrinks_when_a_pick_is_dropped(self):

@@ -101,8 +101,8 @@ from .cluster_form import TextField, prefill_picks, prompt_members
 from .tag_form import (
     RICH_BY_STYLE, STYLE_DICT, STYLE_TAG_INVALID, FormOption, UiClass,
     _fragment_source, _normalize, _plain,
-    checkbox_form, edit_profiles_menu, prompt_tags, squashed_tag_style,
-    tag_style,
+    checkbox_form, edit_profiles_menu, prompt_cluster_tags, prompt_tags,
+    squashed_tag_style, tag_style,
 )
 from ..tags import Agent, AgentBuild, Instance, Registry, Tag, resolve_build
 from ..tags.base import SQUASH_AT, first_glyph
@@ -1382,18 +1382,22 @@ def _member_preview(registry: Registry, cluster: "cluster_state.Cluster",
 def _edit_member_flow(registry: Registry, session: str, member_id: str) -> None:
     """F2 on a member: the ordinary tag form, persisted into cluster.toml.
 
-    Reloads the cluster (rows may be stale — see _ClusterRow) and saves through
-    `Cluster.with_build`, which re-applies the forced specialties; the form
-    happily lets a user untick them, and silently losing {cluster} would make
-    the member introduce itself wrongly on its next launch."""
+    Reloads the cluster (rows may be stale — see _ClusterRow) and shows the
+    CLUSTER's own tags locked-and-checked: they apply to this member and it
+    may not opt out, so the form states them rather than hiding them (the
+    member sees its real build) while `Cluster.with_build` subtracts them
+    again on save, so nothing is stored twice."""
     cluster = cluster_state.load(session)
     if cluster is None or (member := cluster.member(member_id)) is None:
         print(f"\n  Cluster '{session}' changed on disk — no member '{member_id}'.")
         input("  Press Enter to return to the picker… ")
         return
-    new_build = prompt_tags(registry, member.build,
+    shared = frozenset({*cluster.tags.professions, *cluster.tags.specialties,
+                        *cluster.tags.policies})
+    new_build = prompt_tags(registry, cluster.member_build(member),
                             instance=f"{member_id}  (cluster: {session})",
-                            workspace=str(cluster.project))
+                            workspace=str(cluster.project),
+                            locked=shared)
     if new_build is None:
         return
     assert isinstance(new_build, AgentBuild)   # fieldless call — narrow the union
@@ -1522,12 +1526,30 @@ def instance_fields(agent: str, *, workspace: str | None = None,
     ]
 
 
+def _prompt_cluster_tags(registry: Registry, session: str, *,
+                         current: AgentBuild | None = None) -> AgentBuild | None:
+    """Step one of both cluster flows: the cluster-wide tag form, with the
+    locked pair pre-ticked and inert. None on Esc — the caller aborts."""
+    return prompt_cluster_tags(
+        registry, current or AgentBuild(
+            specialties=cluster_state.LOCKED_SPECIALTIES),
+        session=session,
+        locked=frozenset(cluster_state.LOCKED_SPECIALTIES))
+
+
 def _create_cluster_flow(registry: Registry, template_path: Path) -> None:
     """The whole creation flow for one template — ONE form: the cluster's
     name and project path as text fields above the agent list, membership by
     picking. Returns to the picker whatever happens; Enter on the created
     cluster's own row is what launches it."""
     template = load_legoset(template_path)   # row-build already validated it
+    # STEP 1 — the cluster's own tags, forced on every member. First, because
+    # it is the decision that shapes the whole cluster (operator request,
+    # 2026-09-02); Esc here cancels the creation entirely, nothing written.
+    tags = _prompt_cluster_tags(registry, template.name)
+    if tags is None:
+        return
+    # STEP 2 — the existing form: name + project + membership.
     result = prompt_members(
         _agent_rows(registry), prefill_picks(template),
         title="New cluster  (type into the fields; Space adds an agent):",
@@ -1539,7 +1561,7 @@ def _create_cluster_flow(registry: Registry, template_path: Path) -> None:
     project = expand_user_path(values["project"])
     cluster_state.save(cluster_state.from_template(
         values["session"], Path(project), assemble(picks, AGENTS_DIR),
-        template=template.name))
+        template=template.name, tags=tags))
     # No summary, no Enter-pause: the picker redraws with the new cluster row
     # (and its member rows) — that IS the confirmation, same as editing.
 
@@ -1556,6 +1578,10 @@ def _edit_cluster_flow(registry: Registry, session: str) -> None:
         print(f"\n  Cluster '{session}' is gone from disk.")
         input("  Press Enter to return to the picker… ")
         return
+    # STEP 1 — the cluster-wide tags, prefilled from what it carries now.
+    tags = _prompt_cluster_tags(registry, session, current=cluster.tags)
+    if tags is None:
+        return
     prefill = [(m.agent, None if m.role == m.agent else m.role)
                for m in cluster_state.picker_order(cluster.members, registry)]
     result = prompt_members(
@@ -1566,11 +1592,15 @@ def _edit_cluster_flow(registry: Registry, session: str) -> None:
     if result is None:
         return
     values, picks = result
-    members = tuple(cluster_state.with_forced_tags(m)
-                    for m in reassemble(cluster.members, picks, AGENTS_DIR))
     updated = dataclasses.replace(
         cluster, project=Path(expand_user_path(values["project"])),
-        members=members)
+        members=reassemble(cluster.members, picks, AGENTS_DIR), tags=tags)
+    # Re-derive each member's OWN build against the (possibly changed) cluster
+    # set: a tag promoted to cluster-wide must stop being stored per member,
+    # and one demoted from it stays only where it was already ticked.
+    updated = dataclasses.replace(updated, members=tuple(
+        dataclasses.replace(m, build=updated.own_build(m.build))
+        for m in updated.members))
     if values["session"] != cluster.session:
         cluster_state.rename(updated, values["session"])
     else:
@@ -1794,11 +1824,18 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         # is the editing unit: F2 re-tags, Del removes.
         for cluster in cluster_state.discover():
             cluster_running = cluster_container_id(cluster.session) in running
+            # The CLUSTER's own tags live here now — every member carries
+            # them, so showing them once beside the cluster says it without
+            # repeating {mux}{clstr} down every member row (2026-09-02).
+            shared_frags, _ = _tags_column(
+                build_tags(cluster.tags),
+                emphasize=frozenset({"cluster-cowork"}))
             cluster_display = [
                 *PickerRowMarker.CLSTR.fragments("  "),
                 (STYLE_RUNNING_NAME if cluster_running else STYLE_AGENT_NAME,
                  cluster.session),
-                ("", f"  ({len(cluster.members)} members)    "),
+                ("", "  "), *shared_frags,
+                ("", f" ({len(cluster.members)} members)    "),
             ]
             if cluster_running:
                 cluster_display.append(RUNNING_HINT)

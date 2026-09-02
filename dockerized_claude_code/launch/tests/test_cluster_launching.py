@@ -185,6 +185,24 @@ class TestPrepare(LaunchingTmp):
         self.assertIn("source-file -q", text)        # the user's tmux.conf still wins
         self.assertIn("CLAUDE_CODE_SESSION_NAME=researcher__primary", text)
 
+    def test_the_work_protocol_rides_every_cluster_launch(self):
+        # The queue's plumbing: the package + its tunables RO-mounted at the
+        # PACKAGE-OWNED /opt targets (importing them here IS the drift-pin),
+        # and the member-owned protocol dir (chat + cursors) mkdir'd by the
+        # ENTRYPOINT — never by docker, whose auto-created mountpoint parents
+        # arrive root-owned (the recorded herdr lesson).
+        from launch.cluster_work_protocol import (
+            CONFIG_IN_CONTAINER, PACKAGE_IN_CONTAINER, PROTOCOL_DIR_IN_CONTAINER,
+        )
+        from launch.cluster_work_protocol.queue import CURSORS_DIRNAME
+        pairs = set(self.prepared.mounts)
+        self.assertIn((str(paths.CLUSTER_WORK_PROTOCOL_DIR),
+                       f"{PACKAGE_IN_CONTAINER}:{paths.RO_MOUNT_OPTION}"), pairs)
+        self.assertIn((str(paths.CLUSTER_PROTOCOL_CONF),
+                       f"{CONFIG_IN_CONTAINER}:{paths.RO_MOUNT_OPTION}"), pairs)
+        self.assertIn(f"mkdir -p {PROTOCOL_DIR_IN_CONTAINER / CURSORS_DIRNAME}",
+                      self.prepared.script_host.read_text())
+
     def test_the_mounts_cover_project_cluster_and_member_settings(self):
         # target → source: targets ARE unique, so this direction can be a dict.
         dict_of = {target: source for source, target in self.prepared.mounts}

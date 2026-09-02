@@ -35,7 +35,7 @@ import shlex
 from pathlib import Path
 
 from .member import valid_label
-from .tmux import Pane
+from .tmux import SHELL_WINDOW, Pane
 
 BINARY = "herdr"
 # `herdr status server` EXITS 0 WHETHER OR NOT the server runs — it is a
@@ -76,18 +76,41 @@ AGENT_RATIO = "0.78"
 # for terminals that show one.
 HINT_TOKEN = "keys"
 HINT_TEXT = "alt+/ help · alt+q quit"
-SHELL_LABEL = "shell"
+# The free shell's name, borrowed from the tmux backend so both spell it the
+# same — it labels the solo split's pane AND the shell tab in both shapes.
+SHELL_LABEL = SHELL_WINDOW
 
 
-def _tab_create(pane: Pane, focus: bool) -> str:
-    """The `tab create` line for one member: label = member id, cwd, one
-    `--env` per variable (key-sorted, same determinism rule as tmux
-    env_flags), focused only for the FIRST member so the user lands there."""
+def _env_flags(pane: Pane) -> list[str]:
+    """One `--env` per variable, key-sorted (the same determinism rule as
+    tmux's env_flags). Verified live to reach the new shell — and so the
+    agent started in it."""
+    return [flag for key in sorted(pane.env)
+            for flag in ("--env", f"{key}={pane.env[key]}")]
+
+
+def _workspace_create(pane: Pane, session: str) -> str:
+    """The workspace line — and it carries the FIRST agent's cwd and env,
+    because that agent lives in the workspace's ROOT pane.
+
+    Why the root pane hosts an agent rather than the free shell: herdr has no
+    `tab move` verb (checked, v0.8.2 — list/create/get/focus/rename/close
+    only), so tab ORDER is creation order and the only way to put the shell
+    rightmost is to create it last. That means the root tab must be spent on
+    something else, and `workspace create --env` (which does exist) makes it
+    able to host a member. Bonus: both shapes now read the same — root tab =
+    first agent, shell tab last."""
+    argv = [BINARY, "workspace", "create", "--cwd", str(pane.cwd),
+            "--label", session, *_env_flags(pane)]
+    return shlex.join(argv)
+
+
+def _tab_create(pane: Pane) -> str:
+    """The `tab create` line for one member: label = member id, cwd, its env.
+    Never focused — the root tab (the first member) keeps the focus, so
+    attach lands on a member rather than on the shell."""
     argv = [BINARY, "tab", "create", "--cwd", str(pane.cwd),
-            "--label", pane.name]
-    for key in sorted(pane.env):
-        argv += ["--env", f"{key}={pane.env[key]}"]
-    argv.append("--focus" if focus else "--no-focus")
+            "--label", pane.name, *_env_flags(pane), "--no-focus"]
     return shlex.join(argv)
 
 
@@ -119,10 +142,12 @@ def _start_line(pane: Pane) -> str:
             f" || {failed}")
 
 
-def _member_lines(pane: Pane, focus: bool) -> list[str]:
-    """One CLUSTER member's setup: create its tab, then start its process in
-    the tab's root pane (id fished from the create reply)."""
-    return [f"PANE=$({_tab_create(pane, focus)} | {_PANE_ID_SED})",
+def _member_lines(pane: Pane) -> list[str]:
+    """One NON-FIRST member's setup: create its tab, then start its process
+    in the tab's root pane (id fished from the create reply). The first
+    member rides the workspace's root pane instead — see
+    `_workspace_create`."""
+    return [f"PANE=$({_tab_create(pane)} | {_PANE_ID_SED})",
             _start_line(pane)]
 
 
@@ -138,15 +163,16 @@ def script(session: str, panes: tuple[Pane, ...], *,
     2. `herdr server` backgrounded, then a readiness poll — the CLI speaks to
        the socket, so racing it loses; a server that never comes up fails the
        launch loudly (10s ceiling) rather than assembling into the void;
-    3. one workspace (label = the session). CLUSTER shape: its ROOT pane is
-       the free shell and each member gets a TAB (first member focused, so
-       attach lands on a member rather than the shell). SOLO shape: the agent
-       IS the root pane and the free shell SPLITS beneath it — both visible
-       at once (the tmux solo layout, translated) in ONE tab, renamed after
-       the agent so the tab row reads as the agent line it is (the row stays:
-       its right corner carries the key hint). The shell splits BEFORE the
-       agent starts: `agent start` blocks until registration or its timeout,
-       and a slow or failed agent must still leave a usable pane;
+    3. one workspace (label = the session). CLUSTER shape: its ROOT tab is
+       the free shell — RENAMED `shell`, because herdr's default "1" reads as
+       nothing next to four member tabs — and each member gets a TAB (first
+       member focused, so attach lands on a member rather than the shell).
+       SOLO shape: the agent IS the root pane with the free shell SPLIT
+       beneath it — both visible at once (the tmux solo layout, translated)
+       in a tab renamed after the agent — PLUS a full-height `shell` tab
+       beside it. The shell splits BEFORE the agent starts: `agent start`
+       blocks until registration or its timeout, and a slow or failed agent
+       must still leave a usable pane;
     4. attach (`herdr` = attach-or-launch the default persistent session),
        then HOLD the container while the server lives: detaching (prefix+q)
        must leave everything running, exactly the tmux-path contract, and
@@ -183,24 +209,29 @@ def script(session: str, panes: tuple[Pane, ...], *,
             + shlex.join(["--source", "launcher", "--token",
                           f"{HINT_TOKEN}={HINT_TEXT}"])
             + " >/dev/null || :")   # a lost hint must not kill PID 1
+    # ONE root-tab path for both shapes: the workspace's root pane hosts the
+    # FIRST agent (its cwd + env ride `workspace create`), and its tab is
+    # renamed after it. The remaining members follow as tabs, and the free
+    # shell is created LAST so it sits rightmost — herdr has no `tab move`,
+    # so creation order IS tab order (operator request, 2026-09-02).
+    first = panes[0]
+    lines += [
+        # The create reply is consumed twice (pane id AND tab id), so it is
+        # captured whole rather than piped away.
+        f"REPLY=$({_workspace_create(first, session)})",
+        f'PANE=$(printf %s "$REPLY" | {_PANE_ID_SED})',
+        f'TAB=$(printf %s "$REPLY" | {_TAB_ID_SED})',
+        # The workspace id is the pane id's prefix (w1:p1 → w1).
+        'WS="${PANE%%:*}"',
+        hint,
+        # The tab row is the key hint's surface (tab_bar_right rides it), so
+        # every tab earns a real name rather than herdr's default "1" — a
+        # cluster whose shell tab read "1" was reported as having no shell.
+        shlex.join([BINARY, "tab", "rename"]) + ' "$TAB" '
+        + shlex.join([first.name]) + " >/dev/null || :",
+    ]
     if solo:
-        agent = panes[0]
         lines += [
-            # The create reply is consumed twice (pane id AND tab id), so it
-            # is captured whole rather than piped away.
-            f"REPLY=$({shlex.join([BINARY, 'workspace', 'create', '--cwd',
-                                   str(agent.cwd), '--label', session])})",
-            f'PANE=$(printf %s "$REPLY" | {_PANE_ID_SED})',
-            f'TAB=$(printf %s "$REPLY" | {_TAB_ID_SED})',
-            # The workspace id is the pane id's prefix (w1:p1 → w1).
-            'WS="${PANE%%:*}"',
-            hint,
-            # The tab row is the key hint's surface (tab_bar_right rides it),
-            # so the solo tab earns a real name — the agent's — rather than
-            # herdr's default "1". Operator call, 2026-08-29: the hint
-            # belongs at the top, with the agent tabs.
-            shlex.join([BINARY, "tab", "rename"]) + ' "$TAB" '
-            + shlex.join([agent.name]) + " >/dev/null || :",
             # The split reply's first pane_id is the NEW pane's; a failed
             # split leaves the variable empty (the pipeline's status is
             # sed's, so `set -e` does not fire) and the guard says so.
@@ -215,17 +246,18 @@ def script(session: str, panes: tuple[Pane, ...], *,
             # row's corner, nowhere else.
             shlex.join([BINARY, "pane", "rename"]) + ' "$SHELL_PANE" '
             + shlex.join([SHELL_LABEL]) + " >/dev/null || :",
-            _start_line(agent),
         ]
-    else:
-        lines += [
-            f"WS=$({shlex.join([BINARY, 'workspace', 'create', '--cwd',
-                                str(shell_cwd), '--label', session])}"
-            f" | {_WS_ID_SED})",
-            hint,
-        ]
-        for index, pane in enumerate(panes):
-            lines += _member_lines(pane, focus=index == 0)
+    lines.append(_start_line(first))
+    for pane in panes[1:]:
+        lines += _member_lines(pane)
+    # The free shell, LAST and so rightmost. In solo it is the full-height
+    # companion to the split beneath the agent (the operator asked for the
+    # tab "in both" shapes and likes the split too); in a cluster it is the
+    # team's shared terminal.
+    lines.append(
+        shlex.join([BINARY, "tab", "create", "--cwd", str(shell_cwd),
+                    "--label", SHELL_LABEL, "--no-focus"])
+        + " >/dev/null || :")
     lines += [
         "",
         f'{BINARY} || echo "could not attach to herdr (no TTY?)"',

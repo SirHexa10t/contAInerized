@@ -93,6 +93,7 @@ class ContainerEnvKey(str, Enum):
     # Always-on run env (emitted as `-e KEY=VALUE` flags by container_env_args)
     AGENT_STATUS_LINE        = (auto(), True)    # pre-styled ANSI status line at the bottom of Claude Code
     BASH_ENV                 = (auto(), True)    # path to the bashrc that non-interactive bash sources at startup
+    CLAUDE_AGENT_INSTANCE    = (auto(), True)    # this instance's id (`<agent>__<session>`) — the container's own name for itself, which nothing else carried: ~/.claude is the same path in every instance and the hostname is a docker id. Read by bashrc helpers that name their output files after the instance (dump_last_msg)
 
     # Custom __new__ + __init__ so the str-mixin and the extra `container_emit`
     # attribute can coexist:
@@ -263,6 +264,7 @@ def set_container_env(inst: Instance, refresh_installs: bool = False) -> None:
         ContainerEnvKey.FORCE_INSTALLS_REFRESH:  refresh_value or "stable",
         ContainerEnvKey.AGENT_STATUS_LINE:       build_status_line(inst),
         ContainerEnvKey.BASH_ENV:                BASHRC_IN_CONTAINER,
+        ContainerEnvKey.CLAUDE_AGENT_INSTANCE:   inst.instance,
         # Dynamic-key updates from toolkit profiles + optional_creds/
         **toolkit_install_flags(inst.professions),                  # INSTALL_<TOOL> for language toolchains (profile-driven)
         **install_creds_flags(present_optional_cred_services()),    # INSTALL_<TOOL> for service CLIs (creds-presence-driven)

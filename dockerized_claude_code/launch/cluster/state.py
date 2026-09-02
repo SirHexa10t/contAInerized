@@ -3,11 +3,14 @@
     # clusters/devteam-poc/cluster.toml
     project  = "/home/u/proj"
     template = "devteam"
+    professions = []                                    # CLUSTER-level tags:
+    specialties = ["muxer", "cluster", "cluster-cowork"] # forced on every
+    policies    = []                                    # member, stored ONCE
 
     [researcher__primary]
-    engine      = "researcher"
-    professions = ["code"]
-    specialties = ["muxer", "cluster"]
+    engine      = "researcher"                          # this member's OWN
+    professions = ["code"]                              # tags — what it adds
+    specialties = []                                    # on top of the above
     policies    = ["all-actions"]
 
 The per-member tables are **exactly the shape `instances.toml` uses** — the same
@@ -17,6 +20,15 @@ ordinary path and a cluster must not introduce a second tag pipeline. What diffe
 is only the keying: an instance is keyed by `<agent>__<session>`, a member by its
 id *within* its cluster, so the agent and role are read back out of the table name
 (`member.split_member_id`) instead of being stored twice.
+
+Tags come in two layers (2026-09-02). The cluster-level lists at the top are
+what EVERY member is forced to carry — `{mux}`/`{clstr}` always, plus whatever
+else the cluster tag form ticked (`{cc}` above) — and a member table stores
+only what that member adds. `Cluster.member_build` unions the two for launches
+and forms; `own_build` subtracts for storage. One consequence the picker was
+redesigned around: a member row shows only its OWN tags, because repeating the
+cluster's on every row was noise. There is no cluster-level ENGINE: a thinking
+budget is per member, and the cluster form omits that section.
 
 `project` is cluster-level rather than per-member: every member works the same
 project. Each member's own *checkout* of it is derived from the session and
@@ -42,7 +54,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,6 +84,16 @@ _BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _AXES = ("professions", "specialties", "policies")
 
 
+# Cluster-level specialties the operator may not untick — they are what makes a
+# cluster a cluster. `cluster` tells an agent it is one of several (without it a
+# member would introduce itself wrongly and address nobody); `muxer` is its tree
+# parent, named explicitly rather than left to the form's auto-tick because a
+# cluster can be created programmatically and must not depend on interactive
+# cascade behaviour to be launchable. They render locked-and-checked in the
+# cluster tag form, exactly as an `always_on` policy does in the instance form.
+LOCKED_SPECIALTIES = ("muxer", "cluster")
+
+
 @dataclass(frozen=True)
 class Cluster:
     """One cluster: where it works, what it was built from, and who is in it.
@@ -82,9 +104,24 @@ class Cluster:
     project: Path
     members: tuple[Member, ...]
     template: str | None = None
+    tags: AgentBuild = field(default_factory=lambda: AgentBuild(
+        specialties=LOCKED_SPECIALTIES))
 
     def __post_init__(self) -> None:
         valid_label(self.session, "session name")
+        # The cluster-level tags every member inherits (operator request,
+        # 2026-09-02: setting `{cc}` once per cluster instead of once per
+        # member). LOCKED_SPECIALTIES are re-forced here — the one place a
+        # Cluster comes into being, whatever route built it — so no cluster
+        # can exist whose members would not know they are members. `engine`
+        # is deliberately NOT part of this: how hard a member thinks is a
+        # per-member choice, and the cluster form omits that section.
+        missing = tuple(name for name in LOCKED_SPECIALTIES
+                        if name not in self.tags.specialties)
+        if missing or self.tags.engine is not None:
+            object.__setattr__(self, "tags", replace(
+                self.tags, engine=None,
+                specialties=tuple(self.tags.specialties) + missing))
         if not self.members:
             raise ClusterError(
                 f"cluster {self.session!r} has no members — a cluster with "
@@ -133,17 +170,43 @@ class Cluster:
         Order untouched (it is window order; re-tagging must not reshuffle),
         unknown ids raised on (the edit came from a row that names a member —
         missing means the file changed underneath, worth a loud stop), and the
-        FORCED specialties re-applied: the tag form lets a user untick
-        anything, but an edit is a second place a member's build enters the
-        file, so it gets the same guarantee `from_template` gives the first —
-        no path produces a member unaware it is one."""
+        CLUSTER's tags subtracted: the member form shows them locked-and-
+        checked (they apply, and a member may not opt out), so they come back
+        in the result — storing them per member would duplicate what the
+        cluster already says, which is exactly the picker noise this design
+        removed."""
         member = self.member(identifier)
         if member is None:
             raise ClusterError(
                 f"cluster {self.session!r} has no member {identifier!r}")
-        updated = with_forced_tags(replace(member, build=build))
+        updated = replace(member, build=self.own_build(build))
         return replace(self, members=tuple(
             updated if m.id == identifier else m for m in self.members))
+
+    def own_build(self, build: AgentBuild) -> AgentBuild:
+        """`build` minus everything the CLUSTER already carries — what a
+        member's own table stores. The inverse of `member_build`."""
+        return AgentBuild(
+            engine=build.engine,
+            professions=tuple(n for n in build.professions
+                              if n not in self.tags.professions),
+            specialties=tuple(n for n in build.specialties
+                              if n not in self.tags.specialties),
+            policies=tuple(n for n in build.policies
+                           if n not in self.tags.policies))
+
+    def member_build(self, member: Member) -> AgentBuild:
+        """What a member actually LAUNCHES with: the cluster's tags plus its
+        own, order-preserving and deduped, its own engine kept (the cluster
+        has none). One definition, so the launcher, the picker's previews and
+        the member form cannot disagree about a member's real build."""
+        def union(shared: tuple[str, ...], own: tuple[str, ...]) -> tuple[str, ...]:
+            return tuple(shared) + tuple(n for n in own if n not in shared)
+        return AgentBuild(
+            engine=member.build.engine,
+            professions=union(self.tags.professions, member.build.professions),
+            specialties=union(self.tags.specialties, member.build.specialties),
+            policies=union(self.tags.policies, member.build.policies))
 
 
 # ============================================================
@@ -165,9 +228,18 @@ def dumps(cluster: Cluster) -> str:
              f"project = {_toml_str(str(cluster.project))}"]
     if cluster.template is not None:
         lines.append(f"template = {_toml_str(cluster.template)}")
+    # The cluster-level tags, ABOVE the member tables (bare keys must precede
+    # the first table header in TOML — and `loads` picks members by "value is
+    # a table", so these lists can never be mistaken for one).
+    cluster_entry = build_entry(cluster.tags, workspace=None)
+    for axis in _AXES:
+        values = ", ".join(_toml_str(v) for v in cluster_entry.get(axis, []))
+        lines.append(f"{axis} = [{values}]")
     blocks = ["\n".join(lines) + "\n"]
     for member in sorted(cluster.members, key=lambda m: m.id):
-        entry = build_entry(member.build, workspace=None)
+        # Only what is the member's OWN — the cluster's tags are stored once,
+        # up top, not repeated N times.
+        entry = build_entry(cluster.own_build(member.build), workspace=None)
         table = [f"[{_toml_key(member.id)}]"]
         if entry.get("engine") is not None:
             table.append(f"engine = {_toml_str(entry['engine'])}")
@@ -190,14 +262,22 @@ def loads(session: str, text: str) -> Cluster:
         raise ClusterError(f"cluster {session!r}: 'project' is missing")
     template = data.get("template") if isinstance(data.get("template"), str) else None
 
+    # Cluster-level tags. A PRE-2026-09-02 file has none and instead repeats
+    # the forced specialties in every member table; the default covers it (and
+    # `own_build` then strips them out of the members below), so an old file
+    # loads into the new shape and converges on its next save — no migration.
+    shared = entry_to_build(data) if any(axis in data for axis in _AXES) \
+        else AgentBuild(specialties=LOCKED_SPECIALTIES)
     tables = {k: v for k, v in data.items() if isinstance(v, dict)}
     members = []
     for identifier in sorted(tables):
         agent, role = split_member_id(identifier)
         members.append(Member(agent=agent, role=role,
                               build=entry_to_build(tables[identifier])))
-    return Cluster(session=session, project=Path(project),
-                   members=tuple(members), template=template)
+    cluster = Cluster(session=session, project=Path(project),
+                      members=tuple(members), template=template, tags=shared)
+    return replace(cluster, members=tuple(
+        replace(m, build=cluster.own_build(m.build)) for m in cluster.members))
 
 
 def _toml_key(key: str) -> str:
@@ -327,41 +407,22 @@ def destroy(cluster: Cluster) -> None:
     force_remove(cluster_path(cluster.session))
 
 
-# Tags every member carries, whatever its agent's `.lego` says. `cluster` is what
-# tells an agent it is one of several (without it a member would introduce itself
-# wrongly and address nobody); `muxer` is its tree parent, added explicitly rather
-# than left to the form's auto-tick because a cluster is created programmatically
-# and must not depend on interactive cascade behaviour to be launchable.
-FORCED_SPECIALTIES = ("muxer", "cluster")
-
-
-def with_forced_tags(member: Member) -> Member:
-    """`member` with the cluster specialties merged into its build.
-
-    Order-preserving union rather than an append: an agent whose `.lego` already
-    lists one of them must not end up carrying it twice (the store dedupes, but a
-    duplicate would show twice in the picker before it ever reached disk)."""
-    have = tuple(member.build.specialties)
-    missing = tuple(name for name in FORCED_SPECIALTIES if name not in have)
-    if not missing:
-        return member
-    return replace(
-        member,
-        build=replace(member.build, specialties=have + missing))
-
-
 def from_template(session: str, project: Path, members: tuple[Member, ...],
-                  *, template: str | None = None) -> Cluster:
+                  *, template: str | None = None,
+                  tags: AgentBuild | None = None) -> Cluster:
     """Build a fresh cluster. Separate from `Cluster(...)` so the creation path
     has one named entry point, and so `paths.cluster_path` interest stays here
     rather than in every caller.
 
-    Applies FORCED_SPECIALTIES here — at the ONE place a cluster comes into
-    existence — so there is no path that produces a member unaware it is one."""
+    `tags` is the cluster-level set every member inherits (the creation form's
+    first step); omitted, it is just the locked pair. Members keep only what is
+    their OWN, so nothing is stored twice."""
     valid_label(session, "session name")
-    return Cluster(session=session, project=project,
-                   members=tuple(with_forced_tags(m) for m in members),
-                   template=template)
+    cluster = Cluster(session=session, project=project, members=members,
+                      template=template,
+                      tags=tags or AgentBuild(specialties=LOCKED_SPECIALTIES))
+    return replace(cluster, members=tuple(
+        replace(m, build=cluster.own_build(m.build)) for m in members))
 
 
 def cluster_dir(session: str) -> Path:

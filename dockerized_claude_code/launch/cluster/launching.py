@@ -42,11 +42,18 @@ from ..docker_config import (
     effort_args, ensure_image, run_cluster_container,
 )
 from ..file_access import agent_md_index, ensure_dir, write_text
+from ..cluster_work_protocol import (
+    CONFIG_IN_CONTAINER as PROTOCOL_CONF_TARGET,
+    PACKAGE_IN_CONTAINER as PROTOCOL_PACKAGE_TARGET,
+    PROTOCOL_DIR_IN_CONTAINER,
+)
+from ..cluster_work_protocol.queue import CURSORS_DIRNAME
 from ..paths import (
-    ACCOUNT_FILE, CACHE_MOUNTS, CLUSTER_IN_CONTAINER, CREDENTIALS_FILE,
-    CLAUDE_CONFIG_IN_CONTAINER, DOCKER_BASE_MOUNTS, RO_MOUNT_OPTION,
-    TMUX_CONF_IN_CONTAINER, cluster_banner_path, cluster_member_dir,
-    cluster_path, state_settings_path,
+    ACCOUNT_FILE, CACHE_MOUNTS, CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
+    CLUSTER_WORK_PROTOCOL_DIR, CREDENTIALS_FILE, CLAUDE_CONFIG_IN_CONTAINER,
+    DOCKER_BASE_MOUNTS, RO_MOUNT_OPTION, TMUX_CONF_IN_CONTAINER,
+    cluster_banner_path, cluster_member_dir, cluster_path,
+    state_settings_path,
 )
 from ..tags import Instance, Registry, resolve_build
 from . import backend, herdr, launch_plan, tmux
@@ -97,7 +104,11 @@ def member_instances(cluster: Cluster,
             raise ClusterError(
                 f"member {member.id!r}: no agent {member.agent!r} in agents/")
         try:
-            resolved = resolve_build(member.build, member.agent, registry)
+            # The CLUSTER's tags plus the member's own — `member.build` alone
+            # would launch a member without {clstr}, {cc}, or anything else
+            # the cluster set for everyone (stored once, cluster-level).
+            resolved = resolve_build(cluster.member_build(member),
+                                     member.agent, registry)
         except KeyError as error:
             raise ClusterError(
                 f"member {member.id!r} references unknown tag {error} — edit "
@@ -170,10 +181,11 @@ def _union_probe(cluster: Cluster, pairs: list[tuple[Member, Instance]],
     professions: list[str] = []
     specialties: list[str] = []
     for member, _ in pairs:
-        for name in member.build.professions:
+        build = cluster.member_build(member)   # cluster tags included
+        for name in build.professions:
             if name not in professions:
                 professions.append(name)
-        for name in member.build.specialties:
+        for name in build.specialties:
             if name not in specialties:
                 specialties.append(name)
     first = pairs[0][0]
@@ -192,11 +204,15 @@ def _setup_commands(cluster: Cluster) -> tuple[str, ...]:
     - the shared sessions dir, and every member's `sessions/` symlinked to it
       (discovery is per-config-dir; the shared dir is what makes isolated
       members visible to each other — the spike's OPEN #3 answer);
+    - the work-protocol's home (`/cluster/protocol` + its cursors/) — created
+      HERE, member-owned, never as a docker mountpoint parent (those arrive
+      root-owned: the recorded herdr lesson);
     - skills and keybindings symlinked from the shared ~/.claude mounts, which
       a member's CLAUDE_CONFIG_DIR would otherwise hide.
 
     `ln -sfn` so a relaunch over existing links is idempotent."""
-    lines = [f"mkdir -p {SHARED_SESSIONS}"]
+    lines = [f"mkdir -p {SHARED_SESSIONS}",
+             f"mkdir -p {PROTOCOL_DIR_IN_CONTAINER / CURSORS_DIRNAME}"]
     for member in cluster.members:
         config = container_member_dir(cluster.session, member.id)
         lines.append(f"mkdir -p {config}")
@@ -263,6 +279,14 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
                              personal_workspaces=False)
     for host, target in plan.mounts().items():
         mounts.append((str(host), target))
+    # The work-protocol rides every cluster launch: the package (RO, whole —
+    # the `_cluster` layer's cluster-chat shim module-runs it off /opt) and
+    # its tunables file. Both /opt-rooted so no mountpoint parent lands
+    # inside member-writable trees.
+    mounts.append((str(CLUSTER_WORK_PROTOCOL_DIR),
+                   f"{PROTOCOL_PACKAGE_TARGET}:{RO_MOUNT_OPTION}"))
+    mounts.append((str(CLUSTER_PROTOCOL_CONF),
+                   f"{PROTOCOL_CONF_TARGET}:{RO_MOUNT_OPTION}"))
     # The always-on base set, exactly as every solo launch mounts it. Nothing
     # here is optional for a cluster: the entrypoint SOURCES tmux.conf (its
     # `-q` means a missing mount silently boots a session with no quit/help/

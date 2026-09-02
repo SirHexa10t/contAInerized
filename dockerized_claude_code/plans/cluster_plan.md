@@ -400,10 +400,62 @@ message *order*, *broadcast*, and a *shared conversation log* for free.
   we using an enum for `<thing>`?"; any member who has touched that code answers
   ("it's so the values can carry metadata" / "good catch — it *would* be
   better, I'll switch it"); members with nothing to add stay silent.
-- **All-nop handling (needed):** if a broadcast question goes unanswered — every
-  member nopped — it must not vanish. Silence must be *decided*, not accidental.
-  For the PoC, keep it blunt: a round-robin "you're up" rule obliges one member
-  to answer or explicitly say "no one here knows".
+- **Iteration accounting — a nop IS input (2026-08-31, operator).** The reply
+  vocabulary starts with the explicit nop: *"I can't make a proper assessment
+  without going in-depth (and even then, might not have an answer)."* It
+  should be the COMMONEST reply — most members have nothing to do with most
+  issues — and it is not silence: a nop tells the room (the manager above
+  all) that the problem was **observed and partially assessed** by that
+  member. At an ITERATION (a gate moment: plan approval, a roadmap change, a
+  design review), every member's input is accounted for — each replies
+  exactly once, and the queue's total order makes "everyone weighed in"
+  *checkable* rather than assumed. A gate reply is exactly ONE of
+  (2026-08-31, operator):
+
+  - **`nop` — the fold.** Like folding in poker: a decision NOT to
+    participate in this hand, and it carries NO additional data — no hedge,
+    no confidence rider (decided; an earlier draft floated "nop with a
+    hedge" and it is out). Meaning: *"I can't make a proper assessment
+    without going in-depth — and even then, might not have an answer."*
+    Still input: it tells the room, the manager above all, that this member
+    OBSERVED the gate and assessed it as outside its reach. By design the
+    commonest reply — most members have nothing to do with most issues.
+  - **A stance on the 0–10 scale**, plus free-text reasons and riders (the
+    tester's "add tests to the roadmap" is a rider on whatever stance it
+    accompanies). The scale is LINEAR between hard-no and resounding-yes,
+    and the step meanings are CONFIGURATION (the protocol config module +
+    its mounted settings file — see the proposal below), never prose
+    scattered through personas. `5` is the informed midpoint: equally pro
+    and against because of CONFLICTING POINTS — explicitly NOT "I don't
+    know, so I'm neutral"; ignorance is a `nop`, never a 5.
+  - **`hold`** — the process verb, orthogonal to sentiment: pause the
+    thread because it diverges from the core goals (the manager case);
+    re-scope before any re-vote.
+
+  Seed meanings for the scale (they LIVE in configuration; tweak freely):
+
+  | n | sentiment |
+  |---|---|
+  | 0 | hard no — blocking; proceeding is a mistake I can name right now |
+  | 1 | no — a concrete objection stands; strong new evidence could move me |
+  | 2 | strong lean no — serious doubts, though none yet a named blocker |
+  | 3 | probably not — leaning no; verification required before proceeding |
+  | 4 | mild lean no — the reservations outweigh the upside, narrowly |
+  | 5 | torn — strong points BOTH ways; informed conflict, never ignorance |
+  | 6 | mild lean yes — the upside outweighs my named reservations, narrowly |
+  | 7 | probably yes — leaning yes; would welcome a check, wouldn't block |
+  | 8 | strong lean yes — minor quibbles only |
+  | 9 | yes — comfortable; cheaply reversible if wrong |
+  | 10 | resounding yes — trivial or very safe to assume; easy to fix or change if proven wrong |
+
+  Free chatter *between* iterations needs no ack — the mandatory round is a
+  GATE property, not a per-message tax.
+- **All-nop handling (recast by the above):** an unanswered gate is no longer
+  accidental silence — it is N explicit nops on the record: a *decided*,
+  visible outcome. What stays open is only the escalation — who is obliged to
+  go in-depth when everyone nopped. The blunt PoC rule stands (round-robin
+  "you're up", now meaning "you do the in-depth pass", not "you must
+  answer"), and the deferred idea below applies to that choice.
 
   > **DEFERRED IDEA — nop-as-election, an emergent social protocol (not a PoC
   > concern; recorded so it isn't lost).** Instead of a designated chair,
@@ -434,6 +486,132 @@ message *order*, *broadcast*, and a *shared conversation log* for free.
   the right window (local pty injection — simpler than the cowork hub because
   there's no container boundary), or a `Stop`-hook poll. **OPEN #4** — which
   wake backs the queue is undecided and is the queue's make-or-break.
+
+> **PROPOSAL v2 — phase-5 architecture + build roadmap (2026-08-31;
+> supersedes v1 in place).** Operator directives folded in: perfection is NOT
+> expected out of the gate — trial-and-error with many tweaks is the working
+> mode, so the build is modular from day one, every tunable is configuration,
+> `nop` carries nothing, and stances ride the configured 0–10 scale.
+>
+> **MQ type — RECOMMENDATION: one append-only JSONL file with flock'd
+> appends. No broker, no daemon, no database.** What this workflow needs is
+> total order (the serial chain that started this design), broadcast reads,
+> a durable HUMAN-READABLE journal that IS the conversation log, per-member
+> read cursors, and cheap tweakability. At cluster scale — a handful of
+> members, human-turn-paced messages seconds apart — a "queue" is a
+> coordination LOG, not a throughput system: append order gives total order
+> for free, `tail -f` + `jq` give live debugging for free, restarts lose
+> nothing, and the trial's success criterion ("legible from chat.jsonl
+> alone") is a property of the substrate. Weighed and declined:
+>
+> - **brokers** (redis / zeromq / mosquitto / rabbit): a daemon plus a
+>   dependency to babysit, for delivery/consumer-group features that are
+>   all no-ops at this scale — and the log would have to be built SEPARATELY;
+> - **SQLite**: cursors and concurrency for free, but the journal stops
+>   being tail-able text, and our writes are far too sparse to need WAL.
+>   The revisit trigger, recorded: IF per-member cursor/ack bookkeeping
+>   outgrows flat files, SQLite is the next stop — nothing else is;
+> - **maildir-style file-per-message** (the cowork mailbox shape): ordering
+>   then needs a flock'd counter anyway — the same lock with more moving
+>   parts, and the log is a concatenation instead of a file.
+>
+> The WAKE is bought from the MULTIPLEXER — not built, and not the messaging
+> feature (a correction recorded 2026-08-31 while building: the nudge/close
+> TIMERS run as headless shell forks, and a shell process cannot call an
+> agent tool like SendMessage — so every ping rides the muxer's own
+> injection instead: `herdr pane run <pane>` / `tmux -L muxer send-keys`,
+> which lands in the member's session as a `[cluster-chat]`-prefixed user
+> message and starts a real turn). One mechanism for all three ping kinds —
+> open, completion, nudge/timeout — held in wake.py; a failed ping is a
+> printed warning, never an error, and the timers double as the retry. The
+> messaging feature remains the members' own 1:1 channel.
+>
+> **Module layout — the cluster's internal-management package, its own dir
+> under `launch/` (name pending, working title `clusterchat/`):**
+>
+>     config.py    EVERY tunable in one module: gate nudge timeout, reply
+>                  caps, loop caps, the 0-10 scale's step meanings. Loads a
+>                  mounted `settings/cluster_protocol.toml`, so a protocol
+>                  tweak is a file edit + relaunch — no code change, no
+>                  image rebuild.
+>     schema.py    the message shape (seq / ts / member / kind / iteration /
+>                  stance / body) and the reply vocabulary as data;
+>                  validation lives with the shape.
+>     queue.py     append (flock, one JSON line), read-since, per-member
+>                  cursor files — the ONLY module that touches the file.
+>     gates.py     open / close / accounting: who replied, nop vs stance vs
+>                  TIMEOUT (recorded distinctly — a nop is an assessment, a
+>                  timeout is an absence), the stop-rule close line.
+>     wake.py      the ping policy (who gets SendMessage on open/reply),
+>                  isolated so ping-all vs ping-opener-only is one module's
+>                  edit.
+>     cli.py       the `cchat` verbs members call: post / read / open /
+>                  close.
+>
+> Host-side python under `launch/` so the quality gate covers every module;
+> containers receive the package as a READ-ONLY MOUNT (the settings/ pattern)
+> plus a `cchat` bin shim from the reserved `profession/_cluster` layer —
+> which also installs python3-minimal, since the base image carries no
+> python. Mount rather than bake, deliberately: a protocol tweak reaches the
+> next launch with no image rebuild, which is the operator's stated
+> trial-and-error mode.
+>
+> **Build roadmap:**
+>
+> 1. `schema.py` + `config.py` + a seeded `settings/cluster_protocol.toml`
+>    (the scale table above, timeout, caps) — pure modules, test-first.
+> 2. `queue.py` — flock append / read-since / cursors, tested with
+>    concurrent writers hammering one file.
+> 3. `cli.py` (post/read) + the `_cluster` image layer (python3-minimal +
+>    shim) + the RO mount wiring; the `{clstr}` addendum grows its
+>    "how to speak on the queue" text.
+> 4. `gates.py` + `wake.py` — open/close/accounting/pings; the addendum
+>    grows the gate liturgy (reply exactly once; nop is folding; stances are
+>    0-10 with configured meanings; riders welcome on any stance).
+> 5. LIVE TRIAL: three members (project-starter, tester, security-lens
+>    persona) on a toy repo. Success = one gate where a low-stance blocker
+>    is resolved in-thread, one all-nop gate escalated by round-robin, both
+>    legible from `chat.jsonl` alone.
+> 6. The tweak loop: protocol iteration lands in
+>    `settings/cluster_protocol.toml` + addendum text FIRST; code changes
+>    only when a mechanism (not a behavior) is missing.
+>
+> Decision status (2026-08-31):
+>
+> - **Package name — DECIDED:** `launch/cluster_work_protocol/` (operator:
+>   verbose names preferred). Bin shim working title `cluster-chat` — the
+>   agents type it, and it's a one-line rename in the `_cluster` layer.
+> - **Gate timeouts — operator's 7s seed REJECTED with arithmetic, per the
+>   "reject if highly suspect" license.** A gate reply is a full agent TURN:
+>   wake delivery, a queue read (tool call), thinking, an append (tool
+>   call), a ping back — ~15-60s wall-clock for a plain nop, minutes for a
+>   considered stance with reasons. At 7s every member times out on every
+>   gate and the whole protocol records absences. Seeds instead (config,
+>   tweak freely): `nudge_after = 180s` (re-ping members yet to reply),
+>   `close_after = 480s` (hard-close; stragglers recorded as TIMEOUT).
+>   7 SECONDS is the right magnitude for a different tunable and is seeded
+>   there: `lock_wait = 7s`, the flock acquisition ceiling on queue appends.
+> - **Wake policy — DECIDED (operator, 2026-08-31): ping-on-completion,**
+>   one step past opener-only. The opener can only act once everyone has
+>   replied (or the gate times out), so per-reply pings are noise: a REPLY
+>   pings nobody. The reply that COMPLETES the gate (all members accounted)
+>   is the one that pings the opener — detected under the same flock as the
+>   append, so exactly one replier sees the count hit N. `@member` mentions
+>   in any body still ping the named member immediately (the directed
+>   escape hatch for in-thread debate).
+>   The wrinkle this creates, and its answer: with nobody woken per reply,
+>   NO ONE is awake to fire the nudge/timeout when stragglers never come.
+>   Rather than a resident daemon, `open` plants two one-shot timer forks
+>   (`sleep <nudge_after> && cluster-chat check-gate <id>`, same for
+>   close_after): the nudge re-pings only non-repliers; the close-timer
+>   marks TIMEOUTs and pings the opener — it never AUTHORS the close
+>   (refined while building, 2026-08-31): the resolution line needs the
+>   opener's judgment, so closing stays the opener's own verb. Gate
+>   lifetimes are minutes and the forks live in-container, so nothing
+>   persists or polls; `check-gate` derives its branch from journal + clock,
+>   so both forks run the same idempotent verb.
+>
+> Closed since v1: `nop` carries no hedge — it is the fold.
 
 ### Directed address via the feature
 
@@ -772,6 +950,9 @@ State these at the top of the eventual feature so nobody reads them as bugs:
 5. **Protocol + shared chat:** the team dynamic on the queue — broadcast
    questions, any-who-knows answers, all-nop handling, the step-up protocol, and
    a stop rule; moderator first, then round-table; the queue is the journal.
+   Gate iterations account for EVERY member's reply — a nop is input, not
+   silence (the reply vocabulary + implementation sketch live in the
+   message-queue section).
 6. **`agent_writer`, then `team-lead`:** `agent_writer` is a persona that
    follows a plan / improvises and **routes tasks to the fitting member** —
    project-starter when starting a project or feature, refactorer for
@@ -786,6 +967,17 @@ State these at the top of the eventual feature so nobody reads them as bugs:
 
 **Resolved in conversation (recorded so they don't reopen):**
 
+- **Tags are CLUSTER-level, not per-member (2026-09-02).** A cluster carries
+  its own tag set (`cluster.toml`'s top-level axis lists), forced on every
+  member; a member table stores only what it adds. Set once in a tag form
+  that opens BEFORE the name/project/membership form, with `{mux}`/`{clstr}`
+  locked-and-checked and NO engine section (a thinking budget stays per
+  member). Consequences, all deliberate: member rows in the picker show only
+  their own tags (the cluster's show on the cluster row — repeating them per
+  member was "visual duplication"), a member's F2 form shows the cluster's
+  tags locked so it can see its real build without opting out, and a legacy
+  file (forced pair repeated per member, no cluster keys) loads into the new
+  shape and converges on its next save — no migration.
 - **Topology:** flat/equal — no manager/coworker asymmetry among members.
 - **Writer safety:** git worktrees per member (default); lock-files in the
   protocol as a last resort for genuine same-file work; `{ro}` for pure

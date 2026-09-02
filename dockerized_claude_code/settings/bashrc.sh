@@ -1,4 +1,12 @@
-# Sourced by every non-interactive bash inside the container (via BASH_ENV).
+# Every bash inside the container reaches this file, by TWO different routes —
+# both load-bearing, so don't "simplify" either away:
+#   - non-interactive shells (the agent's own Bash tool calls): $BASH_ENV,
+#     staged per launch by the launcher;
+#   - interactive + LOGIN shells (the {mux} shell pane runs `bash -l`):
+#     ~/.profile sources ~/.bashrc, which is where this file is mounted.
+#     BASH_ENV is deliberately ignored by bash for those, so the .profile
+#     route is the only thing that puts these functions in the operator's
+#     pane (verified live: `bash -l -c 'type -t dump_last_msg'` → function).
 # Edit this file to add your own functions / aliases; they take effect on next ./run.py launch.
 
 shopt -s expand_aliases   # aliases are off by default in non-interactive bash
@@ -53,6 +61,12 @@ man() {
         [ "$found" -eq 0 ] && printf '  (none)\n'
     fi
 
+    printf '\nShell helpers (bash functions from settings/bashrc.sh — run in a terminal, not as /commands):\n'
+    printf '  %-22s %s\n' "dump_last_msg [dir]" "save this session's last reply to <instance>-message_<timestamp>.md (default: cwd)"
+    printf '  %-22s %s\n' "summary_diff" "NEW / CHANGED / DELETED vs the manifest in /workspace/.claude_summary"
+    printf '  %-22s %s\n' "summary_files" "just the paths worth re-reading (NEW + CHANGED), one per line"
+    printf '  %-22s %s\n' "summary_save_manifest" "rewrite that manifest — run AFTER summary_diff"
+
     printf '\n'
     printf 'Built-in Claude Code commands (core set — run /help in Claude for the full list):\n'
     printf '  /cost       Token counts and cost for this session\n'
@@ -67,9 +81,19 @@ man() {
     printf '  /help       List of built-in commands\n\n'
 }
 
-# Resolve _summary.py: container bind-mount path first, else next to this bashrc.
+# Resolve the python helpers: container bind-mount path first, else next to
+# this bashrc (so they also work when the repo is used directly on the host).
 _SUMMARY_PY="/home/claude/.claude/_summary.py"
 [ -f "$_SUMMARY_PY" ] || _SUMMARY_PY="$(dirname "${BASH_SOURCE[0]}")/_summary.py"
+_DUMP_LAST_MSG_PY="/home/claude/.claude/_dump_last_msg.py"
+[ -f "$_DUMP_LAST_MSG_PY" ] || _DUMP_LAST_MSG_PY="$(dirname "${BASH_SOURCE[0]}")/_dump_last_msg.py"
+
+# Save the CURRENT session's last assistant reply into
+# `<instance>-message_<timestamp>.md` (in $1, or the current dir). No AI runs:
+# it reads the transcript Claude Code already wrote and copies the text out —
+# unlike /file-message, which asks the agent to write the file itself. Prints
+# the path it wrote. Handy from the {mux} shell pane while the agent is busy.
+dump_last_msg() { python3 "$_DUMP_LAST_MSG_PY" "$@"; }
 
 # Diff /workspace against the manifest in /workspace/.claude_summary;
 # print NEW / CHANGED / DELETED lines for every file that differs.

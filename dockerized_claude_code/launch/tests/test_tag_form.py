@@ -633,5 +633,65 @@ class TestProfilesFormAssembly(unittest.TestCase):
         self.assertIn("tmux", "".join(text for _, text in muxer.body))
 
 
+class TestClusterTagForm(unittest.TestCase):
+    """prompt_cluster_tags — the cluster-wide tag step (2026-09-02). Three
+    departures from the instance form, each asked for: no engines, locked
+    rows for what makes a cluster a cluster, and a preamble that SAYS the
+    selection is forced on every member (a tag list cannot imply that)."""
+
+    def _captured(self, current=None, locked=frozenset({"muxer", "cluster"}),
+                  result=None):
+        captured = {}
+
+        def fake_form(title, options, **kwargs):
+            captured["title"] = title
+            captured["options"] = options
+            captured.update(kwargs)
+            return result
+
+        with patch("launch.gui.tag_form.checkbox_form", side_effect=fake_form):
+            build = tag_form.prompt_cluster_tags(
+                REGISTRY, current or AgentBuild(specialties=tuple(locked)),
+                session="team", locked=locked)
+        return build, captured
+
+    def test_no_engine_section_at_all(self):
+        # A thinking budget is per member; offering one cluster-wide would
+        # silently override every member's own engine.
+        _, captured = self._captured()
+        keys = {option.key for option in captured["options"]}
+        self.assertTrue(keys.isdisjoint(set(REGISTRY.engines)))
+        self.assertNotIn("#engine", keys)
+
+    def test_the_locked_pair_is_checked_and_inert(self):
+        _, captured = self._captured()
+        rows = {option.key: option for option in captured["options"]}
+        for name in ("muxer", "cluster"):
+            with self.subTest(tag=name):
+                self.assertTrue(rows[name].checked)
+                self.assertTrue(rows[name].locked)
+        # ...while an ordinary row stays freely toggleable.
+        self.assertFalse(rows["cluster-cowork"].locked)
+
+    def test_the_preamble_states_that_every_member_is_forced(self):
+        _, captured = self._captured()
+        text = " ".join(captured["preamble"])
+        self.assertIn("EVERY member", text)
+        self.assertIn("FORCED", text)
+        self.assertIn("F2", text)          # where per-member tags still live
+
+    def test_the_result_carries_the_picked_tags_and_never_an_engine(self):
+        build, _ = self._captured(
+            result=["muxer", "cluster", "cluster-cowork", "code", "free-bash"])
+        self.assertIsNone(build.engine)
+        self.assertEqual(build.professions, ("code",))
+        self.assertIn("cluster-cowork", build.specialties)
+        self.assertEqual(build.policies, ("free-bash",))
+
+    def test_esc_returns_none(self):
+        build, _ = self._captured(result=None)
+        self.assertIsNone(build)
+
+
 if __name__ == "__main__":
     unittest.main()

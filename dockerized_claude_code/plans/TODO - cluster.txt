@@ -1,8 +1,4 @@
 
-before resuming cluster (wherever the hell it was left):
 
-add the bookmark/arrow styled chars that'd stylize the agents in picker (like Starship prompt, but grey. Like the commands at the bottom of zellij)
-
-try to replace tmux with herdr
-
+create a TDD-oriented team
 

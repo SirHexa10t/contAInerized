@@ -62,50 +62,72 @@ class TestHerdrScript(unittest.TestCase):
         self.assertLess(text.index("mkdir -p /cluster/sessions"),
                         text.index("herdr server"))
 
-    def test_the_workspace_root_pane_is_the_free_shell(self):
-        # herdr's shape for what tmux modeled as a last `shell` window: the
-        # workspace's own root pane, opened at the project.
-        self.assertIn("herdr workspace create --cwd /workspace --label team",
-                      self.script())
+    def test_the_shell_tab_is_created_LAST_so_it_sits_rightmost(self):
+        # herdr has no `tab move` (v0.8.2: list/create/get/focus/rename/
+        # close), so creation order IS tab order — the shell goes last
+        # (operator request, 2026-09-02). It used to be the workspace's root
+        # tab, where herdr's default label "1" read as "this cluster has no
+        # shell" at all.
+        text = self.script(a_pane("m1"), a_pane("m2"))
+        creates = [line for line in text.splitlines()
+                   if "tab create" in line or "workspace create" in line]
+        self.assertIn("--label shell", creates[-1])       # last => rightmost
+        self.assertIn("--no-focus", creates[-1])
+        self.assertNotIn("shell", creates[0])             # not the root tab
 
     def test_the_cluster_reports_the_key_hint_too(self):
         # Same sidebar hint as the solo shape; here the workspace id is fished
         # from the create reply (no root-pane variable exists on this path).
         text = self.script()
-        self.assertIn("WS=$(herdr workspace create", text)
+        self.assertIn("REPLY=$(herdr workspace create", text)
+        self.assertIn('WS="${PANE%%:*}"', text)
         line = next(ln for ln in text.splitlines()
                     if "report-metadata" in ln)
         self.assertIn(f"{herdr.HINT_TOKEN}=", line)
         self.assertIn("|| :", line)
 
-    def test_each_member_gets_a_labelled_tab_with_its_env(self):
-        text = self.script(a_pane("researcher__primary",
-                                  ANTHROPIC_MODEL="claude-opus-5",
-                                  CLUSTER_MEMBER="researcher__primary"))
-        self.assertIn("--label researcher__primary", text)
-        # Env key-sorted, one --env per pair — verified live to reach the
-        # tab's shell (and so the agent started in it).
-        self.assertIn("--env ANTHROPIC_MODEL=claude-opus-5 "
-                      "--env CLUSTER_MEMBER=researcher__primary", text)
+    def test_every_member_gets_its_env_whichever_pane_hosts_it(self):
+        # Env key-sorted, one --env per pair — verified live to reach the new
+        # shell (and so the agent started in it). The FIRST member's env
+        # rides `workspace create` (it owns the root pane, so the shell tab
+        # can be created last); every other member's rides `tab create`.
+        env = dict(ANTHROPIC_MODEL="claude-opus-5", CLUSTER_MEMBER="x")
+        text = self.script(a_pane("first", **env), a_pane("second", **env))
+        flags = "--env ANTHROPIC_MODEL=claude-opus-5 --env CLUSTER_MEMBER=x"
+        root = next(ln for ln in text.splitlines() if "workspace create" in ln)
+        tab = next(ln for ln in text.splitlines() if "tab create --cwd" in ln
+                   and "--label second" in ln)
+        self.assertIn(flags, root)
+        self.assertIn(flags, tab)
+        # The first member is the ROOT tab, renamed — never a `tab create`.
+        self.assertIn('herdr tab rename "$TAB" first', text)
 
-    def test_the_first_member_is_focused_the_rest_are_not(self):
-        # Attach must land on a member, not the shell — tmux-path parity.
+    def test_attach_lands_on_the_first_member_not_the_shell(self):
+        # tmux-path parity. The first member IS the root tab (focused by
+        # being the only tab at creation), so every later tab — members and
+        # the shell alike — is created --no-focus and nothing steals it.
         text = self.script(a_pane("first"), a_pane("second"))
-        first = text.index("--label first")
-        second = text.index("--label second")
-        self.assertIn("--focus", text[first:second])
-        self.assertIn("--no-focus", text[second:])
+        self.assertIn('herdr tab rename "$TAB" first', text)
+        self.assertNotIn("--focus ", text.replace("--no-focus", ""))
+        for label in ("second", "shell"):
+            line = next(ln for ln in text.splitlines()
+                        if f"--label {label}" in ln)
+            with self.subTest(tab=label):
+                self.assertIn("--no-focus", line)
 
     def test_a_claude_member_starts_through_agent_start(self):
         # THE herdr payoff: `agent start <name> --kind claude` is what makes
         # the member DETECTED — named in `agent list`, idle/working in the
         # sidebar. `pane run` would launch the same process invisibly.
-        text = self.script(a_pane("golem", command=("claude", "--effort", "max")))
+        text = self.script(a_pane("root"),
+                           a_pane("golem", command=("claude", "--effort", "max")))
         self.assertIn("herdr agent start golem --kind claude --pane \"$PANE\" "
                       "-- --effort max", text)
-        # The pane id is fished from tab create's JSON reply.
+        # The pane id is fished from tab create's JSON reply (and from
+        # workspace create's, for the member on the root pane).
         self.assertIn("pane_id", text)
         self.assertIn("PANE=$(herdr tab create", text)
+        self.assertIn("REPLY=$(herdr workspace create", text)
 
     def test_a_non_claude_command_falls_back_to_pane_run(self):
         text = self.script(a_pane("watcher", command=("htop",)))
@@ -150,12 +172,17 @@ class TestSoloShape(unittest.TestCase):
         return herdr.script("inst__proj", (pane or a_pane("agent"),),
                             shell_cwd=Path("/workspace"), solo=True)
 
-    def test_the_agent_is_the_root_pane_and_no_tab_is_created(self):
+    def test_the_agent_is_the_root_pane_not_a_tab_of_its_own(self):
+        # The agent runs in the WORKSPACE's root pane (so the shell can split
+        # beneath it in the same tab); the only tab this shape creates is the
+        # extra full-height shell.
         text = self.script()
         self.assertIn("REPLY=$(herdr workspace create", text)
         self.assertIn('herdr agent start agent --kind claude --pane "$PANE"',
                       text)
-        self.assertNotIn("tab create", text)     # one tab is the whole point
+        creates = [line for line in text.splitlines() if "tab create" in line]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("--label shell", creates[0])
 
     def test_the_one_tab_is_renamed_after_the_agent(self):
         # herdr labels a workspace's root tab "1"; with the tab row kept (it
@@ -231,6 +258,20 @@ class TestSoloShape(unittest.TestCase):
         # pane rather than an empty workspace.
         text = self.script()
         self.assertLess(text.index("pane split"), text.index("agent start"))
+
+    def test_solo_also_gets_a_full_height_shell_tab(self):
+        # The bottom split stays (the operator likes glancing at it); the tab
+        # is the full-screen one, asked for "in both" shapes.
+        text = self.script()
+        create = next(line for line in text.splitlines()
+                      if "tab create" in line)
+        self.assertIn("--label shell", create)
+        self.assertIn("--cwd /workspace", create)
+        self.assertIn("--no-focus", create)     # attach stays on the agent
+        self.assertIn("|| :", create)
+        # ...and it comes AFTER the agent is started, so a slow agent-start
+        # never delays the pane the operator watches.
+        self.assertLess(text.index("agent start"), text.index("tab create"))
 
     def test_solo_is_exactly_one_pane(self):
         with self.assertRaises(ValueError):

@@ -30,8 +30,7 @@ from pathlib import Path
 
 from ..file_access import write_text
 from ..paths import (
-    CLAUDE_CONFIG_IN_CONTAINER, HERDR_CONF_IN_CONTAINER, HERDR_SOLO_CONF,
-    RO_MOUNT_OPTION, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
+    CLAUDE_CONFIG_IN_CONTAINER, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
 )
 from ..tags.identity import Instance
 from . import backend, herdr, tmux
@@ -41,17 +40,6 @@ SCRIPT_NAME = "muxer-start.sh"      # written into the instance state dir each l
 # that file is the one the launcher reads, this constant is what writes the file
 # it names. test_cluster_solo pins them together.
 CONTAINER_SCRIPT = str(CLAUDE_CONFIG_IN_CONTAINER / SCRIPT_NAME)
-
-
-def herdr_conf_override() -> tuple[Path, str] | None:
-    """The (host source, container target[:ro]) for a SOLO herdr launch's
-    config — the collapsed-sidebar variant, settings/herdr-solo.toml — or
-    None when the backend isn't herdr. Same container target as the shared
-    config, so the caller must SWAP the staged mount rather than add one
-    (docker_config's target guard rightly refuses a second claimant)."""
-    if backend() != "herdr":
-        return None
-    return HERDR_SOLO_CONF, f"{HERDR_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}"
 
 
 def script_paths(inst: Instance) -> tuple[Path, str]:

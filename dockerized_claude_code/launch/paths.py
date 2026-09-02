@@ -34,6 +34,8 @@ BASE_SETTINGS_FILE = SETTINGS_DIR / "settings.json"                # shared Clau
 SHARED_COMMANDS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_commands"   # slash commands EVERY instance gets; assembled into state_commands_dir per launch
 COMMANDS_DIR_NAME = "_commands"                                   # dirname under agents/ holding every TAG-granted slash command — split out because the registry validates against a parameterised tree root (scan_all(agents_dir)), so it needs the name, not the composed repo path. Underscore-prefixed to read as the project's established "internal asset, not a tag" marker (_muxer, _quickie) beside the four kind subtrees — and NOT "[commands]", which would wear a profession's punctuation while being no tag, and is a shell glob-class that mangles hand-typed paths
 AGENTS_COMMANDS_DIR = AGENTS_DIR / COMMANDS_DIR_NAME              # one file per command; a tag grants one by NAME (`commands = [...]` in its tag.info), so several tags can share a file and every specialized command is findable in one place. Sits safely beside the four kind subtrees: the scanners walk only engine/profession/specialty/policy
+CLUSTER_WORK_PROTOCOL_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "cluster_work_protocol"   # the cluster work-protocol package — RO-mounted WHOLE into cluster containers; its container-side paths live in the package itself (it is what runs there)
+CLUSTER_PROTOCOL_CONF = SETTINGS_DIR / "cluster_protocol.toml"     # the protocol's tunables (gate timeouts, caps, the 0-10 stance scale) — RO-mounted beside the package; LIVE: protocol tweaks are edits here, not code
 TEMPLATE_FILES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
 OPTIONAL_CREDS_README_TEMPLATE = TEMPLATE_FILES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
 FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"      # planted as FIREWALL_WHITELIST_FILE on first launch
@@ -160,14 +162,14 @@ HERDR_HELP_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "herdr-help.txt"
 # binary just finds it. The parent dir stays writable for herdr's logs and
 # sockets; only the config file itself is pinned read-only.
 HERDR_CONF_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".config/herdr/config.toml"
-# The two host-side herdr config files. herdr reads exactly one config path
-# and has no override flag, so per-shape policy means per-launch MOUNT
-# selection: the shared file rides DOCKER_BASE_MOUNTS; docker_config swaps the
-# solo variant (collapsed sidebar) in for {muxer}+herdr solo launches — same
-# container target, which is why the variant is deliberately NOT in the base
-# set (two sources may never stage one target: add_docker_mount's guard).
+# The herdr backend's config — ONE file for every shape. A solo-only twin
+# existed briefly (2026-08-29 → 09-02) purely to collapse the sidebar for
+# single instances, with a per-launch mount swap to select it; when clusters
+# adopted the same hidden sidebar the two files became identical and both the
+# twin and the swap were deleted. If a genuine per-shape difference ever
+# returns, the swap is the pattern to restore (herdr reads exactly one config
+# path and has no override flag).
 HERDR_CONF_SOURCE = SETTINGS_DIR / "herdr.toml"
-HERDR_SOLO_CONF = SETTINGS_DIR / "herdr-solo.toml"
 # The launcher-UI form manifest (tags/ui_profile.py parses it) — beside the
 # muxer policy files above because its one entry today chooses between them.
 # Host-side data, never mounted.
@@ -224,11 +226,12 @@ DOCKER_BASE_MOUNTS = {
     SETTINGS_DIR / "statusline.sh":             f"{CLAUDE_CONFIG_IN_CONTAINER}/statusline.sh:{RO_MOUNT_OPTION}",    # shared status-line script
     SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
+    SETTINGS_DIR / "_dump_last_msg.py":         f"{CLAUDE_CONFIG_IN_CONTAINER}/_dump_last_msg.py:{RO_MOUNT_OPTION}",# backs dump_last_msg in bashrc (reads the session transcript, writes the last reply to a .md)
     SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
     SETTINGS_DIR / "tmux.conf":                 f"{TMUX_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                      # the muxer's KEY POLICY (quit/help/layout/mouse) + user overrides — sourced last by the generated startup script, so its lines win; inert without {muxer}
     SETTINGS_DIR / "muxer-help.txt":            f"{MUXER_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the `^b ?` popup body (tmux backend) — plain text, cat into the popup; inert without {muxer}
     SETTINGS_DIR / "herdr-help.txt":            f"{HERDR_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the alt+/ popup body (herdr backend) — same plain-text contract; inert without {muxer}
-    HERDR_CONF_SOURCE:                          f"{HERDR_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the herdr backend's key/theme policy at herdr's default path; solo herdr launches swap in HERDR_SOLO_CONF instead (docker_config); inert without {muxer}
+    HERDR_CONF_SOURCE:                          f"{HERDR_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the herdr backend's key/theme/shell policy at herdr's default path — ONE file for solo and cluster alike; inert without {muxer}
 }
 
 

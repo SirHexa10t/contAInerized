@@ -59,9 +59,9 @@ from .firewall import (
 from .paths import (
     BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, COWORK_IN_CONTAINER,
     DEFAULT_WORKSPACE, DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT,
-    FIREWALL_DONE_IN_CONTAINER, HERDR_CONF_SOURCE,
-    INSTALL_FAILURES_LOG_IN_CONTAINER, LOCAL_BIN_IN_CONTAINER,
-    RO_MOUNT_OPTION, cowork_dir_path, state_commands_dir, state_settings_path,
+    FIREWALL_DONE_IN_CONTAINER, INSTALL_FAILURES_LOG_IN_CONTAINER,
+    LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION, cowork_dir_path,
+    state_commands_dir, state_settings_path,
 )
 from .tags import DockerContribution, Instance
 from .template_code.docker_prompts import (
@@ -887,14 +887,6 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
         # value with spaces would come apart), so nothing follows it.
         from .cluster import solo
         solo.install_launcher(inst, tuple(agent_argv))
-        if (override := solo.herdr_conf_override()) is not None:
-            # A solo herdr launch rides its own config (collapsed sidebar) at
-            # the SAME container path as the shared one — swap the staged
-            # mount; the target guard rightly refuses shadowing, so pop the
-            # shared source first.
-            source, target = override
-            _docker_mounts.pop(str(HERDR_CONF_SOURCE), None)
-            add_docker_mount(source, target)
 
     entry_flags, inner_links = entrypoint_chain(contributions)
     # What the container is actually told to run, after the image name:

@@ -807,14 +807,24 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None) -> FormOption:
     )
 
 
-def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOption]:
+def _tag_form_options(registry: Registry, current: AgentBuild, *,
+                      engines: bool = True,
+                      locked: frozenset[str] = frozenset(),
+                      ) -> list[FormOption]:
     """The full sectioned form: one header per kind (its nutshell), engines
     as a radio group at the top (pre-dotted from `current.engine` — the
     caller passes the RESOLVED engine, so the dot shows what would actually
     run), then professions / specialties / policies as checkboxes pre-checked
     from `current`'s axis lists. Policies are ordered by shortname WITH its
     leading symbol (`!` < `+` < `-` in ASCII), so same-stance policies sit
-    together: demands, then grants, then denials."""
+    together: demands, then grants, then denials.
+
+    `engines=False` drops that whole section — the CLUSTER-level form, where
+    per-member thinking budgets have no meaning. `locked` names tags that
+    render checked-and-inert (the treatment an `always_on` policy gets):
+    the cluster form locks {mux}/{clstr}, and a MEMBER's form locks whatever
+    its cluster already imposes, so a member can see what applies to it
+    without being able to opt out."""
     checked = {*current.professions, *current.specialties, *current.policies}
 
     def header(kind_cls: type[Tag]) -> FormOption:
@@ -824,16 +834,59 @@ def _tag_form_options(registry: Registry, current: AgentBuild) -> list[FormOptio
             header=True,
         )
 
-    out: list[FormOption] = [header(Engine)]
-    out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
-            for tag in sorted_engines(registry.engines.values())]
+    out: list[FormOption] = []
+    if engines:
+        out.append(header(Engine))
+        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
+                for tag in sorted_engines(registry.engines.values())]
     for kind_cls, members in ((Profession, list(registry.professions.values())),
                               (Specialty, list(registry.specialties.values())),
                               (Policy, sorted(registry.policies.values(),
                                               key=lambda p: p.shortname))):
         out.append(header(kind_cls))
-        out += [_tag_row(tag, checked=tag.name in checked) for tag in members]
+        for tag in members:
+            row = _tag_row(tag, checked=tag.name in checked or tag.name in locked)
+            out.append(replace(row, locked=True) if tag.name in locked else row)
     return out
+
+
+def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
+                        session: str, locked: frozenset[str],
+                        ) -> "AgentBuild | None":
+    """The CLUSTER-level tag form — step one of creating or editing a cluster
+    (operator request, 2026-09-02: set `{cc}` once for the cluster instead of
+    once per member). Returns the cluster's tag set, or None on Esc.
+
+    Three differences from the instance form, all deliberate: no ENGINE
+    section (a thinking budget is per member), `locked` rows for the tags
+    that make a cluster a cluster ({mux}/{clstr} — checked and inert, the
+    `always_on` treatment), and a preamble that says plainly what the
+    selection does, because "these tags are forced on every member" is not
+    something a tag list can imply on its own."""
+    options = _tag_form_options(registry, current, engines=False, locked=locked)
+    result = checkbox_form(
+        f"Cluster tags for '{session}'  (Space to toggle):", options,
+        warnings=_combo_warnings(registry),
+        requires=_form_requires(registry),
+        wants=_form_wants(registry),
+        labels=_form_labels(registry),
+        preamble=["# EVERY member of this cluster is FORCED to carry the tags",
+                  "# selected here — and only these are set cluster-wide.",
+                  "# Per-member tags (and each member's engine) stay on the",
+                  "# member rows: pick a member in the picker and press F2.",
+                  f"# {', '.join(sorted(locked))} cannot be unticked: they are",
+                  "# what makes this a cluster."])
+    if result is None:
+        return None
+    picked = set(cast("list[str]", result))
+    # No engine axis, and always-on policies stay out of the build exactly as
+    # in prompt_tags (they apply unconditionally and are never persisted).
+    return AgentBuild(
+        engine=None,
+        professions=tuple(n for n in registry.professions if n in picked),
+        specialties=tuple(n for n in registry.specialties if n in picked),
+        policies=tuple(n for n, p in registry.policies.items()
+                       if n in picked and not p.always_on))
 
 
 def _combo_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[str]]]:
@@ -882,14 +935,17 @@ def _form_labels(registry: Registry) -> dict[str, str]:
 @overload
 def prompt_tags(registry: Registry, current: AgentBuild, *,
                 instance: str, workspace: str | None = None,
+                locked: frozenset[str] = frozenset(),
                 fields: None = None) -> "AgentBuild | None": ...
 @overload
 def prompt_tags(registry: Registry, current: AgentBuild, *,
                 instance: str, workspace: str | None = None,
+                locked: frozenset[str] = frozenset(),
                 fields: list[TextField],
                 ) -> "tuple[dict[str, str], AgentBuild] | None": ...
 def prompt_tags(registry: Registry, current: AgentBuild, *,
                 instance: str, workspace: str | None = None,
+                locked: frozenset[str] = frozenset(),
                 fields: list[TextField] | None = None,
                 ) -> "AgentBuild | tuple[dict[str, str], AgentBuild] | None":
     """Run the tag form (see the module docstring for the full behavior) and
@@ -901,7 +957,7 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
     already-answered prompts echoed as the preamble (the member-tag-edit call
     site). WITH fields, the workspace/name ARE the fields — no terminal
     prompt precedes the form — and the preamble only names the agent."""
-    options = _tag_form_options(registry, current)
+    options = _tag_form_options(registry, current, locked=locked)
     preamble = ([f"# agent:  {instance}"] if fields is not None
                 else [f"# instance:  {instance}",
                       f"# workspace: {workspace}"])

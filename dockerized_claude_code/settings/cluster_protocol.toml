@@ -1,0 +1,54 @@
+# ============================================================================
+# cluster_protocol.toml — the cluster work-protocol's tunables. LIVE: edit it.
+# ============================================================================
+#
+#   Read by launch/cluster_work_protocol/config.py — host-side for tests, and
+#   in-container from this file's read-only mount. Behavior tweaks land HERE
+#   (plus the {clstr} addendum's protocol text) first; python changes are for
+#   missing MECHANISMS, not for tuning. Trial-and-error is the expected mode
+#   (plans/cluster_plan.md, "PROPOSAL v2").
+#
+#   Every field is REQUIRED — a missing key is a loud stop, never a silent
+#   default: a protocol quietly running on built-ins would hide exactly the
+#   tweak you thought you had made.
+
+[gate]
+# Seconds before a gate's opener-side timer re-pings members yet to reply.
+# Seeded at 3 minutes: a reply is a full agent turn (wake, queue read, think,
+# append, ping) — ~15-60s for a plain nop, minutes for a considered stance.
+# (An operator seed of 7s was rejected with that arithmetic — recorded in the
+# plan; 7s lives in [queue].lock_wait_seconds instead, where it fits.)
+nudge_after_seconds = 180
+# Seconds before the gate hard-closes: stragglers are recorded as TIMEOUT
+# (distinct from nop — a nop is an assessment, a timeout is an absence) and
+# the opener gets its completion ping.
+close_after_seconds = 480
+# Replies per member per gate. One, by protocol: the mandatory round is one
+# assessment each; follow-ups happen when a body @mentions you.
+reply_cap = 1
+
+[queue]
+# Ceiling on waiting for the append lock (flock) before failing loudly.
+lock_wait_seconds = 7
+# Messages per gate thread before the queue refuses further posts on it — a
+# broken protocol must degrade to silence, not an infinite spend loop.
+loop_cap = 200
+
+[scale]
+# The stance scale: LINEAR from hard-no (0) to resounding-yes (10). A stance
+# is one of the three gate replies (nop / stance / hold); `5` is the INFORMED
+# midpoint — equally pro and against because of conflicting points — never
+# "I don't know, so neutral" (ignorance is a nop, which carries nothing: the
+# fold). Wording is protocol policy: agents quote these meanings, so tweak
+# them here, not in personas.
+0 = "hard no — blocking; proceeding is a mistake I can name right now"
+1 = "no — a concrete objection stands; strong new evidence could move me"
+2 = "strong lean no — serious doubts, though none yet a named blocker"
+3 = "probably not — leaning no; verification required before proceeding"
+4 = "mild lean no — the reservations outweigh the upside, narrowly"
+5 = "torn — strong points BOTH ways; informed conflict, never ignorance"
+6 = "mild lean yes — the upside outweighs my named reservations, narrowly"
+7 = "probably yes — leaning yes; would welcome a check, wouldn't block"
+8 = "strong lean yes — minor quibbles only"
+9 = "yes — comfortable; cheaply reversible if wrong"
+10 = "resounding yes — trivial or very safe to assume; easy to fix or change if proven wrong"

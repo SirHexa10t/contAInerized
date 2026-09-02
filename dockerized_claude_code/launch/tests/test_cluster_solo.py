@@ -189,7 +189,11 @@ class TestHerdrSolo(unittest.TestCase):
                       "--label refactorer__proj", text)
         self.assertIn("herdr agent start agent --kind claude", text)
         self.assertIn("pane split", text)
-        self.assertNotIn("tab create", text)
+        # ...plus the extra full-height shell TAB (operator request
+        # 2026-09-02, "in both" shapes) — the only tab this shape creates.
+        creates = [line for line in text.splitlines() if "tab create" in line]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("--label shell", creates[0])
 
     def test_the_argv_is_baked_in_quoted_here_too(self):
         text = self.script_with(
@@ -204,22 +208,6 @@ class TestHerdrSolo(unittest.TestCase):
 
     def test_tmux_stays_one_profile_edit_away(self):
         self.assertIn("tmux -u -L muxer new-session", self.script_with(False))
-
-    def test_herdr_solo_rides_its_own_config(self):
-        # The collapsed-sidebar variant mounts at the SAME container path as
-        # the shared config, so the override is a swap docker_config performs
-        # — this pins the (source, target) the swap uses, per backend.
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(paths, "AGENTS_STATE", Path(tmp)):
-            paths.ui_profile_path().write_text("herdr_instead_of_tmux = true\n")
-            override = solo.herdr_conf_override()
-            self.assertIsNotNone(override)
-            source, target = override
-            self.assertEqual(source, paths.HERDR_SOLO_CONF)
-            self.assertEqual(
-                target, f"{paths.HERDR_CONF_IN_CONTAINER}:{paths.RO_MOUNT_OPTION}")
-            paths.ui_profile_path().write_text("herdr_instead_of_tmux = false\n")
-            self.assertIsNone(solo.herdr_conf_override())
 
 
 if __name__ == "__main__":

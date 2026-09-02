@@ -336,6 +336,122 @@ registration is `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` (+ peer-token
 early-check recipe above are hereby done. Full results:
 plans/cluster_plan.md, "Research spike — CLOSED".
 
+## Known issues — cluster work protocol, first live {cc} run
+
+**Audited 2026-09-02** on a real 4-member `{cc}` cluster (ConcorDance PoC),
+by reading `/cluster/protocol/chat.jsonl` and the container's work state.
+Verdict: the GATE mechanism worked exactly as designed; what is missing is
+everything it does not cover.
+
+- **The one gate ran correctly, and reply counts were EVEN.** `project-starter`
+  opened `poc-arch`; all three required members replied exactly once — stance
+  8, 8, 8, each with riders and evidence — and the opener closed with
+  "APPROVED 8/8/8" plus the adopted riders. 3-of-3 accounted for. The
+  operator's impression of unevenness came from TOTAL message counts
+  (project-starter 5, researcher 2, others 1), which is by design: the opener
+  also posts the `open`, the `close` and progress `free` lines, and free
+  chatter is unrationed. Worth surfacing per gate ("gate X: 3/3 replied")
+  rather than leaving the raw journal to imply it.
+- **ONE gate for an entire application.** Everything after the plan ran on
+  `free` announcements — including a font/asset swap explicitly framed as
+  "minor refinement inside the approved plan". That followed the addendum's
+  own letter ("routine progress inside an agreed plan needs no gate"), which
+  is exactly why the addendum was the thing at fault.
+- **Nothing ever priced the dependency footprint** — the operator's
+  "way-too-large application" complaint, quantified: **393 transitive crates,
+  3.4 GB target dir**, from an `iced` (wgpu/GPU) GUI stack. Per-crate
+  discipline was actually good (pinned `=` versions, `default-features =
+  false`, feature-trimmed, each with a comment). The plan gate named the
+  library and everyone stanced 8 on it before any footprint existed to
+  judge. FIXED in the `{cc}` addendum: dependencies are their own gate even
+  inside an approved plan, and the gate body must carry a measured footprint;
+  a footprint bigger than the gate's claim is a NEW gate.
+- **Duplicated verification, with no durable home for findings.** Three
+  members each opened the same corpus archive and separately confirmed the
+  same facts (charset, anchor format, file counts), after which one had to
+  correct another's reading in prose. The queue is an append-only
+  CONVERSATION, not a knowledge base. Addendum now tells members to read
+  before re-verifying and to post what they establish; a shared findings
+  file under `/cluster/` is the obvious next step and is NOT built.
+- **No per-member git isolation, by construction.** All four members ran with
+  cwd `/workspace` on ONE checkout, single `main` branch, nothing committed
+  (everything untracked at audit time). `launch_plan.build(...,
+  personal_workspaces=False)` is the switch; `cluster/worktree.py` already
+  implements the per-member alternative and is simply unused. Coordination is
+  by file-claiming over the queue (the opener did claim `Cargo.toml`, `src/`,
+  `tests/`, `assets/`). Whether to flip that to worktrees-plus-branches is an
+  open operator decision, not a defect.
+
+## Known issues — Claude Code surface
+
+- **`app:exit` CANNOT be rebound — so there is no uniform exit key for
+  non-`{muxer}` instances.** The operator wanted one chord (`alt+q`) that
+  ends any session. On a `{muxer}` instance the multiplexer already provides
+  it (root-table binding / direct chord, confirmed working). For a bare
+  instance the key would have to reach Claude Code, and `keybindings.json`
+  looks like it should deliver: the docs list `app:exit` (default Ctrl+D) in
+  the rebindable "App actions" table. It does not work. Measured
+  first-person on **2.1.251**, with both controls, inside a scratch tmux
+  session driven by `send-keys`:
+  - `alt+q` → `app:exit`, bound in **Global AND Chat**, pressed twice: the
+    session was completely unaffected;
+  - control 1 — `ctrl+d` twice in the same pane: exited (so the pane could
+    exit);
+  - control 2 — the SAME `alt+q` bound to `chat:modelPicker`: the picker
+    opened. So the file IS read and `alt+q` IS decoded and dispatched; the
+    ACTION is what refuses to move, matching the docs' separate "Reserved
+    shortcuts: Ctrl+D — Hardcoded exit" line (the "rebindable" reading of
+    the actions table is what proved wrong).
+  The binding was therefore REMOVED rather than shipped inert — a
+  `test_no_binding_claims_the_unbindable_exit_action` guard keeps it out,
+  carrying this evidence. What would close it: an upstream release that
+  makes exit rebindable (re-probe with the two controls above). Workarounds
+  meanwhile, both real: run instances WITH `{muxer}` (its quit key is the
+  uniform chord, and it confirms before killing), or map `alt+q` in the
+  TERMINAL emulator to send `\x04\x04` (kitty: `map alt+q send_text all
+  \x04\x04`) — host-side config, outside this repo. Not worth building: a
+  pty wrapper that watches for the chord would be re-implementing a
+  multiplexer we already ship.
+
+## Known issues — cluster work protocol
+
+- **Capability text is not a protocol — the first live gate never happened,
+  and every MECHANISM was fine.** 2026-09-02: a member of a real
+  `{clstr}` cluster was given a task, planned it solo, and never opened a
+  gate. Verified by inspecting the running container (operator granted
+  `{dood}`): the `_cluster` layer, `python3`, the `cluster-chat` shim, both
+  `/opt` mounts, `/cluster/protocol/cursors` (member-owned), all four
+  members' `$CLUSTER_MEMBER/ROLE/SESSION`, herdr's roster mapping every
+  member id to a pane, and `cluster-chat` itself in situ — all correct;
+  `chat.jsonl` simply never existed, because nothing was ever posted.
+  Cause: the `{clstr}` addendum described the queue's VERBS ("here is how to
+  post, here is how to open a gate") in one ~300-word bullet and never named
+  the MOMENT a gate is obliged. An agent handed a task therefore did the
+  task — correctly, by its instructions.
+  Fixed by rewriting the addendum trigger-first: the gate rule leads, states
+  what makes a decision consequential (the plan about to be executed,
+  architecture, dependencies, schema/API, substantial rewrites, roadmap
+  changes), and carries a tie-breaker ("when in doubt, gate: a nop costs a
+  sibling one line, a bad unilateral commitment costs everyone a rewrite").
+  A test pins the trigger words, so the rule cannot decay back into a manual.
+  **The general lesson, worth remembering as a class:** prompt-level protocol
+  needs CONDITIONALS ("before X, do Y"), not capability descriptions — and
+  the trigger belongs at the top of its bullet, not buried mid-paragraph.
+  **Escalated the same day to a harness lever, since prose had already failed
+  once:** the new `{cc}` tag (`specialty/muxer/cluster/cluster-cowork`)
+  claims `policy/_cluster-cowork`, whose `UserPromptSubmit` hook runs
+  `cluster-chat brief` — so at the moment a task arrives the member is told
+  what it has not read, which gates it OWES a reply to (repeated every prompt
+  until answered: the nag is the enforcement), and the standing gate rule.
+  The brief always exits 0 (a non-zero UserPromptSubmit hook blocks the
+  prompt, which no briefing is worth) and prints nothing outside a cluster.
+  Bonus property worth keeping in mind: it is a SECOND delivery path for the
+  queue, so gate traffic reaches a member even when a pane wake is lost —
+  which de-risks the one mechanism the trial still has to prove.
+  Still unverified (only a live trial can): whether an injected
+  `[cluster-chat]` line reliably starts a turn in a member's Claude pane.
+  Everything up to that point is proven.
+
 ## Known issues — launcher
 
 - **`--continue` silently started a FRESH conversation over a ~92 MB transcript

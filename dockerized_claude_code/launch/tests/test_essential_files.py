@@ -241,8 +241,14 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertIsNotNone(muxer.layer)
         self.assertEqual(muxer.layer.path.name, "_muxer")
         self.assertEqual(muxer.layer.requires, frozenset())
-        # {cluster} has no layer YET — the message-queue will bring `_cluster`.
-        self.assertIsNone(cluster.layer)
+        # The message-queue brought {cluster} its own layer (`_cluster`:
+        # python3 + the cluster-chat shim) — at the profession ROOT like
+        # _muxer, so it too carries no [code] requirement; the two claims
+        # coexisting on nested specialties is the verified both-work-at-once
+        # property the tag comment records.
+        self.assertIsNotNone(cluster.layer)
+        self.assertEqual(cluster.layer.path.name, "_cluster")
+        self.assertEqual(cluster.layer.requires, frozenset())
 
     def test_neither_muxer_nor_cluster_warns(self):
         # `warn` marks AUTHORITY an instance would not otherwise have ({dood}'s
@@ -361,19 +367,27 @@ class TestTagTreeDiscovery(unittest.TestCase):
         for chord in ("alt+/", "alt+q"):
             self.assertIn(chord, herdr.HINT_TEXT)
 
-    def test_the_solo_herdr_config_tracks_the_shared_one(self):
-        # herdr reads exactly one config path and has no override flag, so the
-        # solo variant (collapsed sidebar) is a second FULL file that
-        # docker_config mounts instead — a drift risk this pins at PARSE level:
-        # the pair must be equal except the one known delta, so editing a
-        # shared line in either file fails until the twin follows.
-        import tomllib
-        shared = tomllib.loads(paths.HERDR_CONF_SOURCE.read_text())
-        solo_conf = tomllib.loads(paths.HERDR_SOLO_CONF.read_text())
-        self.assertIs(solo_conf["ui"].pop("sidebar_start_collapsed"), True)
-        self.assertEqual(solo_conf["ui"].pop("sidebar_collapsed_mode"),
-                         "hidden")
-        self.assertEqual(solo_conf, shared)
+    def test_the_active_tabs_label_is_readable_on_its_blue(self):
+        # 0.8.2 has NO active-tab-foreground key (`active_row_bg` is the
+        # sidebar's). Measured with escape-sequence captures: the active tab
+        # draws bg = `accent` (ANSI blue here) and takes its FG from
+        # `surface_dim` — so that token, set black, is the whole fix for the
+        # unreadable grey-on-blue. Pinned because the connection is
+        # non-obvious enough that someone would "clean up" a stray
+        # surface_dim override.
+        text = paths.HERDR_CONF_SOURCE.read_text()
+        self.assertIn('surface_dim = "#000000"', text)
+
+    def test_herdr_panes_run_bash_not_dash(self):
+        # herdr's own default is "$SHELL, then /bin/sh", and $SHELL is UNSET
+        # in these containers — so the operator's shell pane ran DASH and had
+        # none of the launcher's helpers (`man`, `dump_last_msg`, `ll`), while
+        # the tmux backend always had them (tmux.py spells out `bash -l`).
+        # Diagnosed live 2026-09-02 (`ps` showed /bin/sh panes); both configs
+        # must name the shell explicitly.
+        text = paths.HERDR_CONF_SOURCE.read_text()
+        self.assertIn('default_shell = "/bin/bash"', text)
+        self.assertIn('shell_mode = "login"', text)
 
     def test_panes_spawn_at_attach_width_not_the_120_col_default(self):
         # `claude --continue` replays history at the HEADLESS pane size,
@@ -381,10 +395,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # 238-col operator got the whole conversation wrapped at half width
         # (server log: spawn cols=120, attach cols=238). Both configs carry
         # the widened virtual terminal.
-        for name in ("herdr.toml", "herdr-solo.toml"):
-            text = (paths.SETTINGS_DIR / name).read_text()
-            with self.subTest(config=name):
-                self.assertIn("headless_cols = 240", text)
+        self.assertIn("headless_cols = 240", paths.HERDR_CONF_SOURCE.read_text())
 
     def test_the_tab_row_stays_because_it_carries_the_hint(self):
         # Hiding the row for solo's single tab was SHIPPED and then REVERSED
@@ -393,10 +404,8 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # tabs" — and every relocation attempt either didn't render on 0.8.2
         # or didn't belong (a greeting in the shell). Re-hiding the row would
         # silently orphan tab_bar_right again, in BOTH configs.
-        for name in ("herdr.toml", "herdr-solo.toml"):
-            text = (paths.SETTINGS_DIR / name).read_text()
-            with self.subTest(config=name):
-                self.assertNotIn("hide_tab_bar_when_single_tab = true", text)
+        text = paths.HERDR_CONF_SOURCE.read_text()
+        self.assertNotIn("hide_tab_bar_when_single_tab = true", text)
 
     def test_the_herdr_help_matches_the_keys(self):
         # The popup body must track the conf's chords and teach the mouse-copy
@@ -412,6 +421,120 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # herdr's OWN notation (prefix+n), never tmux's ^b — the operator
         # read ^b as a simultaneous chord, and herdr marks keys prefix-style.
         self.assertNotIn("^b", help_text)
+
+    def test_a_bash_mode_command_does_not_provoke_an_answer(self):
+        # `!cmd` in the TUI adds the command AND its output to context, and
+        # since 2.1.186 Claude AUTO-RESPONDS to it — a full paid turn for
+        # what the operator ran for their own eyes (`!man`,
+        # `!dump_last_msg`). This setting restores the older
+        # buffer-without-response behaviour, which is the closest thing
+        # Claude Code offers to "don't run the AI on this"; the output still
+        # rides along on the NEXT prompt (no documented way to drop it), so
+        # the genuinely free path stays the {mux} shell pane.
+        import json
+        settings = json.loads(paths.BASE_SETTINGS_FILE.read_text())
+        self.assertIs(settings["respondToBashCommands"], False)
+
+    def test_no_binding_claims_the_unbindable_exit_action(self):
+        # `app:exit` CANNOT be rebound — measured first-person on Claude Code
+        # 2.1.251, with controls (plans/ISSUES.md): alt+q bound to app:exit in
+        # Global AND Chat did nothing twice over, while the SAME key bound to
+        # chat:modelPicker opened the picker — so the file is read and alt+q
+        # is dispatched; the action itself is reserved (the docs' "Ctrl+D —
+        # Hardcoded exit"). Shipping the binding anyway would be inert config
+        # that reads as load-bearing, which this repo refuses on principle;
+        # re-add it only when a release makes exit rebindable.
+        import json
+        text = (paths.SETTINGS_DIR / "keybindings.json").read_text()
+        self.assertNotIn("app:exit", text)
+        json.loads(text)      # and it stays valid JSON
+
+    def test_the_cluster_layer_ships_python_and_the_chat_shim(self):
+        # {clstr}'s reserved layer, now real. The work-protocol package is
+        # python RO-mounted at /opt (drift-pinned to the package's own
+        # constant), the BASE image has no python, and the shim is the one
+        # executable entry — module-running the package exactly the way its
+        # standalone-import test does. Full python3, not -minimal: the pared
+        # stdlib lacks pieces the protocol needs (tomllib among them).
+        from launch.cluster_work_protocol import PACKAGE_IN_CONTAINER
+        text = (paths.AGENTS_DIR / "profession" / "_cluster"
+                / "Dockerfile").read_text()
+        self.assertIn("--no-install-recommends python3", text)
+        self.assertIn("/usr/local/bin/cluster-chat", text)
+        self.assertIn("python3 -m cluster_work_protocol.cli", text)
+        self.assertIn(str(PACKAGE_IN_CONTAINER), text)
+
+    def test_the_cluster_addendum_teaches_the_queue(self):
+        # The protocol is prompt-level (the cowork lesson: agents follow
+        # addenda to the letter), so the addendum must carry the liturgy:
+        # the verbs, the fold's meaning, the scale pointer, the gate flag.
+        _, body = self.reg.specialties["cluster"].addendum
+        for phrase in ("cluster-chat", "post nop", "post stance",
+                       "cluster-chat scale", "--gate", "fold"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, body)
+
+    def test_cluster_cowork_nests_in_cluster_and_claims_its_hook_fragment(self):
+        # {cc} is the tag that turns cohabitation into obliged consultation.
+        # It needs the cluster's machinery (queue, cluster-chat, roster), so
+        # it nests — and its TEETH are the claimed policy fragment's
+        # UserPromptSubmit hook, not more addendum prose: the live trial
+        # proved prose alone doesn't reach the moment of commitment.
+        import json
+        cc = self.reg.specialties["cluster-cowork"]
+        self.assertEqual(cc.shortname, "cc")
+        self.assertEqual(cc.requires, frozenset({"cluster", "muxer"}))
+        self.assertIsNotNone(cc.policy_dir)
+        fragment = json.loads((cc.policy_dir / "policy.json").read_text())
+        hook = fragment["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(hook["command"], "cluster-chat brief")
+        # No image layer of its own: cluster-chat rides {clstr}'s _cluster.
+        self.assertIsNone(cc.layer)
+
+    def test_cluster_cowork_is_not_locked_onto_every_cluster(self):
+        # {clstr}/{mux} are LOCKED cluster-level (a member must know it is
+        # one); obliged consultation is a CHOICE about how a given cluster
+        # works, so it must stay an untickable-off row nobody forces — a
+        # tick in the cluster tag form, cluster-wide but optional.
+        from launch.cluster.state import LOCKED_SPECIALTIES
+        self.assertNotIn("cluster-cowork", LOCKED_SPECIALTIES)
+
+    def test_cowork_and_cluster_cowork_describe_their_difference(self):
+        # Two collaboration tags with near-identical names: each description
+        # must say which side of the container boundary it lives on, or the
+        # picker offers a coin flip.
+        across = self.reg.specialties["cowork"].full_description
+        within = self.reg.specialties["cluster-cowork"].full_description
+        self.assertIn("{cc}", across)               # names its counterpart
+        self.assertIn("ACROSS containers", across)
+        self.assertIn("hub", across)
+        self.assertIn("queue", within)
+
+    def test_cluster_cowork_gates_dependencies_and_their_footprint(self):
+        # The first live {cc} run stanced 8/8/8 on a plan that named a GUI
+        # framework, then discovered it meant 393 transitive crates and a
+        # 3.4 GB build tree (plans/ISSUES.md, 2026-09-02). Approving a plan
+        # that names a library is not approval of its cost, so the addendum
+        # must gate dependencies separately AND demand a measured footprint.
+        _, body = self.reg.specialties["cluster-cowork"].addendum
+        self.assertIn("DEPENDENCIES ARE GATED SEPARATELY", body)
+        self.assertIn("FOOTPRINT", body)
+        self.assertIn("transitive", body)
+
+    def test_the_cluster_addendum_states_WHEN_a_gate_is_required(self):
+        # THE live-trial failure (2026-09-02): every mechanism worked — shim,
+        # mounts, roster, $CLUSTER_MEMBER — and a member still planned a task
+        # solo, because the addendum described the queue's VERBS without ever
+        # naming the moment a gate is obliged. Capability text is not a
+        # protocol; the trigger must be stated as a rule, with the kinds of
+        # decision that fire it.
+        _, body = self.reg.specialties["cluster"].addendum
+        self.assertIn("OPEN A GATE BEFORE", body)
+        for trigger in ("PLAN", "architecture", "schema", "rewrite"):
+            with self.subTest(trigger=trigger):
+                self.assertIn(trigger, body)
+        # ...and the tie-breaker, so an unsure member errs toward consulting.
+        self.assertIn("When in doubt, gate", body)
 
     def test_cluster_addendum_teaches_the_member_its_own_identity(self):
         # A member shares its persona with any sibling built from the same agent,

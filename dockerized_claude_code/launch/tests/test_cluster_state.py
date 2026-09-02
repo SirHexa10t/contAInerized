@@ -91,27 +91,41 @@ class TestClusterModel(ClusterTmp):
                          paths.cluster_worktree_path("poc", "refactorer"))
 
 
-class TestForcedTags(ClusterTmp):
-    """Every member carries {muxer} and {cluster}, whatever its agent's .lego
-    says — a member unaware it is one would introduce itself wrongly and address
-    nobody, and a cluster created programmatically must not depend on the form's
-    interactive auto-tick to be launchable."""
+class TestClusterTags(ClusterTmp):
+    """Cluster-level tags (2026-09-02): the set every member inherits, stored
+    ONCE on the cluster instead of copied into every member table — which is
+    what lets the picker show a member's own tags without duplicating the
+    cluster's, and lets `{cc}` be set once for the whole team."""
 
-    def test_both_tags_are_applied_at_creation(self):
+    def test_the_locked_pair_is_always_there(self):
         cluster = state.from_template("poc", Path("/tmp/p"), (Member.of("golem"),))
-        self.assertEqual(cluster.members[0].build.specialties, ("muxer", "cluster"))
+        self.assertEqual(cluster.tags.specialties, ("muxer", "cluster"))
 
-    def test_existing_specialties_are_preserved(self):
+    def test_a_cluster_engine_is_refused_silently(self):
+        # A thinking budget is per member — the cluster form has no engine
+        # section, and a hand-edited file must not smuggle one in either.
+        cluster = state.Cluster(
+            session="poc", project=Path("/tmp/p"), members=(Member.of("golem"),),
+            tags=AgentBuild(engine="thinker", specialties=("muxer", "cluster")))
+        self.assertIsNone(cluster.tags.engine)
+
+    def test_members_store_only_their_OWN_tags(self):
         member = Member.of("feature-identifier", build=AgentBuild(
-            specialties=("auto", "firewall")))
+            specialties=("auto", "muxer")))       # muxer is the cluster's
         cluster = state.from_template("poc", Path("/tmp/p"), (member,))
-        self.assertEqual(cluster.members[0].build.specialties,
-                         ("auto", "firewall", "muxer", "cluster"))
+        self.assertEqual(cluster.members[0].build.specialties, ("auto",))
 
-    def test_no_duplicate_when_an_agent_already_carries_one(self):
-        member = Member.of("golem", build=AgentBuild(specialties=("muxer",)))
-        cluster = state.from_template("poc", Path("/tmp/p"), (member,))
-        self.assertEqual(cluster.members[0].build.specialties, ("muxer", "cluster"))
+    def test_member_build_unions_cluster_and_own(self):
+        member = Member.of("researcher", build=AgentBuild(
+            engine="researcher", specialties=("auto",), professions=("code",)))
+        cluster = state.from_template(
+            "poc", Path("/tmp/p"), (member,),
+            tags=AgentBuild(specialties=("muxer", "cluster", "cluster-cowork")))
+        build = cluster.member_build(cluster.members[0])
+        self.assertEqual(build.specialties,
+                         ("muxer", "cluster", "cluster-cowork", "auto"))
+        self.assertEqual(build.professions, ("code",))
+        self.assertEqual(build.engine, "researcher")   # the member's own
 
     def test_other_axes_are_untouched(self):
         member = Member.of("researcher", build=AgentBuild(
@@ -121,17 +135,39 @@ class TestForcedTags(ClusterTmp):
         self.assertEqual(built.build.professions, ("code",))
         self.assertEqual(built.build.policies, ("all-actions",))
 
-    def test_forced_tags_survive_a_round_trip(self):
-        state.save(state.from_template("poc", Path("/tmp/p"), (Member.of("golem"),)))
-        self.assertEqual(state.load("poc").members[0].build.specialties,
-                         ("muxer", "cluster"))
+    def test_cluster_tags_survive_a_round_trip(self):
+        state.save(state.from_template(
+            "poc", Path("/tmp/p"), (Member.of("golem"),),
+            tags=AgentBuild(specialties=("muxer", "cluster", "cluster-cowork"),
+                            policies=("free-bash",))))
+        loaded = state.load("poc")
+        self.assertEqual(loaded.tags.specialties,
+                         ("muxer", "cluster", "cluster-cowork"))
+        self.assertEqual(loaded.tags.policies, ("free-bash",))
+        self.assertEqual(loaded.members[0].build.specialties, ())
 
-    def test_the_forced_names_are_real_tags(self):
+    def test_a_legacy_file_without_cluster_tags_still_loads(self):
+        # Pre-2026-09-02 files repeat the forced pair in every member table
+        # and carry no cluster-level keys. They must load into the new shape
+        # (locked pair at cluster level, members stripped) — no migration.
+        legacy = ('project = "/tmp/p"\n'
+                  '[golem]\nengine = "golem"\n'
+                  'professions = []\nspecialties = ["muxer", "cluster"]\n'
+                  'policies = []\n')
+        cluster = state.loads("poc", legacy)
+        self.assertEqual(cluster.tags.specialties, ("muxer", "cluster"))
+        self.assertEqual(cluster.members[0].build.specialties, ())
+        # ...and the member still LAUNCHES with them.
+        self.assertEqual(
+            cluster.member_build(cluster.members[0]).specialties,
+            ("muxer", "cluster"))
+
+    def test_the_locked_names_are_real_tags(self):
         # A typo here would produce clusters that fail tag validation at launch.
         from launch import paths as real_paths
         from launch.tags import scan_all
         registry = scan_all(real_paths.AGENTS_DIR)
-        for name in state.FORCED_SPECIALTIES:
+        for name in state.LOCKED_SPECIALTIES:
             with self.subTest(tag=name):
                 self.assertIn(name, registry.specialties)
 
@@ -155,15 +191,18 @@ class TestWithBuild(ClusterTmp):
         self.assertEqual(cluster.with_build("refactorer", AgentBuild()).ids,
                          cluster.ids)
 
-    def test_the_forced_specialties_survive_an_edit_that_unticked_them(self):
-        # The tag form lets a user untick anything; an edit is the SECOND place
-        # a member's build enters the file, so it gets the same guarantee
-        # from_template gives the first — no path produces a member unaware it
-        # is one.
+    def test_an_edit_cannot_shed_the_clusters_tags_nor_duplicate_them(self):
+        # The member form shows the cluster's tags locked-and-CHECKED, so they
+        # come back in the result. with_build subtracts them — they live on the
+        # cluster, once — while member_build proves the member still launches
+        # with them. Unticking is impossible in the form and moot here.
         cluster = self.a_cluster()
-        edited = cluster.with_build("refactorer", AgentBuild(professions=("code",)))
-        self.assertEqual(edited.member("refactorer").build.specialties,
-                         ("muxer", "cluster"))
+        edited = cluster.with_build("refactorer", AgentBuild(
+            professions=("code",), specialties=("muxer", "cluster", "auto")))
+        member = edited.member("refactorer")
+        self.assertEqual(member.build.specialties, ("auto",))       # own only
+        self.assertEqual(edited.member_build(member).specialties,
+                         ("muxer", "cluster", "auto"))              # real build
 
     def test_an_unknown_member_is_a_loud_stop(self):
         # The edit came from a row naming a member; missing means the file

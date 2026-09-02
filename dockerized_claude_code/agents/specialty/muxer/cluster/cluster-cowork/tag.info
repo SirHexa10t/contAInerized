@@ -1,0 +1,40 @@
+shortname         = "cc"
+short_description = "cluster members must consult, not just cohabit"
+full_description  = "Turns a cluster from neighbours into a team: members are OBLIGED to run consequential decisions past each other through the work protocol's queue, instead of each planning and building alone in its own window. Before committing to anything costly to undo — the plan it is about to execute, an architecture or dependency choice, a schema change, a substantial rewrite, a roadmap shift — a member opens a GATE on the shared queue; every sibling then owes exactly one reply: a fold (`nop` — the honest 'outside my reach without deep work', and the commonest answer), a 0-10 stance with reasons and riders, or a hold when the thing diverges from the goals. The opener reads what came back and closes the gate with a resolution, and that whole exchange is the team's ordered, readable record. Its teeth are not prose: this tag installs a prompt-time briefing hook, so at the exact moment a task arrives a member is told what it has not read, which gates it owes a reply to, and that commitments need a gate first. Without this tag, cluster members share a container and a project but nothing obliges them to ask each other anything — which is what a live trial found them doing."
+
+# Nested inside {cluster} because the protocol has nothing to run on without
+# it: the queue, `cluster-chat`, and the member roster are all cluster
+# machinery, so ticking {cc} cascades {clstr} and {mux} from the tree.
+#
+# NOT in state.FORCED_SPECIALTIES, deliberately: {clstr} is forced onto every
+# member (a member that didn't know it was one would introduce itself wrongly),
+# but OBLIGED CONSULTATION is a choice about how a given cluster works — some
+# clusters legitimately want parallel workers who never confer. The tag is how
+# the operator says which kind this is; tick it in the cluster form.
+#
+# NO image layer of its own: `cluster-chat` and python3 arrive with {clstr}'s
+# `_cluster` layer, and the work-protocol package rides its mounts. What this
+# tag adds is exactly one thing the tree can express — the claimed policy
+# fragment `policy/_cluster-cowork/` (matched by name, the mechanism {ro} and
+# {cowork} use), whose `UserPromptSubmit` hook runs `cluster-chat brief`
+# before every prompt the member receives.
+#
+# WHY A HOOK AND NOT MORE ADDENDUM TEXT: a live trial (2026-09-02, recorded in
+# plans/ISSUES.md) found every mechanism working and the protocol still unused
+# — a member handed a task planned it alone, because CLAUDE.md text describing
+# the queue never reached the moment of commitment. The hook reaches exactly
+# that moment. It also gives the queue a SECOND delivery path: a member sees
+# gate traffic in its brief even when a pane wake was lost.
+#
+# NO `warn`: obliging consultation grants an instance no authority it lacked.
+
+[addendum]
+title = "Consulting your siblings is mandatory here"
+body  = """This cluster runs on obliged consultation: you may not commit to a consequential decision alone. The rule and the verbs are in the "Cohabiting" section above — what THIS tag changes is that it is not optional, and that you will be reminded at every turn.
+
+- **Before you commit, gate it.** The plan you are about to execute, an architecture or dependency choice, a schema / API change, a substantial rewrite or deletion, a change of priorities: `cluster-chat open <short-id> "<the decision, judgeable in one read>"`, then wait for your siblings' replies, then `cluster-chat close <id> "<resolution>"`. Building first and telling the room afterwards is the one failure this cluster is shaped to prevent.
+- **A gate you owe is a debt, not a suggestion.** Each turn you will be shown any gate awaiting your reply. Answer it before you continue your own work — one reply, and a `nop` (the fold) is a perfectly good one whenever judging it properly would need work you were not asked for.
+- **Read before you write.** Your briefing lists what arrived on the queue since you last looked. Siblings may already have decided the thing you are about to decide.
+- **Cost is the reason this is bounded.** Every gate spends each sibling a turn. Gate the consequential, not the routine: inside an already-agreed plan, just work.
+- **DEPENDENCIES ARE GATED SEPARATELY, even inside an approved plan.** Adding or swapping a library, framework, crate, or package is its own gate — and the gate body must carry the FOOTPRINT, measured: how many transitive dependencies it pulls, how much it adds to a build. Approving a plan that names a library is not approval of its cost; a real cluster once stanced 8/8/8 on a plan and only afterwards discovered the choice meant 393 transitive crates and a 3.4 GB build tree (2026-09-02). If the footprint turns out larger than what the gate said, that is a NEW gate, not a footnote.
+- **Say what you verified, once, where others can find it.** Before re-checking a fact about the project, read the queue: a sibling may already have established it. When you verify something non-obvious (a file format, a corpus count, an API's actual behaviour), post it — three members independently opening the same archive to confirm the same facts, then reconciling a contradiction in prose, is the waste this protocol exists to prevent."""

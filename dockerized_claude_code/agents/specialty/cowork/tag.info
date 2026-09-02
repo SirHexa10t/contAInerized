@@ -1,6 +1,6 @@
 shortname         = "cowrk"
 short_description = "able to prompt other agents"
-full_description  = "Marks this instance as eligible to be recruited by an agent tagged with {manager}, into a multi-agent group, where agents may prompt each-other. Useful for sharing solutions, helping with specialized tasks, and in theory: conversing with AI agents of different kinds"
+full_description  = "Marks this instance as eligible to be recruited by an agent tagged with {manager}, into a multi-agent group, where agents may prompt each-other. Useful for sharing solutions, helping with specialized tasks, and in theory: conversing with AI agents of different kinds. This is collaboration ACROSS containers: each participant keeps its own container, workspace and state, and a host-side hub relays messages and reviewed file copies between them — so peers can be recruited and released one at a time, and nothing they do touches another's filesystem. The in-container counterpart is {cc}: cluster members share one container and confer directly on an ordered queue, with no hub in between. Pick this one for occasional consultation between otherwise independent instances; pick {cc} for a standing team on one project."
 warn              = true
 
 # {cowork}'s settings fragment (policy/_cowork/policy.json — JSON, so its

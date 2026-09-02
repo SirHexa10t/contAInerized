@@ -5,10 +5,10 @@
 #   The tmux sibling of this file is settings/tmux.conf; which one a launch
 #   reads depends on the backend (herdr is the DEFAULT; the ui_profile.toml
 #   preference switches away). Mounted read-only at herdr's own default path,
-#   ~/.config/herdr/config.toml, so no env plumbing is needed. SOLO launches
-#   mount settings/herdr-solo.toml there instead — this file's twin, equal
-#   except the sidebar starting collapsed (a test pins the pair; edit shared
-#   lines in BOTH).
+#   ~/.config/herdr/config.toml, so no env plumbing is needed. ONE file for
+#   every shape: a solo-only twin existed briefly (2026-08-29 → 09-02), for
+#   the collapsed sidebar alone, and was deleted with its per-launch mount
+#   swap once clusters adopted the same hidden sidebar.
 #
 #   Same prefix as tmux — ctrl+b — so muscle memory carries over. The keys
 #   that differ, learned the probed way (herdr v0.8.2 defaults):
@@ -33,6 +33,28 @@ onboarding = false
 # tmux had. Swap for catppuccin / nord / gruvbox / … if you want herdr loud.
 name = "terminal"
 
+[theme.custom]
+# The ACTIVE TAB's label, black (operator request, 2026-09-02: the theme's
+# dim grey was unreadable on the tab's blue).
+#
+# There is no "active tab foreground" key — checked against 0.8.2's full
+# config reference; `active_row_bg` is the SIDEBAR's row, not the tab row.
+# So which token to set was measured, not guessed: herdr was run with each
+# candidate palette token set to a distinct probe colour and the tab row
+# captured with its escape sequences (`tmux capture-pane -e`). Result: the
+# active tab draws bg = `accent` (ANSI blue under this theme — the blue in
+# the report) and takes its FOREGROUND from `surface_dim`, inherited from
+# the tab-bar separator drawn just before it.
+#
+# The trade that comes with it: `surface_dim` also colours those separator
+# glyphs (│) between tabs, so they go black too — invisible against a dark
+# terminal background. The active tab's blue block still delimits it, so
+# this reads as "cleaner" more than "broken", but if the separators are
+# wanted back, drop this line and instead lighten `accent` (below) until
+# the theme's own grey reads against it.
+surface_dim = "#000000"
+# accent = "cyan"      # the active tab's BACKGROUND (and highlight colour)
+
 [update]
 # The launcher PINS herdr's version (and checksum) in the {muxer} image layer;
 # a container must never self-update — versions are an image concern.
@@ -49,7 +71,32 @@ manifest_check = false
 headless_cols = 240
 headless_rows = 60
 
+[terminal]
+# The pane shell — /bin/bash EXPLICITLY, because herdr's own default is
+# "$SHELL, then /bin/sh" and $SHELL is UNSET in these containers (the passwd
+# entry says bash, but nothing exports it). The panes therefore ran dash,
+# which reads no ~/.bashrc — so the operator's shell pane had none of the
+# launcher's helpers (`man`, `dump_last_msg`, `ll`), while the tmux backend
+# always had them because tmux.py spells out `bash -l`. Diagnosed live
+# 2026-09-02: `ps` in a {mux} container showed `/bin/sh` panes.
+default_shell = "/bin/bash"
+# Login shell, matching the tmux backend's `bash -l`: ~/.profile runs and
+# sources ~/.bashrc (where settings/bashrc.sh is mounted). herdr's "auto"
+# means login on macOS only, i.e. NOT here.
+shell_mode = "login"
+
 [ui]
+# The sidebar starts HIDDEN (zero width), clusters included — operator
+# request 2026-09-02, extending the solo rule: its Spaces section always
+# holds exactly one entry (one project per container), the Agents roster
+# duplicates what the tab row already shows by name, and its columns are
+# what a terminal-native shift+drag selection dragged in (the copy-pollution
+# report). prefix+b brings it back when the live idle/working roster is
+# actually wanted. NOTE: this made the two herdr configs identical, so the
+# solo/cluster split was retired with it — one file again.
+sidebar_start_collapsed = true
+sidebar_collapsed_mode = "hidden"
+
 # The tab row STAYS — even for a solo launch's single tab (renamed "agent" by
 # the startup script). Hiding it was tried (hide_tab_bar_when_single_tab) and
 # REVERSED by the operator 2026-08-29: the row's right corner is the key

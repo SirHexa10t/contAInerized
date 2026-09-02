@@ -16,11 +16,18 @@
 
   wheel           scroll back
   prefix+[        copy mode - scroll and mark by keyboard
-  drag, dbl-click copies by itself - the small toast confirms. The copy
-                  is offered to YOUR terminal (OSC 52); many terminals
-                  refuse it, and ctrl+shift+v then pastes stale content.
+  drag, dbl-click copies by itself - the small toast confirms. This copy
+                  is PANE-AWARE (clean text, no sidebar, no borders), but
+                  it reaches your system clipboard only via OSC 52, which
+                  many terminals refuse - then ctrl+shift+v pastes stale.
   shift+drag      select via YOUR terminal (shift+wheel scrolls it) -
-                  ctrl+shift+c copies; that path always works
+                  ctrl+shift+c copies; that path always works, BUT the
+                  terminal marks whole SCREEN rows: a multi-line drag
+                  drags in the sidebar and the '|' borders too.
+                  Press prefix+b first to collapse the sidebar - that
+                  removes most of the junk. Your terminal may also have
+                  a block/rectangular-select modifier (often ctrl+alt or
+                  alt +drag), which takes the pane's columns only.
 
   alt+/           this help  (a direct chord - no prefix)
   alt+q           quit: end the session and stop the container  (Y/n)
