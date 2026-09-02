@@ -106,6 +106,32 @@ def build_status_line(inst: Instance) -> str:
             f"  {chain}")
 
 
+def build_cluster_status_line(inst: Instance, member_id: str) -> str:
+    """`build_status_line`'s CLUSTER-member twin — the bottom line in a
+    member's pane. Same anatomy and colours, three differences that matter
+    once N agents share a container:
+
+    - it leads with the MEMBER ID, verbatim and uncapitalised, because that
+      is the name siblings address it by (`ListAgents`, `SendMessage`, the
+      queue's `member` field). Two members built from the same agent differ
+      only in their role, so the capitalised agent name `build_status_line`
+      shows would render them identically;
+    - the blue slot carries the CLUSTER's name rather than an instance id —
+      `<agent>__<session>` is not a thing here (every member shares the
+      session), and the cluster is what the operator is looking at;
+    - the workspace shown is the cluster's project.
+
+    Staged per member (each tab's own `--env`), because container-wide env
+    could only ever carry one member's line."""
+    CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
+    email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
+    email_part = f"{GREEN}{email}{RESET} : " if email else ""
+    chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
+    return (f"{CYAN}● {member_id} {GREY}( {inst.workspace} ){RESET}"
+            f"\t\t{email_part}{BLUE}{inst.session}{RESET}"
+            f"  {chain}")
+
+
 def set_terminal_title(name: str) -> None:
     """Send an OSC 0 escape so the terminal emulator's window/tab title
     becomes `Claude Code — <name>`. Helps the user tell concurrent agent

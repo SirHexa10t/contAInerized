@@ -53,7 +53,12 @@ name = "terminal"
 # wanted back, drop this line and instead lighten `accent` (below) until
 # the theme's own grey reads against it.
 surface_dim = "#000000"
-# accent = "cyan"      # the active tab's BACKGROUND (and highlight colour)
+# The active tab's BACKGROUND (and herdr's highlight colour generally).
+# Lifted off the theme's ANSI blue — a navy that left even black text short
+# of contrast — to a mid-tone blue that black reads cleanly against, without
+# going neon (operator: "a bit brighter, not too bright", 2026-09-02). One
+# line to tune: darker → #5f87d7, lighter → #a6c8ff.
+accent = "#7aa2f7"
 
 [update]
 # The launcher PINS herdr's version (and checksum) in the {muxer} image layer;

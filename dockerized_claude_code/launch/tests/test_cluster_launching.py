@@ -185,6 +185,25 @@ class TestPrepare(LaunchingTmp):
         self.assertIn("source-file -q", text)        # the user's tmux.conf still wins
         self.assertIn("CLAUDE_CODE_SESSION_NAME=researcher__primary", text)
 
+    def test_every_member_gets_its_own_bottom_status_line(self):
+        # Members had a BLANK bottom row while solo instances have always
+        # shown one (operator report, 2026-09-02): AGENT_STATUS_LINE was
+        # never staged for them. It has to be PER-MEMBER env — container-wide
+        # it could only carry one member's line — and it must lead with the
+        # member ID, since two members built from the same agent would
+        # otherwise render identically.
+        golem = self.window_env("golem")
+        researcher = self.window_env("researcher__primary")
+        for member_id, env in (("golem", golem),
+                               ("researcher__primary", researcher)):
+            with self.subTest(member=member_id):
+                line = env["AGENT_STATUS_LINE"]
+                self.assertIn(member_id, line)
+                self.assertIn(str(self.cluster.project), line)   # the path
+                self.assertIn(self.cluster.session, line)        # the cluster
+        self.assertNotEqual(golem["AGENT_STATUS_LINE"],
+                            researcher["AGENT_STATUS_LINE"])
+
     def test_the_work_protocol_rides_every_cluster_launch(self):
         # The queue's plumbing: the package + its tunables RO-mounted at the
         # PACKAGE-OWNED /opt targets (importing them here IS the drift-pin),

@@ -38,16 +38,16 @@ from pathlib import Path
 from ..agents_crud import (
     compute_resume_flag, install_commands, install_latest_md, install_settings,
 )
-from ..docker_config import (
-    effort_args, ensure_image, run_cluster_container,
-)
-from ..file_access import agent_md_index, ensure_dir, write_text
+from ..claude_code_config import build_cluster_status_line
 from ..cluster_work_protocol import (
     CONFIG_IN_CONTAINER as PROTOCOL_CONF_TARGET,
     PACKAGE_IN_CONTAINER as PROTOCOL_PACKAGE_TARGET,
     PROTOCOL_DIR_IN_CONTAINER,
 )
 from ..cluster_work_protocol.queue import CURSORS_DIRNAME
+from ..container_env import ContainerEnvKey
+from ..docker_config import effort_args, ensure_image, run_cluster_container
+from ..file_access import agent_md_index, ensure_dir, write_text
 from ..paths import (
     ACCOUNT_FILE, CACHE_MOUNTS, CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
     CLUSTER_WORK_PROTOCOL_DIR, CREDENTIALS_FILE, CLAUDE_CONFIG_IN_CONTAINER,
@@ -253,6 +253,13 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
             **inst.conf,
             "CLAUDE_CONFIG_DIR": str(config),
             "CLAUDE_CODE_SESSION_NAME": member.id,
+            # The bottom status line — member id, project, user, cluster,
+            # tags. Per-member and so per-TAB env: container-wide it could
+            # only carry one member's line, which is why members had a blank
+            # bottom row while solo instances have always had this one
+            # (operator report, 2026-09-02).
+            ContainerEnvKey.AGENT_STATUS_LINE.value:
+                build_cluster_status_line(inst, member.id),
         }
         command_for[member.id] = (
             "claude",
