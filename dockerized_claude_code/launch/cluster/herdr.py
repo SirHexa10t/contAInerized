@@ -35,7 +35,7 @@ import shlex
 from pathlib import Path
 
 from .member import valid_label
-from .tmux import SHELL_WINDOW, Pane
+from .panes import SHELL_LABEL, Pane
 
 BINARY = "herdr"
 # `herdr status server` EXITS 0 WHETHER OR NOT the server runs — it is a
@@ -51,19 +51,12 @@ _RUNNING = 'grep -q "status: running"'
 # rather than a python -c: the reply is single-line NDJSON and the id is the
 # first "pane_id" in it (the tab's root pane) — probed, not presumed.
 _PANE_ID_SED = r"sed -n 's/.*\"pane_id\":\"\([^\"]*\)\".*/\1/p' | head -n 1"
-# Same trick for the workspace id (the cluster path's create reply is consumed
-# for this alone; the solo path derives it from the pane id instead) and the
-# tab id (solo renames its one tab after the agent).
-_WS_ID_SED = r"sed -n 's/.*\"workspace_id\":\"\([^\"]*\)\".*/\1/p' | head -n 1"
+# Same trick for the tab id — the root tab is renamed after the first agent.
+# (The workspace id needs no sed: it is the pane id's prefix, w1:p1 → w1.)
 _TAB_ID_SED = r"sed -n 's/.*\"tab_id\":\"\([^\"]*\)\".*/\1/p' | head -n 1"
 # The server needs a beat to bind its socket before the CLI can talk to it.
 _READY_TRIES = 50          # × 0.2s = a 10s ceiling before the launch fails loud
 _STOP_HINT = "herdr server stop"   # THE deliberate way out — ends every member
-# The solo split: `pane split --ratio` sizes the pane BEING SPLIT (the agent),
-# not the new one — a 0.22 first guess produced the inverted layout, caught by
-# the operator's screenshot of the first live launch. 0.78 leaves the shell
-# tmux.SHELL_PANE_PERCENT's classic 22%; the border stays mouse-draggable.
-AGENT_RATIO = "0.78"
 # The key hint. Its HOME is the tab row's right corner (tab_bar_right in the
 # configs) — the operator's call, and CONFIRMED rendering (screenshot,
 # 2026-08-30). The tour that settled it: a shell greeting "doesn't belong in
@@ -76,15 +69,12 @@ AGENT_RATIO = "0.78"
 # for terminals that show one.
 HINT_TOKEN = "keys"
 HINT_TEXT = "alt+/ help · alt+q quit"
-# The free shell's name, borrowed from the tmux backend so both spell it the
-# same — it labels the solo split's pane AND the shell tab in both shapes.
-SHELL_LABEL = SHELL_WINDOW
 
 
 def _env_flags(pane: Pane) -> list[str]:
     """One `--env` per variable, key-sorted (the same determinism rule as
-    tmux's env_flags). Verified live to reach the new shell — and so the
-    agent started in it."""
+    `tmux._env_flags`, whose dialect is `-e KEY=VALUE`). Verified live to
+    reach the new shell — and so the agent started in it."""
     return [flag for key in sorted(pane.env)
             for flag in ("--env", f"{key}={pane.env[key]}")]
 
@@ -154,8 +144,7 @@ def _member_lines(pane: Pane) -> list[str]:
 def script(session: str, panes: tuple[Pane, ...], *,
            shell_cwd: Path,
            unset_env: tuple[str, ...] = (),
-           setup_commands: tuple[str, ...] = (),
-           solo: bool = False) -> str:
+           setup_commands: tuple[str, ...] = ()) -> str:
     """The whole startup as a runnable `sh` script — the herdr twin of
     tmux.script. Order is load-bearing:
 
@@ -163,16 +152,15 @@ def script(session: str, panes: tuple[Pane, ...], *,
     2. `herdr server` backgrounded, then a readiness poll — the CLI speaks to
        the socket, so racing it loses; a server that never comes up fails the
        launch loudly (10s ceiling) rather than assembling into the void;
-    3. one workspace (label = the session). CLUSTER shape: its ROOT tab is
-       the free shell — RENAMED `shell`, because herdr's default "1" reads as
-       nothing next to four member tabs — and each member gets a TAB (first
-       member focused, so attach lands on a member rather than the shell).
-       SOLO shape: the agent IS the root pane with the free shell SPLIT
-       beneath it — both visible at once (the tmux solo layout, translated)
-       in a tab renamed after the agent — PLUS a full-height `shell` tab
-       beside it. The shell splits BEFORE the agent starts: `agent start`
-       blocks until registration or its timeout, and a slow or failed agent
-       must still leave a usable pane;
+    3. one workspace (label = the session), whose ROOT tab hosts the FIRST
+       agent — renamed after it, since herdr's default "1" reads as nothing.
+       Every other agent follows as its own tab, and the free shell is the
+       LAST tab, so it sits rightmost. ONE shape for solo and cluster alike:
+       a solo launch is simply this with one agent. (A solo instance briefly
+       also had the shell as a SPLIT beneath its agent — the tmux layout,
+       translated — and the operator asked for the tab only, 2026-09-03: an
+       extra pane at the bottom of every screen was noise once the tab
+       existed.);
     4. attach (`herdr` = attach-or-launch the default persistent session),
        then HOLD the container while the server lives: detaching (prefix+q)
        must leave everything running, exactly the tmux-path contract, and
@@ -181,8 +169,6 @@ def script(session: str, panes: tuple[Pane, ...], *,
     valid_label(session, "session name")
     if not panes:
         raise ValueError("a cluster needs at least one member pane")
-    if solo and len(panes) != 1:
-        raise ValueError("a solo launch is exactly one agent pane")
     lines = ["#!/bin/sh",
              "# Generated by launch.cluster.herdr — one tab per member "
              "(herdr backend).",
@@ -230,30 +216,11 @@ def script(session: str, panes: tuple[Pane, ...], *,
         shlex.join([BINARY, "tab", "rename"]) + ' "$TAB" '
         + shlex.join([first.name]) + " >/dev/null || :",
     ]
-    if solo:
-        lines += [
-            # The split reply's first pane_id is the NEW pane's; a failed
-            # split leaves the variable empty (the pipeline's status is
-            # sed's, so `set -e` does not fire) and the guard says so.
-            f"SHELL_PANE=$({shlex.join([BINARY, 'pane', 'split'])}"
-            ' "$PANE" '
-            + shlex.join(["--direction", "down", "--ratio", AGENT_RATIO,
-                          "--cwd", str(shell_cwd), "--no-focus"])
-            + f" | {_PANE_ID_SED})",
-            '[ -n "$SHELL_PANE" ] || echo "warning: the shell split did not open"',
-            # Name the shell pane — the label renders on its frame, so it is
-            # deliberately PLAIN (see SHELL_LABEL): the hint lives in the tab
-            # row's corner, nowhere else.
-            shlex.join([BINARY, "pane", "rename"]) + ' "$SHELL_PANE" '
-            + shlex.join([SHELL_LABEL]) + " >/dev/null || :",
-        ]
     lines.append(_start_line(first))
     for pane in panes[1:]:
         lines += _member_lines(pane)
-    # The free shell, LAST and so rightmost. In solo it is the full-height
-    # companion to the split beneath the agent (the operator asked for the
-    # tab "in both" shapes and likes the split too); in a cluster it is the
-    # team's shared terminal.
+    # The free shell, LAST and so rightmost — the operator's terminal in a
+    # solo launch, the team's shared one in a cluster.
     lines.append(
         shlex.join([BINARY, "tab", "create", "--cwd", str(shell_cwd),
                     "--label", SHELL_LABEL, "--no-focus"])

@@ -42,25 +42,23 @@ Discovery is a scan for dirs containing `cluster.toml` — the same choice as
 already the authoritative record, so a separate registry could only disagree
 with it.
 
-**Serialization note.** This writes its own ~15-line TOML emitter rather than
-calling `tags.store.dumps`, which is fixed to that file's header and its
-`workspace`/`engine` pair. The *schema* logic is genuinely shared (the two
-`store` helpers above); only the formatting is restated. If a third
-axis-store appears, extract the emitter then — two similar shapes stay two.
+**Serialization note.** This still writes its own `dumps` rather than calling
+`tags.store.dumps`, which is fixed to that file's header and its
+`workspace`/`engine` pair — two similar shapes stay two. What is NOT restated
+here any more (2026-09-03) is the *escaping*: key quoting, basic-string
+escaping and the `axis = [...]` line come from `launch/toml_emit.py`, because
+those rules are not this format's business and two byte-identical copies of
+them were one edit away from two files quoting differently. The *schema*
+logic is shared as it always was, via the two `store` helpers above.
 """
 
 from __future__ import annotations
 
-import json
-import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from ..tags import Registry
-
+from .. import toml_emit
 from ..file_access import (
     force_remove, is_dir, is_file, iter_subdirs, read_text, write_text,
 )
@@ -68,6 +66,7 @@ from ..paths import (
     cluster_path, cluster_state_path, cluster_worktree_path,
     cluster_worktrees_dir, clusters_dir,
 )
+from ..tags import Registry
 from ..tags.lego import AgentBuild
 from ..tags.store import build_entry, entry_to_build
 from ..utils import shell_returncode
@@ -80,7 +79,6 @@ _FILE_HEADER = (
     "# Member tables carry the same four tag axes as instances.toml; the agent\n"
     "# and role are read back out of the table name, not stored twice.\n"
 )
-_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _AXES = ("professions", "specialties", "policies")
 
 
@@ -225,27 +223,25 @@ def dumps(cluster: Cluster) -> str:
     would have to manage (an earlier format stored `order`; `loads` ignores it
     in old files)."""
     lines = [_FILE_HEADER,
-             f"project = {_toml_str(str(cluster.project))}"]
+             f"project = {toml_emit.string(str(cluster.project))}"]
     if cluster.template is not None:
-        lines.append(f"template = {_toml_str(cluster.template)}")
+        lines.append(f"template = {toml_emit.string(cluster.template)}")
     # The cluster-level tags, ABOVE the member tables (bare keys must precede
     # the first table header in TOML — and `loads` picks members by "value is
     # a table", so these lists can never be mistaken for one).
     cluster_entry = build_entry(cluster.tags, workspace=None)
     for axis in _AXES:
-        values = ", ".join(_toml_str(v) for v in cluster_entry.get(axis, []))
-        lines.append(f"{axis} = [{values}]")
+        lines.append(toml_emit.string_list(axis, cluster_entry.get(axis, [])))
     blocks = ["\n".join(lines) + "\n"]
     for member in sorted(cluster.members, key=lambda m: m.id):
         # Only what is the member's OWN — the cluster's tags are stored once,
         # up top, not repeated N times.
         entry = build_entry(cluster.own_build(member.build), workspace=None)
-        table = [f"[{_toml_key(member.id)}]"]
+        table = [f"[{toml_emit.key(member.id)}]"]
         if entry.get("engine") is not None:
-            table.append(f"engine = {_toml_str(entry['engine'])}")
+            table.append(f"engine = {toml_emit.string(entry['engine'])}")
         for axis in _AXES:
-            values = ", ".join(_toml_str(v) for v in entry.get(axis, []))
-            table.append(f"{axis} = [{values}]")
+            table.append(toml_emit.string_list(axis, entry.get(axis, [])))
         blocks.append("\n".join(table) + "\n")
     return "\n".join(blocks)
 
@@ -278,16 +274,6 @@ def loads(session: str, text: str) -> Cluster:
                       members=tuple(members), template=template, tags=shared)
     return replace(cluster, members=tuple(
         replace(m, build=cluster.own_build(m.build)) for m in cluster.members))
-
-
-def _toml_key(key: str) -> str:
-    return key if _BARE_KEY_RE.match(key) else json.dumps(key)
-
-
-def _toml_str(value: str) -> str:
-    # JSON string escaping is a subset of TOML basic-string escaping, so
-    # json.dumps emits a valid TOML string (same trick as tags/store.py).
-    return json.dumps(value)
 
 
 # ============================================================
@@ -360,7 +346,7 @@ def rename(cluster: Cluster, new_session: str) -> Cluster:
 
 
 def picker_order(members: tuple[Member, ...],
-                 registry: "Registry") -> tuple[Member, ...]:
+                 registry: Registry) -> tuple[Member, ...]:
     """Members in the picker's order — THE member ordering, everywhere.
 
     Same logic that sorts the agent Create rows (profession group, engine

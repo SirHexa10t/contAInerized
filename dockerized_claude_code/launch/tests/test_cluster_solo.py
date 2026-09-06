@@ -178,19 +178,18 @@ class TestHerdrSolo(unittest.TestCase):
         self.assertIn("herdr server", text)
         self.assertNotIn("new-session", text)
 
-    def test_the_agent_is_the_root_pane_and_the_shell_splits_below(self):
+    def test_the_agent_is_the_root_pane_and_the_shell_is_a_tab(self):
         # `agent start --kind claude` into the workspace's own root pane puts
-        # the agent in herdr's sidebar with live idle/working state; the free
-        # shell is a split beneath it (both visible — the tmux solo layout)
-        # in ONE tab, which the script renames after the agent: the tab row
-        # stays, carrying the key hint in its right corner.
+        # the agent in herdr's sidebar with live idle/working state, in the
+        # workspace's root tab renamed after it (the tab row stays, carrying
+        # the key hint in its right corner). The free shell is the ONE extra
+        # tab — never a split: an extra pane at the bottom of every solo
+        # screen was reverted as noise once the tab existed (2026-09-03).
         text = self.script_with(True)
         self.assertIn("workspace create --cwd /workspace "
                       "--label refactorer__proj", text)
         self.assertIn("herdr agent start agent --kind claude", text)
-        self.assertIn("pane split", text)
-        # ...plus the extra full-height shell TAB (operator request
-        # 2026-09-02, "in both" shapes) — the only tab this shape creates.
+        self.assertNotIn("pane split", text)
         creates = [line for line in text.splitlines() if "tab create" in line]
         self.assertEqual(len(creates), 1)
         self.assertIn("--label shell", creates[0])

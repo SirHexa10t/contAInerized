@@ -2,10 +2,9 @@
 and `docker run`. The image-build chain (ensure_image), the bind-mount
 accumulator that flattens into `-v` flags (set_container_mounts +
 add_docker_mount + mount_target_is_staged), small `docker` CLI wrappers
-(require_docker, detect_docker_gid, docker_check_running_subprocess,
-wait_for_container_running, docker_exec_root_subprocess,
-docker_running_instances_subprocess, docker_check_any_agent_running_subprocess,
-docker_subprocess), the
+(require_docker, detect_docker_gid, docker_subprocess,
+docker_running_instances_subprocess,
+docker_check_any_agent_running_subprocess), the
 image-naming helper (image_tag), the tag.docker flag emitters
 (build_arg_flags / env_forward_flags / entrypoint_chain), the post-build
 install-failure surfacing (prompt_install_failures), and the container
@@ -23,26 +22,18 @@ staging. This module holds:
   - _docker_mounts: {source: "target[:ro]"} — staged via add_docker_mount,
     flattened inline by run_container into `-v` flags.
 
-Imports from paths (filesystem constants), claude_code_config (terminal title),
-container_env (env staging + flag formatters), and network (the {firewall}
-coordination hooks). tag_handlers imports add_docker_mount +
+Imports from paths (filesystem constants), claude_code_config (terminal
+title), container_env (env staging + flag formatters), container_probe (the
+container-name format) and firewall (the {firewall} coordination hooks).
+tag_handlers imports add_docker_mount +
 docker_check_any_agent_running_subprocess + detect_docker_gid from here;
 run.py is the top-level consumer.
 """
 
-import fcntl
 import fnmatch
-import os
-import pty
-import re
-import select
 import shutil
-import struct
 import subprocess
 import sys
-import termios
-import time
-import tty
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -51,6 +42,7 @@ from .container_env import (
     ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
     staged_env,
 )
+from .container_probe import CONTAINER_NAME_PREFIX
 from .file_access import ensure_dir
 from .firewall import (
     is_critical_pending, selftest_address, start_firewall_updater,
@@ -59,7 +51,7 @@ from .firewall import (
 from .paths import (
     BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, COWORK_IN_CONTAINER,
     DEFAULT_WORKSPACE, DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT,
-    FIREWALL_DONE_IN_CONTAINER, INSTALL_FAILURES_LOG_IN_CONTAINER,
+    INSTALL_FAILURES_LOG_IN_CONTAINER,
     LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION, cowork_dir_path,
     state_commands_dir, state_settings_path,
 )
@@ -138,21 +130,21 @@ def image_tag(layer_names: list[str]) -> str:
 # ============================================================
 # Docker subprocess helpers
 # ============================================================
-# Every docker-CLI touchpoint outside orchestration lives here: the PATH
-# presence check (require_docker), the read-only probes used by firewall
-# coordination + cache pruning (detect_docker_gid,
-# docker_check_running_subprocess, wait_for_container_running,
-# docker_exec_root_subprocess, docker_running_instances_subprocess,
+# Every FLEET-level docker-CLI touchpoint lives here: the PATH presence check
+# (require_docker), the host/daemon probe (detect_docker_gid), the "what is
+# running right now" queries (docker_running_instances_subprocess,
 # docker_check_any_agent_running_subprocess),
 # and the `docker` invocation wrapper (docker_subprocess) used by
 # ensure_image / run_container below in the orchestration section.
-# CONTAINER_NAME_PREFIX is the one place the per-launch container name format
-# is defined — run_container builds container names from it, and
-# docker_running_instances_subprocess both filters `docker ps` by it and strips
-# it back off to recover instance ids; keeping them consistent is a one-line
-# change here.
-
-CONTAINER_NAME_PREFIX = "claude-code_"   # prefix for every per-launch container name (run_container) and the filter/strip used to map containers back to instance ids (docker_running_instances_subprocess)
+# Talking to ONE named, live container (probe it, wait for it, read its tty
+# size, exec in it) is `container_probe`'s job instead, and writing to one is
+# `container_inject`'s — that split is what keeps the firewall subsystem and
+# the group-hosting layer importable without this module.
+# CONTAINER_NAME_PREFIX is imported rather than defined here: it is still the
+# one definition of the per-launch name format, but it lives with the calls
+# that ADDRESS a container, and this module is one of its consumers —
+# run_container builds names from it, docker_running_instances_subprocess
+# filters `docker ps` by it and strips it back off to recover instance ids.
 
 
 # ============================================================
@@ -224,81 +216,6 @@ def detect_docker_gid() -> str | None:
     if result.returncode == 0 and (out := result.stdout.strip()):
         return out.split(":")[2]
     return None
-
-
-def docker_check_running_subprocess(container_name: str) -> bool:
-    """True if the named container is currently in the Running state per
-    `docker inspect`. False otherwise — returncode non-zero (container not
-    found / daemon unreachable), or `State.Running` is anything other than
-    the literal string `"true"` (docker's text output for that field).
-    One-shot probe; wait_for_container_running polls this in a loop for the
-    "just-created, not yet up" window."""
-    r = shell_capture("docker", "inspect", "--format={{.State.Running}}", container_name)
-    return r.returncode == 0 and r.stdout.strip() == "true"
-
-
-def wait_for_container_running(container_name: str, timeout_seconds: float = 10) -> bool:
-    """Poll `docker_check_running_subprocess` until it returns True, or
-    `timeout_seconds` passes. Returns True if the container came up in time,
-    False on timeout. `docker run` creates the container almost immediately
-    but `docker inspect` returns 'not found' for a small window after —
-    hence the poll. Used by the {firewall} updater (in firewall.resolver._updater_worker)
-    before it starts issuing `docker exec` calls.
-
-    The walrus in the while-condition reads as "while within deadline and not
-    yet running, sleep". `running = False` is initialized to keep the name
-    bound for the return even when the walrus never fires (deadline already
-    passed on entry — `timeout_seconds <= 0`)."""
-    deadline = time.monotonic() + timeout_seconds
-    running = False
-    while time.monotonic() < deadline and not (running := docker_check_running_subprocess(container_name)):
-        time.sleep(0.1)
-    return running
-
-
-def wait_for_firewall_applied(container_name: str, timeout_seconds: float = 90) -> bool:
-    """Gate for the phase-2 firewall updater: True when it's sensible to
-    start inserting rules, False when there's nothing left to update.
-
-    Polls for init-firewall.sh's completion marker
-    (paths.FIREWALL_DONE_IN_CONTAINER). Marker present → True. Container
-    stopped without it → False (init-firewall failed its self-test and took
-    the container down). Deadline passed with the container still up → True
-    anyway, best-effort: the script's runtime is curl-bounded to seconds, so
-    a live container without a marker after this long means the marker
-    mechanism itself broke — and late rules beat no rules.
-
-    The gate exists because "container is running" is NOT "firewall is
-    ready": the entrypoint runs init-firewall.sh as its first act, so an
-    updater that starts inserting rules on mere running-ness races the
-    script — inserts landing before its `iptables -F` were silently wiped,
-    and inserts landing mid-self-test could open provider blocks that made
-    the enforcement probe's target reachable, killing perfectly healthy
-    launches. Used by firewall.resolver._updater_worker between
-    wait_for_container_running and the first rule flush."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if docker_exec_root_subprocess(container_name, "test", "-e", str(FIREWALL_DONE_IN_CONTAINER)).returncode == 0:
-            return True
-        if not docker_check_running_subprocess(container_name):
-            return False
-        time.sleep(0.3)
-    return docker_check_running_subprocess(container_name)
-
-
-def docker_exec_root_subprocess(container_name: str, *cmd: str) -> subprocess.CompletedProcess:
-    """Run `docker exec --user root <container_name> <cmd...>` and return the
-    CompletedProcess (capture_output=True, text=True so callers can inspect
-    returncode + stdout/stderr).
-
-    The `--user root` flag is the privileged-operation pattern: it grants
-    root inside the container *from outside the container's namespace*,
-    bypassing whatever sudoers restrictions are in place for the in-container
-    user. Used by the {firewall} updater (in firewall.resolver._flush_rules)
-    to inject iptables ACCEPT rules into the running container as Phase 2 DNS
-    resolutions complete. Centralised here so privileged docker-exec calls
-    have a single audit point."""
-    return shell_capture("docker", "exec", "--user", "root", container_name, *cmd)
 
 
 def docker_subprocess(args: list[str]) -> None:
@@ -456,134 +373,6 @@ def running_instance_report(inst: Instance) -> str | None:
     return (f"  Instance '{inst.instance}' is already running "
             f"(container {CONTAINER_NAME_PREFIX}{inst.instance}).\n"
             f"  Stop that container, or switch to the terminal that's running it.")
-
-
-# ============================================================
-# Injection — typing a prompt into a live session's TTY
-# ============================================================
-# The one thing group hosting needs docker for beyond launching: waking a
-# running instance. Every byte of {cowork} DATA moves as ordinary files through
-# the per-participant mount; this is only the doorbell.
-#
-# It has to be a pty rather than a pipe. The launcher starts instances with `-t`,
-# and the docker CLI refuses to attach non-TTY stdin to a TTY container — it
-# exits at once, and the first write then dies with EPIPE. Two further details
-# were each found the hard way and are load-bearing, so they are commented where
-# they happen: raw mode (below) and window size (`_match_container_winsize`).
-
-ENTER_KEY = "\r"                    # what the TUI reads as Enter; "\n" is swallowed by the input widget
-INJECT_ENTER_DELAY = 0.4            # settle time between the text and Enter, so the TUI registers a full line
-INJECT_ATTACH_PROBE = 1.0           # how long to watch for docker refusing the attach before typing
-FALLBACK_TTY_SIZE = (24, 80)        # conventional terminal, used only when the container's size is unreadable
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Z0-9]|\x1b[=>]|\r")
-
-
-def docker_attach_inject(instance: str, prompt: str,
-                         *, enter_delay: float = INJECT_ENTER_DELAY) -> bool:
-    """Type `prompt` into `instance`'s live session and press Enter. True if it
-    landed.
-
-    Deliberately no liveness pre-check: callers polling several participants
-    already hold a `docker_running_instances_subprocess` snapshot, and a second
-    probe per injection would buy nothing — attaching to a container that is gone
-    fails cleanly and reports docker's own complaint.
-
-    `--sig-proxy=false` keeps a Ctrl-C in the hub's terminal out of the agent's
-    session. The attach is terminated rather than having its stdin closed: with a
-    TTY the other attachers hold the master open, so `claude` never sees an EOF
-    and the human's own session is left untouched.
-
-    A single line only — `prompt` is TYPED, so an embedded newline reads as Enter
-    and submits a fragment. Callers send a pointer to a file for anything longer
-    (see cowork.mailbox.pointer_prompt)."""
-    container = f"{CONTAINER_NAME_PREFIX}{instance}"
-    master, slave = pty.openpty()
-    _match_container_winsize(master, container)
-    # Raw mode so the line discipline leaves our bytes alone: without it ICRNL
-    # rewrites the Enter (\r -> \n) and ECHO bounces the prompt back into the
-    # stream we read. Real docker sets raw itself; doing it here makes the
-    # injection behave the same whether or not it gets that far.
-    tty.setraw(master)
-    proc = subprocess.Popen(["docker", "attach", "--sig-proxy=false", container],
-                            stdin=slave, stdout=slave, stderr=slave, close_fds=True)
-    os.close(slave)                          # the child owns it now
-    try:
-        # A rejected attach dies within moments and complains onto the pty, so
-        # surface that rather than letting the first write fail with a bare EPIPE.
-        early = _drain_pty(master, INJECT_ATTACH_PROBE)
-        if proc.poll() is not None:
-            detail = _ANSI_RE.sub("", early).strip() or "(docker printed nothing)"
-            print(f"  Injection into '{instance}' failed: {detail}")
-            return False
-        os.write(master, prompt.encode())
-        time.sleep(enter_delay)              # let the TUI register the line before Enter
-        os.write(master, ENTER_KEY.encode())
-        return True
-    except OSError as e:
-        print(f"  Injection into '{instance}' failed writing to the attach stream: {e}")
-        return False
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        os.close(master)
-
-
-def container_tty_size(container: str) -> tuple[int, int] | None:
-    """(rows, cols) of `container`'s OWN terminal, or None if unknowable.
-
-    pid 1 in the container is `claude` (the image's ENTRYPOINT), so its fd 0 is
-    the pty we are about to attach to, and `stty size` reports that pty's
-    winsize. Run without `-t` so the exec doesn't allocate a pty of its own."""
-    try:
-        r = shell_capture("docker", "exec", container, "sh", "-c",
-                          "stty size < /proc/1/fd/0", timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    parts = r.stdout.split()
-    if r.returncode != 0 or len(parts) != 2:
-        return None
-    try:
-        rows, cols = int(parts[0]), int(parts[1])
-    except ValueError:
-        return None
-    return (rows, cols) if rows > 0 and cols > 0 else None
-
-
-def _match_container_winsize(fd: int, container: str) -> None:
-    """Stamp the container's current window size onto our pty.
-
-    `docker attach` PROPAGATES the client terminal's size to the container, so
-    without this the pty's default (often 0x0) resizes the agent's terminal and
-    its TUI redraws into nothing until the human resizes and triggers SIGWINCH.
-    Matching the container's size makes the propagated resize a no-op.
-
-    Read fresh on every injection, because the human may have resized or moved
-    their window since the last prompt — a stale size is exactly what blanks the
-    display."""
-    size = container_tty_size(container) or FALLBACK_TTY_SIZE
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
-
-
-def _drain_pty(master: int, seconds: float) -> str:
-    """Read whatever the attach stream emits for `seconds`, as text. Used to
-    catch docker's own refusal before anything is typed."""
-    chunks: list[bytes] = []
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        ready, _, _ = select.select([master], [], [], 0.2)
-        if not ready:
-            continue
-        try:
-            data = os.read(master, 65536)
-        except OSError:                      # slave side closed — nothing more coming
-            break
-        if not data:
-            break
-        chunks.append(data)
-    return b"".join(chunks).decode(errors="replace")
 
 
 # ============================================================

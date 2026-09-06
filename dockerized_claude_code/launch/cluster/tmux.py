@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from .member import valid_label
+from .panes import AGENT_PANE, SHELL_LABEL, Pane
 
 # The session lives on its OWN server socket, not tmux's default one.
 #
@@ -58,7 +58,6 @@ from .member import valid_label
 SOCKET = "muxer"
 TMUX = ("tmux", "-u", "-L", SOCKET)
 BANNER_REFRESH_SECONDS = 5      # how often tmux re-runs the status-right command
-SHELL_WINDOW = "shell"          # the free terminal, always last
 SHELL_COMMAND = ("bash", "-l")  # login shell: the operator's bashrc/aliases apply
 # The interactive KEY POLICY — quit, help, layout, mouse behavior — is NOT
 # assembled here: it ships as active lines in `settings/tmux.conf`, which the
@@ -87,7 +86,6 @@ _PRINTABLE = tuple(chr(code) for code in range(0x20, 0x7F))
 TYPETHROUGH_LABEL = ("# Any printable key leaves the scroll-back view and lands in"
                      " the pane. One call: 95 would cost 0.7s of spawning.")
 
-AGENT_PANE = "agent"            # pane title for the window the agent owns
 SHELL_PANE_PERCENT = 22         # how much height the free shell gets in a solo split
 # Seconds to wait before re-applying the split after a terminal resize. MEASURED
 # (tmux 3.5a): the `client-resized` hook fires BEFORE tmux finishes re-laying the
@@ -100,39 +98,14 @@ _STATUS_STYLE = "bg=colour236,fg=colour252"
 _CURRENT_STYLE = "bg=colour31,fg=colour231,bold"
 
 
-@dataclass(frozen=True)
-class Pane:
-    """One member's window: its name, what to run, where, and with what env.
-
-    `command` is an argv TUPLE rather than a string because the caller thinks in
-    arguments; it is shell-quoted exactly once, here, when tmux needs it as a
-    single `shell-command` word."""
-    name: str
-    command: tuple[str, ...]
-    cwd: Path
-    env: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        valid_label(self.name, "window name")
-        if not self.command:
-            raise ValueError(f"window {self.name!r} has no command to run")
-
-    @property
-    def shell_command(self) -> str:
-        """`command` as the one shell word tmux runs.
-
-        `shlex.join` rather than `" ".join`: a member's command can carry an
-        argument with a space (a `--append-system-prompt`, a path), and tmux
-        hands this string to a shell, so unquoted joining would split it."""
-        return shlex.join(self.command)
-
-    def env_flags(self) -> tuple[str, ...]:
-        """`-e KEY=VALUE` pairs, key-sorted so the assembly is deterministic and
-        a test can assert on it."""
-        flags: list[str] = []
-        for key in sorted(self.env):
-            flags += ["-e", f"{key}={self.env[key]}"]
-        return tuple(flags)
+def _env_flags(pane: Pane) -> tuple[str, ...]:
+    """`-e KEY=VALUE` pairs for `new-window`/`new-session`, key-sorted so the
+    assembly is deterministic and a test can assert on it. tmux's spelling;
+    herdr renders the same mapping as `--env KEY=VALUE`."""
+    flags: list[str] = []
+    for key in sorted(pane.env):
+        flags += ["-e", f"{key}={pane.env[key]}"]
+    return tuple(flags)
 
 
 def shell_pane(cwd: Path, env: Mapping[str, str] | None = None) -> Pane:
@@ -142,7 +115,7 @@ def shell_pane(cwd: Path, env: Mapping[str, str] | None = None) -> Pane:
     does not own, for logging into a CLI, fixing bashrc, tailing a log, checking
     the network, or running a server beside the work. A login shell rather than
     plain `bash` so the operator's own profile applies."""
-    return Pane(name=SHELL_WINDOW, command=SHELL_COMMAND, cwd=cwd,
+    return Pane(name=SHELL_LABEL, command=SHELL_COMMAND, cwd=cwd,
                 env=env or {})
 
 
@@ -196,7 +169,7 @@ def solo_argv(session: str, agent: Pane, *, shell_cwd: Path,
     caged = f"unset TMUX; exec {agent.shell_command}"
     commands: list[tuple[str, ...]] = [
         (*TMUX, "new-session", "-d", "-s", session, "-n", agent.name,
-         "-c", str(agent.cwd), *agent.env_flags(), "sh", "-c", caged),
+         "-c", str(agent.cwd), *_env_flags(agent), "sh", "-c", caged),
     ]
     # Same session-environment scrub as the cluster path, for the same measured
     # reason (`new-session -e` leaks into the session env). Harmless here even
@@ -211,7 +184,7 @@ def solo_argv(session: str, agent: Pane, *, shell_cwd: Path,
     # thin label is cheaper than making the user guess.
     commands += [
         (*TMUX, "select-pane", "-t", f"{session}:{agent.name}.0", "-T", AGENT_PANE),
-        (*TMUX, "select-pane", "-t", f"{session}:{agent.name}.1", "-T", SHELL_WINDOW),
+        (*TMUX, "select-pane", "-t", f"{session}:{agent.name}.1", "-T", SHELL_LABEL),
     ]
     commands += _ratio_hooks(session, f"{session}:{agent.name}.1", shell_percent)
     # The label carries the project, matching the launch banner's shape. It must
@@ -263,7 +236,7 @@ def startup_argv(session: str, panes: tuple[Pane, ...], *,
     first, *rest = panes
     commands: list[tuple[str, ...]] = [
         (*TMUX, "new-session", "-d", "-s", session, "-n", first.name,
-         "-c", str(first.cwd), *first.env_flags(), first.shell_command),
+         "-c", str(first.cwd), *_env_flags(first), first.shell_command),
     ]
     # MEASURED (tmux 3.5a): `new-session -e` writes the variable into the
     # SESSION environment, not just the first window's process — so every window
@@ -279,7 +252,7 @@ def startup_argv(session: str, panes: tuple[Pane, ...], *,
                  for key in sorted(first.env)]
     commands += [
         (*TMUX, "new-window", "-t", session, "-n", pane.name,
-         "-c", str(pane.cwd), *pane.env_flags(), pane.shell_command)
+         "-c", str(pane.cwd), *_env_flags(pane), pane.shell_command)
         for pane in rest
     ]
     commands += _option_argv(session, banner=banner, refresh=refresh)

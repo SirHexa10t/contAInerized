@@ -31,7 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..agents_crud import instance_from_store
-from ..docker_config import docker_attach_inject
+from ..container_inject import docker_attach_inject
 from ..file_access import (
     ensure_dir, is_dir, is_file_recent, iter_files, iter_subdirs, move_path,
     read_text, remove_path, write_text,

@@ -19,7 +19,7 @@ from prompt_toolkit.mouse_events import (
     MouseButton, MouseEvent, MouseEventType, MouseModifier,
 )
 
-from launch.gui.menu_picker import WHEEL_LINES, _ScrollingControl
+from launch.gui.picker_widget import WHEEL_LINES, _ScrollingControl
 
 
 def an_event(event_type: MouseEventType) -> MouseEvent:
@@ -110,7 +110,7 @@ class TestMouseSupportIsEnabled(unittest.TestCase):
     def build(self) -> dict:
         from unittest.mock import patch
 
-        from launch.gui import menu_picker
+        from launch.gui import picker_widget
 
         captured: dict = {}
 
@@ -122,9 +122,9 @@ class TestMouseSupportIsEnabled(unittest.TestCase):
 
             def run(self) -> None: ...
 
-        with patch.object(menu_picker, "Application", FakeApp):
-            menu_picker.pick_with_preview(
-                "t", [menu_picker.PickerEntry(display=[("", "row")], value=None)])
+        with patch.object(picker_widget, "Application", FakeApp):
+            picker_widget.pick_with_preview(
+                "t", [picker_widget.PickerEntry(display=[("", "row")], value=None)])
         return captured
 
     def test_the_application_is_built_with_mouse_support(self):

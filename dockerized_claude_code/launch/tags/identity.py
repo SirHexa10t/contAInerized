@@ -20,9 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
-from ..file_access import (
-    agent_md_index, continuable_jsonl_bytes, has_continuable_jsonl,
-    last_history_mtime,
+from ..file_access import agent_md_index
+from ..transcripts import (
+    continuable_jsonl_bytes, has_continuable_jsonl, last_history_mtime,
 )
 from ..paths import instance_state_dir_path, state_md_path
 from .base import DockerContribution, Tag

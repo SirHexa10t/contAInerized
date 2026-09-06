@@ -2,11 +2,13 @@
 coordinator plus its whitelist/status submodules).
 
 Everything here runs without DNS, docker, or threads-under-test: the pure
-transformations (_expand_whitelist, _cdn_provider_ranges, _tokens_for,
-_iptables_rules_for, _index_by_host) are exercised directly; the cascade and
+transformations (_expand_whitelist, _tokens_for, _index_by_host) are
+exercised directly; the cascade and
 the refresher pass get a fake resolver; the updater worker is driven
 synchronously with a pre-filled queue; the status tracker writes into a tmp
-dir. Module-level state the functions share (_seen_cdn_ranges,
+dir. The fetched provider table those widening tests seed belongs to
+`cdn_ranges` and is tested in test_firewall_cdn_ranges — this file covers
+what the resolver DOES with it. Module-level state the functions share (_seen_cdn_ranges,
 _resolution_cache, _fresh_resolutions, _emitted_tokens, _all_entries_by_host,
 _phase2_queue) is reset around each test that touches it."""
 
@@ -19,28 +21,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from launch.firewall import resolver
+from launch.firewall import cdn_ranges, resolver
 from launch.firewall.resolver import (
-    HostnameEntry, _cascade, _cdn_provider_ranges, _clean_cidrs,
-    _expand_whitelist, _index_by_host, _iptables_rules_for, _is_ipv6_literal,
-    _subtract_networks, _tokens_for,
+    HostnameEntry, _cascade, _expand_whitelist, _index_by_host,
+    _is_ipv6_literal, _tokens_for,
 )
 from launch.template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
-
-# Provider ranges are fetched at launch, never baked — tests seed this stand-in
-# table via resolver._set_provider_blocks so widening policy is exercised
-# against known data. Addresses below sit inside these seeded blocks.
-_TEST_PROVIDER_BLOCKS = {
-    "cloudflare": ["104.16.0.0/13", "172.64.0.0/13", "198.41.128.0/17"],
-    "fastly": ["151.101.0.0/16", "199.232.0.0/16"],
-    "multi": ["192.0.2.0/24", "198.18.0.0/15", "203.0.112.0/24"],
-}
-_CLOUDFLARE_IP = "104.16.1.1"        # inside seeded cloudflare 104.16.0.0/13
-_FASTLY_IP = "151.101.1.1"           # inside seeded fastly 151.101.0.0/16
-_MULTI_IP = "198.18.5.5"             # inside seeded multi 198.18.0.0/15
-_NON_CDN_IP = "203.0.113.7"          # TEST-NET-3 — in no seeded block
+from launch.tests.test_firewall_cdn_ranges import (
+    _CLOUDFLARE_IP, _FASTLY_IP, _MULTI_IP, _NON_CDN_IP, _TEST_PROVIDER_BLOCKS,
+)
 
 
 class TestExpandWhitelist(unittest.TestCase):
@@ -127,174 +118,16 @@ class TestIsIpv6Literal(unittest.TestCase):
             self.assertFalse(_is_ipv6_literal(entry), entry)
 
 
-class TestCleanCidrs(unittest.TestCase):
-    """Fetched range lists are external input: only well-formed IPv4 CIDRs
-    may survive into rule generation, in collapsed canonical form."""
-
-    def test_garbage_and_v6_dropped(self):
-        cleaned = _clean_cidrs(["104.16.0.0/13", "2606:4700::/32", "not-a-range", ""])
-        self.assertEqual(cleaned, ["104.16.0.0/13"])
-
-    def test_adjacent_blocks_collapse(self):
-        self.assertEqual(_clean_cidrs(["10.0.0.0/25", "10.0.0.128/25"]), ["10.0.0.0/24"])
-
-    def test_host_bits_normalized(self):
-        # Lenient on sloppy published data: host bits are masked, not fatal.
-        self.assertEqual(_clean_cidrs(["10.0.0.5/24"]), ["10.0.0.0/24"])
-
-
-class TestSubtractNetworks(unittest.TestCase):
-    """Netmask-aware difference — the 'provider's own services' computation
-    for providers that publish all-space and rentable-space separately."""
-
-    def test_removal_inside_base_splits_it(self):
-        result = _subtract_networks(["10.0.0.0/8"], ["10.1.0.0/16"])
-        self.assertNotIn("10.0.0.0/8", result)
-        nets = [ipaddress.IPv4Network(c) for c in result]
-        self.assertFalse(any(ipaddress.IPv4Address("10.1.2.3") in n for n in nets))
-        self.assertTrue(any(ipaddress.IPv4Address("10.2.2.3") in n for n in nets))
-
-    def test_removal_covering_base_erases_it(self):
-        self.assertEqual(_subtract_networks(["10.5.0.0/16"], ["10.0.0.0/8"]), [])
-
-    def test_equal_networks_cancel(self):
-        self.assertEqual(_subtract_networks(["192.0.2.0/24"], ["192.0.2.0/24"]), [])
-
-    def test_disjoint_removal_changes_nothing(self):
-        self.assertEqual(_subtract_networks(["192.0.2.0/24"], ["198.51.100.0/24"]), ["192.0.2.0/24"])
-
-
-class TestRangeParsers(unittest.TestCase):
-    """Each provider fetcher's parsing, driven by canned payloads — no
-    resolver involved (_http_get is patched per test)."""
-
-    def _with_body(self, fetcher, body):
-        with patch.object(resolver, "_http_get", return_value=body):
-            return fetcher()
-
-    def test_cloudflare_plain_text_lines(self):
-        self.assertEqual(
-            self._with_body(resolver._cloudflare_ranges, "104.16.0.0/13\n172.64.0.0/13\n"),
-            ["104.16.0.0/13", "172.64.0.0/13"],
-        )
-
-    def test_fastly_addresses_key(self):
-        body = '{"addresses": ["151.101.0.0/16"], "ipv6_addresses": ["2a04:4e40::/32"]}'
-        self.assertEqual(self._with_body(resolver._fastly_ranges, body), ["151.101.0.0/16"])
-
-    def test_github_meta_edge_services_v4_only(self):
-        body = ('{"web": ["140.82.112.0/20", "2a0a:a440::/29"], "api": ["140.82.112.0/20"],'
-                ' "git": ["192.30.252.0/22"], "packages": [], "pages": ["185.199.108.0/22"],'
-                ' "actions": ["4.148.0.0/16"]}')   # actions is NOT an edge service — ignored
-        self.assertEqual(
-            self._with_body(resolver._github_ranges, body),
-            ["140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22"],
-        )
-
-    def test_cloudfront_filters_aws_service(self):
-        body = ('{"prefixes": ['
-                '{"ip_prefix": "13.32.0.0/15", "service": "CLOUDFRONT"},'
-                '{"ip_prefix": "52.94.76.0/22", "service": "EC2"}]}')
-        self.assertEqual(self._with_body(resolver._cloudfront_ranges, body), ["13.32.0.0/15"])
-
-    def test_google_subtracts_rentable_cloud_space(self):
-        payloads = {
-            "https://www.gstatic.com/ipranges/goog.json":
-                '{"prefixes": [{"ipv4Prefix": "192.0.2.0/24"}, {"ipv4Prefix": "198.51.100.0/24"}, {"ipv6Prefix": "2001:db8::/32"}]}',
-            "https://www.gstatic.com/ipranges/cloud.json":
-                '{"prefixes": [{"ipv4Prefix": "198.51.100.0/25"}]}',
-        }
-        with patch.object(resolver, "_http_get", side_effect=payloads.__getitem__):
-            self.assertEqual(resolver._google_ranges(), ["192.0.2.0/24", "198.51.100.128/25"])
-
-    def test_registry_names_match_fetchers(self):
-        self.assertEqual(set(resolver._RANGE_FETCHERS),
-                         {"cloudflare", "fastly", "github", "cloudfront", "google"})
-
-
-class TestLoadCdnRanges(unittest.TestCase):
-    """The per-provider degradation chain: fresh cache → fetch(+save) →
-    stale cache → skipped provider."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        tmp = Path(self.tmpdir.name)
-        self._patches = [
-            patch.object(resolver, "cdn_ranges_cache_path", lambda p: tmp / f"{p}.txt"),
-            patch.object(resolver, "_RANGE_FETCHERS", {"good": lambda: ["192.0.2.0/24"],
-                                                      "bad": self._raise}),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        resolver._set_provider_blocks({})
-        self.tmpdir.cleanup()
-
-    @staticmethod
-    def _raise():
-        raise OSError("fetch refused")
-
-    def test_fetch_populates_and_saves(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            resolver._load_cdn_ranges()
-        self.assertEqual(resolver._provider_blocks["good"], ["192.0.2.0/24"])
-        self.assertEqual(resolver._read_cached_ranges("good"), ["192.0.2.0/24"])
-
-    def test_fresh_cache_skips_fetch(self):
-        resolver._save_cached_ranges("good", ["198.51.100.0/24"])
-        fetchers = {"good": MagicMock()}
-        with patch.object(resolver, "_RANGE_FETCHERS", fetchers):
-            resolver._load_cdn_ranges()
-        fetchers["good"].assert_not_called()
-        self.assertEqual(resolver._provider_blocks["good"], ["198.51.100.0/24"])
-
-    def test_failed_fetch_falls_back_to_stale_cache(self):
-        resolver._save_cached_ranges("bad", ["203.0.113.0/24"])
-        with patch.object(resolver, "is_file_recent", return_value=False), \
-             contextlib.redirect_stderr(io.StringIO()) as err:
-            resolver._load_cdn_ranges()
-        self.assertEqual(resolver._provider_blocks["bad"], ["203.0.113.0/24"])
-        self.assertIn("stale", err.getvalue())
-
-    def test_failed_fetch_without_cache_skips_provider_only(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            resolver._load_cdn_ranges()
-        self.assertNotIn("bad", resolver._provider_blocks)
-        self.assertIn("good", resolver._provider_blocks)   # one dead provider can't sink the rest
-        self.assertIn("no ranges for bad", err.getvalue())
-
-
 class _SeededProvidersMixin(unittest.TestCase):
     """Install the stand-in provider table around each widening-policy test."""
 
     def setUp(self):
-        resolver._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
+        cdn_ranges.set_provider_blocks(_TEST_PROVIDER_BLOCKS)
         resolver._seen_cdn_ranges.clear()
 
     def tearDown(self):
-        resolver._set_provider_blocks({})
+        cdn_ranges.set_provider_blocks({})
         resolver._seen_cdn_ranges.clear()
-
-
-class TestCdnProviderRanges(_SeededProvidersMixin):
-    def test_cloudflare_ip_detected_with_containing_block(self):
-        provider, ranges = _cdn_provider_ranges([_CLOUDFLARE_IP])
-        self.assertEqual(provider, "cloudflare")
-        self.assertEqual(ranges, ["104.16.0.0/13"])
-
-    def test_non_cdn_ip_yields_nothing(self):
-        self.assertEqual(_cdn_provider_ranges([_NON_CDN_IP]), (None, []))
-
-    def test_mixed_ips_collect_all_matched_blocks(self):
-        provider, ranges = _cdn_provider_ranges([_CLOUDFLARE_IP, _NON_CDN_IP, "104.16.200.1"])
-        self.assertEqual(provider, "cloudflare")
-        self.assertEqual(ranges, ["104.16.0.0/13"])   # both CF IPs share one block — no duplicate
-
-    def test_malformed_token_skipped(self):
-        self.assertEqual(_cdn_provider_ranges(["not-an-ip", ""]), (None, []))
 
 
 class TestTokensFor(_SeededProvidersMixin):
@@ -582,77 +415,6 @@ class TestResolveARecords(unittest.TestCase):
         self.assertEqual(resolver._fresh_resolutions, {"hit.com": ["1.1.1.1"]})
 
 
-class TestIptablesRulesFor(unittest.TestCase):
-    def test_default_ports_open_https_and_http(self):
-        rules = _iptables_rules_for("1.2.3.4")
-        self.assertEqual(rules, [
-            "iptables -I OUTPUT 1 -d 1.2.3.4 -p tcp --dport 443 -j ACCEPT",
-            "iptables -I OUTPUT 1 -d 1.2.3.4 -p tcp --dport 80 -j ACCEPT",
-        ])
-
-    def test_explicit_port_opens_only_that_port(self):
-        rules = _iptables_rules_for("1.2.3.4:8443")
-        self.assertEqual(rules, ["iptables -I OUTPUT 1 -d 1.2.3.4 -p tcp --dport 8443 -j ACCEPT"])
-
-    def test_cidr_token_accepted(self):
-        rules = _iptables_rules_for("104.16.0.0/13")
-        self.assertEqual(len(rules), 2)
-        self.assertIn("-d 104.16.0.0/13", rules[0])
-
-    def test_malformed_token_dropped_with_warning(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            rules = _iptables_rules_for("$(reboot)")
-        self.assertEqual(rules, [])
-        self.assertIn("dropping malformed", err.getvalue())
-
-    def test_shell_injection_attempt_dropped(self):
-        # These strings are `&&`-joined into a `sh -c` script — nothing that
-        # fails the strict address shape may produce a rule.
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(_iptables_rules_for("1.2.3.4; reboot"), [])
-            self.assertEqual(_iptables_rules_for("1.2.3.4:80; reboot"), [])
-
-
-class TestFlushRules(unittest.TestCase):
-    def _flush(self, tokens, returncodes):
-        """Run _flush_rules with a scripted docker-exec; returns the scripts
-        executed (one per exec call)."""
-        scripts = []
-        codes = iter(returncodes)
-
-        def fake_exec(container, *cmd):
-            scripts.append(cmd[-1])
-            return SimpleNamespace(returncode=next(codes, 0), stdout="", stderr="boom")
-
-        with patch("launch.docker_config.docker_exec_root_subprocess", side_effect=fake_exec):
-            resolver._flush_rules("c", tokens)
-        return scripts
-
-    def test_burst_becomes_single_exec(self):
-        # 10 tokens × 2 default ports = 20 rules — well under the chunk cap.
-        scripts = self._flush([f"1.2.3.{i}" for i in range(10)], [0])
-        self.assertEqual(len(scripts), 1)
-        self.assertEqual(scripts[0].count("iptables -I"), 20)
-        self.assertIn(" && ", scripts[0])
-
-    def test_large_burst_chunks_at_cap(self):
-        # 75 tokens × 2 ports = 150 rules → 2 execs at the 100-rule cap.
-        scripts = self._flush([f"10.0.0.{i}:443" for i in range(150)], [0, 0])
-        self.assertEqual(len(scripts), 2)
-
-    def test_failed_chunk_retries_once_then_warns(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            scripts = self._flush(["1.2.3.4"], [1, 1])
-        self.assertEqual(len(scripts), 2)   # first try + one retry
-        self.assertIn("batched iptables insert failed", err.getvalue())
-
-    def test_retry_success_does_not_warn(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            scripts = self._flush(["1.2.3.4"], [1, 0])
-        self.assertEqual(len(scripts), 2)
-        self.assertEqual(err.getvalue(), "")
-
-
 class TestUpdaterWorkerBatching(unittest.TestCase):
     """_updater_worker drains everything already queued into one flush —
     the pacing fix: one docker exec per resolution burst, not per rule —
@@ -671,9 +433,9 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
 
         with patch.object(resolver, "_phase2_queue", q), \
              patch.object(resolver, "_start_refresher") as start_refresher, \
-             patch("launch.docker_config.wait_for_container_running", return_value=True), \
-             patch("launch.docker_config.wait_for_firewall_applied", return_value=True), \
-             patch("launch.docker_config.docker_exec_root_subprocess", side_effect=fake_exec):
+             patch("launch.firewall.resolver.wait_for_container_running", return_value=True), \
+             patch("launch.firewall.resolver.wait_for_firewall_applied", return_value=True), \
+             patch("launch.firewall.iptables.docker_exec_root_subprocess", side_effect=fake_exec):
             resolver._updater_worker("claude-code_test")
         return exec_calls, start_refresher
 
@@ -700,9 +462,9 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
         q.put("1.2.3.4")
         with patch.object(resolver, "_phase2_queue", q), \
              patch.object(resolver, "_start_refresher") as start_refresher, \
-             patch("launch.docker_config.wait_for_container_running", return_value=False), \
-             patch("launch.docker_config.wait_for_firewall_applied") as gate, \
-             patch("launch.docker_config.docker_exec_root_subprocess") as ex:
+             patch("launch.firewall.resolver.wait_for_container_running", return_value=False), \
+             patch("launch.firewall.resolver.wait_for_firewall_applied") as gate, \
+             patch("launch.firewall.iptables.docker_exec_root_subprocess") as ex:
             resolver._updater_worker("claude-code_test")
         ex.assert_not_called()
         gate.assert_not_called()
@@ -716,9 +478,9 @@ class TestUpdaterWorkerBatching(unittest.TestCase):
         q.put("1.2.3.4")
         with patch.object(resolver, "_phase2_queue", q), \
              patch.object(resolver, "_start_refresher") as start_refresher, \
-             patch("launch.docker_config.wait_for_container_running", return_value=True), \
-             patch("launch.docker_config.wait_for_firewall_applied", return_value=False), \
-             patch("launch.docker_config.docker_exec_root_subprocess") as ex:
+             patch("launch.firewall.resolver.wait_for_container_running", return_value=True), \
+             patch("launch.firewall.resolver.wait_for_firewall_applied", return_value=False), \
+             patch("launch.firewall.iptables.docker_exec_root_subprocess") as ex:
             resolver._updater_worker("claude-code_test")
         ex.assert_not_called()
         start_refresher.assert_not_called()
@@ -820,7 +582,7 @@ class _EmitterStateMixin(unittest.TestCase):
     empty emission ledgers, and a hand-built _all_entries_by_host."""
 
     def setUp(self):
-        resolver._set_provider_blocks(_TEST_PROVIDER_BLOCKS)
+        cdn_ranges.set_provider_blocks(_TEST_PROVIDER_BLOCKS)
         resolver._seen_cdn_ranges.clear()
         resolver._emitted_tokens.clear()
         resolver._fresh_resolutions.clear()
@@ -831,7 +593,7 @@ class _EmitterStateMixin(unittest.TestCase):
 
     def tearDown(self):
         self._status_patch.stop()
-        resolver._set_provider_blocks({})
+        cdn_ranges.set_provider_blocks({})
         resolver._seen_cdn_ranges.clear()
         resolver._emitted_tokens.clear()
         resolver._fresh_resolutions.clear()
@@ -883,7 +645,7 @@ class TestRefreshPass(_EmitterStateMixin):
         flushed, saves = [], []
         with patch.object(resolver, "_resolve_a_records",
                           side_effect=lambda h, timeout: resolutions.get(h, [])), \
-             patch.object(resolver, "_flush_rules",
+             patch.object(resolver.iptables, "flush",
                           side_effect=lambda c, tokens: flushed.append(tokens)), \
              patch.object(resolver, "_save_resolution_cache",
                           side_effect=lambda m: saves.append(m)):
@@ -947,7 +709,7 @@ class TestPhase1CriticalWidening(_EmitterStateMixin):
         entries = [resolver.HostnameEntry(h, h, "") for h in resolved]
         self._entries(*[(h, "", False) for h in resolved])
         with patch.object(resolver, "_cascade", side_effect=fake_cascade), \
-             patch.object(resolver, "_load_cdn_ranges"), \
+             patch.object(resolver.cdn_ranges, "load"), \
              patch.object(resolver.threading, "Thread") as thread_cls:
             resolver._selftest_addr = None
             tokens = resolver._phase1_worker(entries, [], [])

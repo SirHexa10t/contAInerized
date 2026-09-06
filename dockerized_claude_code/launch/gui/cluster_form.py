@@ -1,7 +1,7 @@
 """The cluster-membership form — pick agents, get members.
 
 This is the widget `cluster_plan.md` flagged as its own milestone: the tag form
-(`tag_form.checkbox_form`) TOGGLES a fixed set, while a cluster membership is a
+(`form_core.checkbox_form`) TOGGLES a fixed set, while a cluster membership is a
 GROWING LIST — picking an agent that is already in adds *another* of it, which
 is how a devteam holds two researchers. So this is a separate form with
 accumulator semantics, not a checkbox variant.
@@ -13,9 +13,21 @@ only grows and shrinks the list; every id the confirm will create is PREVIEWED
 live in the members panel, so the auto-derived roles (`legoset.auto_roles` —
 `golem__1`, `golem__2`) are never a surprise.
 
-Same split as tag_form: the interactive Application here stays out of unit
-scope, so everything with rules — prefill, add/remove, the id preview — is a
-pure helper the tests exercise directly, and the app is a thin loop over them.
+Same split as the tag form: the interactive Application here stays out of unit
+scope. The rules it needs — what a pick is, adding/removing one, and which
+member ids a pick list would produce — are NOT here: they live beside the
+rest of the pick algebra in `cluster.legoset` (moved 2026-09-03), which had
+always owned `auto_roles`/`assemble`/`reassemble` over the very same shape.
+This module is the typing surface; the app is a thin loop over those.
+
+It also RUNS ON form_core's shared scaffold rather than restating it:
+`confirm_gate` (so the really-done? question has the same words, the same
+rules and — the bug that prompted the extraction — the same PLACEMENT as the
+tag form's), plus `answer_first_bind`, `header_windows`,
+`confirm_row_fragments` and `TextField`. What stays local is what genuinely
+differs: every key here is dual-purpose (Space is a literal inside a text
+field but "one more of this agent" on an agent row), so one abstraction over
+two key semantics would cost more than the copies it saved.
 """
 
 from __future__ import annotations
@@ -32,17 +44,12 @@ from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
-from ..cluster.legoset import ClusterTemplate, auto_roles
-from ..cluster.member import member_id
-from .tag_form import (
-    STYLE_DICT, TITLE_HEIGHT, UNCHANGED_QUESTION, TextField, UiClass,
-    _fragment_source, field_errors, field_row_fragments, refresh_auto,
+from ..cluster.legoset import Pick, add_pick, preview_ids, remove_last
+from .form_core import (
+    TextField, answer_first_bind, confirm_gate, confirm_row_fragments,
+    field_errors, field_row_fragments, header_windows, refresh_auto,
 )
-
-# One pick = (agent, role | None). None means "the form added this one" — the
-# role is auto-derived at confirm; a string is a role a TEMPLATE shipped, kept
-# verbatim (researcher__primary survives any amount of adding and removing).
-Pick = tuple[str, str | None]
+from .styles import STYLE_DICT, UiClass, _fragment_source
 
 # Mirrors menu_picker.STYLE_AGENT_NAME (not imported: menu_picker imports this
 # module, and the picker's style constants are not worth a shared module yet).
@@ -54,59 +61,6 @@ HINT_TEXT = ("  Space/+ add another of this agent · Backspace/- remove its last
              " · Enter create · Esc cancel")
 EMPTY_WARNING = "  no members yet — Space on an agent adds one"
 
-
-def prefill_picks(template: ClusterTemplate) -> list[Pick]:
-    """A template's members as the form's starting picks.
-
-    A role equal to the agent's own name is `Member.of`'s DEFAULT — the
-    template said nothing — so it comes back as None. That matters when the
-    user then adds a second of that agent: both entries renumber
-    (`golem__1`/`golem__2`), which a kept literal `golem` role would prevent
-    (it would pin the id while its twin got a number)."""
-    return [(m.agent, None if m.role == m.agent else m.role)
-            for m in template.members]
-
-
-def add_pick(picks: list[Pick], agent: str) -> None:
-    """Picking an agent ADDS AN ENTRY — the interaction this form exists for.
-    Appended at the end; pick SEQUENCE only drives duplicate numbering
-    (`golem__1` was picked before `golem__2`) — display and window order are
-    derived by picker-sort everywhere (state.picker_order), so where in the
-    session a pick lands is not something the user has to compose."""
-    picks.append((agent, None))
-
-
-def remove_last(picks: list[Pick], agent: str) -> None:
-    """Remove that agent's LAST entry (no-op at zero).
-
-    Last-in-first-out, and template entries are not protected: prefills are a
-    starting point, never a lock, so shrinking `devteam`'s two researchers to
-    one drops `adversarial` first — the most recently listed."""
-    for index in range(len(picks) - 1, -1, -1):
-        if picks[index][0] == agent:
-            del picks[index]
-            return
-
-
-def preview_ids(picks: list[Pick], agent_rank: dict[str, int] | None = None) -> list[str]:
-    """The member ids confirming NOW would create — rendered live so the
-    auto-derived roles are visible before anything is persisted.
-
-    With `agent_rank` (agent name → its position in the form's agent list,
-    which arrives in picker order), ids come back in the DERIVED order the
-    cluster will actually display and launch in — so the panel is a truthful
-    preview of the window list, not of a pick sequence that carries no
-    meaning. Without it (rank unknown), pick order is kept."""
-    ids = [(agent, member_id(agent, role)) for agent, role in auto_roles(picks)]
-    if agent_rank is not None:
-        ids.sort(key=lambda pair: (agent_rank.get(pair[0], len(agent_rank)),
-                                   pair[1]))
-    return [identifier for _, identifier in ids]
-
-
-# TextField and its helpers live in tag_form (the shared form machinery, used
-# by both this form and the instance/tag form); re-exported here because this
-# module introduced them and its callers import them from here.
 
 
 def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
@@ -192,16 +146,26 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
                 if i:
                     out.append((UiClass.STATUS.css, " · "))
                 out.append((STYLE_MEMBER_NAME, identifier))
-        for complaint in field_errors(field_rows):
-            out.append((UiClass.WARNING.css, f"\n  {complaint}"))
-        if state["asked"]:
-            out.append((UiClass.TITLE.css, f"\n  {UNCHANGED_QUESTION}"))
+        return out
+
+    def warning_fragments() -> list[tuple[str, str]]:
+        """Field complaints + the really-done? question, in their OWN
+        `dont_extend_height` window just above the confirm row — the same
+        place the tag form puts them. They used to ride the members panel,
+        which is the FLEXIBLE filler, so they top-aligned under the options
+        while the tag form's hugged the button: the same message in two
+        different places (reported 2026-09-02)."""
+        out: list[tuple[str, str]] = [
+            (UiClass.WARNING.css, f"  {complaint}\n")
+            for complaint in field_errors(field_rows)]
+        out += [(style, text + "\n") for style, text in gate.question()]
+        if out:
+            out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
         return out
 
     def confirm_fragments() -> list[tuple[str, str]]:
-        style = (UiClass.CURSOR.css if state["cursor"] == confirm_index
-                 else UiClass.TITLE.css)
-        return [("", "  "), (style, CONFIRM_LABEL)]
+        return confirm_row_fragments(CONFIRM_LABEL,
+                                     state["cursor"] == confirm_index)
 
     def cursor_pos() -> Point:
         return Point(0, min(state["cursor"], confirm_index - 1))
@@ -224,7 +188,7 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
         if (agent := focused_agent()) is not None:
             add_pick(state["picks"], agent)
         else:
-            confirm(event)
+            gate.confirm(event)
 
     def erase(event: KeyPressEvent) -> None:
         """Backspace: delete before the cursor on a field, remove that
@@ -285,43 +249,18 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
             typed(field, event.data)
 
     refresh_auto(field_rows)   # the initial derivation, before any keystroke
-    # The really-done? baseline — same rule as checkbox_form: a confirm that
-    # changed neither a field nor the membership asks first, fields-only forms
-    # excepted (there are none here in practice, but the tests drive some).
-    baseline = (tuple(f.value for f in field_rows), tuple(state["picks"]))
-
-    def unchanged() -> bool:
-        return baseline == (tuple(f.value for f in field_rows),
-                            tuple(state["picks"]))
-
-    def confirm(event: KeyPressEvent) -> None:
-        if not state["picks"] or field_errors(field_rows):
-            return           # the warning zone is already explaining
-        if field_rows and unchanged() and not state["asked"]:
-            state["asked"] = True   # UNCHANGED_QUESTION renders; `answers` consumes the reply
-            return
-        state["confirmed"] = True
-        event.app.exit()
-
-    def answers(event: KeyPressEvent) -> bool:
-        """While the really-done? question is up, the NEXT key is its answer
-        and is CONSUMED — `y` closes, anything else stays — so an `n` cannot
-        leak into a field as text. True = this key was the answer."""
-        if not state["asked"]:
-            return False
-        state["asked"] = False
-        if event.data in ("y", "Y"):
-            state["confirmed"] = True
-            event.app.exit()
-        return True
+    # The shared confirm/really-done? machine (form_core.confirm_gate) — same
+    # words, same rules, same rendering as the tag form. Its snapshot spans
+    # BOTH things a user can change here: the fields and the membership.
+    gate = confirm_gate(
+        snapshot=lambda: (tuple(f.value for f in field_rows),
+                          tuple(state["picks"])),
+        ready=lambda: bool(state["picks"]) and not field_errors(field_rows),
+        asks_when_unchanged=bool(field_rows))
 
     kb = KeyBindings()
 
-    def bind(key: Keys | str, handler: Callable[[KeyPressEvent], None]) -> None:
-        def wrapped(event: KeyPressEvent) -> None:
-            if not answers(event):
-                handler(event)
-        kb.add(key)(wrapped)
+    bind = answer_first_bind(kb, gate)
 
     bind("up", lambda event: move(-1))
     bind("down", lambda event: move(1))
@@ -336,17 +275,12 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
     bind("backspace", erase)
     bind("delete", delete_key)
     bind("-", minus)
-    bind("enter", confirm)
+    bind("enter", gate.confirm)
     bind("escape", lambda event: event.app.exit())
     bind("c-c", lambda event: event.app.exit())
     bind(Keys.Any, type_char)
 
-    header: list[Window] = [Window(FormattedTextControl(
-        _fragment_source(lambda: [(UiClass.TITLE.css, title)])), height=TITLE_HEIGHT)]
-    if preamble_lines:
-        header.append(Window(FormattedTextControl(_fragment_source(
-            lambda: [(UiClass.STATUS.css, "\n".join(preamble_lines))])),
-            height=len(preamble_lines)))
+    header = header_windows(title, preamble_lines)
     hint = (("  type into the focused field · " if field_rows else "  ")
             + HINT_TEXT.strip())
     Application(
@@ -362,6 +296,8 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
             # tag form's explanation zone does.
             Window(FormattedTextControl(_fragment_source(members_fragments)),
                    wrap_lines=True),
+            Window(FormattedTextControl(_fragment_source(warning_fragments)),
+                   wrap_lines=True, dont_extend_height=True),
             Window(height=1, char=" "),
             Window(FormattedTextControl(_fragment_source(confirm_fragments)), height=1),
             Window(FormattedTextControl(_fragment_source(
@@ -371,6 +307,6 @@ def prompt_members(agents: list[tuple[str, str]], initial: list[Pick], *,
         style=Style.from_dict(STYLE_DICT),
         full_screen=True,
     ).run()
-    if not state["confirmed"]:
+    if not gate.confirmed():
         return None
     return {f.key: f.value.strip() for f in field_rows}, state["picks"]

@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from launch.cluster import herdr
-from launch.cluster.tmux import Pane
+from launch.cluster.panes import Pane
 
 
 def a_pane(name: str = "golem", command: tuple[str, ...] = ("claude",),
@@ -163,19 +163,17 @@ class TestHerdrScript(unittest.TestCase):
             herdr.script("team", (), shell_cwd=Path("/workspace"))
 
 
-class TestSoloShape(unittest.TestCase):
-    """script(solo=True): the agent IS the workspace root pane, the free
-    shell a split beneath it — ONE tab, renamed after the agent, because the
-    tab row STAYS: its right corner carries the key hint (tab_bar_right)."""
+class TestOneAgentShape(unittest.TestCase):
+    """A SOLO launch is just `script()` with one agent — there is no shape
+    flag any more. It briefly also split a shell beneath the agent (the tmux
+    layout, translated); the operator asked for the tab only (2026-09-03),
+    which left the two shapes identical and the `solo=` parameter dead."""
 
     def script(self, pane: Pane | None = None) -> str:
         return herdr.script("inst__proj", (pane or a_pane("agent"),),
-                            shell_cwd=Path("/workspace"), solo=True)
+                            shell_cwd=Path("/workspace"))
 
-    def test_the_agent_is_the_root_pane_not_a_tab_of_its_own(self):
-        # The agent runs in the WORKSPACE's root pane (so the shell can split
-        # beneath it in the same tab); the only tab this shape creates is the
-        # extra full-height shell.
+    def test_the_agent_is_the_root_pane_and_the_shell_is_a_tab(self):
         text = self.script()
         self.assertIn("REPLY=$(herdr workspace create", text)
         self.assertIn('herdr agent start agent --kind claude --pane "$PANE"',
@@ -184,99 +182,38 @@ class TestSoloShape(unittest.TestCase):
         self.assertEqual(len(creates), 1)
         self.assertIn("--label shell", creates[0])
 
-    def test_the_one_tab_is_renamed_after_the_agent(self):
-        # herdr labels a workspace's root tab "1"; with the tab row kept (it
-        # carries the hint), the solo tab must read as the agent line it is.
-        # The id is fished from the create reply, tolerant like every
-        # cosmetic line — a failed rename must not kill PID 1.
+    def test_NO_pane_is_split_anywhere(self):
+        # THE bug: an extra shell sat at the bottom of every solo screen once
+        # the shell tab existed. One shell, one place — the rightmost tab.
         text = self.script()
-        rename = next(line for line in text.splitlines()
+        self.assertNotIn("pane split", text)
+        self.assertNotIn("SHELL_PANE", text)
+        self.assertNotIn("--ratio", text)
+
+    def test_the_one_agent_tab_is_renamed_after_the_agent(self):
+        # herdr labels a workspace's root tab "1"; the tab row is the key
+        # hint's surface, so it must read as the agent line it is.
+        rename = next(line for line in self.script().splitlines()
                       if "tab rename" in line)
         self.assertIn('"$TAB"', rename)
         self.assertIn(" agent ", rename)
         self.assertIn("|| :", rename)
 
-    def test_the_shell_splits_below_without_stealing_focus(self):
-        text = self.script()
-        split = next(line for line in text.splitlines()
-                     if "pane split" in line)
-        self.assertIn("--direction down", split)
-        self.assertIn(f"--ratio {herdr.AGENT_RATIO}", split)
-        self.assertIn("--cwd /workspace", split)
-        self.assertIn("--no-focus", split)       # attach lands on the agent
-        # A failed split leaves $SHELL_PANE empty (the capture pipeline's
-        # status is sed's, so `set -e` cannot fire) — the guard line is what
-        # says so instead of killing PID 1.
-        self.assertIn("SHELL_PANE=$(", split)
-        self.assertIn('[ -n "$SHELL_PANE" ] || echo', text)
-
-    def test_no_greeting_is_typed_into_the_shell(self):
-        # A hint typed into the shell pane was SHIPPED and then REVERSED by
-        # the operator (2026-08-29): "they don't belong there" — the hint
-        # lives at the top, in the tab row the solo shape keeps. `pane run`
-        # types into a pane's shell, so its presence here would mean the
-        # script is writing into the operator's terminal again.
-        self.assertNotIn("pane run", self.script())
-
-    def test_the_shell_pane_is_named_plainly(self):
-        # The label RENDERS on the split frame (screenshot-verified
-        # 2026-08-30, correcting an earlier "draws nothing" reading) — which
-        # is exactly why it must stay a bare "shell": hotkey text on the
-        # shell's frame was reported as clutter the moment the tab-row corner
-        # hint landed. The hint has ONE home (tab_bar_right).
-        text = self.script()
-        rename = next(line for line in text.splitlines()
-                      if "pane rename" in line)
-        self.assertIn('"$SHELL_PANE"', rename)
-        self.assertIn(f" {herdr.SHELL_LABEL} ", rename + " ")
-        self.assertNotIn("alt+", herdr.SHELL_LABEL)
-        self.assertIn("|| :", rename)
-
-    def test_the_agent_keeps_the_larger_share(self):
-        # `--ratio` sizes the pane BEING SPLIT — the agent. A 0.22 first guess
-        # shipped Claude Code into the small pane and the shell into the big
-        # one (caught by the operator's screenshot of the first live launch),
-        # so the semantics are pinned as an inequality, not a number.
-        self.assertGreater(float(herdr.AGENT_RATIO), 0.5)
-
     def test_the_key_hint_is_reported_as_workspace_metadata(self):
         # settings/herdr.toml renders `$keys` under the workspace's sidebar
-        # entry — the hint surface that survives the hidden tab row. The id
-        # comes from the pane id's prefix; `|| :` because a lost hint must
-        # never kill PID 1.
+        # entry. The id comes from the pane id's prefix; `|| :` because a
+        # lost hint must never kill PID 1.
         text = self.script()
         self.assertIn('WS="${PANE%%:*}"', text)
-        line = next(ln for ln in text.splitlines()
-                    if "report-metadata" in ln)
+        line = next(ln for ln in text.splitlines() if "report-metadata" in ln)
         self.assertIn(f"{herdr.HINT_TOKEN}=", line)
         self.assertIn("--token", line)
         self.assertIn("|| :", line)
 
-    def test_the_shell_split_precedes_the_agent_start(self):
-        # `agent start` BLOCKS until registration (or its timeout) — the
-        # shell must already exist so a slow or failed agent leaves a usable
-        # pane rather than an empty workspace.
-        text = self.script()
-        self.assertLess(text.index("pane split"), text.index("agent start"))
-
-    def test_solo_also_gets_a_full_height_shell_tab(self):
-        # The bottom split stays (the operator likes glancing at it); the tab
-        # is the full-screen one, asked for "in both" shapes.
-        text = self.script()
-        create = next(line for line in text.splitlines()
-                      if "tab create" in line)
-        self.assertIn("--label shell", create)
-        self.assertIn("--cwd /workspace", create)
-        self.assertIn("--no-focus", create)     # attach stays on the agent
-        self.assertIn("|| :", create)
-        # ...and it comes AFTER the agent is started, so a slow agent-start
-        # never delays the pane the operator watches.
-        self.assertLess(text.index("agent start"), text.index("tab create"))
-
-    def test_solo_is_exactly_one_pane(self):
-        with self.assertRaises(ValueError):
-            herdr.script("x", (a_pane("a"), a_pane("b")),
-                         shell_cwd=Path("/workspace"), solo=True)
+    def test_no_greeting_is_typed_into_any_shell(self):
+        # A hint typed into the shell pane was shipped and REVERSED ("they
+        # don't belong there"): the hint lives in the tab row's corner.
+        self.assertNotIn("pane run", self.script())
 
 
 if __name__ == "__main__":

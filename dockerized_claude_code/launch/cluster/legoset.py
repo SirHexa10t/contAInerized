@@ -153,6 +153,64 @@ def instantiate(template: ClusterTemplate, agents_dir: Path) -> tuple[Member, ..
         for member in template.members)
 
 
+# One pick = (agent, role | None). None means "chosen without a role" — it is
+# auto-derived at assembly; a string is a role a TEMPLATE shipped, kept
+# verbatim (researcher__primary survives any amount of adding and removing).
+# The shape auto_roles / assemble / reassemble below have always taken; named
+# here (with the four helpers that manipulate a pick LIST) since 2026-09-03,
+# when it moved out of gui/cluster_form — a form is where picks are typed,
+# not where what-a-pick-means belongs.
+Pick = tuple[str, str | None]
+
+def prefill_picks(template: ClusterTemplate) -> list[Pick]:
+    """A template's members as the form's starting picks.
+
+    A role equal to the agent's own name is `Member.of`'s DEFAULT — the
+    template said nothing — so it comes back as None. That matters when the
+    user then adds a second of that agent: both entries renumber
+    (`golem__1`/`golem__2`), which a kept literal `golem` role would prevent
+    (it would pin the id while its twin got a number)."""
+    return [(m.agent, None if m.role == m.agent else m.role)
+            for m in template.members]
+
+
+def add_pick(picks: list[Pick], agent: str) -> None:
+    """Picking an agent ADDS AN ENTRY — the interaction this form exists for.
+    Appended at the end; pick SEQUENCE only drives duplicate numbering
+    (`golem__1` was picked before `golem__2`) — display and window order are
+    derived by picker-sort everywhere (state.picker_order), so where in the
+    session a pick lands is not something the user has to compose."""
+    picks.append((agent, None))
+
+
+def remove_last(picks: list[Pick], agent: str) -> None:
+    """Remove that agent's LAST entry (no-op at zero).
+
+    Last-in-first-out, and template entries are not protected: prefills are a
+    starting point, never a lock, so shrinking `devteam`'s two researchers to
+    one drops `adversarial` first — the most recently listed."""
+    for index in range(len(picks) - 1, -1, -1):
+        if picks[index][0] == agent:
+            del picks[index]
+            return
+
+
+def preview_ids(picks: list[Pick], agent_rank: dict[str, int] | None = None) -> list[str]:
+    """The member ids confirming NOW would create — rendered live so the
+    auto-derived roles are visible before anything is persisted.
+
+    With `agent_rank` (agent name → its position in the form's agent list,
+    which arrives in picker order), ids come back in the DERIVED order the
+    cluster will actually display and launch in — so the panel is a truthful
+    preview of the window list, not of a pick sequence that carries no
+    meaning. Without it (rank unknown), pick order is kept."""
+    ids = [(agent, member_id(agent, role)) for agent, role in auto_roles(picks)]
+    if agent_rank is not None:
+        ids.sort(key=lambda pair: (agent_rank.get(pair[0], len(agent_rank)),
+                                   pair[1]))
+    return [identifier for _, identifier in ids]
+
+
 def auto_roles(picks: Sequence[tuple[str, str | None]]) -> list[tuple[str, str]]:
     """Final `(agent, role)` pairs for an ordered pick list, disambiguating
     duplicates without asking the user anything.

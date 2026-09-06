@@ -10,8 +10,10 @@ here at test time rather than at runtime.
 The tag tree itself (Dockerfiles, tag.info shapes, `.lego` references) is
 validated by TestTagTreeDiscovery / TestAgentLegoFiles below via scan_all."""
 
+import ast
 import re
 import unittest
+from pathlib import Path
 
 from launch import paths, tag_handlers
 from launch.tags import load_lego, scan_all
@@ -630,7 +632,6 @@ class TestTagTreeDiscovery(unittest.TestCase):
     def test_a_manager_instance_gets_the_command_and_a_plain_one_does_not(self):
         # The behaviour the whole move exists for, end to end.
         import tempfile
-        from pathlib import Path
 
         from launch.agents_crud import install_commands
         from launch.paths import state_commands_dir
@@ -660,7 +661,6 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # author's file would not be what instances run. (Two tags declaring
         # the same command is fine: one file, no shadowing.)
         import tempfile
-        from pathlib import Path
         from unittest.mock import patch
 
         from launch import agents_crud
@@ -952,6 +952,197 @@ class TestCodeToolkitManifest(unittest.TestCase):
         manifest_args = {e.build_arg for e in self.code.load_toolkit().values() if e.build_arg}
         creds_args = {f"INSTALL_{k}" for k in self.CREDS_CLI_KEYS}
         self.assertEqual(manifest_args | creds_args, arg_names)
+
+
+class TestBenchmarksStayRunnable(unittest.TestCase):
+    """`launch/benchmark/` sits outside the gate's behavioural coverage —
+    mypy and ruff read those modules, but nothing runs them, and a
+    `patch("dotted.string")` target is invisible to all three checks. So a
+    refactor that moves a function leaves the benchmark broken and silent
+    until someone runs it by hand, months later.
+
+    That is not hypothetical: the `container_probe` extraction (2026-09-03)
+    left `bench_firewall_updater` patching two names on `docker_config` that
+    had moved, and it turned out to ALSO be missing a stub for a gate added
+    to the worker after the benchmark was written — so it had been reporting
+    a fabricated "0 docker execs" rather than failing. This test costs a
+    subprocess-free import and catches both shapes."""
+
+    @staticmethod
+    def _bench_modules() -> list[Path]:
+        return sorted(p for p in (paths.DOCKERIZED_CLAUDE_ROOT / "launch" / "benchmark").glob("*.py")
+                      if p.name != "__init__.py")
+
+    @staticmethod
+    def _resolves(target: str) -> bool:
+        """True when `target` names something importable — the check
+        `unittest.mock` defers until the patch is entered. Walks the longest
+        importable prefix, then getattrs the rest, so both
+        `module.function` and `module.Class.method` resolve."""
+        import importlib
+        parts = target.split(".")
+        for split in range(len(parts) - 1, 0, -1):
+            try:
+                obj: object = importlib.import_module(".".join(parts[:split]))
+            except ImportError:
+                continue
+            for attr in parts[split:]:
+                if not hasattr(obj, attr):
+                    return False
+                obj = getattr(obj, attr)
+            return True
+        return False
+
+    def test_there_are_benchmarks_to_check(self):
+        # Guards the two tests below against passing over an empty list.
+        self.assertGreaterEqual(len(self._bench_modules()), 4)
+
+    def test_every_benchmark_still_imports(self):
+        import importlib
+        for path in self._bench_modules():
+            with self.subTest(bench=path.name):
+                importlib.import_module(f"launch.benchmark.{path.stem}")
+
+    def test_every_string_patch_target_resolves(self):
+        for path in self._bench_modules():
+            targets = [node.args[0].value
+                       for node in ast.walk(ast.parse(path.read_text()))
+                       if isinstance(node, ast.Call) and node.args
+                       and isinstance(node.args[0], ast.Constant)
+                       and isinstance(node.args[0].value, str)
+                       and "." in node.args[0].value
+                       and _called_name(node.func) in ("patch", "patch.object")]
+            for target in targets:
+                with self.subTest(bench=path.name, target=target):
+                    self.assertTrue(self._resolves(target),
+                                    f"{path.name} patches {target!r}, which no "
+                                    f"longer exists — the benchmark is broken")
+
+
+def _called_name(func: ast.expr) -> str:
+    """`patch` / `patch.object` / `mock.patch` → a comparable dotted tail."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return f"{_called_name(func.value)}.{func.attr}".removeprefix("mock.")
+    return ""
+
+
+class TestNoImportCycles(unittest.TestCase):
+    """The package's module-level import graph must be ACYCLIC.
+
+    This is a repo-hygiene invariant with a history: `docker_config ↔
+    firewall` was a real cycle for months, worked around with lazy
+    function-body imports, and `cluster/state.py` carried a `TYPE_CHECKING`
+    guard against a cycle that never existed. Both were removed 2026-09-03
+    (the shared calls moved to the leaf `container_probe`), and this test is
+    what keeps the property from quietly regressing — a cycle is easy to
+    introduce with one convenient import and invisible until an unlucky
+    import order crashes a launch.
+
+    Module-level imports ONLY, which is the honest scope: a function-body
+    import cannot deadlock module initialisation, and the two that remain in
+    the tree are there for startup cost, not for cycle-breaking."""
+
+    @staticmethod
+    def _module_name(path: Path) -> str:
+        """`launch/cluster/state.py` → `launch.cluster.state`; a package's
+        `__init__.py` carries the PACKAGE's name, since that is the name an
+        importer names and the module object the interpreter caches."""
+        parts = list(path.relative_to(paths.DOCKERIZED_CLAUDE_ROOT)
+                     .with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        return ".".join(parts)
+
+    @staticmethod
+    def _edges(module: str, is_package: bool, tree: ast.Module) -> set[str]:
+        """Every module this one names at IMPORT time. `ast.Module.body`
+        rather than `ast.walk` is the whole point: a name imported inside a
+        function body is resolved on the first call, long after both modules
+        finished initialising, so it cannot cycle.
+
+        `from . import sibling` resolves to `<pkg>.sibling` — NOT to `<pkg>`.
+        Getting that wrong reports every package whose `__init__` re-exports a
+        submodule as a cycle, which is just the parent/child relationship."""
+        package = module if is_package else module.rsplit(".", 1)[0]
+        edges: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                if node.level:                          # relative
+                    base = package.split(".")[:len(package.split(".")) - node.level + 1]
+                    prefix = ".".join(base + ([node.module] if node.module else []))
+                elif node.module and node.module.split(".")[0] == "launch":
+                    prefix = node.module
+                else:
+                    continue                            # stdlib / third party
+                # A name may be a submodule OR a member of `prefix`; keep both
+                # candidates and let the collected-modules filter decide.
+                edges.add(prefix)
+                edges.update(f"{prefix}.{alias.name}" for alias in node.names)
+            elif isinstance(node, ast.Import):
+                edges.update(alias.name for alias in node.names
+                             if alias.name.split(".")[0] == "launch")
+        return edges
+
+    def _graph(self) -> dict[str, set[str]]:
+        graph: dict[str, set[str]] = {}
+        for path in sorted((paths.DOCKERIZED_CLAUDE_ROOT / "launch").rglob("*.py")):
+            if "tests" in path.parts or "__pycache__" in path.parts:
+                continue
+            name = self._module_name(path)
+            graph[name] = self._edges(name, path.name == "__init__.py",
+                                      ast.parse(path.read_text()))
+        # Drop candidates that name a member rather than a module, a package
+        # reaching into its OWN namespace, and the child → parent-package
+        # edges that importing a submodule implies anyway (`launch.cluster.
+        # state` cannot be reached without `launch` and `launch.cluster`
+        # initialising first — inherent, not a cycle).
+        return {name: {edge for edge in edges
+                       if edge in graph and edge != name
+                       and not name.startswith(f"{edge}.")}
+                for name, edges in graph.items()}
+
+    @staticmethod
+    def _cycles(graph: dict[str, set[str]]) -> list[str]:
+        """Every cycle reachable in `graph`, each rendered as the path that
+        closes it. Depth-first with three colours: a dep found still `open` is
+        on the current stack, which is what a back edge means."""
+        colour: dict[str, str] = {}
+        found: list[str] = []
+
+        def visit(node: str, stack: list[str]) -> None:
+            colour[node] = "open"
+            for dep in sorted(graph.get(node, ())):
+                if colour.get(dep) == "open":
+                    found.append(" → ".join(stack[stack.index(dep):] + [dep]))
+                elif dep not in colour:
+                    visit(dep, stack + [dep])
+            colour[node] = "done"
+
+        for node in sorted(graph):
+            if node not in colour:
+                visit(node, [node])
+        return found
+
+    def test_the_walk_reports_a_cycle_when_there_is_one(self):
+        """The guard's own guard: without this, a `_cycles` that always
+        returned [] would make the assertion below pass forever."""
+        self.assertEqual(self._cycles({"a": {"b"}, "b": {"c"}, "c": set()}), [])
+        self.assertEqual(self._cycles({"a": {"b"}, "b": {"a"}}), ["a → b → a"])
+        self.assertEqual(self._cycles({"a": {"b"}, "b": {"c"}, "c": {"a"}}),
+                         ["a → b → c → a"])
+
+    def test_the_module_graph_has_no_cycles(self):
+        graph = self._graph()
+        # Guards against the graph coming back empty or misbuilt, which would
+        # make the acyclicity assertion pass for the wrong reason. The second
+        # names the edge that replaced the tree's last real cycle.
+        self.assertIn("launch.docker_config", graph)
+        self.assertIn("launch.container_probe", graph["launch.firewall.resolver"])
+        self.assertEqual(self._cycles(graph), [],
+                         "module-level import cycle(s) — the shared part "
+                         "belongs in a third, leaf-er module")
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ from ..paths import (
 )
 from .member import Member
 from .state import Cluster
-from .tmux import Pane
+from .panes import Pane
 from .worktree import Worktree, plan as plan_worktrees
 
 # What each member runs. A tuple so a caller can extend it (extra claude args)

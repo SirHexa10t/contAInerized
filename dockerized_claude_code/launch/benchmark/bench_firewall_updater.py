@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Benchmark: firewall-updater pacing — per-rule docker execs (the old
 scheme) vs the shipped burst-batched updater (`resolver._updater_worker` +
-`_flush_rules`).
+`iptables.flush`).
 
-No docker required: `docker_exec_root_subprocess` and
-`wait_for_container_running` are stubbed with a fixed-latency sleep standing
-in for a real `docker exec` round-trip (~50-150ms in practice; EXEC_LATENCY_S
-below is deliberately at the low end so the old scheme's simulation finishes
-quickly — real-world gaps are proportionally larger).
+No docker required: `docker_exec_root_subprocess` is stubbed with a
+fixed-latency sleep standing in for a real `docker exec` round-trip
+(~50-150ms in practice; EXEC_LATENCY_S below is deliberately at the low end
+so the old scheme's simulation finishes quickly — real-world gaps are
+proportionally larger), and the worker's two entry gates
+(`wait_for_container_running`, `wait_for_firewall_applied`) are stubbed True.
+Stub every gate the worker checks: one left real returns False without
+docker, the worker returns before flushing anything, and the benchmark
+reports a meaningless 0 execs instead of failing.
 
 Two conditions over the same token stream (the builtin whitelist size, all
 default-port → 2 rules per token):
@@ -15,7 +19,7 @@ default-port → 2 rules per token):
       inline the way `_insert_iptables_accept` used to run;
   (b) shipped batched updater — tokens arrive in BURST_COUNT bursts (a
       realistic cascade shape: most hosts resolve in pass 1, stragglers
-      trickle in), each burst drained into `_flush_rules`'s chunked
+      trickle in), each burst drained into `iptables.flush`'s chunked
       `sh -c` execs by the real `_updater_worker` code.
 
 Prints per-condition exec counts, wall time, and rules/sec.
@@ -30,7 +34,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ..firewall import resolver
+from ..firewall import iptables, resolver
 from ..template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
 
 EXEC_LATENCY_S = 0.05   # simulated docker-exec round-trip (real: ~0.05-0.15s)
@@ -51,7 +55,7 @@ def _bench_per_rule(tokens: list[str]) -> tuple[int, float]:
     fake_exec = _fake_exec_factory(counter)
     t0 = time.perf_counter()
     for token in tokens:
-        for rule in resolver._iptables_rules_for(token):
+        for rule in iptables.rules_for(token):
             fake_exec("container", "sh", "-c", rule)
     return counter[0], time.perf_counter() - t0
 
@@ -70,9 +74,13 @@ def _bench_batched(tokens: list[str]) -> tuple[int, float]:
     q.put(resolver._phase2_done)
 
     t0 = time.perf_counter()
+    # Patch the names as `resolver` sees them: both are module-level imports
+    # from `container_probe`, so patching that module would not touch the
+    # references the worker already resolved.
     with patch.object(resolver, "_phase2_queue", q), \
-         patch("launch.docker_config.wait_for_container_running", return_value=True), \
-         patch("launch.docker_config.docker_exec_root_subprocess", side_effect=_fake_exec_factory(counter)):
+         patch("launch.firewall.resolver.wait_for_container_running", return_value=True), \
+         patch("launch.firewall.resolver.wait_for_firewall_applied", return_value=True), \
+         patch("launch.firewall.iptables.docker_exec_root_subprocess", side_effect=_fake_exec_factory(counter)):
         resolver._updater_worker("bench-container")
     return counter[0], time.perf_counter() - t0
 
@@ -81,7 +89,7 @@ def main() -> None:
     # Realistic shape: every builtin domain resolved to one default-port
     # address token (real launches add user entries + apex duplicates).
     tokens = [f"192.0.2.{i % 250}" for i in range(len(BUILTIN_FIREWALL_DOMAINS))]
-    n_rules = sum(len(resolver._iptables_rules_for(t)) for t in tokens)
+    n_rules = sum(len(iptables.rules_for(t)) for t in tokens)
     print(f"Simulating {len(tokens)} resolved tokens → {n_rules} iptables rules "
           f"(exec latency {EXEC_LATENCY_S * 1000:.0f} ms, {BURST_COUNT} resolution bursts).")
     print()

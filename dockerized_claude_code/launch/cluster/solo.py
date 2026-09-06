@@ -34,6 +34,7 @@ from ..paths import (
 )
 from ..tags.identity import Instance
 from . import backend, herdr, tmux
+from .panes import AGENT_PANE, Pane
 
 SCRIPT_NAME = "muxer-start.sh"      # written into the instance state dir each launch
 # What the container runs. Declared in `agents/specialty/muxer/tag.docker` too —
@@ -74,16 +75,16 @@ def install_launcher(inst: Instance, agent_argv: tuple[str, ...]) -> str:
     the better half of a pre-existing gap.
     """
     host, container = script_paths(inst)
-    agent = tmux.Pane(name=tmux.AGENT_PANE, command=agent_argv,
-                      cwd=WORKSPACE_IN_CONTAINER)
+    agent = Pane(name=AGENT_PANE, command=agent_argv,
+                 cwd=WORKSPACE_IN_CONTAINER)
     if backend() == "herdr":
         # No unset_env, no setup_commands: enabling sibling messaging (and its
         # telemetry cost) is a CLUSTER trade — a solo instance keeps the
-        # image's kill-switch. solo=True is the tmux solo layout translated:
-        # the agent IS the workspace root pane, the free shell splits beneath
-        # it, one tab named after the agent (the tab row carries the key hint).
+        # image's kill-switch. No shape flag: herdr.script builds ONE shape
+        # (root tab = first agent, shell tab last), and a solo launch is that
+        # with a single agent — the same tab row a cluster shows.
         text = herdr.script(inst.instance, (agent,),
-                            shell_cwd=WORKSPACE_IN_CONTAINER, solo=True)
+                            shell_cwd=WORKSPACE_IN_CONTAINER)
     else:
         text = tmux.script(
             inst.instance, (agent,),

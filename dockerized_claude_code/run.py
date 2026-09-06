@@ -1,4 +1,30 @@
 #!/usr/bin/env python3
+"""The launcher's front door: pick an agent, build its image, run it.
+
+This is the file to read first. It owns no launch logic of its own — every
+stage below delegates into `launch/`, and what lives here is the ORDER those
+stages run in and the handful of decisions that need the whole picture (which
+shape of target was picked, whether docker is even usable, when to refuse a
+second container for something already running).
+
+    parse_cli / gather_input  argv → LaunchOptions; runs the picker when no
+                              target was named, and short-circuits `--stop`
+    resolve_target            an Agent or Instance row → the full Instance
+                              identity a launch needs (tags, session, engine)
+    setup_state               state dirs, settings, env, mounts, creds
+    launch                    the seven-stage orchestrator, docstring below
+
+Three run shapes leave from here: a solo instance (the common path), a
+cluster (`Cluster` rows hand off to `cluster.launching`, which has its own
+orchestrator — none of the instance stages apply), and `--stop`, which
+launches nothing and just stops what the operator selects. The sibling entry
+scripts are thin by comparison and each drives one subsystem: `cluster.py`,
+`cowork.py`, `quick_question.py`, plus `python -m launch.audit`.
+
+Entry points are the one place import breadth is expected — this module names
+15 launch/ modules because composing them IS its job.
+"""
+
 import argparse
 import dataclasses
 import sys

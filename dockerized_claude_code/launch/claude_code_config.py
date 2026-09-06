@@ -28,7 +28,7 @@ from .tags.base import SQUASH_AT
 from .utils import plural
 
 # Field-driven tag colors for the status line — same dispatch as the picker's
-# `tag_style` (gui.tag_form), in raw ANSI: warn-flagged specialties bright
+# `tag_style` (gui.styles), in raw ANSI: warn-flagged specialties bright
 # red; policies by stance (DENY blue, ALLOW orange, DEMAND bold white);
 # everything else bright green. Each color exists in two forms: the label
 # foreground, and the chip BACKGROUND (black glyph on the tag's color) that

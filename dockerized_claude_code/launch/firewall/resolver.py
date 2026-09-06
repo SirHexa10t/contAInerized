@@ -4,12 +4,17 @@
 writes iptables rules from the pre-resolved address list — no DNS calls, no
 parallel-xargs plumbing, no `getent` timeouts to babysit.
 
-Two self-contained concerns live in sibling submodules: `.whitelist` — the
+Four self-contained concerns live in sibling submodules: `.whitelist` — the
 pure raw-entry → work-item expansion (HostnameEntry, _expand_whitelist,
 _index_by_host); `.status` — the lock-guarded `domains_pending_resolve.yml`
-tracker + its `_status` singleton. What stays here is the coupled core: the
-DNS cascade + cross-launch cache, the live-fetched CDN-range widening, and
-the two-phase + updater + refresher thread orchestration — they share
+tracker + its `_status` singleton; `.cdn_ranges` — the fetched-and-cached
+provider block table this module widens against (`load()` once per launch,
+`provider_ranges(ips)` per resolution); `.iptables` — token → rule strings
+and the batched apply into a live container.
+
+What stays here is the coupled core: the DNS cascade + cross-launch cache,
+the widening POLICY, and the two-phase + updater + refresher thread
+orchestration. Those share
 sequenced, in-place-mutated module state (no locks; strict phase hand-off)
 that only stays correct as one module. The package's public API is re-
 exported from `launch/firewall/__init__.py`; consumers import from there.
@@ -78,12 +83,12 @@ CDN widening (the mitigation): hosts whose resolved IPs sit inside a known
 CDN provider's published IPv4 block get the whole containing block
 whitelisted instead of the momentary IPs, so POP rotation inside the block
 can't strand them. The provider blocks are NOT baked into the source —
-each provider's published range list is fetched live (see the CDN provider
-ranges section below) and cached on disk between launches. The pinning
+each provider's published range list is fetched live (see `.cdn_ranges`)
+and cached on disk between launches. The pinning
 caveat above still fully applies to hosts OUTSIDE any known block, and to
 entries with an explicit :port (those stay pinned — opening a whole
 provider block on a custom port is a broader grant than the entry asked
-for). See _tokens_for for the policy and _RANGE_FETCHERS for the security
+for). See _tokens_for for the policy and `.cdn_ranges` for the security
 tradeoff this widening deliberately makes.
 
 Wildcard entries: `*.example.com` means "subdomains too — including ones
@@ -103,24 +108,23 @@ v6 literal in the whitelist lands in the status file's `skipped:` section
 with the reason, instead of burning the full DNS cascade and polluting
 `failed:`.
 
-Imports nothing heavy: the .whitelist + .status submodules, file_access
-for the cache files + atomic write helper, paths for
-the cache locations, template_code for the curated domain list, stdlib for
-subprocess + threading + ipaddress + urllib. tag_handlers._apply_firewall is
-the entry point caller (calls start_whitelist_resolution during apply_tags);
-docker_config.run_container pairs the await + updater-spawn.
+Imports nothing heavy: the four sibling submodules (.whitelist, .cdn_ranges,
+.iptables, .status), file_access for the cache files + atomic write helper,
+paths for the cache locations, template_code for the curated domain list,
+stdlib for subprocess + threading + ipaddress. tag_handlers._apply_firewall
+is the entry point caller (calls start_whitelist_resolution during
+apply_tags); docker_config.run_container pairs the await + updater-spawn.
 
 Cycle note: docker_config imports the `launch.firewall` facade (for
 is_critical_pending / wait_for_critical_addresses / start_firewall_updater),
-which imports this module; and the updater code below needs docker_config's
-docker-subprocess helpers (wait_for_container_running +
-docker_exec_root_subprocess) to inject iptables rules into the running
-container. The two functions that need them (_updater_worker, _flush_rules)
-do lazy `from ..docker_config import ...` at call time so import-time
-evaluation doesn't hit a half-loaded module."""
+which imports this module — so nothing here may import docker_config back.
+The two calls that need to reach a live container (`_updater_worker`'s
+readiness gates) take them from `container_probe`, a LEAF module that exists
+precisely so this needs no lazy call-time import; `.iptables` takes its
+`docker exec` from there for the same reason (the cycle both dodge is
+described in that module)."""
 
 import ipaddress
-import json
 import os
 import queue
 import re
@@ -130,19 +134,22 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from ..file_access import (
-    force_remove, is_file_recent, parse_lines, path_exists,
-    user_firewall_whitelist_lines, write_text,
+    force_remove, is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
 )
-from ..paths import AGENTS_STATE, RESOLVED_DOMAINS_CACHE_FILE, cdn_ranges_cache_path
+from ..container_probe import (
+    wait_for_container_running,
+    wait_for_firewall_applied,
+)
+from ..paths import AGENTS_STATE, RESOLVED_DOMAINS_CACHE_FILE
+from . import cdn_ranges, iptables
 from .status import _status
 from .whitelist import (
-    HostnameEntry, _IP_OR_CIDR_RE, _expand_whitelist, _index_by_host,
+    HostnameEntry, _expand_whitelist, _index_by_host,
 )
 # Re-exported (unused here): the test suite treats this module as the firewall
 # namespace it patches/reads, so the two submodules' names stay reachable as
@@ -150,7 +157,7 @@ from .whitelist import (
 from .status import _WhitelistResolutionStatus                                # noqa: F401
 from .whitelist import _SKIPPED_IPV6_REASON, _is_ipv6_literal                 # noqa: F401
 from ..template_code.firewall_domains import BUILTIN_FIREWALL_DOMAINS
-from ..utils import shell_capture, split_host_port
+from ..utils import shell_capture
 
 
 # ============================================================
@@ -425,226 +432,9 @@ def selftest_address() -> str | None:
     return _selftest_addr
 
 
-# HTTPS + HTTP — opened for any whitelist entry that doesn't specify :port.
-_DEFAULT_OPEN_PORTS = ("443", "80")
-
 # Plain IPv4 (no CIDR suffix) — what a validated resolver token must look like.
 _IPV4_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 
-
-# === CDN provider ranges — fetched, never baked ===
-# When a whitelisted host's resolved IPs sit inside a known CDN provider's
-# published block, whitelist the WHOLE containing block instead of pinning
-# the momentary IPs — POP rotation inside the block then can't strand the
-# host behind a stale pin.
-#
-# The blocks come from each provider's own published range list, fetched over
-# HTTPS on the host and cached per provider under FIREWALL_CACHE_DIR
-# (per-file mtime = per-provider freshness, _CACHE_TTL_SECONDS). Per launch,
-# each provider resolves through a graceful chain: fresh cache → live fetch
-# (saved back) → stale cache (with a warning) → provider skipped for this
-# launch (hosts on it just stay IP-pinned). Nothing here hardcodes address
-# space — when a provider re-publishes its ranges, the next stale-cache
-# launch picks them up.
-#
-# ⚠ Security tradeoff (deliberate): a provider block is shared by every
-# customer of that CDN — allowing a block makes OTHER sites served from
-# those same addresses reachable too (HTTPS routing is SNI-based, one IP
-# serves many customers). Widening only triggers when a *whitelisted* host
-# is detected on the provider, and wildcards only widen further because the
-# user explicitly asked for subdomain coverage — but the effective grant is
-# "this CDN's edge", not "this one site".
-
-# One HTTPS fetch per provider list; generous because the AWS list is ~2 MB.
-_RANGE_FETCH_TIMEOUT = 15
-
-# Some published endpoints (GitHub's API among them) reject requests with no
-# User-Agent, so every fetch sends a stable, honest one.
-_RANGE_FETCH_USER_AGENT = "claude-agents-launcher"
-
-
-def _http_get(url: str) -> str:
-    """GET `url` and return the body as text. Raises on any HTTP/socket
-    problem — callers treat a raised fetch as 'this provider is unavailable
-    right now' and fall back to cache."""
-    request = urllib.request.Request(url, headers={"User-Agent": _RANGE_FETCH_USER_AGENT})
-    with urllib.request.urlopen(request, timeout=_RANGE_FETCH_TIMEOUT) as response:
-        return response.read().decode("utf-8", errors="replace")
-
-
-def _clean_cidrs(candidates: Iterable[str]) -> list[str]:
-    """Normalize fetched range strings to sorted, collapsed IPv4 CIDRs.
-    Non-IPv4 / malformed entries are dropped silently (published lists mix
-    v6 in freely); collapsing merges adjacent and overlapping blocks so the
-    downstream containment scans and iptables rules stay minimal. Fetched
-    bodies are external input — nothing that doesn't parse as an IPv4
-    network may survive into rule generation."""
-    networks = []
-    for candidate in candidates:
-        try:
-            net = ipaddress.ip_network(candidate.strip(), strict=False)
-        except ValueError:
-            continue
-        if net.version == 4:
-            networks.append(net)
-    return [str(n) for n in ipaddress.collapse_addresses(networks)]
-
-
-def _subtract_networks(base: Iterable[str], remove: Iterable[str]) -> list[str]:
-    """CIDRs covering every address in `base` that is NOT in `remove` —
-    netmask-aware (a plain set difference would miss removals published at a
-    different aggregation than the base). Used for providers that publish
-    "all our space" and "the subset customers can rent" as separate lists,
-    where only the difference — the provider's own services — should drive
-    widening. Inputs are cleaned CIDR strings; result is collapsed."""
-    remove_nets = [ipaddress.IPv4Network(c) for c in _clean_cidrs(remove)]
-    remaining: list[ipaddress.IPv4Network] = []
-    for cidr in _clean_cidrs(base):
-        parts = [ipaddress.IPv4Network(cidr)]
-        for removal in remove_nets:
-            next_parts = []
-            for part in parts:
-                if not part.overlaps(removal):
-                    next_parts.append(part)
-                elif not removal.supernet_of(part):
-                    next_parts.extend(part.address_exclude(removal))   # removal strictly inside part
-            parts = next_parts
-        remaining.extend(parts)
-    return [str(n) for n in ipaddress.collapse_addresses(remaining)]
-
-
-def _cloudflare_ranges() -> list[str]:
-    """Cloudflare publishes a plain-text file, one IPv4 CIDR per line."""
-    return _clean_cidrs(_http_get("https://www.cloudflare.com/ips-v4").splitlines())
-
-
-def _fastly_ranges() -> list[str]:
-    """Fastly publishes JSON: {"addresses": [v4 cidrs], "ipv6_addresses": [...]}."""
-    return _clean_cidrs(json.loads(_http_get("https://api.fastly.com/public-ip-list"))["addresses"])
-
-
-def _github_ranges() -> list[str]:
-    """GitHub's /meta endpoint maps service names to mixed v4/v6 CIDR lists;
-    the edge-serving services below cover web, API, git, release/raw assets,
-    and Pages."""
-    meta = json.loads(_http_get("https://api.github.com/meta"))
-    services = ("web", "api", "git", "packages", "pages")
-    return _clean_cidrs(cidr for service in services for cidr in meta.get(service, []))
-
-
-def _cloudfront_ranges() -> list[str]:
-    """AWS publishes one JSON for all services; CloudFront's entries are the
-    CDN edge blocks."""
-    prefixes = json.loads(_http_get("https://ip-ranges.amazonaws.com/ip-ranges.json"))["prefixes"]
-    return _clean_cidrs(p["ip_prefix"] for p in prefixes if p.get("service") == "CLOUDFRONT")
-
-
-def _google_ranges() -> list[str]:
-    """Google publishes "all Google" (goog.json) and "rentable cloud"
-    (cloud.json); the netmask-aware difference is Google's own services —
-    the ranges its consumer-facing edges (and their minted subdomains)
-    serve from."""
-    def prefixes(url: str) -> list[str]:
-        return [p["ipv4Prefix"] for p in json.loads(_http_get(url))["prefixes"] if "ipv4Prefix" in p]
-    return _subtract_networks(
-        prefixes("https://www.gstatic.com/ipranges/goog.json"),
-        prefixes("https://www.gstatic.com/ipranges/cloud.json"),
-    )
-
-
-# Provider name → fetcher for its published IPv4 ranges. Adding a provider is
-# one entry + one small fetcher above; the cache/fallback plumbing, widening,
-# wildcard grants, and status annotations all key off this registry.
-_RANGE_FETCHERS: dict[str, Callable[[], list[str]]] = {
-    "cloudflare": _cloudflare_ranges,
-    "fastly": _fastly_ranges,
-    "github": _github_ranges,
-    "cloudfront": _cloudfront_ranges,
-    "google": _google_ranges,
-}
-
-# The launch's working view of provider ranges, filled by _load_cdn_ranges at
-# the top of Phase 1 (empty until then, and empty entries simply mean "no
-# widening for that provider this launch"). _provider_blocks feeds wildcard
-# all-blocks grants; _cdn_networks is the parsed flat view the per-IP
-# containment scan iterates. Written once before any resolution callback
-# runs, read-only afterwards — same strict phase sequencing as
-# _seen_cdn_ranges below, so no lock.
-_provider_blocks: dict[str, list[str]] = {}
-_cdn_networks: list[tuple[ipaddress.IPv4Network, str, str]] = []
-
-
-def _set_provider_blocks(blocks: dict[str, list[str]]) -> None:
-    """Install `blocks` as the launch's provider-range view, rebuilding the
-    parsed containment index alongside. IPv4Network (not ip_network) so a v6
-    or malformed CIDR sneaking past a fetcher fails loudly here rather than
-    mis-matching silently."""
-    _provider_blocks.clear()
-    _provider_blocks.update({provider: list(cidrs) for provider, cidrs in blocks.items()})
-    _cdn_networks.clear()
-    _cdn_networks.extend(
-        (ipaddress.IPv4Network(cidr), provider, cidr)
-        for provider, cidrs in _provider_blocks.items()
-        for cidr in cidrs
-    )
-
-
-def _read_cached_ranges(provider: str) -> list[str]:
-    """The provider's cached CIDRs, regardless of file age ([] when the file
-    is missing). Age policy lives in _load_cdn_ranges — this is just the
-    read."""
-    path = cdn_ranges_cache_path(provider)
-    return _clean_cidrs(parse_lines(path)) if path_exists(path) else []
-
-
-def _save_cached_ranges(provider: str, cidrs: list[str]) -> None:
-    """Persist a fresh fetch so the next _CACHE_TTL_SECONDS of launches skip
-    the network round-trip (and so a future failed fetch has something to
-    fall back on)."""
-    lines = [
-        f"# Published IPv4 ranges for '{provider}', fetched by the launcher.",
-        f"# Refetched when this file's mtime ages past {_CACHE_TTL_SECONDS // (60 * 60 * 24)} days.",
-        *cidrs,
-    ]
-    write_text(cdn_ranges_cache_path(provider), "\n".join(lines) + "\n")
-
-
-def _load_cdn_ranges() -> None:
-    """Populate the launch's provider-range view (see _set_provider_blocks).
-    Per provider: a fresh cache file wins outright; otherwise fetch the
-    published list (in parallel across providers, saved back on success);
-    a failed fetch falls back to the stale cache with a warning; no cache
-    at all means the provider is skipped this launch — hosts on it degrade
-    to plain IP pinning, nothing breaks. Runs at the top of Phase 1, so a
-    cold cache adds one fetch round-trip to the launcher's critical-resolve
-    wait; warm launches don't touch the network."""
-    blocks: dict[str, list[str]] = {}
-    to_fetch: list[str] = []
-    for provider in _RANGE_FETCHERS:
-        cached = _read_cached_ranges(provider)
-        if cached and is_file_recent(cdn_ranges_cache_path(provider), _CACHE_TTL_SECONDS):
-            blocks[provider] = cached
-        else:
-            to_fetch.append(provider)
-    if to_fetch:
-        def fetch(provider: str) -> list[str]:
-            try:
-                return _RANGE_FETCHERS[provider]()
-            except Exception as exc:   # noqa: BLE001 — any fetch problem means "use fallback"
-                print(f"  warning: fetching {provider} CDN ranges failed ({exc})", file=sys.stderr)
-                return []
-        with ThreadPoolExecutor(max_workers=len(to_fetch)) as pool:
-            fetched = dict(zip(to_fetch, pool.map(fetch, to_fetch)))
-        for provider, cidrs in fetched.items():
-            if cidrs:
-                blocks[provider] = cidrs
-                _save_cached_ranges(provider, cidrs)
-            elif stale := _read_cached_ranges(provider):
-                blocks[provider] = stale
-                print(f"  warning: using stale cached ranges for {provider}", file=sys.stderr)
-            else:
-                print(f"  warning: no ranges for {provider} this launch — its hosts stay IP-pinned", file=sys.stderr)
-    _set_provider_blocks(blocks)
 
 # CIDR tokens (`<cidr>` or `<cidr>:<port>` for wildcard-with-port entries)
 # already widened this launch — each is opened at most once no matter how
@@ -653,28 +443,6 @@ def _load_cdn_ranges() -> None:
 # refresher starts when the updater sees Phase 2's end-of-stream sentinel)
 # and each one's callbacks run serially in its own worker thread, so no lock.
 _seen_cdn_ranges: set[str] = set()
-
-
-def _cdn_provider_ranges(ips: Iterable[str]) -> tuple[str | None, list[str]]:
-    """(provider, containing CIDR blocks) when any of `ips` sits inside a
-    known provider block (per this launch's fetched view — _cdn_networks);
-    (None, []) otherwise. Malformed / non-IPv4 tokens are skipped. The
-    provider label is for the status-file annotation; the CIDR list drives
-    the actual widening in _tokens_for."""
-    provider: str | None = None
-    ranges: list[str] = []
-    for ip_str in ips:
-        try:
-            addr = ipaddress.IPv4Address(ip_str)
-        except ValueError:
-            continue
-        for network, prov, cidr in _cdn_networks:
-            if addr in network:
-                provider = provider or prov
-                if cidr not in ranges:
-                    ranges.append(cidr)
-                break
-    return provider, ranges
 
 
 def _tokens_for(host: str, ips: list[str], port: str, wildcard: bool = False) -> tuple[list[str], str | None, bool]:
@@ -704,11 +472,11 @@ def _tokens_for(host: str, ips: list[str], port: str, wildcard: bool = False) ->
 
     `host` is unused in the computation but kept in the signature so call
     sites read naturally and future per-host policy has its hook."""
-    provider, ranges = _cdn_provider_ranges(ips)
+    provider, ranges = cdn_ranges.provider_ranges(ips)
     if provider is None or (port and not wildcard):
         return [f"{ip}:{port}" if port else ip for ip in ips], None, wildcard and provider is None
     if wildcard:
-        ranges = list(_provider_blocks[provider])
+        ranges = cdn_ranges.blocks_for(provider)
     block_tokens = [f"{c}:{port}" if port else c for c in ranges]
     new_tokens = [t for t in block_tokens if t not in _seen_cdn_ranges]
     _seen_cdn_ranges.update(new_tokens)
@@ -798,7 +566,7 @@ def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: lis
     today, but if Anthropic ever fronts these hosts with a known provider it
     resumes without a code change — which is why the provider ranges load
     here, before the first resolution callback can fire."""
-    _load_cdn_ranges()
+    cdn_ranges.load()
     critical_addresses: list[str] = list(literal_entries)
     _emitted_tokens.update(literal_entries)
     critical_failed: list[str] = []
@@ -988,10 +756,7 @@ def _updater_worker(container_name: str) -> None:
     resolution burst (~cascade pass), not one per rule. When the end-of-
     stream sentinel arrives, launch-time work is done — hand off to the
     refresher daemon (_start_refresher), which owns drift healing for the
-    rest of the session. Lazy imports break the docker_config↔network
-    import cycle (see module-top docstring)."""
-    from ..docker_config import wait_for_container_running, wait_for_firewall_applied
-
+    rest of the session."""
     if not wait_for_container_running(container_name):
         # Container never came up; nothing to update. Caller's docker compose
         # run will already have surfaced the underlying error.
@@ -1027,15 +792,11 @@ def _updater_worker(container_name: str) -> None:
                 finished = True
                 break
             batch.append(item)
-        _flush_rules(container_name, batch)
+        iptables.flush(container_name, batch)
         if finished:
             _start_refresher(container_name)
             return
 
-
-# Rules per `docker exec sh -c` invocation — bounds the argv/script size.
-# A full-whitelist launch is a few hundred rules → a handful of execs.
-_UPDATER_BATCH_MAX_RULES = 100
 
 # Drift-heal cadence: how often the refresher re-resolves the whole hostname
 # list once launch-time resolution is done. Five minutes bounds how long a
@@ -1100,46 +861,5 @@ def _refresh_pass(container_name: str) -> None:
             new_tokens.extend(tokens)
             _status.mark_resolved(host, ips, cdn=cdn_label)
     if new_tokens:
-        _flush_rules(container_name, new_tokens)
+        iptables.flush(container_name, new_tokens)
         _save_resolution_cache(dict(_fresh_resolutions))
-
-
-def _iptables_rules_for(token: str) -> list[str]:
-    """iptables command strings opening `token` (`addr[:port]`; addr may be a
-    CIDR) at position 1 of the OUTPUT chain — BEFORE the catch-all REJECT.
-    Port absent → the default HTTPS+HTTP pair. Tokens failing the strict
-    address/port validation are dropped with a warning: these strings get
-    joined into a `sh -c` script, so nothing that hasn't matched
-    `^[0-9./]+$`-shaped patterns may pass (defense in depth on top of
-    _resolve_a_records' own output validation)."""
-    addr, port = split_host_port(token)
-    if not _IP_OR_CIDR_RE.match(addr) or (port and not port.isdigit()):
-        print(f"  warning: dropping malformed firewall token {token!r}", file=sys.stderr)
-        return []
-    ports = [port] if port else list(_DEFAULT_OPEN_PORTS)
-    return [f"iptables -I OUTPUT 1 -d {addr} -p tcp --dport {p} -j ACCEPT" for p in ports]
-
-
-def _flush_rules(container_name: str, tokens: list[str]) -> None:
-    """Apply `tokens` to the running container's iptables in chunks of
-    ≤_UPDATER_BATCH_MAX_RULES rules, one `docker exec --user root sh -c`
-    per chunk. `&&`-joined so a mid-chunk failure surfaces as a non-zero
-    exit; each failed chunk retries once (duplicate -I inserts from a
-    partially-applied first attempt are harmless) then warns and moves on
-    — best-effort. Lazy import of
-    docker_exec_root_subprocess breaks the docker_config↔network import
-    cycle (see module-top docstring)."""
-    from ..docker_config import docker_exec_root_subprocess
-
-    rules = [rule for token in tokens for rule in _iptables_rules_for(token)]
-    for i in range(0, len(rules), _UPDATER_BATCH_MAX_RULES):
-        script = " && ".join(rules[i:i + _UPDATER_BATCH_MAX_RULES])
-        result = docker_exec_root_subprocess(container_name, "sh", "-c", script)
-        if result.returncode != 0:
-            result = docker_exec_root_subprocess(container_name, "sh", "-c", script)   # one retry — transient exec races
-        if result.returncode != 0:
-            print(
-                f"  warning: batched iptables insert failed ({len(rules[i:i + _UPDATER_BATCH_MAX_RULES])} rules): "
-                f"{result.stderr.strip() or result.stdout.strip()}",
-                file=sys.stderr,
-            )

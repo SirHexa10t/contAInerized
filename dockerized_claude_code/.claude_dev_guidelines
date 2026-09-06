@@ -16,10 +16,17 @@ Grouped by layer, top of the dependency graph last.
 - `launch/utils.py` — domain-neutral helpers (formatting, sorting, parsing, host:port split, user prompts).
 - `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined. Constants + path-builder lambdas only — no disk listings (those are file_access work).
 - `launch/template_code/` — pure data, no logic: docker-side strings (`docker_prompts.py`), the curated firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; the firewall resolver fetches them live).
+- `launch/toml_emit.py` — rendering the TOML the launcher writes by hand: key quoting, basic-string escaping, the `axis = [...]` line. Reading TOML is `tomllib`'s job; both hand-written stores (`tags/store.py`, `cluster/state.py`) take their escaping from here while each still owns its own shape.
+- `launch/container_probe.py` — one named, LIVE container: how it is addressed (`CONTAINER_NAME_PREFIX`) and how to interrogate it (probe, wait, read its tty size, exec as root). Fleet-wide "what is running" queries stay in `docker_config`.
+- `launch/container_inject.py` — the write-side twin: typing a prompt into a live session's TTY (`docker_attach_inject`, the `{cowork}` doorbell). Owns the pty/termios plumbing nothing else in the tree needs.
 
 ### Disk — depends only on leaves
 
 - `launch/file_access.py` — sole chokepoint for every disk-touching call (reads, atomic writes, removes, queries, lists, stats) — including the agents/ name → md-path index (`agent_md_index`, cached).
+
+### Disk consumers — depend on file_access + leaves
+
+- `launch/transcripts.py` — reading Claude Code's own session records: is there anything `--continue` could load and how big is it, when was this instance last used, what was said last and by whom. Encodes the SHAPE of a format that is not ours (which turn types count, that a `tool_result` is typed "user" without being a human prompt, that sidechains belong to somebody else) — and degrades every parse to None rather than raising, so an upstream schema change shows up as an empty preview, not a failed launch.
 
 ### The tag system — `launch/tags/`, depends on disk + leaves
 
@@ -37,7 +44,9 @@ Grouped by layer, top of the dependency graph last.
 
 - `launch/claude_code_config.py` — everything the launcher RENDERS about an instance: the in-container status line + terminal title, and the pre-build launch banner (`print_launch_banner`, printed by run.py).
 - `launch/firewall/` — the `{firewall}` outbound-whitelist subsystem, packaged (like `tags/` and `gui/`); `__init__.py` is the public facade (five entry points), and consumers import from `launch.firewall`, never the submodules:
-  - `resolver.py` — the coordinator: the coupled core that stays one module because it shares sequenced, in-place-mutated, lock-free state — CDN-range widening, host-side DNS cascade (`getent ahostsv4` on Linux, `socket.getaddrinfo` fallback on hosts without getent, e.g. macOS), cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift. Critical Anthropic pins are widened to the registered `160.79.104.0/21` block, and `selftest_address()` feeds init-firewall.sh's DNS-free self-test (`$1` → `curl --resolve`); the script also probes/reorders dead-first nameservers in resolv.conf at startup. The test suite (`test_firewall.py`) patches/reads this module directly — it's the single namespace the coordinator reads its collaborators from.
+  - `resolver.py` — the coordinator: the coupled core that stays one module because it shares sequenced, in-place-mutated, lock-free state — the widening POLICY, host-side DNS cascade (`getent ahostsv4` on Linux, `socket.getaddrinfo` fallback on hosts without getent, e.g. macOS), cross-launch IP cache (fresh-DNS union / failure fallback — never a substitute for a live lookup), burst-batched iptables updater (gated on init-firewall.sh's completion marker so it never races the in-container setup), and the post-launch refresher daemon that re-resolves the whitelist every few minutes to heal DNS drift. Critical Anthropic pins are widened to the registered `160.79.104.0/21` block, and `selftest_address()` feeds init-firewall.sh's DNS-free self-test (`$1` → `curl --resolve`); the script also probes/reorders dead-first nameservers in resolv.conf at startup. The test suite (`test_firewall.py`) patches/reads this module directly — it's the single namespace the coordinator reads its collaborators from.
+  - `cdn_ranges.py` — the fetched-and-cached table of provider IPv4 blocks the resolver widens against (`load()` once per launch, `provider_ranges(ips)` per resolution, `blocks_for(provider)` for a wildcard's whole-edge grant). Knows nothing of DNS, phases or iptables; caches per provider under `FIREWALL_CACHE_DIR` with a graceful chain (fresh cache → live fetch → stale cache + warning → provider skipped).
+  - `iptables.py` — what an opened address MEANS in iptables (`rules_for`: two rules per address by default, inserted before the catch-all REJECT) and how a batch reaches a live container (`flush`). The token-validation security boundary lives here: a token failing the strict address/port shape is DROPPED, never escaped, because these strings are joined into a `sh -c` script that runs as root.
   - `whitelist.py` — the pure raw-entry → work-item expansion (wildcard + IPv6-skip aware; `HostnameEntry` / `_expand_whitelist` / `_index_by_host`); no DNS, threads, or disk, so the security-relevant parsing is unit-testable in isolation.
   - `status.py` — the lock-guarded `domains_pending_resolve.yml` tracker (`_WhitelistResolutionStatus` + the process-wide `_status` singleton) that mirrors DNS-resolution progress to the agent-visible status file.
 
@@ -50,23 +59,62 @@ Grouped by layer, top of the dependency graph last.
 - `launch/user_additions.py` — user-side contributions to the container (optional-creds mounts + first-launch template plants).
 - `launch/audit.py` — read-only state-correctness checker, runnable as `python -m launch.audit`.
 
-### UI
+### UI — `launch/gui/`, depends on tags + services
 
-The TUI lives in the `launch/gui/` subpackage — nothing outside it imports
-prompt_toolkit; run.py drives everything through `launch/gui/__init__.py`'s
-re-exports.
+Nine modules, nothing outside the package imports prompt_toolkit, and run.py
+drives everything through `launch/gui/__init__.py`'s re-exports. Direction
+inside is strictly one-way: `styles` → `form_core` → {`forms`,
+`cluster_form`} → {`picker_previews`, `picker_prompts`} → {`picker_flows`,
+`picker_widget`} → `menu_picker`.
 
-- `launch/gui/tag_form.py` — every form: the kind-sectioned tag form (`prompt_tags`: engine radio, requires-cascade, combos + wants warnings, context preamble), the per-profession toolkit form (`edit_toolkits_menu`), and the generic `checkbox_form` primitive behind both — plus the shared TUI style system (`UiClass`, `tag_style`, the stance colors) both surfaces use.
-- `launch/gui/menu_picker.py` — prompt_toolkit picker + F8 legend + line prompts (workspace, session) + the "Edit Toolkits" opener row; imports the forms and styles from tag_form (one-way: tag_form never imports the picker). (Launch-stage output like the pre-build banner is NOT here — that's claude_code_config, which owns everything the launcher renders about an instance.)
+- `gui/styles.py` — the style system every surface draws with: the `UiClass` CSS classes, the field-driven tag colours (`tag_style`, `squashed_tag_style`, `RICH_BY_STYLE`), the display coercers, and the chrome heights (`TITLE_HEIGHT` / `STATUS_HEIGHT`) forms and picker both reserve.
+- `gui/form_core.py` — the generic form: `FormOption`, `TextField`, the shared confirm/really-done? gate (`ConfirmGate` + `confirm_gate`), and the `checkbox_form` primitive. No form may restate any of it.
+- `gui/forms.py` — what the launcher ASKS: the instance tag form (`prompt_tags`), its cluster-wide sibling, the merged preferences form (`edit_profiles_menu`).
+- `gui/cluster_form.py` — the membership form, whose accumulator semantics (picking an agent adds ANOTHER) need their own key map; runs on form_core's scaffold, takes its pick algebra from `cluster.legoset`.
+- `gui/picker_previews.py` — every row kind's preview text, and the child-process transcript read that keeps a huge transcript off the UI thread.
+- `gui/picker_prompts.py` — the non-fullscreen bits both the picker and its flows need: line prompts (workspace, session suffix), inline dialogs, field builders, and the confirm wording every one of them shares.
+- `gui/picker_flows.py` — what each picker key MEANS once a row is chosen: the create / edit / destroy flows.
+- `gui/picker_widget.py` — the REUSABLE picker: the row contract (`PickerEntry`/`ContEntry` and their deferred-preview slots), the row decorations whose glyphs+styles are data on an enum rather than branches in a renderer (`PickerRowMarker`, `PickerCwdHint`), the preview LOADER, cursor movement over skippable rows, and the selection loop (`pick_with_preview`). Knows nothing about agents.
+- `gui/menu_picker.py` — the launcher's three MENUS built on that widget: the main agent picker (`select_agent`), the deletion submenu, `--stop`'s selector (`prompt_stop`), plus the F8 composition legend. This is the only gui module with agent-domain knowledge. (Launch-stage output like the pre-build banner is NOT here — that's claude_code_config, which owns everything the launcher renders about an instance.)
+
+### Clusters — `launch/cluster/`, a leaf consumer of the core
+
+N members, one container, one project. Like `cowork/` and `quickie/`, nothing
+in `launch/` imports it back except `run.py`'s launch call.
+
+- `cluster/member.py` — what one member IS; id composition; name validation (the `valid_label` both backends and `panes` enforce).
+- `cluster/legoset.py` — `.legoset` parsing: a cluster template's default membership.
+- `cluster/state.py` — `cluster.toml`: durable member set, the cluster-level tags every member inherits, and discovery-by-scan. Its `dumps` owns this format's shape; escaping comes from `toml_emit`.
+- `cluster/panes.py` — what a multiplexer is asked to start: one `Pane` per member (name, argv, cwd, env) plus the two labels neither backend owns. The vocabulary BOTH backends read — deliberately free of either one's flag dialect.
+- `cluster/tmux.py` — the tmux backend: pure argv/script assembly plus the key/status policy.
+- `cluster/herdr.py` — the herdr backend, selected by default; same assembly-only contract in its own dialect.
+- `cluster/worktree.py` — writer safety: one git worktree per member (argv assembly + probes).
+- `cluster/launch_plan.py` — the join: a `Cluster` + env → worktrees, panes, mounts.
+- `cluster/launching.py` — the integration step: state on disk → one running container with N members, each a full Claude session in its own window/tab.
+- `cluster/solo.py` — what `{muxer}` does to a SOLO launch: the same two backends, one agent.
+- `cluster/cli.py` — the operator surface (`cluster.py` is its repo-root entry).
+
+### The cluster work protocol — `launch/cluster_work_protocol/`
+
+The message queue cluster members speak on, mounted INTO the container and
+run there as `cluster-chat`. Standalone by constraint: stdlib +
+intra-package imports only, because in the container there is no `launch/`.
+
+- `schema.py` — the message shape and reply vocabulary (including the fold rule: a `nop` carries no data).
+- `queue.py` — the only module that touches `chat.jsonl` (flock'd appends, total order, per-member cursors).
+- `gates.py` — the iteration machinery: open, reply accounting, nudge/timeout, close. All state is derived from the journal.
+- `wake.py` — the ping side: how a queue event WAKES a member.
+- `config.py` — every tunable, loaded from `settings/cluster_protocol.toml`.
+- `cli.py` — the `cluster-chat` command members actually call.
 
 ### Entry
 
 - `run.py` — staged `launch()` orchestrator (scan tags → migrate store → input → fs-validate → resume → persist → apply tags → setup → build → run).
 - `quick_question.py` — thin repo-root entry for the quickie tool (the `q` alias target): hands argv to `launch.quickie.main` (argparse, so `q -h` is quickie's own help, not claude's).
-- `launch/quickie/` — the `q` one-shot-question tool: a LEAF CONSUMER of the launcher core (imports `launch/` helpers; nothing in `launch/` imports it back). Layers: `cli.py` = the argparse front end (a question, `--explain`/`--research` to pick the agent, `--history`/`--answer <id>`/`--resume <id>` thread ops) dispatching to → `ask.py`, a lean cousin of `run.py`'s `launch()` (no picker/form/store) that builds an Instance from a `QuickieAgent` spec — QUICK (`_quickie`, quick/Sonnet, default), TRIVIA (`_trivia`, reliable/Opus, `--explain`), RESEARCH (`researcher.md` + `_research.lego`, researcher engine, base image, `--research`) — under `quickie/<gibberish>/` (via `Instance.state_dir_override`) with the shared `quickie/communal/` workspace and runs `claude -p` in stream-json mode (via `run_container(interactive=False, print_prompt=…, stream_renderer=render_stream)`), reusing the core's `compute_resume_flag` for `--resume`'s `--continue`; `render.py` = `render_stream`, which turns Claude Code's stream-json events into a live `⋯ thinking…` stderr ticker + a streamed stdout answer (reasoning TEXT is redacted by current models — `display: omitted` — so only elapsed time is shown, never the chain-of-thought); and `history.py` = `--history` (grey timestamp + id + last question, ascending) and `--answer <id>` (reprint the saved answer), via `file_access.last_prompt_in_state` / `last_answer_in_state`. Shared mechanisms it needs live in the core (the override field, run_container print mode + its `stream_renderer` hook / `docker_stream_subprocess`, compute_resume_flag, the transcript reads), never in quickie.
+- `launch/quickie/` — the `q` one-shot-question tool: a LEAF CONSUMER of the launcher core (imports `launch/` helpers; nothing in `launch/` imports it back). Layers: `cli.py` = the argparse front end (a question, `--explain`/`--research` to pick the agent, `--history`/`--answer <id>`/`--resume <id>` thread ops) dispatching to → `ask.py`, a lean cousin of `run.py`'s `launch()` (no picker/form/store) that builds an Instance from a `QuickieAgent` spec — QUICK (`_quickie`, quick/Sonnet, default), TRIVIA (`_trivia`, reliable/Opus, `--explain`), RESEARCH (`researcher.md` + `_research.lego`, researcher engine, base image, `--research`) — under `quickie/<gibberish>/` (via `Instance.state_dir_override`) with the shared `quickie/communal/` workspace and runs `claude -p` in stream-json mode (via `run_container(interactive=False, print_prompt=…, stream_renderer=render_stream)`), reusing the core's `compute_resume_flag` for `--resume`'s `--continue`; `render.py` = `render_stream`, which turns Claude Code's stream-json events into a live `⋯ thinking…` stderr ticker + a streamed stdout answer (reasoning TEXT is redacted by current models — `display: omitted` — so only elapsed time is shown, never the chain-of-thought); and `history.py` = `--history` (grey timestamp + id + last question, ascending) and `--answer <id>` (reprint the saved answer), via `transcripts.last_prompt_in_state` / `last_answer_in_state`. Shared mechanisms it needs live in the core (the override field, run_container print mode + its `stream_renderer` hook / `docker_stream_subprocess`, compute_resume_flag, the transcript reads), never in quickie.
 
 - `cowork.py` — thin repo-root entry for the multi-agent hub CLI (mirrors `quick_question.py`): hands argv to `launch.cowork.main`.
-- `launch/cowork/` — multi-agent group hosting: like quickie, a LEAF CONSUMER of the core (nothing in `launch/` imports it back except `run.py`'s one `ensure_hub_running` call and `audit.py`'s checks). One concern per module — `group` (durable state + discovery-by-scan), `mailbox` (message plane + capture attribution), `sync` (file plane), `journal` (conversation log), `roster` (who is recruitable), `control` (agent-facing verbs, tag-gated), `lifecycle` (singleton + start/stop policy), `relay` (the loop + routing policy; orchestration only), `cli` (argparse). It owns NO docker calls: injection (`docker_attach_inject`) lives in `docker_config`, which is that module's stated invariant. Dependency direction inside: `relay` never imports `control` (control calls `relay.send`) — the CLI wires them together via `serve(also_poll=…)`.
+- `launch/cowork/` — multi-agent group hosting: like quickie, a LEAF CONSUMER of the core (nothing in `launch/` imports it back except `run.py`'s one `ensure_hub_running` call and `audit.py`'s checks). One concern per module — `group` (durable state + discovery-by-scan), `mailbox` (message plane + capture attribution), `sync` (file plane), `journal` (conversation log), `roster` (who is recruitable), `control` (agent-facing verbs, tag-gated), `lifecycle` (singleton + start/stop policy), `relay` (the loop + routing policy; orchestration only), `cli` (argparse). It owns NO docker calls: injection comes from `container_inject` (its only writer to a container) and the liveness snapshot from `docker_config`'s fleet query, in `roster`. Dependency direction inside: `relay` never imports `control` (control calls `relay.send`) — the CLI wires them together via `serve(also_poll=…)`.
 
 ### Other directories
 
@@ -84,30 +132,71 @@ The arrows must stay one-way. A reversal creates a cycle (or hides one behind
 lazy imports, which is the bandage of last resort).
 
 ```
-leaves: utils, paths, template_code/   (independent — none imports in-project)
+leaves: utils, paths, template_code/, toml_emit, container_probe
+        (independent — none imports in-project;
+         container_inject imports only container_probe)
                   │
                   ▼
-            file_access ──► tags/ ──┐
-                                    ├─► small services (claude_code_config, firewall/)
-                                    │
-                  small services ──► orchestration (container_env, docker_config, tag_handlers,
-                                                    agents_crud, user_additions, audit)
-                                             │
-                                             ▼
-                                             gui/ (tag_form ─► menu_picker)
-                                             │
-                                             ▼
-                                             entry (run.py)
+            file_access ──► transcripts
+                  │
+                  ▼
+                tags/ ──┐
+                        ├─► small services (claude_code_config, firewall/)
+                        │
+      small services ──► orchestration (container_env, docker_config, tag_handlers,
+                                        agents_crud, user_additions, audit)
+                                 │
+                                 ├─► gui/   (styles ─► form_core ─► forms ─►
+                                 │           previews/prompts ─► flows/widget
+                                 │           ─► menu_picker)
+                                 │
+                                 ├─► leaf consumers: cluster/, cowork/, quickie/
+                                 │   (nothing in launch/ imports these back)
+                                 │
+                                 ▼
+                                 entry (run.py, cluster.py, cowork.py,
+                                        quick_question.py, -m launch.audit)
 ```
 
-**One acknowledged cycle:** `docker_config ↔ firewall`. `docker_config` imports
-`network` at module level (for `is_critical_pending` / `start_firewall_updater` /
-`wait_for_critical_addresses`) via the `launch.firewall` facade;
-`firewall.resolver._updater_worker` and `_flush_rules` lazy-import
-`docker_config.wait_for_container_running`
-and `docker_config.docker_exec_root_subprocess` from inside the function body. Both
-docstrings call this out. Don't add new lazy imports without good reason —
-prefer to push the shared logic to a leaf-er module first.
+**NO import cycles (since 2026-09-03).** There used to be exactly one —
+`docker_config ↔ firewall`: `docker_config` imports the `launch.firewall`
+facade at module level (`is_critical_pending` / `start_firewall_updater` /
+`wait_for_critical_addresses`), while `firewall.resolver` needed four
+container probes back out of `docker_config` and got them with LAZY
+`from ..docker_config import …` calls inside two function bodies.
+
+It was fixed the way this guide already prescribed — "push the shared logic
+to a leaf-er module first": those four calls now live in
+`launch/container_probe.py`, which imports only `paths`, `utils` and the
+stdlib, so both sides import DOWNWARD and the lazy imports are gone. The
+same pass deleted the tree's only `TYPE_CHECKING` guard
+(`cluster/state.py` deferring `Registry`), which was guarding against a
+cycle that did not exist — `tags/` has never imported `cluster/`.
+
+So the rule is now plain: **no lazy (function-body) imports and no
+`TYPE_CHECKING` guards for cycle-breaking.** If two modules need each other,
+the shared part belongs in a third, leaf-er one — `container_probe` is the
+worked example, and its docstring states the line it draws so the next
+addition knows whether it belongs there.
+
+The rule is machine-enforced, not honour-system: `TestNoImportCycles`
+(`test_essential_files.py`) parses every module's top-level imports into a
+graph and fails on any back edge, naming the path that closes it. Lazy
+imports are out of its scope by design — a name resolved on first call cannot
+deadlock initialisation — so the two that remain (`cluster/cli.py` and
+`docker_config`'s branch-local `cluster.solo`) are there for startup cost and
+stay legal. Rewriting one as a top-level import is fine as long as the gate
+stays green.
+
+**`launch/benchmark/` is the one tree the gate does not run.** ruff and mypy
+read it; nothing executes it; and a `patch("dotted.string")` target is
+invisible to all three checks, so a rename leaves a benchmark broken and
+quiet. `TestBenchmarksStayRunnable` imports each module and resolves each
+patch target for that reason — when you move a function a benchmark patches,
+that test is what tells you. Keep patch targets pointed at the module that
+USES the name (`launch.firewall.resolver.wait_for_container_running`), not
+the one that defines it: a module-level import binds the reference before any
+patch runs, so patching the definer's module changes nothing.
 
 ## Where new code goes — by example
 
@@ -204,10 +293,38 @@ owning tag) goes in `BASE_ADDENDUMS` in that module instead.
 
 ### A new picker row kind
 
-→ `gui/menu_picker.py`. Define a dataclass for the row's data (see `ContEntry` /
-`PickerEntry`). Add a `PickerRowMarker` enum member if you want a new glyph
-prefix. Build entries via the existing `pick_with_preview` primitive — it's
-generic over `PickerEntry.value`.
+→ split across the two picker modules, along the line they were divided on:
+the row's DATA and the menu that offers it go in `gui/menu_picker.py`; a new
+GLYPH or decoration goes on `picker_widget`'s `PickerRowMarker` /
+`PickerCwdHint` enums (glyph + style as enum data, never a branch in the
+renderer). Build entries with `pick_with_preview` — it is generic over
+`PickerEntry.value` and must stay that way: if the widget needs to know what
+kind of thing it is showing, the knowledge belongs on the row, not in the
+loop.
+
+### A new thing to read out of a session transcript
+
+→ `launch/transcripts.py`, not `file_access`. That module already owns the
+format's quirks (turn types, tool-result echoes, sidechains) and the
+degrade-to-None discipline every parse there follows. `file_access` stays the
+chokepoint for the READ itself, which `transcripts` goes through.
+
+### A new call that talks to a running container
+
+→ `container_probe.py` if it interrogates one named container (and it may use
+`CONTAINER_NAME_PREFIX`, which lives there); `container_inject.py` if it
+writes to one's terminal; `docker_config.py` if it asks about the FLEET
+("which instances are up"). The first two are leaves on purpose: the firewall
+subsystem and the group-hosting layer both need them, and both would pull in
+the whole build-and-run module otherwise.
+
+### A new multiplexer backend, or a change to what a backend is asked to start
+
+→ the backend's own module (`cluster/tmux.py`, `cluster/herdr.py`); the
+REQUEST shape is `cluster/panes.py`. Nothing backend-specific may land in
+`panes` — not a flag spelling, not a syntax. The test that pins this
+(`test_cluster_panes.py`) asserts neither backend defines the record and that
+`herdr` does not import `tmux`, because it did for months.
 
 ### A new state-correctness check
 
@@ -226,6 +343,16 @@ a free function elsewhere — the dataclass owns its derivations. Same for any
 → the format itself lives in `tags/store.py`; the conversion FROM the
 previous format goes in `tags/migrations.py` (the only module that may know
 retired formats exist) as an extension of `ensure_migrated`.
+
+### A third hand-written TOML store
+
+→ its `dumps` lives with its own format (two similar shapes stay two — a
+shared `dumps` would be parameterised by header, key set and value kinds
+until it was harder to read than either caller). But its ESCAPING comes from
+`toml_emit.py`, never a fresh `json.dumps` wrapper: `tags/store.py` and
+`cluster/state.py` each carried a byte-identical copy of those five lines
+until 2026-09-03, and the failure mode of letting them drift is silent —
+each file's own reader keeps parsing until a key finally needs quoting.
 
 ### A new helper that's pure (no disk, no third-party)
 

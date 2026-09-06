@@ -2,8 +2,9 @@
 
 This module is orchestration only. Every mechanism it uses belongs to a peer:
 `mailbox` stages messages and attributes replies, `sync` moves files, `journal`
-records, `group` holds durable state, and `docker_config` owns the one docker
-touchpoint (injection). What lives here is the *policy* — who gets told what, in
+records, `group` holds durable state, and `container_inject` owns the one
+docker touchpoint (typing into a live session's TTY). What lives here is the
+*policy* — who gets told what, in
 what order, and when to stop.
 
 **The hub advances through transcripts, not through the outbox.** A capture is a
@@ -37,7 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from ..docker_config import docker_attach_inject
+from ..container_inject import docker_attach_inject
 from . import journal, mailbox, sync
 from .group import (
     GroupStatus, HubState, ParticipantState, Session, discover_sessions,

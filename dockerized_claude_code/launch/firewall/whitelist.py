@@ -26,7 +26,7 @@ _SKIPPED_IPV6_REASON = "IPv6 entry — the container network and firewall are IP
 class HostnameEntry(NamedTuple):
     """A whitelist entry that needs DNS — the raw entry string, its hostname,
     the port suffix (`""` when the entry didn't specify one, in which case
-    `_DEFAULT_OPEN_PORTS` is opened instead), and whether the entry carried a
+    `iptables.DEFAULT_OPEN_PORTS` is opened instead), and whether the entry carried a
     `*.` wildcard prefix (which asks for all-provider-blocks widening — see
     resolver._tokens_for). Carried through both phases of the resolution cascade
     so a resolved host can be matched back to every entry that shares its

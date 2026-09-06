@@ -10,7 +10,7 @@ render loop's ticks arrive late, which the user feels as the picker freezing
 even though the read is "in the background". This benchmark measures exactly
 that: a fake UI thread ticks every 5 ms and records how late each tick fires,
 while the read runs (a) on a thread, (b) in a spawned child process — the
-mechanism `menu_picker._read_last_prompt` uses.
+mechanism `picker_previews._read_last_prompt` uses.
 
 Run from the project root (a file path argument adds a real state dir):
   python3 -m launch.benchmark.bench_preview_gil [state_dir ...]
@@ -24,7 +24,7 @@ from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from ..file_access import last_prompt_in_state
+from ..transcripts import last_prompt_in_state
 from .bench_preview_segments import _synthetic_state_dir
 
 TICK_SECONDS = 0.005      # one simulated render tick — prompt_toolkit-ish cadence

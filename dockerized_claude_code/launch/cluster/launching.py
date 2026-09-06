@@ -310,16 +310,22 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
             ensure_dir(cache_host)
             mounts.append((str(cache_host), str(cache_target)))
 
-    write_text(cluster_banner_path(cluster.session),
-               tmux.banner_text(cluster.ids, project=str(cluster.project)))
     script_host = cluster_path(cluster.session) / SCRIPT_NAME
     if backend() == "herdr":
+        # No banner file: herdr renders the member line from the per-pane
+        # metadata the script reports (`workspace report-metadata`), so the
+        # file tmux's status bar cats has no reader here. Writing it anyway
+        # left every default-backend launch producing a file nobody opened.
         text = herdr.script(
             cluster.session, plan.panes(),
             shell_cwd=plan.container_shell_cwd,
             unset_env=(MESSAGING_KILL_SWITCH,),
             setup_commands=_setup_commands(cluster))
     else:
+        # tmux's status bar cats this file (`plan.container_banner` is its
+        # in-container path), so the backend that reads it writes it.
+        write_text(cluster_banner_path(cluster.session),
+                   tmux.banner_text(cluster.ids, project=str(cluster.project)))
         text = tmux.script(
             cluster.session, plan.panes(),
             banner=plan.container_banner,

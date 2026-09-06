@@ -15,9 +15,11 @@ read time. Full-replacement semantics: an entry wins over the agent's
 on the `.lego` pre-picks". `workspace` / `engine` are simply omitted when
 unset (TOML has no null); readers see the absent key as None.
 
-Reading goes through stdlib `tomllib`; writing through the small emitter
-below — the schema is flat and fixed (string + string-list values only),
-so a dependency-free serializer stays ~20 lines. Deliberately cache-free:
+Reading goes through stdlib `tomllib`; writing through `dumps` below, which
+owns THIS file's shape (its header, its `workspace`/`engine` pair) and takes
+the escaping rules from `launch/toml_emit.py` — the schema is flat and fixed
+(string + string-list values only), so a dependency-free serializer stays
+small enough that `tomli-w` would not pay for itself. Deliberately cache-free:
 load reads the (small) file each call, so it's trivially testable
 (functions take an explicit `path`) and there's no stale cache across the
 picker's several reads. Callers follow load → mutate → save; `write_text`
@@ -29,12 +31,11 @@ makes the save atomic.
 
 from __future__ import annotations
 
-import json
-import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
+from .. import toml_emit
 from ..file_access import path_exists, read_text, write_text
 from ..paths import INSTANCES_FILE
 from .lego import AgentBuild
@@ -46,21 +47,6 @@ _FILE_HEADER = (
     "# defaults; deleting an entry re-opens the form on those defaults.\n"
 )
 
-# TOML bare keys: letters/digits/underscore/dash. Anything else (a future
-# dotted agent name, say) gets basic-string quoting so the file stays valid.
-_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def _toml_key(key: str) -> str:
-    return key if _BARE_KEY_RE.match(key) else json.dumps(key)
-
-
-def _toml_str(value: str) -> str:
-    # JSON string escaping is a subset of TOML basic-string escaping
-    # (\" \\ \n \t \uXXXX …), so json.dumps yields a valid TOML string.
-    return json.dumps(value)
-
-
 def dumps(mapping: dict[str, dict[str, Any]]) -> str:
     """Serialize the store: header comment, then one key-sorted table per
     instance. Only the shapes this store holds are supported — optional
@@ -69,13 +55,12 @@ def dumps(mapping: dict[str, dict[str, Any]]) -> str:
     blocks = [_FILE_HEADER]
     for instance_id in sorted(mapping):
         entry = mapping[instance_id]
-        lines = [f"[{_toml_key(instance_id)}]"]
-        for key in ("workspace", "engine"):
-            if entry.get(key) is not None:
-                lines.append(f"{key} = {_toml_str(entry[key])}")
+        lines = [f"[{toml_emit.key(instance_id)}]"]
+        for field in ("workspace", "engine"):
+            if entry.get(field) is not None:
+                lines.append(f"{field} = {toml_emit.string(entry[field])}")
         for axis in ("professions", "specialties", "policies"):
-            values = ", ".join(_toml_str(v) for v in entry.get(axis, []))
-            lines.append(f"{axis} = [{values}]")
+            lines.append(toml_emit.string_list(axis, entry.get(axis, [])))
         blocks.append("\n".join(lines) + "\n")
     return "\n".join(blocks)
 

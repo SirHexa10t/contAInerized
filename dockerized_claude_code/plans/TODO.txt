@@ -458,8 +458,9 @@ next AI to implement:
     <instance_name>  ("INVALID"/"RUNNING"/"CURRENT DIR") ( <instance_path> ) 
 
 
+Can we integrate a "find" feature? Maybe through {mux} ?
 
-
+Can't we integrate `alt+q` as exit into `keybindings.json`? Was that what we tried (and failed) earlier?
 
 
 

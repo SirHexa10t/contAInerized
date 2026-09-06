@@ -15,7 +15,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from launch import paths
-from launch.cluster import launch_plan, state, tmux
+from launch.cluster import launch_plan, panes as panes_mod, state, tmux
 from launch.cluster.member import ClusterError, Member
 
 
@@ -69,35 +69,23 @@ def typethrough(argv_list: tuple[tuple[str, ...], ...]) -> dict[str, str]:
 
 
 def a_pane(name: str = "golem", command: tuple[str, ...] = ("claude",),
-           cwd: str = "/workspaces/golem", **env: str) -> tmux.Pane:
-    return tmux.Pane(name=name, command=command, cwd=Path(cwd), env=env)
+           cwd: str = "/workspaces/golem", **env: str) -> panes_mod.Pane:
+    return panes_mod.Pane(name=name, command=command, cwd=Path(cwd), env=env)
 
 
-class TestPane(unittest.TestCase):
+class TestEnvFlags(unittest.TestCase):
+    """tmux's own rendering of a pane's env. The record holds a plain
+    mapping; `-e KEY=VALUE` is this backend's dialect (herdr says
+    `--env KEY=VALUE`), which is why it lives here and not on `Pane`."""
+
     def test_env_flags_are_key_sorted(self):
         # Deterministic assembly: a dict's insertion order must not leak into
         # the command line, or a diff of two plans shows phantom changes.
         pane = a_pane(ZULU="1", ALPHA="2")
-        self.assertEqual(pane.env_flags(), ("-e", "ALPHA=2", "-e", "ZULU=1"))
+        self.assertEqual(tmux._env_flags(pane), ("-e", "ALPHA=2", "-e", "ZULU=1"))
 
     def test_no_env_means_no_flags(self):
-        self.assertEqual(a_pane().env_flags(), ())
-
-    def test_command_is_shell_quoted_exactly_once(self):
-        # tmux hands this string to a shell, so an argument containing a space
-        # must survive as ONE argument.
-        pane = a_pane(command=("claude", "--append-system-prompt", "be terse now"))
-        self.assertEqual(shlex.split(pane.shell_command),
-                         ["claude", "--append-system-prompt", "be terse now"])
-
-    def test_window_name_is_validated(self):
-        # ':' would make `-t session:name` address a different window.
-        with self.assertRaises(ClusterError):
-            a_pane(name="bad:name")
-
-    def test_a_pane_needs_a_command(self):
-        with self.assertRaises(ValueError):
-            tmux.Pane(name="golem", command=(), cwd=Path("/tmp"))
+        self.assertEqual(tmux._env_flags(a_pane()), ())
 
 
 class TestStartupArgv(unittest.TestCase):
@@ -220,18 +208,18 @@ class TestFreeShellAndQuit(unittest.TestCase):
         argv = tmux.startup_argv("poc", self.panes, shell_cwd=Path("/workspace"))
         names = [a[a.index("-n") + 1] for a in argv
                  if sub(a) in ("new-session", "new-window")]
-        self.assertEqual(names, ["member-one", "member-two", tmux.SHELL_WINDOW])
+        self.assertEqual(names, ["member-one", "member-two", tmux.SHELL_LABEL])
 
     def test_the_shell_is_a_login_shell(self):
         # So the operator's own bashrc/aliases apply — "tune bashrc properly" is
         # one of the reasons this window exists.
         argv = tmux.startup_argv("poc", self.panes, shell_cwd=Path("/workspace"))
-        shell = next(a for a in argv if tmux.SHELL_WINDOW in a)
+        shell = next(a for a in argv if tmux.SHELL_LABEL in a)
         self.assertIn("-l", shell[-1])
 
     def test_no_shell_when_none_is_asked_for(self):
         argv = tmux.startup_argv("poc", self.panes)
-        self.assertFalse(any(tmux.SHELL_WINDOW in a for a in argv))
+        self.assertFalse(any(tmux.SHELL_LABEL in a for a in argv))
 
     def test_the_first_member_is_still_selected_with_a_shell_present(self):
         argv = tmux.startup_argv("poc", self.panes, shell_cwd=Path("/workspace"))
@@ -313,7 +301,7 @@ class TestSoloSplit(unittest.TestCase):
     def test_both_panes_are_labelled_on_the_divider(self):
         titles = [a[a.index("-T") + 1] for a in self.argv
                   if sub(a) == "select-pane" and "-T" in a]
-        self.assertEqual(titles, [tmux.AGENT_PANE, tmux.SHELL_WINDOW])
+        self.assertEqual(titles, [tmux.AGENT_PANE, tmux.SHELL_LABEL])
         options = set_options(self.argv)
         self.assertEqual(options["pane-border-status"], "top")
 

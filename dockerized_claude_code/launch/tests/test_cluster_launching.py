@@ -326,6 +326,20 @@ class TestBackendSwitch(LaunchingTmp):
         self.assertIn(f"unset {launching.MESSAGING_KILL_SWITCH}", text)
         self.assertIn(f"mkdir -p {launching.SHARED_SESSIONS}", text)
 
+    def test_only_the_backend_that_reads_the_banner_writes_it(self):
+        """The banner file is tmux's status-bar source. It used to be written
+        on every launch regardless of backend, so the default path produced a
+        file with no reader — the kind of leftover that later reads as a
+        contract ("something must need this") and never gets removed."""
+        write_ui_profile(herdr=True)
+        self.prepared()
+        self.assertFalse(paths.cluster_banner_path(self.cluster.session).exists())
+
+        write_ui_profile(herdr=False)
+        self.prepared()
+        self.assertIn("2 member(s)",
+                      paths.cluster_banner_path(self.cluster.session).read_text())
+
     def test_a_profile_that_lost_the_field_is_a_loud_stop(self):
         # The operator's spec: a hand-edit that dropped the field must never
         # silently flip the muxer — the stop names the field and the fix

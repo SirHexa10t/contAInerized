@@ -8,7 +8,8 @@ independent signals, none of which this module gathers itself:
     back. Read off the resolved identity (`Instance.is_cowork`).
   * **liveness** — is its container up? Injection types into a live TTY, so a
     stopped instance cannot be reached at all. One `docker ps`, via
-    `docker_config`, which owns every docker call.
+    `docker_config`, which owns the FLEET-level docker queries (a
+    single-container probe would come from `container_probe` instead).
   * **commitments** — which active groups is it already in? A peer juggling
     three groups is a poor fourth choice, and that is the manager's call to make
     with the facts in front of it.

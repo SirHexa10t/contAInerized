@@ -1,50 +1,24 @@
-"""Tests for launch.tag_form — the sectioned tag form's pure parts (option
-assembly, radio grouping, attached_to ordering, requires cascade, warning
-computation, prompt_tags post-processing) plus the shared display coercers.
-Assembled against the real shipped agents/ tree. The prompt_toolkit
-Application itself (checkbox_form) is interactive and stays out of unit
-scope."""
+"""Tests for launch.gui.forms — what each concrete form ASKS: the tag form's
+sectioned rows, its cluster-wide sibling (no engines, locked pair), and the
+merged preferences form's sections.
+
+Split out of test_tag_form 2026-09-03; the machinery those forms run on is
+tested in test_form_core.py."""
 
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from launch.gui import tag_form
-from launch.paths import AGENTS_DIR
-from launch.gui.tag_form import (
-    STYLE_UNDERLINE, FormOption, _combo_warnings, _form_requires, _normalize,
-    _plain, _tag_form_options, active_warnings, ordered_form_options,
-    _toolkit_form_options, prompt_tags, requires_closure,
+from launch.gui import forms
+from launch.gui.forms import (
+    _form_requires, _tag_form_options, _toolkit_form_options, prompt_tags,
 )
+from launch.gui.styles import STYLE_UNDERLINE, _plain
+from launch.paths import AGENTS_DIR
 from launch.tags import AgentBuild, scan_all
 from launch.tags.profession import ToolkitEntry
 
 REGISTRY = scan_all(AGENTS_DIR)
-
-
-class TestDisplayCoercion(unittest.TestCase):
-    """_normalize/_plain back the picker's filter matching — every accepted
-    display shape must round-trip to comparable plain text."""
-
-    def test_normalize_plain_string(self):
-        self.assertEqual(_normalize("hello"), [("", "hello")])
-
-    def test_normalize_fragment_list_passthrough(self):
-        frags = [("bold", "a"), ("", "b")]
-        self.assertEqual(_normalize(frags), frags)
-
-    def test_plain_joins_fragment_text(self):
-        self.assertEqual(_plain([("bold", "a"), ("", "b")]), "ab")
-
-    def test_plain_of_string(self):
-        self.assertEqual(_plain("hello"), "hello")
-
-
-
-
-# ============================================================
-# Checkbox form — pure assembly / ordering / cascade / warning logic
-# ============================================================
 
 
 class TestTagFormOptions(unittest.TestCase):
@@ -173,273 +147,13 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertIn("<+qry>", labels["web-research"])   # policies render their shortname
 
 
-class TestRequiresClosure(unittest.TestCase):
-    def test_no_requires_yields_empty(self):
-        self.assertEqual(requires_closure("code", {}), set())
-
-    def test_direct_requirement(self):
-        self.assertEqual(requires_closure("web", {"web": frozenset({"code"})}), {"code"})
-
-    def test_transitive_requirement(self):
-        req = {"c": frozenset({"b"}), "b": frozenset({"a"})}
-        self.assertEqual(requires_closure("c", req), {"a", "b"})
-
-    def test_self_not_included(self):
-        self.assertNotIn("web", requires_closure("web", {"web": frozenset({"code"})}))
-
-    def test_cycle_terminates(self):
-        req = {"a": frozenset({"b"}), "b": frozenset({"a"})}
-        self.assertEqual(requires_closure("a", req), {"a", "b"})
-
-    def test_real_tree_webdev_requires_code(self):
-        self.assertEqual(requires_closure("webdev", _form_requires(REGISTRY)), {"code"})
-
-
-class TestOrderedFormOptions(unittest.TestCase):
-    """ordered_form_options — the attached_to proximity layout: attached
-    options tuck directly beneath their anchor; no dependency semantics."""
-
-    @staticmethod
-    def _opt(key: str, attached_to: str | None = None) -> FormOption:
-        return FormOption(key=key, label=key, attached_to=attached_to)
-
-    def test_anchor_order_preserved_without_attachments(self):
-        out = ordered_form_options([self._opt("a"), self._opt("b"), self._opt("c")])
-        self.assertEqual([o.key for o in out], ["a", "b", "c"])
-
-    def test_attached_tucks_directly_after_anchor(self):
-        # The future firewall⇄auto shape: firewall declared last still
-        # renders right beneath auto.
-        out = ordered_form_options([self._opt("auto"), self._opt("dood"),
-                                    self._opt("firewall", attached_to="auto")])
-        self.assertEqual([o.key for o in out], ["auto", "firewall", "dood"])
-
-    def test_multiple_attachments_keep_relative_order(self):
-        out = ordered_form_options([self._opt("auto"),
-                                    self._opt("f1", attached_to="auto"),
-                                    self._opt("f2", attached_to="auto")])
-        self.assertEqual([o.key for o in out], ["auto", "f1", "f2"])
-
-    def test_unknown_anchor_appends_at_end(self):
-        out = ordered_form_options([self._opt("a"), self._opt("x", attached_to="ghost")])
-        self.assertEqual([o.key for o in out], ["a", "x"])
-
-
-class TestActiveWarnings(unittest.TestCase):
-    """active_warnings against the real combos.info copy (re-keyed by tag
-    name via _combo_warnings) — the form's live warning zone."""
-
-    def setUp(self):
-        self.warnings = _combo_warnings(REGISTRY)
-
-    def test_dood_plus_auto_combo_shipped(self):
-        self.assertIn(frozenset({"dood", "auto"}), self.warnings)
-
-    def test_auto_plus_dood_fires(self):
-        self.assertEqual(len(active_warnings({"auto", "dood"}, self.warnings)), 1)
-
-    def test_superset_still_fires(self):
-        self.assertEqual(len(active_warnings({"auto", "dood", "web"}, self.warnings)), 1)
-
-    def test_singles_dont_fire(self):
-        self.assertEqual(active_warnings({"auto"}, self.warnings), [])
-        self.assertEqual(active_warnings({"dood"}, self.warnings), [])
-
-    def test_empty_selection_no_warnings(self):
-        self.assertEqual(active_warnings(set(), self.warnings), [])
-
-
-class TestRefreshAuto(unittest.TestCase):
-    """The auto-fill contract: a derived field FOLLOWS its source until the
-    user touches it, then never again — 'the name follows the path until you
-    type your own'."""
-
-    def fields(self):
-        path = tag_form.TextField(key="path", label="path", value="/code/thing")
-        name = tag_form.TextField(
-            key="name", label="name", value="",
-            auto=lambda values: f"golem__{values['path'].rsplit('/', 1)[-1]}")
-        return path, name
-
-    def test_untouched_fields_follow_their_source(self):
-        path, name = self.fields()
-        tag_form.refresh_auto([path, name])
-        self.assertEqual(name.value, "golem__thing")
-        path.insert("2")
-        tag_form.refresh_auto([path, name])
-        self.assertEqual(name.value, "golem__thing2")
-
-    def test_one_keystroke_in_the_field_stops_the_following(self):
-        path, name = self.fields()
-        tag_form.refresh_auto([path, name])
-        name.insert("!")                      # the user typed their own
-        path.insert("2")
-        tag_form.refresh_auto([path, name])
-        self.assertEqual(name.value, "golem__thing!")
-
-    def test_backspace_counts_as_touching_too(self):
-        # Deleting part of the suggestion IS choosing a name.
-        path, name = self.fields()
-        tag_form.refresh_auto([path, name])
-        name.backspace()
-        tag_form.refresh_auto([path, name])
-        self.assertEqual(name.value, "golem__thin")
-
-    def test_cursor_motion_does_not_count_as_touching(self):
-        # Arrowing around a suggestion is LOOKING, not choosing — the field
-        # keeps following its source, and the rewrite snaps the cursor back
-        # to the end (there was no user cursor position worth preserving).
-        path, name = self.fields()
-        tag_form.refresh_auto([path, name])
-        name.home()
-        name.word_right()
-        path.insert("2")
-        tag_form.refresh_auto([path, name])
-        self.assertEqual(name.value, "golem__thing2")
-        self.assertEqual(name.cursor, len("golem__thing2"))
-
-    def test_fields_without_auto_never_move(self):
-        path, name = self.fields()
-        name.auto = None
-        name.value = "pinned"
-        tag_form.refresh_auto([path, name])
-        self.assertEqual(name.value, "pinned")
-
-
-class TestFormDrivenHeadless(unittest.TestCase):
-    """checkbox_form driven for real — keystrokes through a pipe input, no
-    terminal. This is where the interactive-only guarantees live: the confirm
-    gate on invalid fields is unreachable from pure helpers, and a mutation
-    run proved it was unpinned until these."""
-
-    def drive(self, keys, fields=None, options=None):
-        from prompt_toolkit.application import create_app_session
-        from prompt_toolkit.input import create_pipe_input
-        from prompt_toolkit.output import DummyOutput
-        with create_pipe_input() as pipe:
-            with create_app_session(input=pipe, output=DummyOutput()):
-                # Trailing double ctrl-C is a TRIPWIRE, not part of any test's
-                # script: a form still open after its keys (e.g. the really-
-                # done? question arming when it shouldn't) cancels to None and
-                # FAILS loudly — without it such a regression hangs the suite.
-                # Two, because the first may be consumed as the question's
-                # answer. A correctly-exited form never reads them.
-                pipe.send_text(keys + "\x03\x03")
-                return tag_form.checkbox_form(
-                    "t", options or [tag_form.FormOption(key="o", label="opt")],
-                    fields=fields)
-
-    def test_confirm_refuses_while_a_field_is_invalid(self):
-        # First Enter must be REFUSED (field empty + validator says so); the
-        # typed x then makes it valid and the second Enter lands. If the gate
-        # dies, the first Enter exits with the empty value instead.
-        result = self.drive("\rx\r", fields=[
-            tag_form.TextField(key="f", label="name", value="",
-                               validate=lambda v: "empty" if not v else None)])
-        self.assertEqual(result, ({"f": "x"}, []))
-
-    def test_space_is_a_literal_in_a_field(self):
-        result = self.drive("a b\r", fields=[
-            tag_form.TextField(key="f", label="name", value="")])
-        self.assertEqual(result, ({"f": "a b"}, []))
-
-    def test_backspace_edits_the_field(self):
-        result = self.drive("ab\x7f\r", fields=[
-            tag_form.TextField(key="f", label="name", value="")])
-        self.assertEqual(result, ({"f": "a"}, []))
-
-    def test_options_below_the_fields_still_toggle(self):
-        # Down-arrow onto the option row, Space toggles it, Enter confirms —
-        # the field rows must not have broken the row offset arithmetic.
-        result = self.drive("\x1b[B \r", fields=[
-            tag_form.TextField(key="f", label="name", value="ok")])
-        self.assertEqual(result, ({"f": "ok"}, ["o"]))
-
-    def test_arrows_never_edit_a_field(self):
-        # ← once ate a character in a live form (a remove handler fell through
-        # to backspace). Left and right on a focused field must change nothing
-        # — which makes this form UNCHANGED, so Enter asks and `y` closes it.
-        result = self.drive("\x1b[D\x1b[C\ry", fields=[
-            tag_form.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "abc"}, []))
-
-    def test_left_arrow_moves_the_cursor_so_typing_lands_mid_string(self):
-        result = self.drive("\x1b[Dx\r", fields=[
-            tag_form.TextField(key="f", label="name", value="ab")])
-        self.assertEqual(result, ({"f": "axb"}, []))
-
-    def test_ctrl_left_jumps_a_word_in_a_path(self):
-        # ctrl+← from the end of /tmp/proj lands before `proj` (path
-        # separators end a word), so the x goes in front of the basename.
-        result = self.drive("\x1b[1;5Dx\r", fields=[
-            tag_form.TextField(key="f", label="path", value="/tmp/proj")])
-        self.assertEqual(result, ({"f": "/tmp/xproj"}, []))
-
-    def test_home_and_the_delete_key_erase_at_the_cursor(self):
-        # Home to column 0, Delete eats the char AT the cursor (not before).
-        result = self.drive("\x1b[H\x1b[3~\r", fields=[
-            tag_form.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "bc"}, []))
-
-    def test_an_unchanged_confirm_asks_and_any_other_key_stays(self):
-        # Enter on an untouched form arms the really-done? question. The next
-        # key ANSWERS it and is consumed — the `n` here must not land in the
-        # field as text; the x afterwards proves the form is still live.
-        result = self.drive("\rnx\r", fields=[
-            tag_form.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "abcx"}, []))
-
-    def test_a_changed_confirm_never_asks(self):
-        # One real edit and Enter closes directly — no `y` is queued, so if
-        # the question wrongly armed, the tripwire would cancel to None.
-        result = self.drive("x\r", fields=[
-            tag_form.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "abcx"}, []))
-
-
-class TestWantsWarnings(unittest.TestCase):
-    """wants_warnings — the advisory zone. Keys stay manifest NAMES (they must
-    match the checked set); `labels` is display-only, and it exists because a
-    header naming 'cowork' and 'free-bash' points the user at two strings that
-    appear nowhere on screen — the rows say {cowork} and <+bash>."""
-
-    WANTS = {"cowork": (("free-bash", "coworkers get auto-denied without it"),)}
-
-    def test_fires_only_while_the_wanted_tag_is_unchecked(self):
-        self.assertEqual(len(tag_form.wants_warnings({"cowork"}, self.WANTS)), 1)
-        self.assertEqual(tag_form.wants_warnings({"cowork", "free-bash"},
-                                                 self.WANTS), [])
-        self.assertEqual(tag_form.wants_warnings(set(), self.WANTS), [])
-
-    def test_the_header_shows_labels_when_given(self):
-        labels = {"cowork": "{cowrk}", "free-bash": "<+bash>"}
-        (header, _), = tag_form.wants_warnings({"cowork"}, self.WANTS, labels)
-        self.assertEqual(header, "'{cowrk}' wants '<+bash>':")
-
-    def test_a_key_missing_from_the_map_falls_back_to_itself(self):
-        # Non-tag callers of checkbox_form lose nothing by omitting labels.
-        (header, _), = tag_form.wants_warnings({"cowork"}, self.WANTS,
-                                               {"cowork": "{cowrk}"})
-        self.assertEqual(header, "'{cowrk}' wants 'free-bash':")
-
-    def test_the_forms_label_map_is_punctuated_for_every_kind(self):
-        # The real registry, all four kinds — a want may point at any tag.
-        labels = tag_form._form_labels(REGISTRY)
-        self.assertEqual(labels["cowork"], "{cowrk}")
-        self.assertEqual(labels["free-bash"], "<+bash>")
-        self.assertEqual(labels["code"], "[code]")
-        # Engines included (a want may point at one) — asserted via the tag's
-        # own label because engine shortnames are expressive (thinker is 🧠).
-        self.assertEqual(labels["thinker"], REGISTRY.engines["thinker"].label)
-
-
 class TestPromptTags(unittest.TestCase):
     """prompt_tags' post-form processing: the flat key list splits back into
     axes (registry order) and the engine rides through untouched. The form
     itself is patched — its interactive behavior is out of unit scope."""
 
     def _run(self, form_result, current=AgentBuild(engine="poet")):
-        with patch.object(tag_form, "checkbox_form", return_value=form_result) as self.form:
+        with patch.object(forms, "checkbox_form", return_value=form_result) as self.form:
             return prompt_tags(REGISTRY, current,
                                instance="poet__verse", workspace="/tmp/ws")
 
@@ -476,22 +190,6 @@ class TestPromptTags(unittest.TestCase):
                          ((), (), ()))
 
 
-class TestCascadeInForm(unittest.TestCase):
-    """The check-cascade wiring: simulate what the form's Space handler does
-    (toggle + cascade) using the pure pieces, against the real tree's
-    webdev→code edge."""
-
-    def test_checking_dependent_checks_requirement(self):
-        req = _form_requires(REGISTRY)
-        checked = {"webdev"} | requires_closure("webdev", req)
-        self.assertIn("code", checked)
-
-    def test_unchecking_requirement_identifies_dependents(self):
-        req = _form_requires(REGISTRY)
-        dependents = {k for k in ("webdev",) if "code" in requires_closure(k, req)}
-        self.assertEqual(dependents, {"webdev"})
-
-
 class TestFormRequires(unittest.TestCase):
     def test_only_tags_with_requires_present(self):
         req = _form_requires(REGISTRY)
@@ -502,7 +200,6 @@ class TestFormRequires(unittest.TestCase):
         # dood's `_dood` image layer lives under profession/code/ — the
         # specialty inherits the code requirement from its claimed layer.
         self.assertEqual(_form_requires(REGISTRY).get("dood"), frozenset({"code"}))
-
 
 
 class TestToolkitFormOptions(unittest.TestCase):
@@ -581,18 +278,18 @@ class TestProfilesFormAssembly(unittest.TestCase):
             captured.update(kwargs)
             return None   # cancel — nothing persisted
 
-        with patch("launch.gui.tag_form.toolkit_profile_path",
+        with patch("launch.gui.forms.toolkit_profile_path",
                    return_value=Path("/nonexistent/code_profile.toml")), \
-             patch("launch.gui.tag_form.ui_profile_path",
+             patch("launch.gui.forms.ui_profile_path",
                    return_value=Path("/nonexistent/ui_profile.toml")), \
-             patch("launch.gui.tag_form.checkbox_form", side_effect=fake_form):
-            tag_form.edit_profiles_menu(scan_all(AGENTS_DIR))
+             patch("launch.gui.forms.checkbox_form", side_effect=fake_form):
+            forms.edit_profiles_menu(scan_all(AGENTS_DIR))
         return captured
 
     def test_size_note_passed_as_preamble(self):
         # The size disclaimer belongs to the toolkit rows and rides along
         # whenever a toolkit section is present.
-        self.assertIn(tag_form.TOOLKIT_SIZE_NOTE,
+        self.assertIn(forms.TOOLKIT_SIZE_NOTE,
                       self._captured().get("preamble", []))
 
     def test_first_section_titles_the_form_and_later_ones_become_headers(self):
@@ -649,8 +346,8 @@ class TestClusterTagForm(unittest.TestCase):
             captured.update(kwargs)
             return result
 
-        with patch("launch.gui.tag_form.checkbox_form", side_effect=fake_form):
-            build = tag_form.prompt_cluster_tags(
+        with patch("launch.gui.forms.checkbox_form", side_effect=fake_form):
+            build = forms.prompt_cluster_tags(
                 REGISTRY, current or AgentBuild(specialties=tuple(locked)),
                 session="team", locked=locked)
         return build, captured
@@ -692,6 +389,3 @@ class TestClusterTagForm(unittest.TestCase):
         build, _ = self._captured(result=None)
         self.assertIsNone(build)
 
-
-if __name__ == "__main__":
-    unittest.main()

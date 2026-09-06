@@ -16,7 +16,10 @@ there rather than reimplemented in this package. What exists today:
     legoset      `.legoset` parsing — a cluster template's default membership
     state        `cluster.toml` — durable member set + per-member tags, discovery
     worktree     writer safety: one git worktree per member (argv assembly + probes)
-    tmux         the multiplexer: N members → one window (pure argv assembly)
+    panes        what a backend is asked to start: one `Pane` per member —
+                 the vocabulary BOTH backends read
+    tmux         the tmux backend: N members → one window (pure argv assembly)
+    herdr        the herdr backend, selected by default (same, its dialect)
     launch_plan  the join: a Cluster + env → worktrees, panes, mounts
     cli          the PoC command line
 

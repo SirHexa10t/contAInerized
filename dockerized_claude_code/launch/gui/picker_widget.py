@@ -1,0 +1,812 @@
+"""The reusable full-screen picker: what a ROW is, and the loop that selects
+one (launch/gui).
+
+`pick_with_preview` is the widget — a filterable list on the left, a preview
+pane on the right, and one of select / delete / modify / cancel as the
+outcome. It knows nothing about agents, instances or clusters: a caller hands
+it `PickerEntry` rows and gets back the opaque `value` of whichever row was
+chosen. `menu_picker` builds the launcher's actual menus on top of it.
+
+Split out of `menu_picker.py` 2026-09-03, which was 1541 lines holding both
+the widget and every menu built with it. The seam is one-way and was already
+implicit: nothing in here refers to a single menu-side name.
+
+What lives here:
+  - `PickerEntry` / `ContEntry`   the row contract, including the DEFERRED
+                                  preview slots (a row may hand over a
+                                  callable instead of text, so a slow
+                                  preview never blocks the first paint)
+  - `PickerAction` / `PickerRowMarker` / `PickerCwdHint`
+                                  the outcome enum, and the two row
+                                  decorations whose glyphs+styles are
+                                  data on the enum rather than branches
+                                  in the renderer
+  - `_PreviewLoader`              when to compute a preview and where to
+                                  park it
+  - `_tags_column` / `_cont_tags_column`
+                                  the tag-chip columns rows render with
+  - `_ScrollingControl`, `_cursor_step`, `_focusable_indices`
+                                  navigation over rows the cursor may skip
+  - `pick_with_preview`           the application + key bindings + loop
+"""
+
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from enum import Enum
+from functools import cached_property
+from typing import Any, cast
+
+from prompt_toolkit import Application                                     # dep — declared in pyproject.toml [project]
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import D
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.styles import Style
+
+from ..tags import Agent, Instance, Tag
+from ..tags.base import SQUASH_AT, first_glyph
+from ..utils import reset_terminal
+from .picker_previews import _last_prompt_display, cont_preview
+from .styles import (
+    STATUS_HEIGHT, STYLE_DICT, STYLE_TAG_INVALID, TITLE_HEIGHT, UiClass,
+    _fragment_source, _normalize, _plain, squashed_tag_style, tag_style,
+)
+
+
+# ============================================================
+# Row decoration + layout — the widget's own vocabulary
+# ============================================================
+
+HINT_BASE_TEXT       = "↑↓ navigate  •  type to filter  •  Enter select  •  Esc cancel"
+HINT_DELETE_SUFFIX   = "  •  Del delete"
+HINT_MODIFY_SUFFIX   = "  •  F2 modify"
+WHEEL_LINES          = 3     # rows the wheel moves per notch, on either side
+# Shown above a long preview so its scroll position is legible. Only for genuinely
+# long content — on a preview that fits, a position marker is noise.
+PREVIEW_POSITION       = "\x1b[2m   line {} / {}\x1b[0m"
+PREVIEW_POSITION_FLOOR = 40
+HINT_LEGEND_SUFFIX   = "  •  F8 legend"
+HINT_LEGEND_OPEN     = "F8 / Esc close legend"
+FILTER_LABEL         = "filter: "
+EMPTY_FILTER_MESSAGE = "(no matches)"
+PREVIEW_LOADING_TEXT = "… loading preview (keep browsing)"
+LAST_PROMPT_LOADING  = "[loading…]"   # stands in for the Last prompt value while transcripts are read
+DIVIDER_CHAR         = "│"
+LIST_WEIGHT    = 2
+PREVIEW_WEIGHT = 3
+DIVIDER_WIDTH  = 1
+PAGE_JUMP      = 10  # rows skipped per PageUp/PageDown
+# The bookmark shapes the picker's two CONTRASTED row kinds lead with (see
+# PickerRowMarker): an agent row is a green tab with a fading end, its
+# instances nest beneath behind a dim grey ▸. Green by request (iterated from
+# an all-grey first pass) — it is also Create's KIND colour, the same green
+# the preview's accent bar shows, so the tab and the bar agree.
+STYLE_TAB            = "bg:ansigreen fg:black bold"         # the tab body behind "Create" — black text on the green art, per request
+STYLE_TAB_TIP        = "fg:ansigreen"                       # its fading end: foreground == tab background, so the shade ramp reads as the tab dissolving, not as characters
+STYLE_NEST_MARK      = "fg:ansibrightblack"                 # instance rows: dim marker, indented under the agent's tab
+# The cluster-template rows wear the same tab shape in CYAN — a third kind
+# beside create-green and continue-yellow, same colour its preview accent shows.
+# Existing clusters nest beneath in the CONT shape (also cyan), their members a
+# level deeper still — shape says create/continue, colour says cluster.
+STYLE_CLUSTER_TAB     = "bg:ansicyan fg:black bold"
+STYLE_CLUSTER_TAB_TIP = "fg:ansicyan"
+STYLE_CLUSTER_NEST    = "fg:ansicyan"
+# The tab's end, as a shade ramp (▓▒░ — Block Elements, U+2580–259F). NOT a
+# triangle: ▶ is a Geometric Shape, i.e. a TYPOGRAPHIC character the font
+# renders at text size, so it sat visibly shorter than the row (reported from
+# a live launch). Block elements are the one shape family terminal emulators
+# rasterize THEMSELVES — kitty's box_drawing module, and the same procedural
+# drawing in VTE/gnome-terminal, WezTerm, and alacritty — full-cell and
+# seam-free with the font never consulted. That is the transplantable half of
+# "kitty stops trusting fonts": an application cannot draw pixels, but it can
+# emit only the code points the emulator draws procedurally. The ramp is the
+# classic powerline "fade" separator, built from universal characters.
+TAB_TIP = "▓▒░"
+# The set the tip must stay inside — tested, so a prettier font glyph cannot
+# sneak back in and reintroduce the short-triangle rendering.
+BLOCK_ELEMENTS = range(0x2580, 0x25A0)
+TAG_EMPHASIS         = "bold underline"   # style SUFFIX for tags an emphasize set names (see _tags_column) — on top of the tag's own color, so the color language survives the shout
+
+
+class PickerAction(Enum):
+    """Closed set of actions pick_with_preview returns alongside the selected
+    entry's value. None (returned for cancel/escape) sits outside the enum so
+    callers can branch on `if action is None` idiomatically."""
+    SELECT = "select"     # Enter — user picked a row
+    DELETE = "delete"     # Del   — user pressed delete on a row (only fires for deletable rows)
+    MODIFY = "modify"     # F2    — user pressed modify on a row (only fires for modifiable rows)
+
+class PickerRowMarker(Enum):
+    """Row lead-in — the fragments that prefix a row, bundled with the accent
+    colour the preview's edge bar shows while that row is selected. Bundled so
+    'kind of row' is one named thing instead of parallel constants assembled
+    at each call site.
+
+    The two row kinds the picker CONTRASTS — agents (Create) and their
+    instances (Cont) — wear bookmark shapes instead of emoji: the agent row
+    leads with a grey tab dissolving through a shade ramp (the Starship
+    segment look, fade variant), and its instances nest beneath it behind a
+    dim, indented ▸. The shape-work is confined to characters terminals draw
+    PROCEDURALLY (see TAB_TIP) — two font lessons paid for this: the
+    private-use powerline wedges () are tofu on stock fonts, and even the
+    universally-COVERED triangle ▶ renders at typographic size, visibly
+    shorter than the row (both observed live). Cell backgrounds and block
+    elements are the only full-height primitives an application can rely on.
+    ▸ on the Cont rows is deliberately exempt: it is a bullet next to text,
+    not furniture that must span the row.
+    The tab wears Create's KIND colour (green, matching the preview's accent
+    bar) with black text; the nest marker stays dim grey — so colour, shape,
+    and depth all separate the two kinds the same way.
+
+    Members expose:
+      .lead        — tuple of (style, text) fragments that start the row
+      .accent      — preview accent-bar style while the row is selected
+      .fragments() — the lead plus an optional alignment suffix, ready to
+                     splat into a FormattedText list
+    """
+    # Both creation tabs lead with `+` — the creation intent in one glyph, and
+    # the two tab NAMES then say what gets created (an agent instance; a
+    # cluster) instead of one saying the verb and the other the noun.
+    NEW     = (((STYLE_TAB, " + Agent "), (STYLE_TAB_TIP, TAB_TIP)), "fg:ansigreen")
+    CONT    = (((STYLE_NEST_MARK, "   ▸ Cont."),),              "fg:ansiyellow")
+    CLUSTER = (((STYLE_CLUSTER_TAB, " + Cluster "), (STYLE_CLUSTER_TAB_TIP, TAB_TIP)),
+               "fg:ansicyan")
+    # "Cont.", the same word instance rows use — an existing cluster IS a
+    # continuation; the cyan is what says "cluster" (kind = colour, verb = word).
+    CLSTR   = (((STYLE_CLUSTER_NEST, "   ▸ Cont."),),           "fg:ansicyan")
+    MEMBER  = (((STYLE_NEST_MARK, "        · "),),              "fg:ansicyan")
+    TOOLS  = ((("fg:ansicyan", "🧰 Toolkits"),),               "")
+    DELMNU = ((("fg:ansired", "⚠️ DELETE‼️"),),                "")
+    DLET   = ((("fg:ansired", "🗑 DELETE"),),                  "")
+    BACK   = ((("", "🚪  Back"),),                             "")
+
+    def __init__(self, lead: tuple[tuple[str, str], ...], accent: str) -> None:
+        self.lead = lead
+        self.accent = accent
+
+    def fragments(self, suffix: str = "") -> list[tuple[str, str]]:
+        """The lead fragments plus `suffix` (alignment spacing, or trailing
+        text like the back-row's label) as its OWN default-styled fragment —
+        never glued onto the last lead fragment, whose style may carry a
+        background that would smear across the gap."""
+        return [*self.lead, ("", suffix)] if suffix else list(self.lead)
+
+    def width(self, suffix: str = "") -> int:
+        """The lead's width in cells (every lead character is single-width —
+        ASCII plus Block Elements). What cross-marker column alignment
+        computes from: the cluster tab is wider than the agent tab, so landing
+        both rows' NAMES in one column means measuring, not guessing."""
+        return sum(len(text) for _, text in self.lead) + len(suffix)
+
+class PickerCwdHint(Enum):
+    """The cwd-relation tag shown on a Cont row's workspace. CURRENT/DEFAULT
+    mark a healthy relation to where the launcher was invoked from; INVALID
+    flags a stored workspace path that no longer exists / isn't a directory
+    so the user can spot it before continuing (or hit F2 to repoint it).
+    Same bundling rationale as PickerRowMarker — label text and style are a
+    fixed pair, not two parallel constants. CURRENT/DEFAULT share a yellow
+    style; kept as separate enum members so the colours can diverge later
+    without re-threading call sites."""
+    CURRENT = ("(CURRENT DIR) ", "bold fg:ansiyellow")
+    DEFAULT = ("(DEFAULT DIR) ", "bold fg:ansiyellow")
+    INVALID = ("(INVALID DIR) ", "bold fg:ansired")
+
+    def __init__(self, label: str, style: str) -> None:
+        self.label = label
+        self.style = style
+
+    @property
+    def fragment(self) -> tuple[str, str]:
+        """(style, label) tuple ready for a FormattedText segment. Property
+        rather than method since the label is fixed — no per-call suffix."""
+        return (self.style, self.label)
+
+@dataclass(frozen=True)
+class ContEntry:
+    """One Cont/DELETE row's data — what `continuable_instances` produces and
+    `pick_with_preview` consumes. `identity` is what the picker hands back
+    on selection; the *_display strings are pre-rendered for the agent-name
+    column / hint area; the is_*_dir booleans drive the
+    CURRENT/DEFAULT/INVALID workspace tags (only one can be True per row —
+    invalid implies ws_resolved is None, which makes the other two False).
+    `is_running` means a container for this instance is up right now, so the
+    row renders greyed with the RUNNING tag and is information-only — docker
+    would refuse a second container on the same `--name` anyway."""
+    identity: Instance
+    workspace_display: str
+    is_current_dir: bool
+    is_default_dir: bool
+    is_invalid_dir: bool
+    last_used_display: str
+    is_running: bool = False
+
+    @cached_property
+    def preview(self) -> str:
+        """The full Cont-row preview — `_compose` with the real `Last prompt`
+        value, which is the expensive part: benchmarked at 99.9% of the build
+        on a 155 MB state dir (3.9 s of a 3.9 s total; metadata + tags are
+        ~5 ms — see benchmark/bench_preview_segments.py). The picker therefore
+        never computes THIS on the UI thread: it shows `preview_quick` and
+        resolves this form on the loader's worker.
+
+        A cached_property, so the read happens once per screen-session however
+        often the row is re-rendered. (cached_property assigns via `__dict__`,
+        which a frozen dataclass permits — only `__setattr__` is blocked.)"""
+        return self._compose(_last_prompt_display(self.identity.state_dir))
+
+    @cached_property
+    def preview_quick(self) -> str:
+        """The instant form: identical to `preview` except the `Last prompt`
+        value reads `[loading…]` — the ~5 ms of metadata + tags the UI thread
+        CAN afford, shown while the worker reads the transcripts. The stand-in
+        appears only when the instance has any session history at all
+        (a cheap glob+stat), so a fresh instance never flashes a loading line
+        for a field it will not get. The rare inverse — history whose turns
+        are all tool echoes, so no prompt ever resolves — shows the stand-in
+        once, then loses the field when the full form lands: honest, brief."""
+        return self._compose(LAST_PROMPT_LOADING
+                             if self.identity.has_continuable_history else None)
+
+    def _compose(self, prompt: str | None) -> str:
+        """The preview text — built by `picker_previews`, which owns every
+        row kind's pane content; this row only supplies its own values."""
+        return cont_preview(self.identity, self.workspace_display,
+                            self.last_used_display, prompt)
+
+@dataclass(frozen=True)
+class PickerEntry:
+    """One row in `pick_with_preview`. `display` is the prompt_toolkit
+    FormattedText fragment list (list of (style, text) tuples), `preview` is
+    the right-pane ANSI text — either the string itself, or a zero-arg callable
+    producing it, resolved when the row is first highlighted (Cont rows pass a
+    callable: their preview reads the instance's transcripts for the `Last
+    prompt` line, and paying that per instance at menu OPEN would make startup
+    scale with everyone's conversation history). `value` is what the picker
+    hands back on selection (Agent for Create rows, Instance
+    for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
+    for Back rows). `deletable` / `modifiable` default True; the producer
+    sets them False to disable Del / F2 on the row (Create / Back / opener).
+    `selectable=False` makes the row INFORMATION-ONLY: still rendered, but the
+    cursor never lands on it, so Enter / Del / F2 can't target it (a running
+    instance — see RUNNING_HINT). `display` defaults to a fresh empty list per
+    instance to keep the dataclass safe — never shared across rows."""
+    display: list[tuple[str, str]] = field(default_factory=list)
+    preview: str | Callable[[], str] = ""
+    preview_quick: str | Callable[[], str] | None = None   # cheap stand-in pane shown while `preview` resolves
+    value: Any = None
+    deletable: bool = True
+    modifiable: bool = True
+    selectable: bool = True
+
+    @property
+    def preview_ready(self) -> bool:
+        """True once `preview` holds the rendered string — the signal the
+        picker's render path uses to decide between showing it and showing a
+        loading placeholder while a worker resolves it. A plain-string preview
+        (Create / Back rows) is born ready."""
+        return not callable(self.preview)
+
+    def preview_ansi(self) -> str:
+        """The rendered preview, resolving a deferred one.
+
+        Resolution REPLACES `preview` with the produced string (via
+        `object.__setattr__` — the one mutation this frozen dataclass permits
+        itself), and that is not an optimisation: it is what makes
+        `preview_ready` answer without computing anything, which the render
+        path depends on to stay non-blocking. The heavy work is cached on
+        ContEntry's side too (`cached_property`), so re-resolving after a
+        rebuild costs a dict lookup."""
+        if callable(self.preview):
+            object.__setattr__(self, "preview", self.preview())
+        return cast(str, self.preview)
+
+    def quick_ansi(self) -> str:
+        """The stand-in pane, resolved the same way. Cheap by contract —
+        everything in it except the transcript-fed field, ~5 ms — so the UI
+        thread calls this directly while the loader's worker builds the real
+        one. Callers check `preview_quick is not None` first."""
+        if callable(self.preview_quick):
+            object.__setattr__(self, "preview_quick", self.preview_quick())
+        return cast(str, self.preview_quick)
+
+class _PreviewLoader:
+    """Resolves slow previews OFF the UI thread, so highlighting a heavy row
+    never stalls the picker.
+
+    The render path asks `text()` for the highlighted row. A ready preview
+    comes back at once; an unresolved one comes back as PREVIEW_LOADING_TEXT
+    while the resolution runs on the one worker thread, which pokes the
+    application's thread-safe `invalidate()` when it finishes — prompt_toolkit
+    then re-renders and the ready branch serves the real thing. Meanwhile
+    every keystroke works: the UI thread never touches a transcript.
+
+    One worker, deliberately: previews resolve in highlight order and each at
+    most once (`_submitted`), so holding an arrow key across heavy rows queues
+    quick sequential reads instead of forking a thread per row. The worker
+    itself stays GIL-quiet: the expensive segment runs in a child process
+    (`_read_last_prompt` — a CPU-bound thread would convoy the render loop),
+    so this thread mostly WAITS. A resolution that RAISES becomes a
+    visible `(preview failed …)` pane rather than an eternal placeholder,
+    because `_submitted` rightly blocks a retry and a silent swallow would
+    look identical to loading forever."""
+
+    def __init__(self, invalidate: Callable[[], None]) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=1,
+                                            thread_name_prefix="preview")
+        self._invalidate = invalidate
+        self._submitted: set[int] = set()
+
+    def text(self, index: int, entry: PickerEntry) -> str:
+        """The pane content for `entry` right now: the preview, or — with
+        resolution scheduled — the richest stand-in available: the entry's
+        quick form (everything but the transcript-fed field, benchmarked at
+        ~5 ms against seconds for the full read) when it has one, else the
+        bare PREVIEW_LOADING_TEXT line."""
+        if entry.preview_ready:
+            return entry.preview_ansi()
+        if index not in self._submitted:
+            self._submitted.add(index)
+            self._executor.submit(self._resolve, entry)
+        if entry.preview_quick is not None:
+            return entry.quick_ansi()
+        return PREVIEW_LOADING_TEXT
+
+    def _resolve(self, entry: PickerEntry) -> None:
+        try:
+            entry.preview_ansi()
+        except Exception as error:                      # noqa: BLE001 — see class docstring
+            object.__setattr__(entry, "preview", f"(preview failed: {error})")
+        self._invalidate()
+
+    def shutdown(self) -> None:
+        """Stop resolving. Queued rows are dropped (the picker is closing —
+        nobody will read them); a resolution already running finishes, since
+        its result lands in ContEntry's cache and greets the next menu."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+def _deferred_preview(entry: "ContEntry", *, quick: bool = False) -> Callable[[], str]:
+    """A zero-arg producer of `entry`'s preview (or its quick form), for
+    PickerEntry's deferred slots. A named closure rather than an inline lambda
+    at the call sites: the loop variable must be bound NOW (a bare lambda
+    would render whichever row the loop finished on), and the
+    binding-by-default-arg idiom is exactly the kind of trap this spells out
+    instead."""
+    return (lambda: entry.preview_quick) if quick else (lambda: entry.preview)
+
+def _tags_column(tags: Iterable[Tag],
+                 emphasize: frozenset[str] = frozenset(),
+                 ) -> tuple[list[tuple[str, str]], int]:
+    """Render a tag set for cont-row / Create-row display as prompt_toolkit
+    `(style, text)` fragments. Returns (fragments, visible width); empty input
+    → ([], 0). A trailing space fragment is appended to non-empty output so
+    the widest row in the column gets a built-in separator before its right
+    neighbor (the agent / instance name). Tags named in `emphasize` get
+    TAG_EMPHASIS on top of their usual color, both forms — the stop selector
+    uses it to make `{muxer}` jump out.
+
+    Two forms, chosen by how crowded the row is. Below SQUASH_AT tags: each
+    tag's kind-punctuated label in its warn-aware color. At SQUASH_AT or more,
+    the labels stop fitting anything, so each tag collapses to its
+    one-character `squash_glyph` on a chip of its usual color
+    (`squashed_tag_style`) — the full names move to the row's preview pane,
+    which lists every tag expanded. Both forms space-separate, so two adjacent
+    chips of the same color read as two tags rather than one block."""
+    tag_list = list(tags)
+    if not tag_list:
+        return [], 0
+    squash = len(tag_list) >= SQUASH_AT
+    fragments: list[tuple[str, str]] = []
+    for tag in tag_list:
+        if fragments:
+            fragments.append(("", " "))
+        style, text = ((squashed_tag_style(tag_style(tag)), tag.squash_glyph)
+                       if squash else (tag_style(tag), tag.label))
+        if tag.name in emphasize:
+            style = f"{style} {TAG_EMPHASIS}"
+        fragments.append((style, text))
+    fragments.append(("", " "))   # trailing separator — bakes into the column width
+    visible = sum(len(text) for _, text in fragments)
+    return fragments, visible
+
+def _cont_tags_column(inst: Instance,
+                      emphasize: frozenset[str] = frozenset(),
+                      ) -> tuple[list[tuple[str, str]], int]:
+    """A Cont row's tag column: the resolved tags (via `_tags_column`)
+    followed by any `invalid_tags` — stored names that no longer resolve —
+    in the red-background/black-foreground alert style so a stale/typo'd tag
+    is impossible to miss. The invalid tags also block the instance from
+    starting (see select_agent / resolve_target).
+
+    The SQUASH_AT threshold counts BOTH parts: six tags where one is invalid
+    are exactly as crowded as six valid ones, and mixing one squashed part
+    with one labelled part would make the alert look like a different feature
+    rather than one of the row's tags. A squashed invalid tag stays visible
+    for the same reason the labelled form does — its chip is the alert red no
+    valid tag uses."""
+    problems = inst.invalid_tags
+    if len(inst.active_tags) + len(problems) >= SQUASH_AT:
+        chips = [(squashed_tag_style(tag_style(tag))
+                  + (f" {TAG_EMPHASIS}" if tag.name in emphasize else ""),
+                  tag.squash_glyph)
+                 for tag in inst.active_tags]
+        chips += [(STYLE_TAG_INVALID, first_glyph(problem.name))
+                  for problem in problems]
+        fragments: list[tuple[str, str]] = []
+        for chip in chips:
+            if fragments:
+                fragments.append(("", " "))
+            fragments.append(chip)
+        fragments.append(("", " "))
+        return fragments, sum(len(text) for _, text in fragments)
+    fragments, width = _tags_column(inst.active_tags, emphasize)
+    for problem in problems:
+        if fragments:
+            fragments.append(("", " "))
+            width += 1
+        fragments.append((STYLE_TAG_INVALID, problem.label))
+        width += len(problem.label)
+    if problems:
+        fragments.append(("", " "))   # trailing separator, matching _tags_column
+        width += 1
+    return fragments, width
+
+def _focusable_indices(entries: list[PickerEntry], shown: list[int]) -> list[int]:
+    """Row indices the cursor may land on: visible after filtering AND
+    selectable. Information-only rows (a running instance) are rendered but
+    never focusable, which is what blocks Enter / Del / F2 on them."""
+    return [i for i in shown if entries[i].selectable]
+
+def _cursor_step(entries: list[PickerEntry], shown: list[int], cursor: int, delta: int) -> int:
+    """Where the cursor lands after moving `delta` rows — stepping over
+    information-only rows and wrapping at the ends. `cursor` unchanged when
+    nothing is focusable; snaps to the first focusable row when the cursor
+    isn't on one. Module-level and pure so the skip behaviour is unit-testable
+    without driving a live prompt_toolkit Application."""
+    landable = _focusable_indices(entries, shown)
+    if not landable:
+        return cursor
+    if cursor not in landable:
+        return landable[0]
+    return landable[(landable.index(cursor) + delta) % len(landable)]
+
+class _ScrollingControl(FormattedTextControl):
+    """A `FormattedTextControl` that turns the wheel into a caller-supplied step.
+
+    prompt_toolkit already delivers a mouse event only to the control under the
+    pointer, so "scroll whichever side the mouse is over" needs no hit-testing of
+    our own — each side just handles its own events. Returning None marks the
+    event handled; returning NotImplemented would let it bubble and the other
+    side would react too.
+    """
+
+    def __init__(self, *args: Any, on_scroll: Callable[[int], None], **kw: Any) -> None:
+        # `on_scroll` receives NOTCHES (-1 up, +1 down), not lines: the list moves
+        # one ROW per notch (precise selection) while the preview moves several
+        # LINES, and only each side knows which it wants.
+        super().__init__(*args, **kw)
+        self._on_scroll = on_scroll
+
+    def mouse_handler(self, mouse_event: MouseEvent) -> object:
+        if mouse_event.event_type is MouseEventType.SCROLL_UP:
+            self._on_scroll(-1)
+            return None
+        if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+            self._on_scroll(1)
+            return None
+        return super().mouse_handler(mouse_event)
+
+def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
+    """Render a full-screen picker; block until the user picks or cancels.
+
+    legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
+    over the preview pane (Esc closes it). The agent picker passes LEGEND_TEXT so
+    users can recall what each tag's kind punctuation means."""
+    if not entries:
+        raise ValueError("entries must be non-empty")
+
+    state: dict[str, Any] = {
+        # First selectable row, not blindly 0 — entries[0] can be
+        # information-only (a running instance heading the delete submenu).
+        "cursor": next((i for i, e in enumerate(entries) if e.selectable), 0),
+        "filter": "",
+        "shown": list(range(len(entries))),
+        "result": (None, None),
+        "legend_open": False,
+        # Lines the preview is scrolled down by. Reset whenever the preview's
+        # CONTENT changes (a new row, or the legend opening), because a leftover
+        # offset would open the next preview part-way down for no reason.
+        "preview_scroll": 0,
+    }
+
+    def focusable() -> list[int]:
+        return _focusable_indices(entries, state["shown"])
+
+    def refilter() -> None:
+        q = state["filter"].lower()
+        state["shown"] = [i for i in range(len(entries))
+                          if q in _plain(entries[i].display).lower()]
+        if state["cursor"] in state["shown"] and entries[state["cursor"]].selectable:
+            return                                    # current row survived the filter
+        landable = focusable()
+        # Fall back to the first visible row when nothing is focusable, so the
+        # cursor stays inside `shown` for rendering (Enter is guarded anyway).
+        state["cursor"] = landable[0] if landable else (state["shown"][0] if state["shown"] else 0)
+
+    def scroll_list(notches: int) -> None:
+        """Move the highlight by `notches` focusable rows.
+
+        Moves the CURSOR rather than a viewport offset, so the wheel and the arrow
+        keys can never disagree about which row is selected — and the preview
+        follows along, which is what makes wheeling the list useful at all.
+        Unselectable rows are skipped because `focusable()` already excludes them."""
+        landable = focusable()
+        if not landable:
+            return
+        here = state["cursor"]
+        nearest = min(range(len(landable)), key=lambda i: abs(landable[i] - here))
+        state["cursor"] = landable[max(0, min(nearest + notches, len(landable) - 1))]
+        # A new row means a new preview, so it starts at the top — EXCEPT while the
+        # legend is open: the side pane is then showing the legend, whose content
+        # does not depend on the cursor, so resetting it would throw away the
+        # reader's place in it for no reason.
+        if not state["legend_open"]:
+            state["preview_scroll"] = 0
+
+    def list_fragments() -> list[tuple[str, str]]:
+        if not state["shown"]:
+            return [(UiClass.NO_MATCH.css, EMPTY_FILTER_MESSAGE)]
+        out = []
+        for i in state["shown"]:
+            segments = _normalize(entries[i].display)
+            if i == state["cursor"]:
+                segments = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
+                            for style, text in segments]
+            out.extend(segments)
+            out.append(("", "\n"))
+        if out and out[-1] == ("", "\n"):
+            out.pop()
+        return out
+
+    def _preview_source() -> str:
+        """The preview's full text, before scrolling."""
+        if state["legend_open"] and legend_text is not None:
+            return legend_text
+        if not state["shown"]:
+            return ""
+        return loader.text(state["cursor"], entries[state["cursor"]])
+
+    def scroll_preview(notches: int) -> None:
+        """Move the preview by `notches` wheel steps, clamped to its content.
+
+        Clamped rather than free-running: scrolling a short preview off the top
+        looks like the pane went blank. Two lines are always left reachable so the
+        end of the text still reads as the end."""
+        limit = max(0, _preview_lines_total() - 2)
+        state["preview_scroll"] = max(
+            0, min(state["preview_scroll"] + notches * WHEEL_LINES, limit))
+
+    def _preview_lines_total() -> int:
+        return len(_preview_source().splitlines())
+
+    def preview_text() -> ANSI | str:
+        source = _preview_source()
+        if not source:
+            return ""
+        offset = state["preview_scroll"]
+        lines = source.splitlines()
+        if offset:
+            # Slicing whole LINES, not characters: the text carries ANSI escapes
+            # and cutting mid-sequence would leak the escape into the output.
+            source = "\n".join(lines[offset:])
+        # A one-line position marker, since there is no usable scrollbar (see the
+        # preview Window). It states only what is actually known — how far down the
+        # SOURCE we are — rather than implying a viewport size the slice cannot know.
+        if len(lines) > PREVIEW_POSITION_FLOOR:
+            source = f"{PREVIEW_POSITION.format(offset + 1, len(lines))}\n{source}"
+        return ANSI(source)
+
+    def title_fragments() -> list[tuple[str, str]]:
+        return [(UiClass.TITLE.css, title)]
+
+    def status_fragments() -> list[tuple[str, str]]:
+        if state["legend_open"]:
+            hint = HINT_LEGEND_OPEN
+        else:
+            hint = HINT_BASE_TEXT
+            if allow_delete:
+                hint += HINT_DELETE_SUFFIX
+            if allow_modify:
+                hint += HINT_MODIFY_SUFFIX
+            if legend_text is not None:
+                hint += HINT_LEGEND_SUFFIX
+        out = [(UiClass.STATUS.css, hint), ("", "\n")]
+        if state["filter"]:
+            out.append((UiClass.FILTER.css, FILTER_LABEL))
+            out.append(("", state["filter"]))
+        return out
+
+    def cursor_pos() -> Point:
+        if not state["shown"]:
+            return Point(0, 0)
+        return Point(0, state["shown"].index(state["cursor"]))
+
+    kb = KeyBindings()
+
+    def move(delta: int) -> None:
+        state["cursor"] = _cursor_step(entries, state["shown"], state["cursor"], delta)
+        if not state["legend_open"]:      # the legend does not follow the cursor
+            state["preview_scroll"] = 0
+
+    @kb.add("up")
+    def _(event: KeyPressEvent) -> None: move(-1)
+
+    @kb.add("down")
+    def _(event: KeyPressEvent) -> None: move(1)
+
+    @kb.add("pageup")
+    def _(event: KeyPressEvent) -> None: move(-PAGE_JUMP)
+
+    @kb.add("pagedown")
+    def _(event: KeyPressEvent) -> None: move(PAGE_JUMP)
+
+    @kb.add("home")
+    def _(event: KeyPressEvent) -> None:
+        if landable := focusable():
+            state["cursor"] = landable[0]
+            if not state["legend_open"]:
+                state["preview_scroll"] = 0
+
+    @kb.add("end")
+    def _(event: KeyPressEvent) -> None:
+        if landable := focusable():
+            state["cursor"] = landable[-1]
+            if not state["legend_open"]:
+                state["preview_scroll"] = 0
+
+    @kb.add("enter")
+    def _(event: KeyPressEvent) -> None:
+        # The selectable check is belt-and-braces: move()/refilter() keep the
+        # cursor off information-only rows, but it also covers the
+        # nothing-focusable case (every visible row is information-only).
+        if state["shown"] and entries[state["cursor"]].selectable:
+            state["result"] = (PickerAction.SELECT, entries[state["cursor"]].value)
+            event.app.exit()
+
+    @kb.add("escape")
+    def _(event: KeyPressEvent) -> None:
+        if state["legend_open"]:
+            state["legend_open"] = False
+            state["preview_scroll"] = 0
+            return
+        state["result"] = (None, None)
+        event.app.exit()
+
+    @kb.add("c-c")
+    def _(event: KeyPressEvent) -> None:
+        state["result"] = (None, None)
+        event.app.exit()
+
+    @kb.add("f8")
+    def _(event: KeyPressEvent) -> None:
+        if legend_text is not None:
+            state["legend_open"] = not state["legend_open"]
+            state["preview_scroll"] = 0   # legend and preview scroll independently
+
+    @kb.add("backspace")
+    def _(event: KeyPressEvent) -> None:
+        if state["filter"]:
+            state["filter"] = state["filter"][:-1]
+            refilter()
+
+    @kb.add(Keys.Any)
+    def _(event: KeyPressEvent) -> None:
+        ch = event.data
+        if ch and len(ch) == 1 and ch.isprintable():
+            state["filter"] += ch
+            refilter()
+
+    if allow_delete:
+        @kb.add("delete")
+        def _on_delete_key(event: KeyPressEvent) -> None:
+            if not state["shown"]:
+                return
+            entry = entries[state["cursor"]]
+            if not entry.deletable:
+                return  # silently ignored — caller marked this row non-deletable
+            state["result"] = (PickerAction.DELETE, entry.value)
+            event.app.exit()
+
+    if allow_modify:
+        @kb.add("f2")
+        def _on_modify_key(event: KeyPressEvent) -> None:
+            if not state["shown"]:
+                return
+            entry = entries[state["cursor"]]
+            if not entry.modifiable:
+                return  # silently ignored — caller marked this row non-modifiable
+            state["result"] = (PickerAction.MODIFY, entry.value)
+            event.app.exit()
+
+    def accent_style() -> str:
+        """Colour the preview's left-edge accent bar based on the selected row's kind:
+        green for Create rows (Agent), yellow for Cont rows (Instance), dim
+        default for menu/back rows."""
+        if not state["shown"]:
+            return UiClass.DIVIDER.css
+        value = entries[state["cursor"]].value
+        if isinstance(value, Instance):             # cont row
+            return PickerRowMarker.CONT.accent      # yellow — the kind colour the grey lead no longer carries
+        if isinstance(value, Agent):                # new row
+            return PickerRowMarker.NEW.accent       # green
+        return UiClass.DIVIDER.css
+
+    body = HSplit([
+        Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT),
+        VSplit([
+            Window(
+                _ScrollingControl(_fragment_source(list_fragments),
+                                  get_cursor_position=cursor_pos,
+                                  focusable=True,
+                                  show_cursor=False,
+                                  on_scroll=scroll_list),
+                wrap_lines=False,
+                width=D(weight=LIST_WEIGHT),
+            ),
+            Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=UiClass.DIVIDER.css),
+            Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
+            Window(
+                _ScrollingControl(preview_text, on_scroll=scroll_preview),
+                wrap_lines=True,
+                width=D(weight=PREVIEW_WEIGHT),
+                style=UiClass.PREVIEW.css,
+                # NO ScrollbarMargin. It renders the WINDOW's own scroll state,
+                # while the scrolling here is done by slicing the text before the
+                # window ever sees it — so the bar described a viewport that does
+                # not exist: it sat at the bottom while the text was at the top,
+                # then shrank away as the sliced content got shorter. A correct bar
+                # would mean scrolling the window instead of the text (and
+                # ScrollbarMargin cannot be dragged either — it has no mouse
+                # handler). The position indicator below is honest about what it
+                # knows; see `preview_text`.
+            ),
+        ]),
+        Window(FormattedTextControl(_fragment_source(status_fragments)), height=STATUS_HEIGHT),
+    ])
+
+    app: Application[None] = Application(
+        layout=Layout(body),
+        key_bindings=kb,
+        style=Style.from_dict(STYLE_DICT),
+        full_screen=True,
+        # Without this prompt_toolkit never puts the terminal into mouse-reporting
+        # mode, so NO mouse event reaches any control — the per-side scroll
+        # handlers were correct and simply never called. It defaults to False.
+        #
+        # The trade-off, stated because it is felt: while the picker is open the
+        # terminal's own click-drag selection is suppressed (the app owns the
+        # mouse), so text cannot be selected out of a row or preview until the
+        # picker closes. Holding Shift bypasses it in most terminals.
+        mouse_support=True,
+    )
+    # Created here, after `app` exists, because the worker needs its
+    # (thread-safe) invalidate; preview_text above reaches `loader` through the
+    # closure, which resolves by the time the first render calls it.
+    loader = _PreviewLoader(app.invalidate)
+    try:
+        app.run()
+    finally:
+        loader.shutdown()
+        # mouse_support means the terminal streams `\e[<35;x;yM` reports the
+        # whole time the picker is open. prompt_toolkit turns the mode off on
+        # exit, but reports already IN FLIGHT land on the tty after it stops
+        # reading — and echo as `35;77;15M` garbage at whatever prompt comes
+        # next. Repairing + draining here closes that race (Esc included).
+        reset_terminal(drain_input=True)
+
+    return state["result"]

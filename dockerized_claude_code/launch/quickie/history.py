@@ -15,7 +15,8 @@ from datetime import datetime
 from rich.console import Console
 from rich.text import Text
 
-from ..file_access import iter_subdirs, last_answer_in_state, last_prompt_in_state
+from ..file_access import iter_subdirs
+from ..transcripts import last_answer_in_state, last_prompt_in_state
 from ..paths import quickie_communal_workspace, quickie_dir, quickie_state_dir_path
 
 PROMPT_MAX = 180   # question chars shown before the listing cuts it with an ellipsis

@@ -9,9 +9,10 @@ Grouped by section in this file:
   - Agent file lookup (agent_md_index [cached]) — the name → md-path index
     (stem = agent name; an agent's axes live in `<name>.lego`, parsed by
     the tags package).
-  - Per-instance state-dir queries (has_continuable_jsonl, last_history_mtime)
-    — feed Instance properties. (The per-instance axis store — instances.toml
-    — lives in tags.store, built on this module's read/write primitives.)
+  - (The per-instance axis store — instances.toml — lives in tags.store, and
+    the session-transcript readers in `launch/transcripts.py`; both are built
+    on this module's read/write primitives rather than opening files
+    themselves.)
   - Optional credentials (present_optional_cred_services [cached],
     optional_cred_tokens)
   - User firewall whitelist (user_firewall_whitelist_lines [cached, self-plants
@@ -38,7 +39,6 @@ import os
 import shutil
 import time
 from collections.abc import Iterator
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import IO, Any
@@ -48,7 +48,7 @@ from .paths import (
     CREDENTIALS_FILE, FIREWALL_WHITELIST_FILE,
     FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS, optional_creds_service_path,
-    optional_creds_token_path, state_history_path, state_workspace_jsonls,
+    optional_creds_token_path,
 )
 from .utils import shell_returncode
 
@@ -483,112 +483,6 @@ def ensure_shared_oauth_files() -> None:
         write_text(ACCOUNT_FILE, "{}")
     if not path_exists(CREDENTIALS_FILE):
         write_text(CREDENTIALS_FILE, "{}")
-
-
-# ============================================================
-# Per-instance state-dir queries (helpers for Instance properties)
-# ============================================================
-
-def has_continuable_jsonl(state_dir: Path) -> bool:
-    """True iff `state_dir` has at least one non-empty session JSONL — i.e.,
-    something `claude --continue` can load. `state_workspace_jsonls` points
-    at `projects/-workspace/`, where only session-UUID JSONLs live —
-    `history.jsonl` is a sibling of `projects/` at the state-dir root, so
-    it never shows up in the iteration. Instance.has_continuable_history
-    is a thin wrapper — pulling the disk-walk out of the dataclass keeps
-    tags/identity.py a pure data layer."""
-    return any(jsonl.stat().st_size > 0 for jsonl in state_workspace_jsonls(state_dir))
-
-
-def continuable_jsonl_bytes(state_dir: Path) -> int:
-    """Size in bytes of the transcript `claude --continue` would load — the
-    most recently modified non-empty session JSONL — or 0 when the dir holds
-    none. The size matters because `--continue` has been observed silently
-    starting a FRESH conversation over a ~92 MB transcript (ISSUES.md,
-    2026-08-29): compute_resume_flag warns past a threshold instead of letting
-    a launch discover it. Instance.continuable_history_bytes is the thin
-    wrapper, same split as `has_continuable_jsonl` above."""
-    stats = [jsonl.stat() for jsonl in state_workspace_jsonls(state_dir)]
-    live = [stat for stat in stats if stat.st_size > 0]
-    return max(live, key=lambda stat: stat.st_mtime).st_size if live else 0
-
-
-def last_history_mtime(state_dir: Path) -> float | None:
-    """Mtime of `<state_dir>/history.jsonl` (the per-launch input log), or
-    None if it doesn't exist yet. `state_history_path` encodes the layout
-    fact that this file has a single deterministic location — no walk
-    needed. Instance.last_used_mtime is a thin wrapper around this
-    (same reason as above)."""
-    history = state_history_path(state_dir)
-    return history.stat().st_mtime if history.is_file() else None
-
-
-def last_prompt_in_state(state_dir: Path) -> tuple[str, float] | None:
-    """The most recent human prompt in a state dir's conversation transcript,
-    paired with its time as epoch seconds — or None if the dir holds no prompt
-    yet. Reads the session JSONLs under `projects/-workspace/` (the same
-    records `claude --continue` loads, so a dir yields a prompt here iff it is
-    resumable). A transcript "user" turn counts as a human prompt only when its
-    `message.content` is text — a plain string or `text` blocks — never a
-    `tool_result` echo (those are also typed "user" but aren't something the
-    person asked). Malformed / schema-drifted lines are skipped, so a truncated
-    or format-changed transcript degrades to "no prompt" rather than crashing
-    the caller (e.g. quickie's `--history` listing)."""
-    return _last_text_turn(state_dir, "user")
-
-
-def last_answer_in_state(state_dir: Path) -> tuple[str, float] | None:
-    """The most recent assistant answer in a state dir's transcript, paired with
-    its time as epoch seconds — or None if there's no answer yet. Same source
-    and same graceful-degrade rules as last_prompt_in_state; the assistant's
-    `text` blocks are the answer (redacted `thinking` and `tool_use` blocks
-    carry no readable text, so `_content_text` skips them). Powers quickie's
-    `q --answer <id>`."""
-    return _last_text_turn(state_dir, "assistant")
-
-
-def _last_text_turn(state_dir: Path, event_type: str) -> tuple[str, float] | None:
-    """(text, epoch-seconds) of the latest transcript turn of `event_type`
-    ("user" | "assistant") that carries readable text, scanning every session
-    JSONL under `projects/-workspace/`."""
-    latest: tuple[str, float] | None = None
-    for jsonl in state_workspace_jsonls(state_dir):
-        for line in read_text(jsonl).splitlines():
-            found = _transcript_turn(line, event_type)
-            if found is not None and (latest is None or found[1] > latest[1]):
-                latest = found
-    return latest
-
-
-def _transcript_turn(line: str, event_type: str) -> tuple[str, float] | None:
-    """(text, epoch-seconds) for a transcript JSONL line of `event_type` that
-    carries readable text, else None — other turn types, tool-result echoes,
-    sidechains, and unparseable lines all return None."""
-    try:
-        event = json.loads(line)
-        if event.get("type") != event_type or event.get("isSidechain"):
-            return None
-        text = _content_text(event.get("message", {}).get("content"))
-        if not text:
-            return None
-        return text, datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError, AttributeError, KeyError, json.JSONDecodeError):
-        return None
-
-
-def _content_text(content: object) -> str:
-    """The human-typed text of a user message's `content`: the string itself,
-    or the joined `text` blocks of a block list; "" for a tool_result-only list
-    (or any other shape), which marks 'not a human prompt'."""
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        return " ".join(
-            block["text"] for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        ).strip()
-    return ""
 
 
 # ============================================================

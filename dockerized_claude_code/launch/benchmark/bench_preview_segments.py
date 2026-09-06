@@ -31,7 +31,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..agents_crud import list_all_instances
-from ..gui.menu_picker import ContEntry, _last_prompt_display, _render_md, _tags_preview
+from ..gui.menu_picker import ContEntry
+from ..gui.picker_previews import (
+    _last_prompt_display, _render_md, _tags_preview,
+)
 from ..paths import AGENTS_DIR, instance_state_dir_path
 from ..tags import AgentBuild, Instance, resolve_build, scan_all
 

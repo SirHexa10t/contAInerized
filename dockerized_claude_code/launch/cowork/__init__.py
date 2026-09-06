@@ -6,9 +6,12 @@ capture, routes messages between participants, and exchanges files through each
 participant's `group_hosting/<instance-id>/` dir (bind-mounted at `/cowork`).
 
 Layering: this package consumes the launcher's core (paths, file_access, tags,
-agents_crud, docker_config) and is consumed by the `cowork.py` entry script. It
-owns no docker-CLI calls of its own — every `docker` touchpoint lives in
-`docker_config`, which is that module's stated invariant.
+agents_crud) and is consumed by the `cowork.py` entry script. It owns no
+docker-CLI calls of its own — the two it needs are imported: the injection
+(`container_inject.docker_attach_inject`, this package's only writer to a
+container) and the liveness snapshot (`docker_config`'s fleet query, in
+`roster`). Injection moved out of `docker_config` on 2026-09-03 so hosting a
+group no longer pulls in the whole build-and-run module for one function.
 
 Modules:
 
