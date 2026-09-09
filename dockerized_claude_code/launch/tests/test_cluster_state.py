@@ -66,7 +66,8 @@ class TestClusterModel(ClusterTmp):
 
     def test_illegal_session_name_refused(self):
         # The session name is also the tmux session name and a directory.
-        for bad in ("has:colon", "has.dot", "has/slash", "has space"):
+        for bad in ("has:colon", "has.dot", "has/slash", "has space",
+                    "has~tilde", "has*star", "has\\backslash", "has\x1bescape"):
             with self.subTest(session=bad), self.assertRaises(ClusterError):
                 state.from_template(bad, Path("/tmp/p"), (Member.of("golem"),))
 
@@ -170,6 +171,76 @@ class TestClusterTags(ClusterTmp):
         for name in state.LOCKED_SPECIALTIES:
             with self.subTest(tag=name):
                 self.assertIn(name, registry.specialties)
+
+
+class TestMemberInstance(ClusterTmp):
+    """`Cluster.member_instance` — a member as the ordinary Instance it launches
+    as, resolved against the REAL registry. Its two failure encodings are the
+    contract: None for a vanished agent, `invalid_tags` for a stale tag name —
+    never a raise, because the picker needs both as visible rows and
+    `launching.member_instances` adds the loud stop on top."""
+
+    def setUp(self):
+        super().setUp()
+        from launch.paths import AGENTS_DIR
+        from launch.tags import scan_all
+        self.registry = scan_all(AGENTS_DIR)
+
+    def test_a_member_is_an_instance_in_its_own_dir(self):
+        cluster = self.a_cluster()
+        inst = cluster.member_instance(cluster.member("researcher__primary"),
+                                       self.registry)
+        self.assertEqual(inst.state_dir,
+                         paths.cluster_member_dir("poc", "researcher__primary"))
+        self.assertEqual(inst.workspace, "/tmp/project")
+        self.assertEqual(inst.engine.name, "researcher")   # its own .lego engine
+        self.assertTrue(inst.is_startable)
+
+    def test_the_instance_carries_the_clusters_tags_as_well_as_its_own(self):
+        member = Member.of("researcher", build=AgentBuild(specialties=("auto",)))
+        cluster = state.from_template(
+            "poc", Path("/tmp/p"), (member,),
+            tags=AgentBuild(specialties=("muxer", "cluster", "cluster-cowork")))
+        inst = cluster.member_instance(cluster.members[0], self.registry)
+        self.assertEqual([s.name for s in inst.specialties],
+                         ["muxer", "cluster", "cluster-cowork", "auto"])
+
+    def test_a_stale_tag_lands_on_invalid_tags_instead_of_raising(self):
+        member = Member.of("poet", build=AgentBuild(specialties=("ghost-tag",)))
+        cluster = state.from_template("poc", Path("/tmp/p"), (member,))
+        inst = cluster.member_instance(cluster.members[0], self.registry)
+        self.assertEqual([p.name for p in inst.invalid_tags], ["ghost-tag"])
+        self.assertFalse(inst.is_startable)
+        # The resolvable tags still resolved — the member renders, red chip and all.
+        self.assertEqual([s.name for s in inst.specialties], ["muxer", "cluster"])
+
+    def test_a_vanished_agent_is_none_not_a_raise(self):
+        cluster = state.from_template("poc", Path("/tmp/p"), (Member.of("nobody"),))
+        self.assertIsNone(cluster.member_instance(cluster.members[0], self.registry))
+
+
+class TestLastUsed(ClusterTmp):
+    """`Cluster.last_used_mtime` — a cluster goes by its LATEST member: the
+    newest member history.jsonl, via the same probe an instance uses."""
+
+    def _touch_history(self, member_id: str, mtime: float) -> None:
+        import os
+        history = paths.state_history_path(paths.cluster_member_dir("poc", member_id))
+        history.parent.mkdir(parents=True, exist_ok=True)
+        history.write_text("{}\n")
+        os.utime(history, (mtime, mtime))
+
+    def test_no_member_history_means_never(self):
+        self.assertIsNone(self.a_cluster().last_used_mtime)
+
+    def test_the_newest_member_history_wins(self):
+        self._touch_history("refactorer", 1_000_000.0)
+        self._touch_history("researcher__primary", 2_000_000.0)
+        self.assertEqual(self.a_cluster().last_used_mtime, 2_000_000.0)
+
+    def test_one_member_with_history_is_enough(self):
+        self._touch_history("researcher__adversarial", 1_500_000.0)
+        self.assertEqual(self.a_cluster().last_used_mtime, 1_500_000.0)
 
 
 class TestWithBuild(ClusterTmp):

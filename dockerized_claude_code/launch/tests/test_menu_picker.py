@@ -1,8 +1,9 @@
 """Tests for launch.menu_picker's non-TUI logic: the pure display helpers,
-the Cont-row factory (continuable_instances — sorting, cwd-relation flags,
-tag display), and the shared session prompt. The tag form's tests live in
-test_form_core.py; the prompt_toolkit Applications themselves are
-interactive and stay out of unit scope."""
+the row factories (continuable_instances / cluster_entries — sorting, the
+cwd-relation hint, tag display), the row anatomy every existing thing wears,
+and the --stop selector. The tag form's tests live in test_form_core.py; the
+prompt_toolkit Applications themselves are interactive and stay out of unit
+scope."""
 
 import tempfile
 import unittest
@@ -13,29 +14,10 @@ from launch.gui import menu_picker, picker_widget
 from launch.gui.menu_picker import (
     RUNNING_HINT, STYLE_RUNNING_NAME, continuable_instances,
 )
-from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, Instance, resolve_build, scan_all
-
-REGISTRY = scan_all(AGENTS_DIR)
-
-
-def make_inst(agent="poet", session="s", workspace="/tmp", *,
-              professions=(), specialties=(), policies=()):
-    """A real Instance resolved against the real registry (engine falls back
-    agent-name → default, exactly like a launch)."""
-    build = AgentBuild(engine=None, professions=tuple(professions),
-                       specialties=tuple(specialties), policies=tuple(policies))
-    return Instance(agent=agent, md_path=Path(f"/fake/{agent}.md"), session=session,
-                    workspace=workspace, is_brand_new=False,
-                    **resolve_build(build, agent, REGISTRY))
-
-
-
-
-
-
-
-
+from launch.gui.picker_widget import PickerCwdHint
+from launch.paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS
+from launch.tags import AgentBuild, Instance
+from launch.tests.fixtures import REGISTRY, make_inst
 
 
 class TestInstanceBuild(unittest.TestCase):
@@ -111,31 +93,21 @@ class TestContinuableInstances(unittest.TestCase):
     def test_current_dir_flagged(self):
         entries = self._entries([make_inst("golem", "a", self.ws)],
                                 cwd=Path(self.ws).resolve())
-        self.assertTrue(entries[0].is_current_dir)
-        self.assertFalse(entries[0].is_invalid_dir)
+        self.assertIs(entries[0].workspace.hint, PickerCwdHint.CURRENT)
 
     def test_invalid_workspace_flagged_but_shown(self):
         entries = self._entries([make_inst("golem", "a", "/no/such/dir")])
-        self.assertTrue(entries[0].is_invalid_dir)
-        self.assertFalse(entries[0].is_current_dir)
-        self.assertEqual(entries[0].workspace_display, "/no/such/dir")   # stored value still shown
+        self.assertIs(entries[0].workspace.hint, PickerCwdHint.INVALID)
+        self.assertEqual(entries[0].workspace.display, "/no/such/dir")   # stored value still shown
 
     def test_missing_workspace_shows_placeholder(self):
         entries = self._entries([make_inst("golem", "a", None)])
-        self.assertEqual(entries[0].workspace_display, "?")
+        self.assertEqual(entries[0].workspace, menu_picker.WorkspaceView("?", None))
         self.assertIsNone(entries[0].identity.workspace)
 
     def test_never_used_renders_never(self):
         entries = self._entries([make_inst("golem", "a", self.ws)])
         self.assertEqual(entries[0].last_used_display, "(never)")
-
-
-
-
-
-
-
-
 
 
 class TestRunningFlag(TestContinuableInstances):
@@ -165,8 +137,6 @@ class TestRunningFlag(TestContinuableInstances):
         self.assertEqual(STYLE_RUNNING_NAME, "fg:ansibrightblack")   # grey, not STYLE_AGENT_NAME blue
         self.assertEqual(RUNNING_HINT[1].strip(), "(RUNNING)")
         self.assertIn("red", RUNNING_HINT[0])                        # the tag itself is the red part
-
-
 
 
 class TestRowAssembly(unittest.TestCase):
@@ -260,6 +230,17 @@ class TestRowAssembly(unittest.TestCase):
         self.assertEqual(cluster_text.index(cluster_row.value.name),
                          agent_text.index(agent_row.value.name))
 
+    def test_every_marked_row_starts_with_its_markers_lead(self):
+        # `PickerEntry.marker` drives the accent bar; the lead the producer
+        # splats into `display` must be that same marker's, or the bar and
+        # the row would disagree about what kind of row this is.
+        for entry in self.entries():
+            if entry.marker is None:
+                continue
+            with self.subTest(marker=entry.marker.name):
+                lead = entry.marker.lead
+                self.assertEqual(tuple(entry.display[:len(lead)]), lead)
+
     def test_a_broken_template_renders_unselectable_not_a_crash(self):
         # Templates are hand-authored; the picker is where the author IS, so a
         # parse error must become a red info row naming the fault.
@@ -289,6 +270,12 @@ class TestPromptStop(unittest.TestCase):
         patcher = patch("launch.tags.identity.last_history_mtime", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Cluster rows read their members' state dirs; keep that off the
+        # real ~/.claude-agents.
+        from launch import paths as launch_paths
+        redirect = patch.object(launch_paths, "AGENTS_STATE", Path(self.ws))
+        redirect.start()
+        self.addCleanup(redirect.stop)
 
     def _run(self, insts, running, clusters=(), picked=None):
         captured = {}
@@ -344,15 +331,23 @@ class TestPromptStop(unittest.TestCase):
         self.assertNotIn(picker_widget.TAG_EMPHASIS, styles["{auto}"])
 
     def test_running_clusters_get_a_row_keyed_by_container_id(self):
-        from types import SimpleNamespace
-        cluster = SimpleNamespace(session="team", members=[1, 2],
-                                  project=Path("/proj"), ids=("a", "b"))
+        # A REAL cluster (unsaved — the row factory only needs the record):
+        # its rows are built through member_instance, so a stand-in object
+        # would not do any more.
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        cluster = state.from_template("team", Path("/proj"),
+                                      (Member.of("golem"), Member.of("poet")))
         _, captured = self._run([], running={"cluster-team"},
                                 clusters=[cluster])
         (row,) = captured["options"]
         self.assertEqual(row.key, "cluster-team")
-        self.assertIn("team", self._row_text(row))
-        self.assertIn("/proj", self._row_text(row))
+        text = self._row_text(row)
+        self.assertIn("team", text)
+        self.assertIn("/proj", text)
+        self.assertIn("(2 members)", text)          # the cluster column carries the count
+        self.assertIn("(INVALID DIR)", text)        # and the cwd hint, like an instance row
+        self.assertIn("last used", "".join(t for _, t in row.body))
 
     def test_a_stray_running_id_still_gets_a_stoppable_row(self):
         # A container with no store entry and no cluster is exactly what
@@ -379,12 +374,192 @@ class TestPromptStop(unittest.TestCase):
         self.assertNotIn("options", captured)   # checkbox_form never opened
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestCwdContext(unittest.TestCase):
+    """`_CwdContext` — the ONE reading of a workspace's relation to the launch
+    site, shared by instance rows, cluster rows and --stop (it was inline in
+    the instance factory, and the hint chain was copied per row kind). The
+    precedence is the contract: CURRENT beats DEFAULT, INVALID is exclusive,
+    and DEFAULT applies only when the launcher runs from a neutral dir."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.here = Path(self.tmp.name).resolve()
+        self.other = Path(tempfile.mkdtemp(dir=self.tmp.name)).resolve()
+
+    def test_the_cwd_itself_reads_current_even_when_it_is_the_default(self):
+        ctx = menu_picker._CwdContext(cwd=self.here, default_workspace=self.here,
+                                      defaulting=True)
+        self.assertIs(ctx.view(str(self.here)).hint, PickerCwdHint.CURRENT)
+
+    def test_the_default_workspace_reads_default_only_from_a_neutral_dir(self):
+        neutral = menu_picker._CwdContext(cwd=self.here, default_workspace=self.other,
+                                          defaulting=True)
+        self.assertIs(neutral.view(str(self.other)).hint, PickerCwdHint.DEFAULT)
+        # From a project dir the "default" is just another path — no hint,
+        # because being in a project under $HOME does not make /ai_workspace
+        # your default workspace.
+        project = menu_picker._CwdContext(cwd=self.here, default_workspace=self.other,
+                                          defaulting=False)
+        self.assertIsNone(project.view(str(self.other)).hint)
+
+    def test_a_vanished_path_reads_invalid_but_is_still_shown(self):
+        ctx = menu_picker._CwdContext(cwd=self.here, default_workspace=self.here,
+                                      defaulting=False)
+        view = ctx.view("/no/such/dir")
+        self.assertIs(view.hint, PickerCwdHint.INVALID)
+        self.assertEqual(view.display, "/no/such/dir")
+
+    def test_nothing_stored_shows_the_placeholder_with_no_hint(self):
+        ctx = menu_picker._CwdContext(cwd=self.here, default_workspace=self.here,
+                                      defaulting=False)
+        self.assertEqual(ctx.view(None), menu_picker.WorkspaceView("?", None))
+
+    def test_here_knows_whether_the_launch_site_is_neutral(self):
+        with patch.object(menu_picker, "resolved_cwd",
+                          return_value=Path(DEFAULTING_DIRS[0]).resolve()):
+            self.assertTrue(menu_picker._CwdContext.here().defaulting)
+        with patch.object(menu_picker, "resolved_cwd", return_value=self.here):
+            self.assertFalse(menu_picker._CwdContext.here().defaulting)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestClusterRows(unittest.TestCase):
+    """Cluster rows wear the instance rows' anatomy (`_session_row`): their
+    project paths line up in one column, they carry the cwd hints, and their
+    members are rows with the instance rows' deferred previews. Real clusters
+    in a redirected AGENTS_STATE; the TUI is stubbed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from launch import paths as launch_paths
+        patcher = patch.object(launch_paths, "AGENTS_STATE", Path(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        self.state, self.Member = state, Member
+
+    def save(self, session, members, project="/tmp/project", tags=None):
+        return self.state.save(self.state.from_template(
+            session, Path(project), members, template="devteam", tags=tags))
+
+    def entries(self, cwd=None, running=None):
+        captured = {}
+        with patch.object(menu_picker, "pick_with_preview",
+                          lambda t, entries, **kw:
+                          captured.update(entries=entries) or (None, None)), \
+             patch.object(menu_picker, "list_all_instances", return_value=[]), \
+             patch.object(menu_picker, "docker_running_instances_subprocess",
+                          return_value=running), \
+             patch.object(menu_picker, "resolved_cwd",
+                          return_value=cwd or Path("/nowhere")):
+            menu_picker.select_agent(REGISTRY)
+        return captured["entries"]
+
+    @staticmethod
+    def text(entry):
+        return "".join(t for _, t in entry.display)
+
+    def cluster_rows(self, **kw):
+        return [e for e in self.entries(**kw)
+                if isinstance(e.value, menu_picker._ClusterRow)]
+
+    def test_project_paths_line_up_across_cluster_rows(self):
+        # Different name lengths AND different tag sets — the two things the
+        # column pads — must still land the path at one index (the same
+        # measured-not-trusted check the template rows get).
+        self.save("aa", (self.Member.of("golem"),))
+        self.save("a-much-longer-cluster-name", (self.Member.of("golem"), self.Member.of("poet")),
+                  tags=AgentBuild(professions=("code",),
+                                  specialties=("muxer", "cluster", "cluster-cowork")))
+        rows = self.cluster_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({self.text(r).index("/tmp/project") for r in rows}), 1)
+
+    def test_the_column_carries_the_forced_tags_and_the_member_count(self):
+        self.save("team", (self.Member.of("golem"), self.Member.of("poet")),
+                  tags=AgentBuild(specialties=("muxer", "cluster", "cluster-cowork")))
+        (row,) = self.cluster_rows()
+        text = self.text(row)
+        self.assertIn("{cc}", text)
+        self.assertIn("(2 members)", text)
+        count_style = next(style for style, t in row.display if "members)" in t)
+        self.assertEqual(count_style, menu_picker.STYLE_MEMBER_COUNT)
+        self.assertLess(text.index("(2 members)"), text.index("team"))   # column, then name
+
+    def test_a_cluster_row_gets_the_cwd_hints_instance_rows_have(self):
+        # Launched from a neutral dir with the project AT the default
+        # workspace: the yellow (DEFAULT DIR) — the hint the operator asked
+        # cluster rows to get "like instances do".
+        self.save("team", (self.Member.of("golem"),), project=DEFAULT_WORKSPACE)
+        (row,) = self.cluster_rows(cwd=Path(DEFAULTING_DIRS[0]).resolve())
+        self.assertIn(PickerCwdHint.DEFAULT.fragment, row.display)
+        # The project as the cwd → (CURRENT DIR); a vanished project → (INVALID DIR).
+        self.save("here", (self.Member.of("golem"),), project=self._tmp.name)
+        self.save("gone", (self.Member.of("golem"),), project="/no/such/dir")
+        rows = {r.value.session: r for r in self.cluster_rows(cwd=Path(self._tmp.name).resolve())}
+        self.assertIn(PickerCwdHint.CURRENT.fragment, rows["here"].display)
+        self.assertIn(PickerCwdHint.INVALID.fragment, rows["gone"].display)
+
+    def test_member_rows_defer_their_previews_like_instance_rows(self):
+        self.save("team", (self.Member.of("golem"),))
+        (row,) = [e for e in self.entries()
+                  if isinstance(e.value, menu_picker._MemberRow)]
+        self.assertFalse(row.preview_ready)              # a callable: the transcript read waits for the first highlight
+        self.assertIsNotNone(row.preview_quick)          # and the instant form stands in meanwhile
+        self.assertIs(row.marker, menu_picker.PickerRowMarker.MEMBER)
+
+    def test_enter_is_inert_on_every_member_row_but_f2_and_del_are_not(self):
+        # A member launches with its cluster: Enter must do nothing there —
+        # not even explain itself — while the row stays the editing unit.
+        # Both member kinds: a healthy one and one whose agent is gone.
+        self.save("team", (self.Member.of("golem"), self.Member.of("nobody")))
+        rows = [e for e in self.entries()
+                if isinstance(e.value, menu_picker._MemberRow)]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            with self.subTest(member=row.value.member_id):
+                self.assertFalse(row.pickable)
+                self.assertTrue(row.selectable)
+                self.assertTrue(row.deletable)
+
+    def test_a_member_whose_agent_is_gone_stays_listed_in_red(self):
+        # Never dropped: a member the listing hides is the silently-degraded
+        # peer the launch refuses. Del still removes it; F2 has nothing to edit.
+        self.save("team", (self.Member.of("golem"), self.Member.of("nobody")))
+        rows = {e.value.member_id: e for e in self.entries()
+                if isinstance(e.value, menu_picker._MemberRow)}
+        self.assertEqual(set(rows), {"golem", "nobody"})
+        ghost = rows["nobody"]
+        self.assertIn("no agent 'nobody'", self.text(ghost))
+        self.assertIn((menu_picker.STYLE_TAG_INVALID, "nobody"), ghost.display)
+        self.assertTrue(ghost.selectable)
+        self.assertTrue(ghost.deletable)
+        self.assertFalse(ghost.modifiable)
+        # The cluster pane names the fault too, and still lists the healthy member.
+        (cluster_row,) = self.cluster_rows()
+        self.assertIn("no agent 'nobody'", cluster_row.preview)
+        self.assertIn("golem", cluster_row.preview)
+
+    def test_every_template_row_precedes_every_cluster_row(self):
+        # Templates together, then the clusters — a second template must land
+        # after devteam, never after devteam's clusters, because a cluster is
+        # not nested under the template it was created from.
+        self.save("aa", (self.Member.of("golem"),))
+        self.save("zz", (self.Member.of("golem"),))
+        kinds = [type(e.value).__name__ for e in self.entries()
+                 if isinstance(e.value, (menu_picker._ClusterTemplateRow,
+                                         menu_picker._ClusterRow))]
+        self.assertEqual(kinds, sorted(kinds, key=kinds.index))   # no interleaving...
+        self.assertEqual(kinds, ["_ClusterTemplateRow"] * kinds.count("_ClusterTemplateRow")
+                         + ["_ClusterRow"] * kinds.count("_ClusterRow"))
+
+    def test_a_running_cluster_shows_the_running_hint_in_the_shared_anatomy(self):
+        self.save("team", (self.Member.of("golem"),))
+        (row,) = self.cluster_rows(running=frozenset({"cluster-team"}))
+        self.assertIn(RUNNING_HINT, row.display)
+        self.assertFalse(row.selectable)
 
 
 if __name__ == "__main__":

@@ -415,6 +415,19 @@ everything it does not cover.
 
 ## Known issues — cluster work protocol
 
+- **The gate pings suggest commands the CLI rejects.** Found during the
+  gui-dedup gate (2026-09-09; a member reported it, the opener verified both
+  halves against the CLI): the completion ping says `cluster-chat read
+  --new`, which does not exist (plain `read` catches up; `--peek` reads
+  without moving the cursor; `--since SEQ` from a sequence number); and the
+  reply hint `post stance <0-10> "..." --gate <id>` fails with "unrecognized
+  arguments" — per `cluster-chat post --help` the number is an OPTION, so
+  the working form is `cluster-chat post stance --stance <0-10> --gate <id>
+  "<body>"`. A wrong hint costs every reply one failed attempt at the moment
+  the protocol most needs to be frictionless. What would close it: correct
+  the hint text where the pings are composed (`cluster_work_protocol/gates.py`
+  / `wake.py`) and pin it with a test that feeds each suggested command
+  through the CLI's own argparser.
 - **Capability text is not a protocol — the first live gate never happened,
   and every MECHANISM was fine.** 2026-09-02: a member of a real
   `{clstr}` cluster was given a task, planned it solo, and never opened a
@@ -628,6 +641,28 @@ everything it does not cover.
 
 ## Known issues — testing technique
 
+- **A shape-only parity test let the same two forms drift a second time —
+  compare what the user SEES, not the window stack.** `TestFormTailsMatch`
+  (2026-09-02) pinned that the tag form and the membership form end in the
+  same four windows, after their really-done? question had rendered at two
+  different heights. It kept passing while the membership form's "no members
+  yet" complaint rode the FLEXIBLE members panel (top-aligned) and its field
+  complaints hugged the button, and while its `cursor_pos` sat one line above
+  the highlighted row whenever text fields were present (the blank separator
+  after the fields was not counted) — both found 2026-09-09 from an operator
+  report that "the warning appears higher or lower". Fixed by making the
+  drift impossible rather than detectable: both forms now run on ONE scaffold
+  (`form_core.run_form`) and cannot restate the layout or the key map, and
+  `TestFormPlacementParity` pins where a complaint renders and where the
+  cursor sits by driving the REAL bindings against a captured layout. Two
+  lessons: a parity test must assert the content's PLACEMENT (which window
+  carries which text) — a shape comparison cannot see a message in the wrong
+  window; and a recorded decision AGAINST an abstraction ("one abstraction
+  over two key semantics would cost more than the copies it saved",
+  cluster_form.py until 2026-09-09) must price the drift of the copies it
+  keeps — that one never did, and its premise was wrong on inspection (both
+  forms already branched field-vs-row identically; only the row action
+  differed).
 - **A same-length mutation can leave stale bytecode behind, and the restored tree
   then fails.** Mutation-testing a guard means editing a source file, running the
   suite, and restoring it. CPython validates a `.pyc` against the source's

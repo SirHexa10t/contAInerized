@@ -13,22 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from launch.gui import menu_picker, picker_previews, picker_widget
-from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, Instance, resolve_build, scan_all
-
-REGISTRY = scan_all(AGENTS_DIR)
-
-
-def make_inst(agent="poet", session="s", workspace="/tmp", *,
-              professions=(), specialties=(), policies=()):
-    """A real Instance resolved against the real registry (engine falls back
-    agent-name → default, exactly like a launch)."""
-    build = AgentBuild(engine=None, professions=tuple(professions),
-                       specialties=tuple(specialties), policies=tuple(policies))
-    return Instance(agent=agent, md_path=Path(f"/fake/{agent}.md"), session=session,
-                    workspace=workspace, is_brand_new=False,
-                    **resolve_build(build, agent, REGISTRY))
-
+from launch.tags import AgentBuild
+from launch.tests.fixtures import REGISTRY, make_inst
 
 
 def _plain_text(ansi: str) -> str:
@@ -149,8 +135,7 @@ class TestLastPromptDisplay(unittest.TestCase):
         self._write_prompt("the prompt")
         entry = menu_picker.ContEntry(
             identity=dataclasses.replace(make_inst(), state_dir_override=self.state_dir),
-            workspace_display="/w", is_current_dir=False, is_default_dir=False,
-            is_invalid_dir=False, last_used_display="now")
+            workspace=menu_picker.WorkspaceView("/w", None), last_used_display="now")
         row = menu_picker.PickerEntry(preview=menu_picker._deferred_preview(entry))
         reads = {"count": 0}
         real = picker_previews.last_prompt_in_state
@@ -203,18 +188,105 @@ class TestLastPromptDisplay(unittest.TestCase):
     def _entry(self) -> menu_picker.ContEntry:
         return menu_picker.ContEntry(
             identity=dataclasses.replace(make_inst(), state_dir_override=self.state_dir),
-            workspace_display="/w", is_current_dir=False, is_default_dir=False,
-            is_invalid_dir=False, last_used_display="now")
+            workspace=menu_picker.WorkspaceView("/w", None), last_used_display="now")
 
     def test_the_preview_field_appears_when_a_prompt_exists(self):
         self._write_prompt("the question I asked")
         inst = make_inst("golem", "a", "/tmp")
         entry = menu_picker.ContEntry(
             identity=dataclasses.replace(inst, state_dir_override=self.state_dir),
-            workspace_display="/tmp", is_current_dir=False, is_default_dir=False,
-            is_invalid_dir=False, last_used_display="(never)")
+            workspace=menu_picker.WorkspaceView("/tmp", None), last_used_display="(never)")
         self.assertIn("Last prompt", entry.preview)
         self.assertIn("the question I asked", entry.preview)
+
+
+class TestClusterAndMemberPreviews(unittest.TestCase):
+    """Cluster and member panes come from the SAME builder as instance panes
+    (`session_preview`), so they show what instances show — a `Last used`
+    fact, the expanded tag list, and for members the deferred `Last prompt`
+    — where each had a hand-rolled pane with none of that before 2026-09-09.
+    Real clusters in a redirected AGENTS_STATE; the transcript read runs
+    in-process through the same seam TestLastPromptDisplay uses."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        from launch import paths as launch_paths
+        patcher = patch.object(launch_paths, "AGENTS_STATE", Path(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        seam = patch.object(picker_previews, "_read_last_prompt",
+                            picker_previews.last_prompt_in_state)
+        seam.start()
+        self.addCleanup(seam.stop)
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        self.state = state
+        self.cluster = state.save(state.from_template(
+            "team", Path("/tmp/project"),
+            (Member.of("golem"), Member.of("researcher", "primary")),
+            template="devteam",
+            tags=AgentBuild(specialties=("muxer", "cluster", "cluster-cowork"))))
+
+    def _write_member_history(self, member_id: str, prompt: str) -> None:
+        import json
+        from launch import paths as launch_paths
+        member_dir = launch_paths.cluster_member_dir("team", member_id)
+        transcript = member_dir / "projects" / "-workspace" / "s.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(json.dumps({
+            "type": "user", "timestamp": "2026-08-07T10:00:00Z",
+            "message": {"role": "user", "content": prompt}}) + "\n")
+        (member_dir / "history.jsonl").write_text("{}\n")
+
+    def _entry(self):
+        (entry,) = menu_picker.cluster_entries(REGISTRY, frozenset(),
+                                               menu_picker._CwdContext.here())
+        return entry
+
+    def test_the_cluster_pane_shows_last_used_from_its_newest_member(self):
+        self._write_member_history("golem", "hello")
+        text = _plain_text(self._entry().preview)
+        facts, members = text.split("Members:")
+        self.assertIn("Last used:", facts)
+        self.assertNotIn("(never)", facts)               # golem ran, so the cluster has
+        self.assertIn("researcher__primary", members)    # ...while this member never did
+        self.assertIn("(never)", members)
+
+    def test_the_cluster_pane_expands_the_tags_it_forces_on_every_member(self):
+        text = _plain_text(self._entry().preview)
+        self.assertIn("Tags:", text)
+        self.assertIn("{cc}", text)
+        self.assertIn(REGISTRY.specialties["cluster-cowork"].short_description, text)
+        self.assertIn("Project:", text)
+        self.assertIn("/tmp/project", text)
+
+    def test_an_unresolvable_cluster_tag_is_flagged_not_dropped(self):
+        self.state.save(dataclasses.replace(
+            self.cluster, tags=AgentBuild(specialties=("muxer", "cluster", "ghost"))))
+        text = _plain_text(self._entry().preview)
+        self.assertIn("{ghost}", text)
+        self.assertIn("this cluster can launch", text)
+
+    def test_a_member_pane_defers_its_last_prompt_like_an_instance(self):
+        self._write_member_history("golem", "the member's question")
+        golem = next(m for m in self._entry().members if m.member.id == "golem")
+        quick = _plain_text(golem.preview_quick)
+        self.assertIn(picker_widget.LAST_PROMPT_LOADING, quick)
+        self.assertNotIn("the member's question", quick)
+        self.assertIn("Role:", quick)
+        self.assertIn("Cluster:", quick)
+        full = _plain_text(golem.preview)
+        self.assertIn("the member's question", full)
+        self.assertIn("Last used:", full)
+        self.assertNotIn("(never)", full.split("Tags:")[0])
+
+    def test_a_member_pane_marks_the_tags_it_inherits_from_the_cluster(self):
+        golem = next(m for m in self._entry().members if m.member.id == "golem")
+        text = _plain_text(golem.preview_quick)
+        mux_line = next(line for line in text.splitlines() if "{mux}" in line)
+        self.assertIn("(cluster-wide)", mux_line)
+        self.assertIn("{cc}", text)                      # the member's REAL build, cluster tags included
 
 
 if __name__ == "__main__":

@@ -462,12 +462,20 @@ Can we integrate a "find" feature? Maybe through {mux} ?
 
 Can't we integrate `alt+q` as exit into `keybindings.json`? Was that what we tried (and failed) earlier?
 
+UI Fixes:
+    Forms have a huge overlap but seem a bit different in different implementations (e.g. the warning text for cluster forms appears either higher or lower than it does for instance forms)
+    In the right-side preview section in picker:
+        Clusters and their members should have a "Last Used" field, like instances do (clusters can go by their latest member's field)
+        Cluster members should have "last prompt" field
+        Clusters should have a tag-list like instances do
+        Generally, less code-duplication, again
+    Cluster instances (the clusters, not members) should have their workspace dirs aligned, like instances do
+    Cluster instances (the clusters, not members) should have a yellow "(DEFAULT DIR)" message around the workspace path (when applicable), like instances do.
+    
 
+Quitting takes a while somehow... Both in a mux (herdr) exit, and in a regular instance's case.
 
-
-
-
-
+Markdown (color/stylize) the output of quick-questions
 
 
 

@@ -10,7 +10,8 @@ mid-flow (roles auto-derive; the preview is what keeps them from surprising).
 
 import unittest
 
-from launch.gui.cluster_form import TextField, field_errors, prompt_members
+from launch.gui.cluster_form import prompt_members
+from launch.gui.form_core import TextField, field_errors
 
 
 class TestTextField(unittest.TestCase):

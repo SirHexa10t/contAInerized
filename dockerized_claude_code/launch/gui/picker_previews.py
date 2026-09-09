@@ -8,26 +8,38 @@ with rich renderables because markdown cannot colour a SPAN, and the
 expensive part — the last human prompt, read out of a transcript that can be
 tens of megabytes — is deliberately NOT computed where the keyboard is.
 
-  _render_md / _render_parts     markdown → ANSI, and the interleaved form
+  _ansi                          rich renderables → the pane's ANSI text: the
+                                 ONE console every preview renders through
   _read_last_prompt              that prompt's read, in a CHILD PROCESS —
                                  a CPU-bound thread convoys the GIL and
                                  stalls the picker's keystrokes (measured:
                                  803 ms vs 3.5 ms; benchmark/
                                  bench_preview_gil.py reproduces it)
   _last_prompt_display           the same, formatted for the pane
-  cont_preview                   a Cont row's metadata + tags + that prompt
-  _tags_preview                  the tag list a squashed row cannot show
-  _create_preview / _template_preview / _cluster_preview / _member_preview
-                                 one builder per kind of row
+  session_preview                THE pane for anything with a state dir: a
+                                 lead-in, a YAML fact block, the optional
+                                 `Last prompt`, the expanded tag list — which
+                                 instances, cluster members and clusters all
+                                 render through (2026-09-09: each had its own
+                                 hand-rolled pane before, and only the
+                                 instance one showed Last used / Last prompt)
+  cont_preview / member_preview / _cluster_preview
+                                 its three callers, each supplying its facts
+  _tag_lines / _member_line      the tag list a squashed row cannot show, and
+                                 one member's summary line in a cluster pane
+  _resolve_tags                  a build's names as Tag objects, plus the
+                                 names that resolve to nothing
+  _create_preview / _template_preview
+                                 the two creation rows' panes
 
 What did NOT come along, deliberately: `_PreviewLoader`. Its thread worker
 and cache are coupled to `PickerEntry`'s deferred slots — WHEN to compute a
 preview and where to put the result is the widget's business — so it stays
 beside the rows it fills, and calls in here for the text.
 
-Direction: `styles` → … → `picker_previews` → `menu_picker`. Nothing here
-imports the picker: the Cont-row preview takes the values it needs
-(`cont_preview`), so the row model stays where the rows are.
+Direction: `styles` → … → `picker_previews` → `picker_widget` → `menu_picker`.
+Nothing here imports the picker: every builder takes the VALUES it needs, so
+the row models stay where the rows are.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from __future__ import annotations
 import atexit
 import io
 import multiprocessing
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -45,39 +58,29 @@ from rich.text import Text
 
 from ..cluster import state as cluster_state
 from ..cluster.legoset import ClusterTemplate
+from ..cluster.member import Member
 from ..file_access import read_text
 from ..transcripts import last_prompt_in_state
-from ..tags import Agent, AgentBuild, Instance, Registry
-from .styles import RICH_BY_STYLE, tag_style
+from ..tags import Agent, AgentBuild, Engine, Instance, Registry, Tag, TagProblem
+from .styles import RICH_AGENT_NAME, RICH_BY_STYLE, tag_style
 
-def _render_md(text: str) -> str:
-    """Render markdown text to an ANSI-encoded string for the picker's preview
-    pane. Width is fixed to 80; prompt_toolkit re-wraps if the pane is
-    narrower."""
-    buf = io.StringIO()
-    Console(
-        file=buf, force_terminal=True, color_system="truecolor", width=80,
-    ).print(Markdown(text))
-    return buf.getvalue()
+PREVIEW_WIDTH = 80                # rich renders at this width; prompt_toolkit re-wraps if the pane is narrower
+LAST_PROMPT_PREVIEW_CHARS = 250   # enough to recognise a conversation; not a transcript viewer
+STYLE_ALERT = "black on red"      # rich twin of styles.STYLE_TAG_INVALID: a name that resolves to nothing
 
 
-def _render_parts(*parts: Any) -> str:
-    """Markdown and rich renderables interleaved into one ANSI preview string —
-    `_render_md`'s console, accepting prepared renderables. Exists because
-    markdown cannot colour a SPAN, and the cluster previews colour member
-    names and tag labels inline."""
+def _ansi(*renderables: Any) -> str:
+    """Rich renderables → one ANSI string, on the preview pane's console.
+    Markdown and rich Text interleave freely, which is what lets a pane
+    colour a SPAN (a tag label, a member name) — markdown alone cannot. Four
+    call sites each built this console themselves until 2026-09-09."""
     buf = io.StringIO()
     console = Console(file=buf, force_terminal=True, color_system="truecolor",
-                      width=80)
-    for part in parts:
+                      width=PREVIEW_WIDTH)
+    for part in renderables:
         console.print(part)
     return buf.getvalue()
 
-
-RICH_MEMBER_NAME = "bold bright_blue"
-
-
-LAST_PROMPT_PREVIEW_CHARS = 250   # enough to recognise a conversation; not a transcript viewer
 
 # The child process that parses transcripts — created on first use, kept for
 # the launcher's lifetime (one warm child serves every preview of every menu),
@@ -136,75 +139,174 @@ def _last_prompt_display(state_dir: Path) -> str | None:
     return condensed or None
 
 
-def cont_preview(inst: Instance, workspace_display: str,
-                 last_used_display: str, prompt: str | None) -> str:
-    """A Cont row's preview: an italic lead-in, a rule, a YAML-fenced
-    metadata block (rich syntax-colours keys and values) — with a `Last
-    prompt` field iff `prompt` is given — then every active tag expanded
-    to its coloured label, full name and one-liner. The preview is where
-    tags can be READ: the row itself collapses them to one-char chips
-    once it holds SQUASH_AT of them, so this list is the lookup.
+def session_preview(lead: str, facts: Sequence[tuple[str, str]], *,
+                    tags: Sequence[Tag], problems: Sequence[TagProblem],
+                    prompt: str | None = None,
+                    inherited: frozenset[str] = frozenset(),
+                    fix_target: str = "this instance can start",
+                    trailer: Iterable[Any] = ()) -> str:
+    """The pane for anything that has a state dir — an instance, a cluster
+    member, a cluster: an italic lead-in, a rule, a YAML-fenced fact block
+    (rich syntax-colours keys and values; the `Label:` column is padded to
+    the longest label) — with a `Last prompt` field iff `prompt` is given —
+    then every tag expanded to its coloured label, full name and one-liner
+    (`_tag_lines`), then any `trailer` renderables. The preview is where tags
+    can be READ: the row collapses them to one-char chips once it holds
+    SQUASH_AT of them, so this list is the lookup.
 
-    Takes the four values it needs rather than the row object: that is
-    what keeps this module from importing the picker (2026-09-03).
-    """
-    return _render_md(
-        f"*Continue session `{inst.instance}`.*\n\n"
-        f"---\n\n"
-        f"```yaml\n"
-        f"Agent:     {inst.agent}\n"
-        f"Session:   {inst.session}\n"
-        f"Workspace: {workspace_display}\n"
-        f"Engine:    {inst.engine.name if inst.engine else '(default)'}\n"
-        f"State:     {inst.state_dir}\n"
-        f"Last used: {last_used_display}\n"
-        + (f"\nLast prompt:\n  {prompt}\n" if prompt else "")
-        + "```\n"
-        ) + _tags_preview(inst)
+    One builder for the three kinds of row (2026-09-09), so they cannot drift
+    in shape — a member pane and an instance pane differ only in their facts.
+    Takes values, never a row object: that is what keeps this module from
+    importing the picker."""
+    pad = max(len(label) for label, _ in facts) + 1          # "Label:" then at least one space
+    block = "".join(f"{label + ':':<{pad}} {value}\n" for label, value in facts)
+    if prompt:
+        block += f"\nLast prompt:\n  {prompt}\n"
+    return _ansi(Markdown(f"*{lead}*\n\n---\n\n```yaml\n{block}```"),
+                 _tag_lines(tags, problems, inherited=inherited, fix_target=fix_target),
+                 *trailer)
 
 
-def _tags_preview(inst: Instance) -> str:
-    """The Cont preview's expanded tag list, ANSI-rendered: one line per
-    active tag — colored label, underlined full name, one-line description —
-    plus an alert line per invalid tag with what to do about it.
+def _tag_lines(tags: Sequence[Tag], problems: Sequence[TagProblem], *,
+               inherited: frozenset[str] = frozenset(),
+               fix_target: str = "this instance can start") -> Text:
+    """The expanded tag list: one line per tag — coloured label, underlined
+    full name, one-line description, and a dim `(cluster-wide)` on the tags a
+    member inherits from its cluster — plus an alert line per unresolvable
+    name with what to do about it (`fix_target` names what the fix unblocks).
 
-    Built with rich Text (like the F8 legend, same RICH_BY_STYLE colors)
-    rather than inside the markdown, because per-tag coloring is the point:
-    the legend taught these colors, the row may be showing them as bare chips,
-    and this list is what maps a chip back to a name."""
-    labels = [t.label for t in inst.active_tags] + [p.label for p in inst.invalid_tags]
+    Built with rich Text (like the F8 legend, same RICH_BY_STYLE colours)
+    rather than inside the markdown, because per-tag colouring is the point:
+    the legend taught these colours, the row may be showing them as bare
+    chips, and this list is what maps a chip back to a name."""
+    labels = [t.label for t in tags] + [p.label for p in problems]
     pad = max((len(label) for label in labels), default=0)
-    lines = Text("Tags:\n", style="bold")
-    # Padding sits OUTSIDE each styled span: the invalid style paints a red
+    lines = Text("Tags:", style="bold")
+    # Padding sits OUTSIDE each styled span: the alert style paints a red
     # background, and a red bar of trailing spaces would read as more alert.
-    for tag in inst.active_tags:
-        lines.append("  ")
+    for tag in tags:
+        lines.append("\n  ")
         lines.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
         lines.append(" " * (pad - len(tag.label)) + "  ")
         lines.append(tag.fullname or tag.name, style="underline")
-        lines.append(f" — {tag.short_description}\n")
-    if not inst.active_tags:
-        lines.append("  (none)\n")
-    for problem in inst.invalid_tags:
-        lines.append("  ")
-        lines.append(problem.label, style="black on red")
+        if tag.name in inherited:   # beside the name, so a long description wrapping cannot orphan it
+            lines.append(" (cluster-wide)", style="dim")
+        lines.append(f" — {tag.short_description}")
+    if not tags:
+        lines.append("\n  (none)")
+    for problem in problems:
+        lines.append("\n  ")
+        lines.append(problem.label, style=STYLE_ALERT)
         lines.append(" " * (pad - len(problem.label)) + "  ")
         lines.append(f"{problem.reason.replace('_', ' ')} {problem.kind} — "
-                     f"fix it via F2 before this instance can start\n")
-    buf = io.StringIO()
-    Console(file=buf, force_terminal=True, color_system="truecolor", width=80,
-            ).print(lines, end="")
-    return buf.getvalue()
+                     f"fix it via F2 before {fix_target}")
+    return lines
+
+
+def _resolve_tags(registry: Registry, build: AgentBuild,
+                  ) -> tuple[list[Tag], list[TagProblem]]:
+    """A build's profession / specialty / policy names as Tag objects (build
+    order), plus a TagProblem for every name that resolves to nothing —
+    `Registry.resolve_store_build`'s non-raising partition, as objects. The
+    engine is left out: it is a fact line, not a tag-list entry. Rows use the
+    tags; panes use both."""
+    clean, problems = registry.resolve_store_build(build)
+    names = (*clean.professions, *clean.specialties, *clean.policies)
+    return [tag for name in names if (tag := registry.get(name)) is not None], problems
+
+
+def cont_preview(inst: Instance, workspace_display: str,
+                 last_used_display: str, prompt: str | None) -> str:
+    """A Cont row's pane — `session_preview` with an instance's facts."""
+    return session_preview(
+        f"Continue session `{inst.instance}`.",
+        [("Agent", inst.agent),
+         ("Session", inst.session),
+         ("Workspace", workspace_display),
+         ("Engine", inst.engine.name if inst.engine else "(default)"),
+         ("State", str(inst.state_dir)),
+         ("Last used", last_used_display)],
+        tags=inst.active_tags, problems=inst.invalid_tags, prompt=prompt)
+
+
+def member_preview(inst: Instance, member: Member, cluster: str,
+                   project_display: str, last_used_display: str,
+                   prompt: str | None, inherited: frozenset[str]) -> str:
+    """A member row's pane — the same builder with a member's facts: who it
+    is within its cluster, then everything an instance pane shows, because
+    the member IS an instance (`Cluster.member_instance`). Its tags are its
+    REAL build, the cluster's marked `(cluster-wide)`; the row shows only
+    its own. A stale tag blocks the whole cluster's launch, which is what
+    the alert line says."""
+    return session_preview(
+        f"`{member.id}` — member of cluster `{cluster}`.",
+        [("Agent", member.agent),
+         ("Role", member.role),
+         ("Cluster", cluster),
+         ("Project", project_display),
+         ("Engine", inst.engine.name if inst.engine else "(default)"),
+         ("State", str(inst.state_dir)),
+         ("Last used", last_used_display)],
+        tags=inst.active_tags, problems=inst.invalid_tags, prompt=prompt,
+        inherited=inherited, fix_target="this cluster can launch")
+
+
+def _member_line(identifier: str, engine: Engine | None, tags: Sequence[Tag],
+                 problems: Sequence[TagProblem], last_used: str, *,
+                 missing_agent: str | None = None) -> Text:
+    """One member's line in its cluster's pane: bullet, BLUE name (the colour
+    names wear everywhere in the picker), its engine and OWN tag labels in
+    their legend colours — an unresolvable name in the alert style rather than
+    vanishing — and when it last ran, dim. A member whose agent `.md` is gone
+    (`missing_agent`) renders its name in the alert style with what to do."""
+    line = Text("  • ", style="dim")
+    if missing_agent is not None:
+        line.append(identifier, style=STYLE_ALERT)
+        line.append(f"  no agent '{missing_agent}' in agents/ — Del removes it "
+                    f"from the cluster", style="bold red")
+        return line
+    line.append(identifier, style=RICH_AGENT_NAME)
+    for tag in (*((engine,) if engine else ()), *tags):
+        line.append("  ")
+        line.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
+    for problem in problems:
+        line.append("  ")
+        line.append(problem.label, style=STYLE_ALERT)
+    line.append(f"   · last used {last_used}", style="dim")
+    return line
+
+
+def _cluster_preview(cluster: cluster_state.Cluster, tags: Sequence[Tag],
+                     problems: Sequence[TagProblem], last_used_display: str,
+                     member_lines: Sequence[Text]) -> str:
+    """An existing cluster's pane — the same builder: its facts (Last used is
+    its newest member's), the tags it forces on every member expanded with
+    any unresolvable name flagged, then who is in it wearing what
+    (`_member_line`, in picker order — the window order). Keys are the status
+    bar's and legend's job, same as every other row."""
+    origin = f" (from `{cluster.template}.legoset`)" if cluster.template else ""
+    members = Text("Members:", style="bold")
+    for line in member_lines:
+        members.append("\n")
+        members.append_text(line)
+    return session_preview(
+        f"Cluster `{cluster.session}`{origin}.",
+        [("Project", str(cluster.project)),
+         ("Template", cluster.template or "(none)"),
+         ("State", str(cluster_state.cluster_dir(cluster.session))),
+         ("Last used", last_used_display)],
+        tags=tags, problems=problems, fix_target="this cluster can launch",
+        trailer=(Text(), members))
 
 
 def _create_preview(agent: Agent) -> str:
     """Build the Create-row preview markdown from a creatable_agents Agent
     and render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
-    return _render_md(
+    return _ansi(Markdown(
         f"*Create a new instance of `{agent.name}` — `agents/{agent.md_path.name}`*\n\n"
         f"---\n\n"
         f"{read_text(agent.md_path)}"
-    )
+    ))
 
 
 def _template_preview(template: ClusterTemplate, path: Path) -> str:
@@ -215,10 +317,10 @@ def _template_preview(template: ClusterTemplate, path: Path) -> str:
     members = Text()
     for m in template.members:
         members.append("  • ", style="dim")
-        members.append(m.id, style=RICH_MEMBER_NAME)
+        members.append(m.id, style=RICH_AGENT_NAME)
         members.append("\n")
     members.rstrip()
-    return _render_parts(
+    return _ansi(
         Markdown(f"*Create a cluster from `agents/{path.name}`*\n\n---\n\n"
                  f"{description}"
                  f"A **cluster** is N agents cohabiting one container on one "
@@ -226,52 +328,3 @@ def _template_preview(template: ClusterTemplate, path: Path) -> str:
                  f"each other by name.\n\nDefault members:"),
         Text(),
         members)
-
-
-# The rich twin of STYLE_AGENT_NAME: previews render through rich, the rows
-# through prompt_toolkit, and member names must wear the same blue in both.
-
-
-def _member_line(registry: Registry, identifier: str, build: AgentBuild) -> Text:
-    """One preview line for a member: bullet, BLUE name (the colour agent names
-    wear everywhere in the picker), then its tag labels in their legend colours
-    — a name that no longer resolves renders alert-style rather than vanishing."""
-    line = Text("  • ", style="dim")
-    line.append(identifier, style=RICH_MEMBER_NAME)
-    names = (*((build.engine,) if build.engine else ()),
-             *build.professions, *build.specialties, *build.policies)
-    for name in names:
-        line.append("  ")
-        if (tag := registry.get(name)) is not None:
-            line.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
-        else:
-            line.append(name, style="black on red")
-    return line
-
-
-def _cluster_preview(registry: Registry, cluster: "cluster_state.Cluster") -> str:
-    """An existing cluster's preview: who is in it, wearing what. Keys are the
-    status bar's and legend's job, same as every other row."""
-    origin = f" (from `{cluster.template}.legoset`)" if cluster.template else ""
-    return _render_parts(
-        Markdown(f"*Cluster `{cluster.session}`{origin}*\n\n---\n\n"
-                 f"project: `{cluster.project}`"),
-        Text(),
-        *[_member_line(registry, m.id, m.build)
-          for m in cluster_state.picker_order(cluster.members, registry)])
-
-
-def _member_preview(registry: Registry, cluster: "cluster_state.Cluster",
-                    member: "cluster_state.Member") -> str:
-    """One member's preview: its agent, its tags — plus the one member-specific
-    fact worth stating (the forced tags), with the generic key tutorial gone
-    like every other preview's."""
-    tags = _member_line(registry, member.id, member.build)
-    return _render_parts(
-        Markdown(f"*`{member.id}` — member of cluster `{cluster.session}`*"
-                 f"\n\n---\n\n"
-                 f"agent: `{member.agent}` · role: `{member.role}`"),
-        Text(),
-        tags,
-        Markdown("\n*`{muxer}` and `{cluster}` are re-applied on every edit — "
-                 "every member carries them.*"))

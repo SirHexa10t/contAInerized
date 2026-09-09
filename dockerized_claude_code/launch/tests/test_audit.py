@@ -21,8 +21,8 @@ from unittest.mock import patch
 
 from launch import paths
 from launch.audit import (
-    _check_json_file, _cowork_issues, _load_store, _store_entry_issues,
-    _stray_root_instances, build_parser,
+    _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names,
+    _load_store, _store_entry_issues, _stray_root_instances, build_parser,
 )
 from launch.cowork import control, mailbox
 from launch.paths import AGENTS_DIR
@@ -329,6 +329,75 @@ class TestCoworkIssues(unittest.TestCase):
         pid_path.parent.mkdir(parents=True)
         pid_path.write_text(f"{os.getpid()}\n")     # us: definitely alive
         self.assertEqual(_cowork_issues(), [])
+
+
+class TestIllegalInstanceNames(unittest.TestCase):
+    """`_illegal_instance_names` — instance dirs whose session half the shared
+    label rule refuses (made before the form applied it, or by hand)."""
+
+    def test_legal_names_are_clean(self):
+        self.assertEqual(_illegal_instance_names(["golem__a", "bug-investigator__my-proj"]), [])
+
+    def test_an_illegal_session_is_reported_with_the_rules_reason(self):
+        issues = _illegal_instance_names(["golem__ok", "golem__my.app", "poet__a:b"])
+        self.assertEqual([(kind, target) for kind, target, _ in issues],
+                         [("bad_name", "golem__my.app"), ("bad_name", "poet__a:b")])
+        self.assertIn("tmux", issues[0][2])
+        self.assertIn("F2", issues[0][2])
+
+
+class TestClusterIssues(unittest.TestCase):
+    """`_cluster_issues` — the clusters/ tree: a dir whose NAME the label rule
+    refuses (discovery skips it, so the picker never shows it) and a
+    cluster.toml that fails to load for any other reason. Real persistence in
+    a redirected AGENTS_STATE."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write(self, name: str, text: str) -> None:
+        target = paths.cluster_state_path(name)
+        target.parent.mkdir(parents=True)
+        target.write_text(text)
+
+    def test_a_host_without_clusters_has_no_findings(self):
+        self.assertEqual(_cluster_issues(), [])
+
+    def test_a_healthy_cluster_is_clean(self):
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        state.save(state.from_template("team", Path("/tmp/p"), (Member.of("golem"),)))
+        self.assertEqual(_cluster_issues(), [])
+
+    def test_a_dir_without_cluster_toml_is_not_a_cluster(self):
+        (paths.clusters_dir() / "stray").mkdir(parents=True)
+        self.assertEqual(_cluster_issues(), [])
+
+    def test_an_illegal_cluster_name_is_reported(self):
+        self._write("has~tilde", 'project = "/tmp/p"\n\n[golem]\n')
+        (issue,) = _cluster_issues()
+        self.assertEqual(issue[:2], ("bad_name", "has~tilde"))
+        self.assertIn("ref name", issue[2])
+        self.assertIn("rename", issue[2])
+
+    def test_an_unloadable_cluster_is_reported(self):
+        # A member id the rule refuses — discovery would skip the whole
+        # cluster silently, and the operator would wonder where it went. The
+        # table key is QUOTED: as a bare key `:` is a TOML error, which would
+        # exercise the corrupt-file path instead of the member rule.
+        self._write("team", 'project = "/tmp/p"\n\n["golem__a:b"]\n')
+        (issue,) = _cluster_issues()
+        self.assertEqual(issue[:2], ("bad_cluster", "team"))
+        self.assertIn("a:b", issue[2])
+
+    def test_corrupt_toml_is_reported_not_raised(self):
+        self._write("team", "{{{ not toml")
+        (issue,) = _cluster_issues()
+        self.assertEqual(issue[0], "bad_cluster")
 
 
 class TestAuditCli(unittest.TestCase):

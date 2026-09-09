@@ -3,8 +3,9 @@
 The property that matters most: a member id is simultaneously a directory name, a
 tmux window name, and a git branch component. Every test here is really asking
 "could this name mean something different in one of those three places than it
-does in the others?" — because that is how a launcher acts on the wrong target
-instead of failing.
+does in the others — or be refused by one of them after the launcher already
+accepted it?" — because that is how a launcher acts on the wrong target, or
+fails late with someone else's error, instead of failing at the prompt.
 """
 
 import unittest
@@ -72,6 +73,40 @@ class TestNameLegality(unittest.TestCase):
         # Would break the round-trip: split_member_id picks the first '__'.
         with self.assertRaises(ClusterError):
             member_id("researcher", f"a{MEMBER_SEPARATOR}b")
+
+    def test_git_ref_hostile_characters_rejected_because_labels_become_branches(self):
+        # `cluster/<session>/<member>` is a branch name; git-check-ref-format
+        # refuses every one of these anywhere in a ref. Refused here, at the
+        # prompt, rather than by `git worktree add` after the cluster exists.
+        for char in "~^?*[\\":
+            with self.subTest(char=char), self.assertRaisesRegex(ClusterError, "ref name"):
+                valid_label(f"a{char}b", "session name")
+
+    def test_control_and_invisible_characters_rejected_as_a_class(self):
+        # An escape sequence or a zero-width space inside a tmux status token,
+        # a tab title or a picker row is not a name — whatever the code point.
+        for bad in ("a\x1bb", "a\x00b", "a\u200bb", "a\rb"):
+            with self.subTest(label=bad), self.assertRaises(ClusterError):
+                valid_label(bad, "session name")
+
+    def test_the_message_names_the_place_the_character_would_misbehave(self):
+        # Each rejected character carries ITS reason, so the user learns why
+        # instead of a generic "invalid name".
+        with self.assertRaisesRegex(ClusterError, "session:window"):
+            valid_label("a:b", "session name")
+        with self.assertRaisesRegex(ClusterError, "path component"):
+            valid_label("a/b", "session name")
+        with self.assertRaisesRegex(ClusterError, "inbox"):
+            valid_label("a@b", "session name")
+
+    def test_the_rule_is_the_shared_one(self):
+        # valid_label adds only the exception type: the message IS
+        # tags.identity.label_error's, so the instance form, cowork and
+        # clusters can never disagree about what a name may contain.
+        from launch.tags.identity import label_error
+        with self.assertRaises(ClusterError) as caught:
+            valid_label("a~b", "session name")
+        self.assertIn(label_error("a~b"), str(caught.exception))
 
     def test_empty_rejected(self):
         with self.assertRaises(ClusterError):

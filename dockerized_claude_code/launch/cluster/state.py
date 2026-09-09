@@ -60,15 +60,17 @@ from pathlib import Path
 
 from .. import toml_emit
 from ..file_access import (
-    force_remove, is_dir, is_file, iter_subdirs, read_text, write_text,
+    agent_md_index, force_remove, is_dir, is_file, iter_subdirs, read_text,
+    write_text,
 )
 from ..paths import (
-    cluster_path, cluster_state_path, cluster_worktree_path,
+    cluster_member_dir, cluster_path, cluster_state_path, cluster_worktree_path,
     cluster_worktrees_dir, clusters_dir,
 )
-from ..tags import Registry
+from ..tags import Instance, Registry, resolve_build
 from ..tags.lego import AgentBuild
 from ..tags.store import build_entry, entry_to_build
+from ..transcripts import last_history_mtime
 from ..utils import shell_returncode
 from . import worktree
 from .member import ClusterError, Member, split_member_id, valid_label
@@ -205,6 +207,49 @@ class Cluster:
             professions=union(self.tags.professions, member.build.professions),
             specialties=union(self.tags.specialties, member.build.specialties),
             policies=union(self.tags.policies, member.build.policies))
+
+    def member_instance(self, member: Member, registry: Registry) -> Instance | None:
+        """`member` as the ordinary `Instance` it launches as — persona,
+        engine conf, settings, claude_args and the picker's previews all come
+        from the one existing pipeline ("a member is an instance in all but
+        placement"): its state dir is its own dir inside the cluster, its
+        tags are `member_build` (the cluster's plus its own).
+
+        Two failure encodings, deliberately distinct — never collapse them:
+          None                   the agent's `.md` is gone from agents/, so
+                                 there is nothing to build an Instance from;
+          Instance.invalid_tags  a tag name that no longer resolves, kept
+                                 non-raising exactly as a stale instances.toml
+                                 entry is (`agents_crud.instance_from_store`):
+                                 the picker shows the red chips and
+                                 `is_startable` says no.
+        Neither raises here because the picker needs both as rows (a red
+        one, never a vanished one); `launching.member_instances` is where
+        each becomes a loud stop naming the member."""
+        md_path = agent_md_index().get(member.agent)
+        if md_path is None:
+            return None
+        clean, problems = registry.resolve_store_build(self.member_build(member))
+        return Instance(
+            agent=member.agent, md_path=md_path, session=self.session,
+            workspace=str(self.project), is_brand_new=False,
+            invalid_tags=tuple(problems),
+            state_dir_override=cluster_member_dir(self.session, member.id),
+            **resolve_build(clean, member.agent, registry))
+
+    @property
+    def last_used_mtime(self) -> float | None:
+        """When any member last ran: the newest member `history.jsonl`
+        (`transcripts.last_history_mtime`, the very probe behind an
+        instance's `last_used_mtime`), or None while no member has one. A
+        cluster goes by its latest member (operator request, 2026-09-09).
+        Display only — cluster rows stay session-sorted — and it stats one
+        file per member, so callers read it once per menu build, not per
+        render."""
+        stamps = [stamp for member in self.members
+                  if (stamp := last_history_mtime(
+                      cluster_member_dir(self.session, member.id))) is not None]
+        return max(stamps, default=None)
 
 
 # ============================================================

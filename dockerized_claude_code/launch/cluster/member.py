@@ -21,25 +21,22 @@ not just a directory name — it is also a **tmux window name**, and tmux addres
 windows with `session:window.pane`. A role containing `:` or `.` would make
 `-t cluster:my.role` ambiguous, and tmux would act on the wrong target rather
 than fail. Raising when the name is composed is how that never reaches a command
-line. (Same argument as `cowork.group._separator_free`, different characters.)
+line. The RULE itself is not this module's: `tags.identity.label_error` is the
+one legality rule every name a person types is held to — instance sessions and
+cowork labels included since 2026-09-09, when three validators were found
+carrying three subsets of it. `valid_label` wraps it in `ClusterError`; only
+the member-id separator rule (`__`, in `valid_role`) is this feature's own.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..tags.identity import label_error
 from ..tags.lego import AgentBuild
 
 MEMBER_SEPARATOR = "__"     # between agent and role in a member id
 
-# Rejected in any agent name, role, or cluster session name:
-#   ':' '.'   tmux target syntax is `session:window.pane` — either would make an
-#             addressed window ambiguous rather than invalid
-#   '/'       every one of these becomes a path component
-#   '@'       reserved by {cowork} for inbox dirs; keep the two features' name
-#             spaces mutually legible if a tree ever holds both
-#   space/tab a tmux window name and a shell word both end at whitespace
-_FORBIDDEN = (":", ".", "/", "@", " ", "\t", "\n")
 
 
 class ClusterError(Exception):
@@ -48,19 +45,15 @@ class ClusterError(Exception):
 
 
 def valid_label(label: str, kind: str) -> str:
-    """`label` unchanged, or a ClusterError naming what is wrong with it.
+    """`label` unchanged, or a ClusterError naming what is wrong with it —
+    `tags.identity.label_error`'s rule (the one every name a person types is
+    held to), wrapped in this feature's exception; `kind` says which name.
 
     Raises rather than sanitising, for the reason `{cowork}` learned: silently
     rewriting an id leaves the thing keyed under a name its own participants do
     not answer to."""
-    if not label:
-        raise ClusterError(f"a cluster {kind} may not be empty")
-    for char in _FORBIDDEN:
-        if char in label:
-            shown = repr(char) if char.strip() else "whitespace"
-            raise ClusterError(
-                f"a cluster {kind} may not contain {shown} — it becomes both a "
-                f"path component and a tmux window name: {label!r}")
+    if (error := label_error(label)) is not None:
+        raise ClusterError(f"a cluster {kind} {error}: {label!r}")
     return label
 
 

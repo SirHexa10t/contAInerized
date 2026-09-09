@@ -35,38 +35,38 @@ from typing import Any
 
 from ..file_access import is_dir, is_file, iter_subdirs, read_text, write_text
 from ..paths import (
-    INBOX_SEPARATOR, cowork_group_path, group_hosting_dir, group_key,
-    group_session_path, hub_state_path,
+    cowork_group_path, group_hosting_dir, group_key, group_session_path,
+    hub_state_path,
 )
+from ..tags.identity import label_error
 
 HUB_STATE_SCHEMA = 1     # bumped only on a breaking change to the on-disk shape
 
 
-def _separator_free(label: str, kind: str) -> str:
-    """`label`, or a ValueError if it carries a character some composed name
-    needs to be able to split on.
+def _legal_label(label: str, kind: str) -> str:
+    """`label`, or a ValueError when it cannot be a name — `tags.identity.
+    label_error`'s rule (the one every name a person types is held to), wrapped
+    in this feature's exception; `kind` says which name.
 
-    Two composed names lean on this. An inbox dir is named `<group>@<sender>`
+    Two composed names are why cowork checks at all, and both stay structural
+    guarantees rather than conventions only because nothing that composes a
+    name can smuggle a separator in. An inbox dir is named `<group>@<sender>`
     and sits as a SIBLING of the group dirs in the same tree, so the two must
     never be able to share a name. And the prompt marker is
     `[cowork task <manager>::<project>]` (mailbox.TAG_SEPARATOR), which
-    attribution splits on its first `::` to rebuild the group key. Both are
-    structural guarantees, not conventions — and they hold only as long as
-    nothing that composes a name smuggles a separator in. The session suffix a
-    user types is free text (`menu_picker.prompt_session` does not restrict
-    characters) and a project label is written by an agent, so both are checked
-    here, at the point a name enters durable state.
+    attribution splits on its first `::` to rebuild the group key. `@` and `:`
+    are both in the shared table; the rest of it (path, tmux, git and
+    control-character hazards) rides along, because a name entering durable
+    state here lands in the same places every other name does. Checked at
+    that point of entry: an instance id at recruitment — the instance form
+    applies the same rule when the instance is named (since 2026-09-09), so
+    only a legacy or hand-made id can fail here — and a project label when a
+    manager writes it.
 
     Raises rather than sanitising: silently rewriting an id would leave the group
     keyed under a name its participants do not answer to."""
-    if INBOX_SEPARATOR in label:
-        raise ValueError(f"a cowork {kind} may not contain "
-                         f"{INBOX_SEPARATOR!r} (it separates a group from a "
-                         f"sender in inbox dir names): {label!r}")
-    if ":" in label:
-        raise ValueError(f"a cowork {kind} may not contain ':' (the prompt "
-                         f"marker joins manager and project with '::'): "
-                         f"{label!r}")
+    if (error := label_error(label)) is not None:
+        raise ValueError(f"a cowork {kind} {error}: {label!r}")
     return label
 
 
@@ -125,7 +125,7 @@ class Session:
         managers outright would forbid the most capable coworkers there are."""
         if coworker in self.coworkers or coworker == self.manager:
             return self
-        return replace(self, coworkers=(*self.coworkers, _separator_free(coworker, "instance id")))
+        return replace(self, coworkers=(*self.coworkers, _legal_label(coworker, "instance id")))
 
     def without_coworker(self, coworker: str) -> Session:
         """This session minus `coworker`; unchanged if it was not a member —
@@ -234,8 +234,8 @@ def create_session(manager: str, project: str, task: str,
     Both halves of the key are separator-checked before anything is written: the
     key names this group's directory in EVERY participant's tree, so a bad one
     would not be a local mistake."""
-    _separator_free(manager, "instance id")
-    _separator_free(project, "project label")
+    _legal_label(manager, "instance id")
+    _legal_label(project, "project label")
     existing = load_session(cowork_group_path(manager, group_key(manager, project)))
     if existing is not None:
         return existing

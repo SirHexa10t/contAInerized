@@ -35,7 +35,7 @@ Grouped by layer, top of the dependency graph last.
 - `tags/registry.py` — `scan_all(agents_dir)` → `Registry`: discover, cross-validate (fail loud), look up.
 - `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections). Shipped `.lego` files are validated with the RAISING `Registry.validate_build`; user-editable `instances.toml` entries use the NON-raising `Registry.resolve_store_build` (keeps valid tags, returns `TagProblem`s for the rest) so a stale/typo'd stored tag becomes a blocked, flagged instance rather than a crash.
 - `tags/toolkit_profile.py` — per-profession `~/.claude-agents/<profession>_profile.toml` load/generate/save (install toggles for a profession's optional `template.form` entries); depends on `tags/profession.py`'s `ToolkitEntry`.
-- `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `claude_args`, `unmet_wants`).
+- `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `claude_args`, `unmet_wants`); and `label_error`, the ONE legality rule every name a person types is held to (an instance's session, a cluster's session, a member's role) — returned in the form validator's shape so the field shows it live, and wrapped by `cluster.member.valid_label` / `cowork.group._legal_label` in their own exceptions.
 - `tags/store.py` — `instances.toml` load/save (stdlib `tomllib` in; a small fixed-schema TOML emitter out).
 - `tags/migrations.py` — ISOLATED one-shot conversions from retired on-disk formats; the only module allowed to know retired formats exist.
 - `tags/addendums.py` — the CLAUDE.md addendum composer: universal BASE_ADDENDUMS, the placeholder registry, and `compose(active_tags)`; per-tag copy lives in each tag.info's `[addendum]` table.
@@ -68,23 +68,23 @@ inside is strictly one-way: `styles` → `form_core` → {`forms`,
 `picker_widget`} → `menu_picker`.
 
 - `gui/styles.py` — the style system every surface draws with: the `UiClass` CSS classes, the field-driven tag colours (`tag_style`, `squashed_tag_style`, `RICH_BY_STYLE`), the display coercers, and the chrome heights (`TITLE_HEIGHT` / `STATUS_HEIGHT`) forms and picker both reserve.
-- `gui/form_core.py` — the generic form: `FormOption`, `TextField`, the shared confirm/really-done? gate (`ConfirmGate` + `confirm_gate`), and the `checkbox_form` primitive. No form may restate any of it.
+- `gui/form_core.py` — the generic form: `FormOption`, `TextField`, the shared confirm/really-done? gate (`ConfirmGate` + `confirm_gate`), and `run_form` + `FormBody` — the ONE scaffold every full-screen form runs on (text fields, cursor, key map, warning window, layout), with `checkbox_form` as the multi-select row model on it. No form may restate any of it: the two forms drifted twice while each had its own copy (plans/ISSUES.md, testing technique).
 - `gui/forms.py` — what the launcher ASKS: the instance tag form (`prompt_tags`), its cluster-wide sibling, the merged preferences form (`edit_profiles_menu`).
-- `gui/cluster_form.py` — the membership form, whose accumulator semantics (picking an agent adds ANOTHER) need their own key map; runs on form_core's scaffold, takes its pick algebra from `cluster.legoset`.
-- `gui/picker_previews.py` — every row kind's preview text, and the child-process transcript read that keeps a huge transcript off the UI thread.
+- `gui/cluster_form.py` — the membership form: its agent rows, its add/remove ROW actions (picking an agent adds ANOTHER) and the members panel, declared as a `FormBody` on `run_form`; its pick algebra comes from `cluster.legoset`.
+- `gui/picker_previews.py` — `session_preview`, the ONE pane instances, cluster members and clusters render through (a fact block, the optional `Last prompt`, the expanded tag list), the creation rows' panes, and the child-process transcript read that keeps a huge transcript off the UI thread.
 - `gui/picker_prompts.py` — the non-fullscreen bits both the picker and its flows need: line prompts (workspace, session suffix), inline dialogs, field builders, and the confirm wording every one of them shares.
 - `gui/picker_flows.py` — what each picker key MEANS once a row is chosen: the create / edit / destroy flows.
-- `gui/picker_widget.py` — the REUSABLE picker: the row contract (`PickerEntry`/`ContEntry` and their deferred-preview slots), the row decorations whose glyphs+styles are data on an enum rather than branches in a renderer (`PickerRowMarker`, `PickerCwdHint`), the preview LOADER, cursor movement over skippable rows, and the selection loop (`pick_with_preview`). Knows nothing about agents.
-- `gui/menu_picker.py` — the launcher's three MENUS built on that widget: the main agent picker (`select_agent`), the deletion submenu, `--stop`'s selector (`prompt_stop`), plus the F8 composition legend. This is the only gui module with agent-domain knowledge. (Launch-stage output like the pre-build banner is NOT here — that's claude_code_config, which owns everything the launcher renders about an instance.)
+- `gui/picker_widget.py` — the REUSABLE picker: the row contract (`PickerEntry` with its `marker`, its per-key gates — `deletable` / `modifiable` / `pickable` — and deferred-preview slots; `ContEntry` for anything with a state dir and `MemberEntry`, its cluster-member subclass; `WorkspaceView`, a row's path + cwd hint as one fact), the row decorations whose glyphs+styles are data on an enum rather than branches in a renderer (`PickerRowMarker`, `PickerCwdHint`), the preview LOADER, cursor movement over skippable rows, the accent bar's colour (read off the row's marker) and the selection loop (`pick_with_preview`). Knows nothing about agents.
+- `gui/menu_picker.py` — the launcher's three MENUS built on that widget: the main agent picker (`select_agent`), the deletion submenu, `--stop`'s selector (`prompt_stop`), plus the F8 composition legend — and the row DATA they share: `_CwdContext` (the launch-site facts a workspace is judged against, resolved once per menu build), the two row factories (`continuable_instances`, `cluster_entries` — whose members are Instances via `Cluster.member_instance`), and `_session_row`, the one anatomy every row for an existing thing wears. This is the only gui module with agent-domain knowledge. (Launch-stage output like the pre-build banner is NOT here — that's claude_code_config, which owns everything the launcher renders about an instance.)
 
 ### Clusters — `launch/cluster/`, a leaf consumer of the core
 
 N members, one container, one project. Like `cowork/` and `quickie/`, nothing
 in `launch/` imports it back except `run.py`'s launch call.
 
-- `cluster/member.py` — what one member IS; id composition; name validation (the `valid_label` both backends and `panes` enforce).
+- `cluster/member.py` — what one member IS; id composition; `valid_label` — `tags.identity.label_error` as a `ClusterError`, plus the member-id separator rule — which both backends and `panes` enforce.
 - `cluster/legoset.py` — `.legoset` parsing: a cluster template's default membership.
-- `cluster/state.py` — `cluster.toml`: durable member set, the cluster-level tags every member inherits, and discovery-by-scan. Its `dumps` owns this format's shape; escaping comes from `toml_emit`.
+- `cluster/state.py` — `cluster.toml`: durable member set, the cluster-level tags every member inherits, and discovery-by-scan; plus what a member IS at launch (`Cluster.member_instance` — the ordinary `Instance`, non-raising: a vanished agent is `None`, a stale tag lands on `invalid_tags`) and when the cluster was last used (`last_used_mtime`, its newest member). Its `dumps` owns this format's shape; escaping comes from `toml_emit`.
 - `cluster/panes.py` — what a multiplexer is asked to start: one `Pane` per member (name, argv, cwd, env) plus the two labels neither backend owns. The vocabulary BOTH backends read — deliberately free of either one's flag dialect.
 - `cluster/tmux.py` — the tmux backend: pure argv/script assembly plus the key/status policy.
 - `cluster/herdr.py` — the herdr backend, selected by default; same assembly-only contract in its own dialect.
@@ -300,7 +300,23 @@ GLYPH or decoration goes on `picker_widget`'s `PickerRowMarker` /
 renderer). Build entries with `pick_with_preview` — it is generic over
 `PickerEntry.value` and must stay that way: if the widget needs to know what
 kind of thing it is showing, the knowledge belongs on the row, not in the
-loop.
+loop. Concretely: give the row its `marker` (the accent bar reads it — the
+one place the widget learns a row's KIND); if the thing has a state dir,
+build it as a `ContEntry` (or a subclass, as `MemberEntry` is) so it gets
+the deferred `Last used` / `Last prompt` pane for free; read its workspace
+through `menu_picker._CwdContext.view` and render it with `_session_row`,
+so its path lines up with every other row's and it wears the same hints.
+
+### A new full-screen form
+
+→ a row model + `FormBody` on `form_core.run_form` — never a prompt_toolkit
+Application of its own. A form declares only what differs: its rows, which
+keys act on a ROW (the scaffold already knows what every key does on a text
+field and on the confirm button), its filler panel, its own complaints, its
+confirm label and hint. The two forms each had their own Application until
+2026-09-09 and drifted twice; `TestFormTailsMatch` now pins that only
+`form_core` builds one, `TestFormPlacementParity` that complaints and the
+cursor land where they should in both.
 
 ### A new thing to read out of a session transcript
 
@@ -353,6 +369,22 @@ until it was harder to read than either caller). But its ESCAPING comes from
 `cluster/state.py` each carried a byte-identical copy of those five lines
 until 2026-09-03, and the failure mode of letting them drift is silent —
 each file's own reader keeps parsing until a key finally needs quoting.
+
+### A new name a person types (a session, a label, a role)
+
+→ hold it to `tags.identity.label_error` — as the field's `validate` in a
+form, or wrapped in the feature's own exception at the point the name enters
+durable state — and add only the feature's OWN separator rule on top (`__`
+for member ids; cowork's `@` and `:` are in the shared table). Never a second
+character table: three subsets of one rule drifted apart until 2026-09-09,
+and the gap left instance names unchecked while the same dot broke them
+under `{muxer}` (cluster/solo.py). A DEFAULT the form pre-fills may be bent
+legal with `suggested_label` (`my.app` → `my-app`, `café` → `cafe` — NFKD
+plus a small table for the letters it cannot decompose; no guessing for
+scripts without an ASCII spelling); a name the user typed never is —
+refuse it with the reason. The docker container-name charset is
+the rule's catch-all and lives beside `CONTAINER_NAME_PREFIX` in
+`container_probe.py`, where the name format is defined.
 
 ### A new helper that's pure (no disk, no third-party)
 

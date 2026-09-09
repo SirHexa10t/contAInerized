@@ -2,3 +2,7 @@
 
 create a TDD-oriented team
 
+share memory/context between agents
+    find other ways to save on tokens/time
+
+

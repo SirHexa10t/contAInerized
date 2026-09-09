@@ -30,6 +30,7 @@ the reverse would put it back behind `docker_config` where the firewall
 cannot reach it.
 """
 
+import re
 import subprocess
 import time
 
@@ -41,6 +42,13 @@ from .utils import shell_capture
 # strips it back off to recover instance ids, and the injection path composes
 # it to attach. Keeping those consistent is a one-line change here.
 CONTAINER_NAME_PREFIX = "claude-code_"
+# The characters docker accepts in a container name — `[a-zA-Z0-9][a-zA-Z0-9_.-]+`
+# (the daemon's RestrictedNamePattern). Every launcher container is the prefix
+# above plus a label, so the prefix carries the leading-alnum requirement and a
+# label needs only the body class. `tags.identity.label_error` refuses anything
+# outside it up front: `docker run --name` refusing it later is a raw daemon
+# error at the end of a build (2026-09-09).
+CONTAINER_NAME_CHARS = re.compile(r"[a-zA-Z0-9_.-]+")
 
 def docker_check_running_subprocess(container_name: str) -> bool:
     """True if the named container is currently in the Running state per

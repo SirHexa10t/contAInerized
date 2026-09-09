@@ -370,10 +370,16 @@ class TestSharedFormScaffold(unittest.TestCase):
 
 
 class TestFormTailsMatch(unittest.TestCase):
-    """THE regression the extraction was for: both forms must end with the
-    same window stack, so the really-done? question and the field complaints
-    hug the confirm button in each. They differed — the cluster form put them
-    in its FLEXIBLE members panel, which top-aligns."""
+    """THE regression the 2026-09-02 extraction was for: both forms must end
+    with the same window stack, so the really-done? question and the field
+    complaints hug the confirm button in each. They differed — the cluster
+    form put them in its FLEXIBLE members panel, which top-aligns.
+
+    Since 2026-09-09 both forms are built by ONE scaffold (`form_core.run_form`),
+    so the shapes agree by construction; this test now guards the construction
+    itself — the membership form builds no Application of its own — and keeps
+    the tail comparison as the cheap end-to-end check of it. WHERE a given
+    complaint lands inside that tail is `TestFormPlacementParity`'s job."""
 
     @staticmethod
     def _tail(build):
@@ -384,8 +390,7 @@ class TestFormTailsMatch(unittest.TestCase):
             captured["layout"] = kwargs["layout"]
             return MagicMock()
 
-        with patch("launch.gui.form_core.Application", side_effect=fake_app), \
-             patch("launch.gui.cluster_form.Application", side_effect=fake_app):
+        with patch("launch.gui.form_core.Application", side_effect=fake_app):
             build()
         children = captured["layout"].container.children
         # (height, hugs-the-bottom) per window — enough to compare shapes
@@ -398,6 +403,10 @@ class TestFormTailsMatch(unittest.TestCase):
         return [(str(getattr(w, "height", None)), hugs(w))
                 for w in children[-4:]]
 
+    def test_only_the_scaffold_builds_a_form_application(self):
+        from launch.gui import cluster_form
+        self.assertFalse(hasattr(cluster_form, "Application"))
+
     def test_both_forms_end_with_the_same_window_stack(self):
         from launch.gui import cluster_form
         field = form_core.TextField(key="name", label="name", value="x")
@@ -407,6 +416,92 @@ class TestFormTailsMatch(unittest.TestCase):
             [("golem", "d")], [("golem", None)], title="t",
             fields=[form_core.TextField(key="name", label="name", value="x")]))
         self.assertEqual(tags_tail, members_tail)
+
+
+
+class TestFormPlacementParity(unittest.TestCase):
+    """WHERE things render — the drift `TestFormTailsMatch` could not see,
+    because it compares window SHAPES, not which window carries which text.
+    Two regressions found 2026-09-09, both in the cluster form only:
+
+    - its 'no members yet' complaint rode the FLEXIBLE members panel (which
+      top-aligns under the options) while its field complaints hugged the
+      confirm button — the operator saw the same kind of warning at two
+      heights across the two forms;
+    - its `cursor_pos` ignored the blank separator line rendered after the
+      text fields, so with fields present the reported cursor sat one line
+      above the highlighted agent row (only visible once the list overflows
+      and prompt_toolkit scrolls to the wrong line).
+
+    Both are pinned by driving the REAL bindings against a captured layout,
+    and both are asserted for both forms, so the two can only agree."""
+
+    @staticmethod
+    def _capture(build):
+        from unittest.mock import MagicMock
+        captured = {}
+
+        def fake_app(**kwargs):
+            captured["layout"] = kwargs["layout"]
+            captured["key_bindings"] = kwargs["key_bindings"]
+            return MagicMock()
+
+        with patch("launch.gui.form_core.Application", side_effect=fake_app):
+            build()
+        return captured
+
+    @staticmethod
+    def _text(window) -> str:
+        return "".join(text for _, text in window.content.text())
+
+    @staticmethod
+    def _press(captured, key) -> None:
+        """Fire the form's own handler for `key` — the real binding, not a
+        re-implementation of what the key is supposed to do."""
+        from unittest.mock import MagicMock
+        from prompt_toolkit.keys import Keys
+        wanted = Keys(key)
+        binding = next(b for b in captured["key_bindings"].bindings
+                       if tuple(b.keys) == (wanted,))
+        event = MagicMock()
+        event.data = ""
+        binding.handler(event)
+
+    def _forms(self):
+        """Both forms, each with ONE text field above ONE row."""
+        from launch.gui import cluster_form
+        field = lambda: form_core.TextField(key="name", label="name", value="x")   # noqa: E731
+        return {
+            "tag form": lambda: form_core.checkbox_form(
+                "t", [FormOption(key="a", label="a")], fields=[field()]),
+            "membership form": lambda: cluster_form.prompt_members(
+                [("golem", "d")], [("golem", None)], title="t", fields=[field()]),
+        }
+
+    def test_the_empty_membership_complaint_sits_in_the_warning_window(self):
+        from launch.gui import cluster_form
+        captured = self._capture(lambda: cluster_form.prompt_members(
+            [("golem", "d")], [], title="t",
+            fields=[form_core.TextField(key="name", label="name", value="x")]))
+        children = captured["layout"].container.children
+        # The tail every form ends with: filler · warnings · blank · confirm · hint
+        filler, warnings = children[-5], children[-4]
+        complaint = cluster_form.EMPTY_WARNING.strip()
+        self.assertIn(complaint, self._text(warnings))
+        self.assertNotIn(complaint, self._text(filler))
+
+    def test_cursor_pos_names_the_line_the_highlighted_row_renders_on(self):
+        for name, build in self._forms().items():
+            with self.subTest(form=name):
+                captured = self._capture(build)
+                self._press(captured, "down")     # field → the one row beneath it
+                options = captured["layout"].container.children[2]   # title · blank · options
+                fragments = options.content.text()
+                highlighted = next(i for i, (style, _) in enumerate(fragments)
+                                   if form_core.UiClass.CURSOR.css in style)
+                rendered_line = "".join(t for _, t in fragments[:highlighted]).count("\n")
+                self.assertEqual(options.content.get_cursor_position().y,
+                                 rendered_line)
 
 
 if __name__ == "__main__":

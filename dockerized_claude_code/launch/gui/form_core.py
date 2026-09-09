@@ -18,14 +18,25 @@ cluster_form.py:
                                       the rest of the shared scaffold
   active_warnings / wants_warnings / requires_closure
                                       the warning zone's pure logic
-  checkbox_form                       the multi-select primitive itself
+  FormBody / run_form                 the scaffold every form RUNS ON: the
+                                      text fields, the cursor, the key map,
+                                      the confirm gate, the warning window
+                                      and the layout — defined once
+  checkbox_form                       the multi-select primitive: a row
+                                      model + one Space action on that
+                                      scaffold
 
 Placement rule this module exists to enforce: a form must not restate any of
-the above. The copies had already drifted once — the same really-done?
-message rendered at the bottom of one form and the top of the other — and
-`TestFormTailsMatch` now pins that they cannot diverge again.
+the above. The copies drifted twice — first the really-done? message rendered
+at the bottom of one form and the top of the other (2026-09-02), then the
+cluster form's "no members" complaint top-aligned while its field complaints
+hugged the button, and its cursor sat one line above the highlighted row
+(2026-09-09). Since then the forms share `run_form` and cannot restate the
+layout at all; `TestFormPlacementParity` pins where complaints render and
+where the cursor sits, for both forms at once.
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -39,8 +50,8 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
 from .styles import (
-    STATUS_HEIGHT, STYLE_DICT, STYLE_LOCKED, TITLE_HEIGHT, UiClass,
-    _fragment_source, _normalize,
+    STATUS_HEIGHT, STYLE_AGENT_NAME, STYLE_DICT, STYLE_LOCKED, TITLE_HEIGHT,
+    UiClass, _fragment_source, _normalize,
 )
 
 # ============================================================
@@ -232,7 +243,6 @@ def refresh_auto(fields: list[TextField]) -> None:
             fld.cursor = len(fld.value)
 
 
-FIELD_VALUE_STYLE = "bold fg:ansibrightblue"   # field values wear the picker's agent-name blue
 FIELD_END_MARK    = "▏"                        # marks the value's end; IS the cursor when it sits there
 # The really-done? question a no-change confirm raises — see `confirm_gate`,
 # which both forms drive, so they ask with the same words AND the same rules.
@@ -343,12 +353,12 @@ def field_row_fragments(fld: TextField, focused: bool,
     the caller's."""
     label = (UiClass.STATUS.css, f"    {fld.label:<{label_width}}  ")
     if not focused:
-        return [label, (FIELD_VALUE_STYLE, fld.value), ("", FIELD_END_MARK)]
+        return [label, (STYLE_AGENT_NAME, fld.value), ("", FIELD_END_MARK)]
     at = fld.value[fld.cursor:fld.cursor + 1]
-    frags = [label, (FIELD_VALUE_STYLE, fld.value[:fld.cursor])]
+    frags = [label, (STYLE_AGENT_NAME, fld.value[:fld.cursor])]
     if at:
-        frags += [(f"{FIELD_VALUE_STYLE} noreverse", at),
-                  (FIELD_VALUE_STYLE, fld.value[fld.cursor + 1:]),
+        frags += [(f"{STYLE_AGENT_NAME} noreverse", at),
+                  (STYLE_AGENT_NAME, fld.value[fld.cursor + 1:]),
                   ("", FIELD_END_MARK)]
     else:
         frags.append(("noreverse", FIELD_END_MARK))
@@ -409,6 +419,236 @@ def _indent_fragments(frags: list[tuple[str, str]], indent: str = "  ") -> list[
     return out
 
 
+# ============================================================
+# The scaffold — what EVERY full-screen form runs on
+# ============================================================
+
+# What a key does on a FOCUSED TEXT FIELD, whichever form the field belongs
+# to. Edits re-derive the auto fields; motions never touch text — a form once
+# ate a character on ←, which is why the two tables are separate.
+_FIELD_EDITS: dict[str, Callable[[TextField], None]] = {
+    "backspace": TextField.backspace,
+    "delete":    TextField.delete,
+}
+_FIELD_MOTIONS: dict[str, Callable[[TextField], None]] = {
+    "left":    TextField.left,
+    "right":   TextField.right,
+    "c-left":  TextField.word_left,
+    "c-right": TextField.word_right,
+    "home":    TextField.home,
+    "end":     TextField.end,
+}
+# Prefixed to a form's hint whenever it carries text fields — one wording for
+# both forms (the membership form said it, the tag form never did).
+FIELDS_HINT_PREFIX = "type into the focused field  •  "
+
+
+@dataclass(frozen=True)
+class FormBody:
+    """What a concrete form hands `run_form`: its rows, and what its keys do
+    to them. Everything else — the text fields above the rows, the cursor, the
+    confirm gate, the warning window, the layout — is the scaffold's, defined
+    once for every form.
+
+      rows       the current fragments of every row, with NO cursor highlight
+                 (the scaffold applies it to whichever row is focused)
+      stops      the row indices the cursor may land on (a header is skipped)
+      actions    key → what it does to the focused ROW, by row index. A form
+                 declares only the ROW half of each key: on a focused field
+                 the same key keeps its text meaning (Space types a space, ←
+                 moves the cursor), and on the button Space confirms.
+      filler     the flexible middle window, given the focused row's index
+                 (None on a field or the button): the focused option's
+                 explanation, the membership preview
+      warnings   the form's own complaints, as lines; the scaffold renders
+                 them, the field errors and the really-done? question in the
+                 ONE bottom-hugging warning window
+      snapshot   everything the user can change in the rows (the scaffold adds
+                 the field values) — the really-done? baseline
+      ready      an extra confirm gate beyond "no field is invalid"
+    """
+    rows: Callable[[], list[list[tuple[str, str]]]]
+    stops: Sequence[int]
+    actions: Mapping[str, Callable[[int], None]]
+    filler: Callable[[int | None], list[tuple[str, str]]]
+    warnings: Callable[[], list[str]]
+    confirm_label: str
+    hint: str
+    snapshot: Callable[[], Any]
+    ready: Callable[[], bool] = lambda: True
+
+
+def run_form(title: str, preamble: list[str] | None, fields: list[TextField] | None,
+             body: FormBody) -> dict[str, str] | None:
+    """Render a full-screen form; block until confirm or cancel. Returns the
+    field values (an empty dict for a fieldless form), or None on Esc/Ctrl-C.
+
+    THE definition of how a launcher form behaves. ↑↓ cycle the stops — the
+    fields, then the body's rows, then the [ Confirm ] button, wrapping.
+    Typing edits a focused field: Space is a literal there, Backspace/Delete
+    erase around the cursor, ←/→ move it (ctrl+←/→ by word, Home/End to the
+    extremes) and never edit. On a row the body's `actions` decide what a key
+    does; on the button Space confirms. Enter confirms from anywhere, refused
+    while a field is invalid or `body.ready()` says no (the warning window is
+    already explaining why), and a confirm that changed nothing asks
+    `really done?` first (see `confirm_gate`; only forms with fields ask).
+
+    Header, fields+rows, the flexible filler, the warnings, the confirm row and
+    the hint stack in that order, the warnings in a `dont_extend_height`
+    window hugging the button. Two hand-rolled copies of this stack drifted
+    twice before it was defined here once (module docstring)."""
+    preamble_lines = preamble or []
+    field_rows: list[TextField] = list(fields or [])
+    fields_at = len(field_rows)                       # body row i renders at index fields_at + i
+    row_count = len(body.rows())
+    confirm_index = fields_at + row_count             # the confirm button is the last navigable row
+    stops = ([*range(fields_at)]
+             + [fields_at + i for i in body.stops]
+             + [confirm_index])
+    state: dict[str, Any] = {"cursor": stops[0]}
+
+    def focused_field() -> TextField | None:
+        if state["cursor"] < fields_at:
+            return field_rows[state["cursor"]]
+        return None
+
+    def focused_row() -> int | None:
+        index = state["cursor"] - fields_at
+        return index if 0 <= index < row_count else None
+
+    def option_fragments() -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        label_width = max((len(f.label) for f in field_rows), default=0)
+        for i, fld in enumerate(field_rows):
+            out.extend(field_row_fragments(fld, i == state["cursor"], label_width))
+            out.append(("", "\n"))
+        if field_rows:
+            out.append(("", "\n"))    # one blank line between fields and rows — cursor_pos counts it
+        for i, frags in enumerate(body.rows()):
+            if i + fields_at == state["cursor"]:
+                frags = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
+                         for style, text in frags]
+            out.extend(frags)
+            out.append(("", "\n"))
+        if out:
+            out.pop()   # trailing newline
+        return out
+
+    def filler_fragments() -> list[tuple[str, str]]:
+        return body.filler(focused_row())
+
+    def warning_fragments() -> list[tuple[str, str]]:
+        lines = [*body.warnings(), *field_errors(field_rows)]
+        out = [(UiClass.WARNING.css, f"  {line}\n") for line in lines]
+        out += [(style, text + "\n") for style, text in gate.question()]
+        if out:
+            out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
+        return out
+
+    def confirm_fragments() -> list[tuple[str, str]]:
+        return confirm_row_fragments(body.confirm_label,
+                                     state["cursor"] == confirm_index)
+
+    hint = (FIELDS_HINT_PREFIX if field_rows else "") + body.hint
+
+    def cursor_pos() -> Point:
+        # Field rows render one line each, then the blank separator, then the rows.
+        line = state["cursor"] + (1 if field_rows and state["cursor"] >= fields_at else 0)
+        last = fields_at + (1 if field_rows else 0) + row_count - 1
+        return Point(0, min(line, last))
+
+    def move(delta: int) -> None:
+        state["cursor"] = stops[(stops.index(state["cursor"]) + delta) % len(stops)]
+
+    refresh_auto(field_rows)    # the initial derivation, before any keystroke
+    # Built AFTER that derivation so the baseline includes the auto-filled
+    # values. Only forms WITH fields ask: a fieldless form's Enter is
+    # unambiguous, and open-look-Enter should stay one keystroke there.
+    gate = confirm_gate(
+        snapshot=lambda: (tuple(f.value for f in field_rows), body.snapshot()),
+        ready=lambda: not field_errors(field_rows) and body.ready(),
+        asks_when_unchanged=bool(field_rows))
+
+    def keyed(key: str) -> Callable[[KeyPressEvent], None]:
+        """One handler per bound key: its FIELD meaning while a field is
+        focused, Space-confirms on the button, else the body's ROW action."""
+        def handler(event: KeyPressEvent) -> None:
+            if (fld := focused_field()) is not None:
+                if key in _FIELD_EDITS:
+                    _FIELD_EDITS[key](fld)
+                    refresh_auto(field_rows)
+                elif key in _FIELD_MOTIONS:
+                    _FIELD_MOTIONS[key](fld)
+                elif event.data and event.data.isprintable():   # Space, +, - … are literals in a field
+                    fld.insert(event.data)
+                    refresh_auto(field_rows)
+                return
+            if state["cursor"] == confirm_index:
+                if key == " ":
+                    gate.confirm(event)
+                return
+            action = body.actions.get(key)
+            if action is not None and (row := focused_row()) is not None:
+                action(row)
+        return handler
+
+    def type_char(event: KeyPressEvent) -> None:
+        # Printable keys type into a focused field; elsewhere they fall
+        # through unused. Specials carry escape sequences (unprintable) and
+        # are filtered out.
+        if (fld := focused_field()) is not None and event.data \
+                and event.data.isprintable():
+            fld.insert(event.data)
+            refresh_auto(field_rows)
+
+    def cancel(event: KeyPressEvent) -> None:
+        event.app.exit()
+
+    kb = KeyBindings()
+    # Every binding runs behind the really-done? interception (the gate's own
+    # rule), so the answer key never doubles as its usual action.
+    bind = answer_first_bind(kb, gate)
+    bind("up", lambda event: move(-1))
+    bind("down", lambda event: move(1))
+    for key in dict.fromkeys([*_FIELD_EDITS, *_FIELD_MOTIONS, " ", *body.actions]):
+        bind(key, keyed(key))
+    bind("enter", gate.confirm)
+    bind("escape", cancel)
+    bind("c-c", cancel)
+    bind(Keys.Any, type_char)
+
+    Application(
+        layout=Layout(HSplit([
+            *header_windows(title, preamble_lines),
+            Window(height=1, char=" "),
+            Window(FormattedTextControl(_fragment_source(option_fragments),
+                                        get_cursor_position=cursor_pos,
+                                        focusable=True,
+                                        show_cursor=False),
+                   wrap_lines=False, dont_extend_height=True),
+            Window(height=1, char=" "),
+            # Flexible filler, so the warnings + confirm hug the bottom.
+            Window(FormattedTextControl(_fragment_source(filler_fragments)), wrap_lines=True),
+            Window(FormattedTextControl(_fragment_source(warning_fragments)), wrap_lines=True, dont_extend_height=True),
+            Window(height=1, char=" "),
+            Window(FormattedTextControl(_fragment_source(confirm_fragments)), height=1),
+            Window(FormattedTextControl(_fragment_source(lambda: [(UiClass.STATUS.css, hint)])),
+                   height=STATUS_HEIGHT),
+        ])),
+        key_bindings=kb,
+        style=Style.from_dict(STYLE_DICT),
+        full_screen=True,
+    ).run()
+
+    if not gate.confirmed():
+        return None
+    return {f.key: f.value.strip() for f in field_rows}
+
+
+# ============================================================
+# Checkbox form (multi-select) — the primitive behind prompt_tags
+# ============================================================
+
 def checkbox_form(title: str, options: list[FormOption],
                   warnings: dict[frozenset[str], tuple[str, list[str]]] | None = None,
                   requires: dict[str, frozenset[str]] | None = None,
@@ -417,14 +657,12 @@ def checkbox_form(title: str, options: list[FormOption],
                   preamble: list[str] | None = None,
                   fields: list[TextField] | None = None,
                   ) -> "list[str] | tuple[dict[str, str], list[str]] | None":
-    """Render a full-screen multi-select form; block until confirm or cancel.
-
-    ↑↓ cycle through the rows (options first, then the [ Confirm ] button,
-    wrapping around); Space toggles the focused checkbox (or confirms, on
-    the button); Enter confirms from anywhere; Esc / Ctrl-C cancels. The
-    focused option's `body` renders in an explanation panel under the list;
-    `warnings` entries whose combination is fully checked render live, in
-    warning red, directly above the confirm button.
+    """The multi-select form on `run_form`'s scaffold (keys, fields, confirm
+    rules and layout are all documented there). What this form adds: Space
+    toggles the focused checkbox, with the requires-cascade; the focused
+    option's `body` renders in the flexible panel under the list; `warnings`
+    entries whose combination is fully checked, and `wants` whose wanted key
+    is unchecked, render live in the warning window.
 
     `requires` maps option keys to prerequisite option keys and drives the
     live check-cascade: checking a box also checks its transitive
@@ -432,27 +670,19 @@ def checkbox_form(title: str, options: list[FormOption],
     dependents. No disabling or indentation — every row stays freely
     toggleable, the cascade just keeps the set consistent.
 
-    `wants` maps option keys to their (wanted-key, message) requests —
-    rendered in the warning zone while the wanter is checked and the wanted
-    key isn't (see wants_warnings). Purely advisory. `labels` maps keys to
-    the display form those warnings name them by — pass it when rows are
-    labelled differently than they are keyed, or the warning points the
-    user at a name that appears nowhere on screen.
+    `wants` maps option keys to their (wanted-key, message) requests — purely
+    advisory (see wants_warnings). `labels` maps keys to the display form
+    those warnings name them by — pass it when rows are labelled differently
+    than they are keyed, or the warning points the user at a name that
+    appears nowhere on screen.
 
     `preamble` lines render dim (comment-like) between the title and the
     rows — context the form was opened with (instance name, workspace).
 
     Rows with `header=True` render but are skipped by navigation; rows with
     a `group` behave as radios; rows with `locked=True` render grayed and
-    ignore Space (see FormOption).
-
-    `fields` (TextField rows) render ABOVE the options and are edited by
-    typing while focused — Space is a literal there, a toggle on option rows;
-    Backspace/Delete erase around the cursor, ←/→ move it (ctrl+←/→ by word,
-    Home/End to the extremes) and never edit. Confirm additionally refuses
-    while any field is invalid (the warning zone shows why), and a confirm
-    that changed NOTHING asks `really done? (y/N)` first — Enter is easily
-    mistaken for a field-navigation key.
+    ignore Space (see FormOption). `fields` (TextField rows) render ABOVE the
+    options.
 
     Returns the checked options' keys in display order — as
     `(field values, keys)` when `fields` were given — or None on cancel."""
@@ -462,22 +692,7 @@ def checkbox_form(title: str, options: list[FormOption],
     warning_map = warnings or {}
     req_map = requires or {}
     wants_map = wants or {}
-    preamble_lines = preamble or []
-    field_rows: list[TextField] = list(fields or [])
-    fields_at = len(field_rows)            # option row i renders at index fields_at + i
     by_key = {o.key: o for o in rows if not o.header}
-    confirm_index = fields_at + len(rows)  # the confirm button is the last navigable row
-    # Navigation stops: the text fields, every non-header row, then confirm.
-    stops = (list(range(fields_at))
-             + [fields_at + i for i, o in enumerate(rows) if not o.header]
-             + [confirm_index])
-    state: dict[str, Any] = {"cursor": stops[0], "confirmed": False,
-                             "asked": False}
-
-    def focused_field() -> TextField | None:
-        if state["cursor"] < fields_at:
-            return field_rows[state["cursor"]]
-        return None
 
     def cascade(toggled: FormOption) -> None:
         """Keep the checked set requires-consistent after `toggled` flips.
@@ -491,10 +706,11 @@ def checkbox_form(title: str, options: list[FormOption],
                 if opt.checked and not opt.locked and toggled.key in requires_closure(opt.key, req_map):
                     opt.checked = False
 
-    def toggle(opt: FormOption) -> None:
+    def toggle(index: int) -> None:
         """Space on a row: plain rows flip (with requires-cascade); radio rows
         check-and-exclude their group (a checked radio stays checked — pick a
         different member to move the dot). Locked rows are inert."""
+        opt = rows[index]
         if opt.locked:
             return
         if opt.group is not None:
@@ -509,16 +725,10 @@ def checkbox_form(title: str, options: list[FormOption],
     def checked_keys() -> set[str]:
         return {o.key for o in rows if o.checked and not o.header}
 
-    def option_fragments() -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
-        label_width = max((len(f.label) for f in field_rows), default=0)
-        for i, fld in enumerate(field_rows):
-            out.extend(field_row_fragments(fld, i == state["cursor"], label_width))
-            out.append(("", "\n"))
-        if field_rows:
-            out.append(("", "\n"))
-        for i, opt in enumerate(rows):
-            frags = []
+    def row_fragments() -> list[list[tuple[str, str]]]:
+        out: list[list[tuple[str, str]]] = []
+        for opt in rows:
+            frags: list[tuple[str, str]] = []
             if opt.header:
                 frags.extend(_normalize(opt.label))
             else:
@@ -531,166 +741,33 @@ def checkbox_form(title: str, options: list[FormOption],
                 frags.extend(_normalize(opt.label))
             if opt.locked:   # gray the whole row — a fixed, un-toggleable entry
                 frags = [(STYLE_LOCKED, text) for _, text in frags]
-            if i + fields_at == state["cursor"]:
-                frags = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
-                         for style, text in frags]
-            out.extend(frags)
-            out.append(("", "\n"))
-        if out:
-            out.pop()   # trailing newline
+            out.append(frags)
         return out
 
-    def body_fragments() -> list[tuple[str, str]]:
-        if not fields_at <= state["cursor"] < confirm_index:
+    def body_fragments(focused: int | None) -> list[tuple[str, str]]:
+        if focused is None:
             return []
-        body = rows[state["cursor"] - fields_at].body
+        body = rows[focused].body
         return _indent_fragments(body) if body else []
 
-    def warning_fragments() -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
+    def warning_lines() -> list[str]:
         checked = checked_keys()
-        entries = (active_warnings(checked, warning_map)
-                   + wants_warnings(checked, wants_map, labels)
-                   + [(complaint, []) for complaint in field_errors(field_rows)])
-        for header, body in entries:
-            out.append((UiClass.WARNING.css, f"  {header}\n"))
-            out.extend((UiClass.WARNING.css, f"  {line}\n") for line in body)
-        out += [(style, text + "\n") for style, text in gate.question()]
-        if out:
-            out[-1] = (out[-1][0], out[-1][1].rstrip("\n"))
-        return out
+        return [line
+                for header, body in (active_warnings(checked, warning_map)
+                                     + wants_warnings(checked, wants_map, labels))
+                for line in (header, *body)]
 
-    def confirm_fragments() -> list[tuple[str, str]]:
-        return confirm_row_fragments(FORM_CONFIRM_LABEL,
-                                     state["cursor"] == confirm_index)
-
-    def title_fragments() -> list[tuple[str, str]]:
-        return [(UiClass.TITLE.css, title)]
-
-    def preamble_fragments() -> list[tuple[str, str]]:
-        return [(UiClass.STATUS.css, "\n".join(preamble_lines))]
-
-    def hint_fragments() -> list[tuple[str, str]]:
-        return [(UiClass.STATUS.css, FORM_HINT_TEXT)]
-
-    def cursor_pos() -> Point:
-        # Field rows render one line each; a blank line follows them.
-        line = state["cursor"] + (1 if field_rows and state["cursor"] >= fields_at else 0)
-        return Point(0, min(line, fields_at + (1 if field_rows else 0) + len(rows) - 1))
-
-    def move(delta: int) -> None:
-        i = stops.index(state["cursor"])
-        state["cursor"] = stops[(i + delta) % len(stops)]
-
-    refresh_auto(field_rows)    # the initial derivation, before any keystroke
-    # The shared confirm/really-done? machine (tag_form.confirm_gate), built
-    # AFTER that derivation so its baseline includes the auto-filled values.
-    # Only forms WITH fields ask: a fieldless form's Enter is unambiguous,
-    # and open-look-Enter should stay one keystroke there.
-    gate = confirm_gate(
-        snapshot=lambda: (tuple(f.value for f in field_rows),
-                          tuple(o.checked for o in rows)),
-        ready=lambda: not field_errors(field_rows),
-        asks_when_unchanged=bool(field_rows))
-
-    def field_edit(edit: Callable[[TextField], None]) -> Callable[[KeyPressEvent], None]:
-        """Handler for a key that EDITS the focused field (and re-derives the
-        auto fields) — a no-op anywhere else."""
-        def handler(event: KeyPressEvent) -> None:
-            if (fld := focused_field()) is not None:
-                edit(fld)
-                refresh_auto(field_rows)
-        return handler
-
-    def field_motion(motion: Callable[[TextField], None]) -> Callable[[KeyPressEvent], None]:
-        """Handler for a key that MOVES the focused field's cursor — no edit,
-        no auto refresh, a no-op anywhere else. Kept separate from field_edit
-        so a motion key can never change text (a form once ate characters
-        on ←)."""
-        def handler(event: KeyPressEvent) -> None:
-            if (fld := focused_field()) is not None:
-                motion(fld)
-        return handler
-
-    def space(event: KeyPressEvent) -> None:
-        if (fld := focused_field()) is not None:
-            fld.insert(" ")
-            refresh_auto(field_rows)
-        elif state["cursor"] == confirm_index:
-            gate.confirm(event)
-        else:
-            toggle(rows[state["cursor"] - fields_at])
-
-    def type_char(event: KeyPressEvent) -> None:
-        # Printable keys type into a focused field; elsewhere they fall
-        # through unused, exactly as before fields existed. Specials carry
-        # escape sequences (unprintable) and are filtered out.
-        if (fld := focused_field()) is not None and event.data \
-                and event.data.isprintable():
-            fld.insert(event.data)
-            refresh_auto(field_rows)
-
-    def cancel(event: KeyPressEvent) -> None:
-        event.app.exit()
-
-    kb = KeyBindings()
-
-    # Every binding runs behind the really-done? interception (the gate's
-    # own rule), so the answer key never doubles as its usual action.
-    bind = answer_first_bind(kb, gate)
-
-    bind("up", lambda event: move(-1))
-    bind("down", lambda event: move(1))
-    bind(" ", space)
-    bind("backspace", field_edit(TextField.backspace))
-    bind("delete", field_edit(TextField.delete))
-    bind("left", field_motion(TextField.left))
-    bind("right", field_motion(TextField.right))
-    bind("c-left", field_motion(TextField.word_left))
-    bind("c-right", field_motion(TextField.word_right))
-    bind("home", field_motion(TextField.home))
-    bind("end", field_motion(TextField.end))
-    bind("enter", gate.confirm)
-    bind("escape", cancel)
-    bind("c-c", cancel)
-    bind(Keys.Any, type_char)
-
-    header_windows = [Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT)]
-    if preamble_lines:
-        header_windows.append(Window(FormattedTextControl(_fragment_source(preamble_fragments)),
-                                     height=len(preamble_lines)))
-    body_layout = HSplit([
-        *header_windows,
-        Window(height=1, char=" "),
-        Window(FormattedTextControl(_fragment_source(option_fragments),
-                                    get_cursor_position=cursor_pos,
-                                    focusable=True,
-                                    show_cursor=False),
-               wrap_lines=False, dont_extend_height=True),
-        Window(height=1, char=" "),
-        Window(FormattedTextControl(_fragment_source(body_fragments)), wrap_lines=True),   # flexible filler — focused option's explanation
-        Window(FormattedTextControl(_fragment_source(warning_fragments)), wrap_lines=True, dont_extend_height=True),
-        Window(height=1, char=" "),
-        Window(FormattedTextControl(_fragment_source(confirm_fragments)), height=1),
-        Window(FormattedTextControl(_fragment_source(hint_fragments)), height=STATUS_HEIGHT),
-    ])
-
-    Application(
-        layout=Layout(body_layout),
-        key_bindings=kb,
-        style=Style.from_dict(STYLE_DICT),
-        full_screen=True,
-    ).run()
-
-    if not gate.confirmed():
+    values = run_form(title, preamble, fields, FormBody(
+        rows=row_fragments,
+        stops=[i for i, o in enumerate(rows) if not o.header],
+        actions={" ": toggle},
+        filler=body_fragments,
+        warnings=warning_lines,
+        confirm_label=FORM_CONFIRM_LABEL,
+        hint=FORM_HINT_TEXT,
+        snapshot=lambda: tuple(o.checked for o in rows),
+    ))
+    if values is None:
         return None
     keys = [o.key for o in rows if o.checked]
-    if fields is None:
-        return keys
-    return {f.key: f.value.strip() for f in field_rows}, keys
-
-
-# ============================================================
-# The tag form — registry → FormOptions → AgentBuild
-# ============================================================
-
+    return keys if fields is None else (values, keys)

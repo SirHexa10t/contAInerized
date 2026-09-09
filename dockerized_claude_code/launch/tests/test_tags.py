@@ -22,6 +22,50 @@ from launch.tags import (
     TagError, ToolkitEntry, addendums, image_chain, load_lego, merge_fragments, migrations,
     resolve_build, scan_all, store,
 )
+from launch.tags.identity import FORBIDDEN_IN_LABELS, label_error, suggested_label
+
+
+class TestSuggestedLabel(unittest.TestCase):
+    """`suggested_label` — the rule as a FIXER, for a form's auto-filled default
+    only: a dotted project dir must never pre-fill a name the field then
+    refuses. Typed names are never bent (`label_error` refuses them)."""
+
+    def test_illegal_characters_become_dashes(self):
+        self.assertEqual(suggested_label("my.app"), "my-app")
+        self.assertEqual(suggested_label("a b/c:d"), "a-b-c-d")
+        self.assertEqual(suggested_label("my–app"), "my-app")     # an en dash, not a hyphen
+
+    def test_letters_with_an_ascii_spelling_get_it_rather_than_a_dash(self):
+        # Accents decompose (NFKD) and the mark is dropped; the letters that
+        # do not decompose have their spelling in _TRANSLITERATIONS.
+        for text, expected in (("café", "cafe"), ("Zürich.app", "Zurich-app"),
+                               ("naïve résumé", "naive-resume"), ("Straße", "Strasse"),
+                               ("Ærø", "AEro"), ("Łódź", "Lodz"), ("ﬁle²", "file2")):
+            with self.subTest(text=text):
+                self.assertEqual(suggested_label(text), expected)
+
+    def test_scripts_without_an_ascii_spelling_still_dash(self):
+        # No guessing: a CJK or Cyrillic name is not transliterated, it is
+        # dropped like any other illegal character.
+        self.assertEqual(suggested_label("日本-app"), "app")
+        self.assertEqual(suggested_label("Москва"), "")
+
+    def test_runs_collapse_and_ends_trim(self):
+        self.assertEqual(suggested_label("..hidden.."), "hidden")
+        self.assertEqual(suggested_label("a...b"), "a-b")
+
+    def test_a_legal_name_is_untouched(self):
+        self.assertEqual(suggested_label("my-app_2"), "my-app_2")
+
+    def test_nothing_legal_leaves_the_caller_its_fallback(self):
+        self.assertEqual(suggested_label("..."), "")
+
+    def test_the_result_always_passes_the_rule_it_was_bent_by(self):
+        for text in ("my.app", "a b/c", "weird~^?*[\\name", "café!", "Straße", "\x1bx"):
+            with self.subTest(text=text):
+                bent = suggested_label(text)
+                if bent:
+                    self.assertIsNone(label_error(bent))
 
 
 class TagTreeTestCase(unittest.TestCase):
@@ -1074,6 +1118,58 @@ class TestPolicyFragments(TagTreeTestCase):
         self.assertTrue(ro.workspace_readonly)
         self.assertEqual(ro.load_fragment(), {"permissions": {"deny": ["Write", "Edit", "NotebookEdit"]}})
         self.assertNotIn("read-only", reg.policies)   # the fragment is not an offered policy
+
+
+class TestLabelError(unittest.TestCase):
+    """`label_error` — the ONE legality rule every name a person types is held
+    to (an instance's session, a cluster's session, a member's role). A name
+    lands as a directory, a docker `--name`, a tmux address, a herdr label, a
+    git branch component and a cowork token; each rejected character names the
+    place it would misbehave, in the shape a form validator returns."""
+
+    def test_a_legal_name_is_none(self):
+        for name in ("golem", "bug-investigator", "my_project", "a__b", "v2", "X"):
+            with self.subTest(name=name):
+                self.assertIsNone(label_error(name))
+
+    def test_dockers_charset_is_the_catch_all(self):
+        # Anything the table and the printable check let through still has
+        # to survive `docker run --name claude-code_<label>`: an accent, a
+        # `!`, a quote would otherwise fail there, at the end of a build.
+        for name in ("café", "a!b", "a#b", "a'b", "a=b", "a,b"):
+            with self.subTest(name=name):
+                self.assertIn("docker", label_error(name))
+        # ...while the table's own characters keep their more specific reason.
+        self.assertNotIn("docker", label_error("a.b"))
+
+    def test_empty_is_the_first_complaint(self):
+        self.assertEqual(label_error(""), "cannot be empty")
+
+    def test_every_forbidden_character_is_refused_with_its_reason(self):
+        # Iterates the real table, so a character added there is tested by
+        # construction — no list to keep in step.
+        for char, reason in FORBIDDEN_IN_LABELS.items():
+            with self.subTest(char=repr(char)):
+                error = label_error(f"a{char}b")
+                self.assertIsNotNone(error)
+                self.assertIn(reason, error)
+
+    def test_whitespace_is_named_as_such(self):
+        # `' '` in a message reads as a typo; the word does not.
+        self.assertIn("whitespace", label_error("a b"))
+        self.assertNotIn("whitespace", label_error("a:b"))
+
+    def test_control_and_invisible_characters_are_refused_as_a_class(self):
+        for bad in ("a\x1bb", "a\x00b", "a\u200bb", "a\rb"):
+            with self.subTest(label=bad):
+                self.assertIn("control or invisible", label_error(bad))
+
+    def test_the_first_problem_is_reported_not_all(self):
+        # A str-or-None contract: ONE message a field can show, never a list.
+        error = label_error("a:b/c")
+        self.assertIsInstance(error, str)
+        self.assertIn("':'", error)
+        self.assertNotIn("'/'", error)
 
 
 if __name__ == "__main__":

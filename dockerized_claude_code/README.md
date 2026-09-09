@@ -366,11 +366,24 @@ red under the banner.
 | ↑ / ↓ | Move between rows |
 | (any printable character) | Filter rows by substring |
 | Backspace | Edit the filter |
-| Enter | Select |
-| Del | Delete the highlighted instance (with confirmation) |
-| F2 | Redefine an instance — walks through workspace, session name, and the tag form |
+| Enter | Select — launch the highlighted instance or cluster, or create from an agent / cluster template. Inert on a cluster member: members launch with their cluster |
+| Del | Delete the highlighted row (with confirmation): an instance and its state dir, a cluster and its members, or one member out of its cluster |
+| F2 | Redefine the highlighted row in one form: an instance's project path, name and tags; a cluster's tags, then its name, project and membership; a member's own tags (the cluster's show locked) |
 | F8 | Toggle the composition legend — overlays one table per kind (engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
+
+Rows for existing things — instances, clusters, cluster members — share one
+anatomy: tags, name, then the workspace path in a column, tagged
+`(CURRENT DIR)` when it is where you launched from, `(DEFAULT DIR)` when it
+is the default workspace and you launched from a neutral dir like `$HOME`,
+or `(INVALID DIR)` when the stored path no longer exists. The right-hand
+pane previews the highlighted row: for an instance, a cluster or a member
+it lists the same facts — workspace, engine, state dir, when it was last
+used (a cluster goes by its latest member) and, for instances and members,
+the last prompt typed into it — then every active tag expanded to its full
+name and description. A member's pane marks the tags it inherits from its
+cluster `(cluster-wide)`; a cluster's pane lists its members with their
+own tags and last use.
 
 ### Audit
 
@@ -385,8 +398,11 @@ orphans (state dirs without an agent .md), stray instance dirs still at the
 `~/.claude-agents/` root (they now live under `instances/`), ghost
 `instances.toml` entries (entry without a state dir), bad workspaces (entry points nowhere),
 entries referencing unknown tags or the wrong axis, missing/empty OAuth
-files, and instances with no `history.jsonl` (the file the picker uses for
-the "Last used" hint). Prints `All clear. N instance(s)…` when nothing is
+files, names the launcher's label rule refuses (an instance's session or a
+cluster's directory name — such a cluster is skipped by discovery and never
+shows in the picker), clusters whose `cluster.toml` fails to load, and
+instances with no `history.jsonl` (the file the picker uses for the "Last
+used" hint). Prints `All clear. N instance(s)…` when nothing is
 wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
 
 ## Adding an Agent
@@ -623,7 +639,7 @@ launch/
   firewall/                          # {firewall} subsystem (package): __init__ facade + resolver.py (two-phase DNS resolution — sync Phase 1 → streaming Phase 2 via docker exec iptables -I, CDN widening, cross-launch resolved-IP cache; getent on Linux, socket.getaddrinfo fallback where absent e.g. macOS) + whitelist.py (entry expansion) + status.py (agent-visible domains_pending_resolve.yml). Host caches live in ~/.claude-agents/firewall_cache/; curated domain list in template_code/firewall_domains.py.
   agents_crud.py                     # instance-state CRUD — instances.toml writers (persist/delete/modify), install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker-entry factories, engine sort keys.
   user_additions.py                  # optional_creds mounts + plant_user_extras (readme always; firewall_whitelist.txt under {firewall}).
-  gui/                               # TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports). Six modules, one role each, imported strictly one way — styles.py (the style system + tag colours every surface draws with) -> form_core.py (FormOption/TextField, the shared confirm gate, the generic checkbox_form) -> forms.py (the instance + cluster-wide tag forms, the merged "(Edit Preferences)" form) & cluster_form.py (the membership form's accumulator semantics) -> picker_previews.py (every row kind's preview text + the child-process transcript read) & picker_prompts.py (line prompts, inline dialogs, field validators) -> picker_flows.py (what each picker key MEANS: cluster create/edit, member re-tag, removals) -> menu_picker.py (the picker widget: row models, F8 legend, the off-thread preview loader, the selection loop, --stop's selector).
+  gui/                               # TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports). Nine modules, one role each, imported strictly one way — styles.py (the style system + tag colours every surface draws with) -> form_core.py (FormOption/TextField, the confirm gate, and run_form: the ONE scaffold both full-screen forms run on; checkbox_form is the multi-select row model on it) -> forms.py (the instance + cluster-wide tag forms, the merged "(Edit Preferences)" form) & cluster_form.py (the membership form: its agent rows + add/remove keys on the scaffold) -> picker_previews.py (session_preview — the one pane instances, cluster members and clusters render through — + the child-process transcript read) & picker_prompts.py (line prompts, inline dialogs, field validators) -> picker_flows.py (what each picker key MEANS: cluster create/edit, member re-tag, removals) & picker_widget.py (the reusable picker: row models incl. WorkspaceView / ContEntry / MemberEntry, the off-thread preview loader, the selection loop) -> menu_picker.py (the launcher's menus: select_agent, the deletion submenu, --stop's selector, the F8 legend; the shared Cont-row anatomy every existing thing wears).
   cowork/                            # {cowork}/{manager} multi-agent group hosting — leaf consumer of the core: group (durable state) + mailbox (messages + capture attribution) + sync (file plane) + journal + roster + control (agent-facing verbs) + lifecycle (hub singleton) + relay (the loop) + cli. Owns no docker calls; injection lives in docker_config. cowork.py at the repo root is its thin entry.
   cluster/                           # {mux}/{clstr} COHABITING agents (PoC) — leaf consumer too: member (identity + name legality) + legoset (cluster templates) + state (cluster.toml) + worktree (writer safety) + tmux/herdr (multiplexer assembly — herdr by default; the switch is ~/.claude-agents/ui_profile.toml's herdr_instead_of_tmux, edited from the picker) + launch_plan + cli. cluster.py at the root is its entry, cluster_plan.md the design record.
   quickie/                           # the `q` one-shot-question tool — leaf consumer of the core: cli.py (argparse dispatch) → ask.py (fixed-build Instance under quickie/<gibberish>, stream-json run) + render.py (thinking ticker + streamed answer) + history.py (--history listing / --answer replay). quick_question.py at the repo root is its thin entry.

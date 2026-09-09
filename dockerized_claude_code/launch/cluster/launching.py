@@ -47,7 +47,7 @@ from ..cluster_work_protocol import (
 from ..cluster_work_protocol.queue import CURSORS_DIRNAME
 from ..container_env import ContainerEnvKey
 from ..docker_config import effort_args, ensure_image, run_cluster_container
-from ..file_access import agent_md_index, ensure_dir, write_text
+from ..file_access import ensure_dir, write_text
 from ..paths import (
     ACCOUNT_FILE, CACHE_MOUNTS, CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
     CLUSTER_WORK_PROTOCOL_DIR, CREDENTIALS_FILE, CLAUDE_CONFIG_IN_CONTAINER,
@@ -88,36 +88,26 @@ def container_member_dir(session: str, member_id: str) -> Path:
 
 def member_instances(cluster: Cluster,
                      registry: Registry) -> list[tuple[Member, Instance]]:
-    """Each member as an ordinary `Instance` — the whole point of "a member is
-    an instance in all but placement": persona installs, settings merging,
-    engine conf, and claude_args all come from the one existing pipeline. The
-    state dir is the member's own dir inside the cluster.
-
-    A member whose agent or tags no longer resolve is a loud stop naming the
-    member: launching a cluster with a silently-degraded member would be the
-    cowork lesson (half-configured peers) relearned."""
-    index = agent_md_index()
+    """Each member as an ordinary `Instance` (`Cluster.member_instance` — the
+    whole point of "a member is an instance in all but placement": persona
+    installs, settings merging, engine conf, and claude_args all come from
+    the one existing pipeline), turning either of its failure encodings into
+    a LOUD STOP naming the member: launching a cluster with a silently-
+    degraded member would be the cowork lesson (half-configured peers)
+    relearned. The picker takes the same two encodings the other way — a
+    red row, not a crash — which is why the method itself never raises."""
     pairs: list[tuple[Member, Instance]] = []
     for member in cluster.members:
-        md_path = index.get(member.agent)
-        if md_path is None:
+        inst = cluster.member_instance(member, registry)
+        if inst is None:
             raise ClusterError(
                 f"member {member.id!r}: no agent {member.agent!r} in agents/")
-        try:
-            # The CLUSTER's tags plus the member's own — `member.build` alone
-            # would launch a member without {clstr}, {cc}, or anything else
-            # the cluster set for everyone (stored once, cluster-level).
-            resolved = resolve_build(cluster.member_build(member),
-                                     member.agent, registry)
-        except KeyError as error:
+        if not inst.is_startable:
+            names = ", ".join(problem.label for problem in inst.invalid_tags)
             raise ClusterError(
-                f"member {member.id!r} references unknown tag {error} — edit "
-                f"its tags from the picker (F2)") from error
-        pairs.append((member, Instance(
-            agent=member.agent, md_path=md_path, session=cluster.session,
-            workspace=str(cluster.project), is_brand_new=False,
-            state_dir_override=cluster_member_dir(cluster.session, member.id),
-            **resolved)))
+                f"member {member.id!r} references unknown tag(s) {names} — "
+                f"edit its tags from the picker (F2)")
+        pairs.append((member, inst))
     return pairs
 
 

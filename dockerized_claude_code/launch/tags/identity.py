@@ -16,15 +16,18 @@ whole profession group being ahead.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
+from ..container_probe import CONTAINER_NAME_CHARS
 from ..file_access import agent_md_index
 from ..transcripts import (
     continuable_jsonl_bytes, has_continuable_jsonl, last_history_mtime,
 )
-from ..paths import instance_state_dir_path, state_md_path
+from ..paths import INBOX_SEPARATOR, instance_state_dir_path, state_md_path
 from .base import DockerContribution, Tag
 from .engine import Engine
 from .lego import AgentBuild
@@ -43,6 +46,104 @@ SESSION_SEP = "__"
 COWORK_SPECIALTY = "cowork"
 MANAGER_SPECIALTY = "manager"
 MUXER_SPECIALTY = "muxer"
+
+# ============================================================
+# Label legality — the one rule every name a person types is held to
+# ============================================================
+# An instance's session, a cluster's session, a member's role: each is typed
+# once and then becomes a directory name, part of a docker `--name`, a tmux
+# session/window address, a herdr workspace label, a git branch component
+# (cluster worktrees) and a cowork inbox / prompt-marker token. Every rejected
+# character is paired with the place it would mean something else in — that
+# reason IS the message the user reads. Until 2026-09-09 three validators
+# carried three different subsets of this (cluster labels; cowork's two
+# separators; nothing at all for instance names, so a dotted project dir
+# auto-named an instance that reached tmux as an address — cluster/solo.py);
+# now one rule, and each caller adds only its own separator. git's remaining
+# ref rules (no `..`, `@{`, `.lock`, no component starting with `.`) are
+# unreachable once `.` and `@` are out. After the table, docker's container
+# name charset (`container_probe.CONTAINER_NAME_CHARS`) is the catch-all for
+# everything else — `é`, `!`, `#`, quotes — so `docker run --name` never gets
+# to refuse a name at the end of a build.
+_TMUX_TARGET = "tmux addresses windows as session:window.pane"
+_GIT_REF = "git refuses it in a ref name, and the label is a component of a worktree branch"
+_WHITESPACE = "a tmux window name and a shell word both end at whitespace"
+FORBIDDEN_IN_LABELS: dict[str, str] = {
+    ":": _TMUX_TARGET,
+    ".": _TMUX_TARGET,
+    "/": "the label becomes a path component",
+    INBOX_SEPARATOR: "{cowork} names inbox dirs `<group>@<sender>`, and the two name spaces should stay legible side by side",
+    " ": _WHITESPACE,
+    "\t": _WHITESPACE,
+    "\n": _WHITESPACE,
+    "~": _GIT_REF,
+    "^": _GIT_REF,
+    "?": _GIT_REF,
+    "*": _GIT_REF,
+    "[": _GIT_REF,
+    "\\": _GIT_REF,
+}
+
+
+def label_error(label: str) -> str | None:
+    """Why `label` cannot be an identifier, or None when it can — in the shape
+    a form validator returns (`gui.form_core.TextField.validate`), so a form
+    shows it live beside the field and a model wraps it in its own exception
+    (`cluster.member.valid_label` → ClusterError, `cowork.group._legal_label`
+    → ValueError). Reports the FIRST problem and never sanitises: a rewritten
+    name would leave the thing keyed under a name it does not answer to.
+    Non-printable characters are refused as a class after the table — an
+    escape sequence or a zero-width space in a tmux status token, a tab title
+    or a picker row is not a name, whatever its code point — and docker's
+    container-name charset is the final catch-all, since every name here ends
+    up in a `docker run --name`."""
+    if not label:
+        return "cannot be empty"
+    for char, reason in FORBIDDEN_IN_LABELS.items():
+        if char in label:
+            shown = repr(char) if char.strip() else "whitespace"
+            return f"may not contain {shown} — {reason}"
+    if not label.isprintable():
+        return ("may not contain control or invisible characters — it is shown as "
+                "a tmux status token, a tab title and a picker row")
+    if not CONTAINER_NAME_CHARS.fullmatch(label):
+        return ("may only use letters, digits, '_' and '-' — a docker container "
+                "name (`docker run --name`) accepts nothing else")
+    return None
+
+
+# Letters with an obvious ASCII spelling that Unicode decomposition (NFKD)
+# leaves whole, because they are letters of their own rather than a base
+# letter plus an accent. NFKD already handles every accented Latin letter
+# (`é` → `e` + a combining mark, which `suggested_label` then drops) and the
+# compatibility forms (ligatures, fullwidth digits, superscripts); this table
+# is only what it cannot. Scripts with no ASCII spelling (CJK, Cyrillic) are
+# deliberately absent — a wrong guess is worse than a `-`.
+_TRANSLITERATIONS = str.maketrans({
+    "ß": "ss", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ø": "o", "Ø": "O",
+    "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ð": "d", "Ð": "D", "þ": "th",
+    "Þ": "Th", "ı": "i",
+})
+
+
+def suggested_label(text: str) -> str:
+    """`text` bent into a legal label for a form's DEFAULT. Letters with an
+    ASCII spelling get it first (`café` → `cafe`, `Straße` → `Strasse` — NFKD
+    decomposition with the marks dropped, plus `_TRANSLITERATIONS`); then
+    every character `label_error` still refuses becomes `-`, runs of `-`
+    collapse to one and the ends are trimmed (`my.app` → `my-app`, `.hidden`
+    → `hidden`); "" comes back when nothing legal remains, so the caller
+    falls back to its own default. For suggestions ONLY — a name the user
+    typed is never rewritten (`label_error` refuses, it does not fix: a
+    rewritten id would leave the thing keyed under a name it does not answer
+    to); a suggestion nobody has typed yet has no owner to betray. Each
+    character is judged through the same rule, so there is no second table
+    of legality to keep in step — only the spelling table above."""
+    decomposed = unicodedata.normalize("NFKD", text.translate(_TRANSLITERATIONS))
+    unaccented = "".join(ch for ch in decomposed
+                         if not unicodedata.category(ch).startswith("M"))
+    bent = "".join(ch if label_error(ch) is None else "-" for ch in unaccented)
+    return re.sub(r"-{2,}", "-", bent).strip("-")
 
 
 _TagT = TypeVar("_TagT", bound=Tag)

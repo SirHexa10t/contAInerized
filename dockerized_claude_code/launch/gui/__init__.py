@@ -6,24 +6,28 @@ role each (`tag_form` held the first three at once until 2026-09-03):
                     `squashed_tag_style`, `RICH_BY_STYLE`), and the display
                     coercers. The picker uses these as much as the forms do.
   - `form_core`   — the generic form: `FormOption`, `TextField`, the shared
-                    confirm/really-done? gate, and the `checkbox_form`
-                    primitive. No form may restate any of it.
+                    confirm/really-done? gate, and `run_form` — the ONE
+                    scaffold every full-screen form runs on; `checkbox_form`
+                    is the multi-select row model on it. No form may
+                    restate any of it.
   - `forms`       — what the launcher ASKS: the instance tag form, its
                     cluster-wide sibling, the merged preferences form.
-  - `cluster_form`— the membership form, whose accumulator semantics (picking
-                    an agent adds ANOTHER) need their own key map; it runs on
-                    form_core's scaffold and takes its pick algebra from
-                    `cluster.legoset`.
-  - `picker_previews`— every row kind's preview text, and the child-process
-                    read that keeps a huge transcript off the UI thread.
+  - `cluster_form`— the membership form: its agent rows and add/remove ROW
+                    actions (picking an agent adds ANOTHER) declared on
+                    `run_form`; its pick algebra comes from `cluster.legoset`.
+  - `picker_previews`— `session_preview`, the one pane instances, cluster
+                    members and clusters render through, plus the
+                    child-process read that keeps a huge transcript off
+                    the UI thread.
   - `picker_prompts`— the non-fullscreen bits BOTH the picker and its flows
                     need: line prompts, inline dialogs, field builders.
   - `picker_flows`— what each picker key MEANS once a row is chosen: the
                     create / edit / destroy flows.
-  - `picker_widget`— the reusable picker: the row models (`PickerEntry` and
-                    its deferred-preview slots), the preview LOADER, cursor
-                    movement over skippable rows, and the selection loop.
-                    Knows nothing about agents.
+  - `picker_widget`— the reusable picker: the row models (`PickerEntry` with
+                    its marker and deferred-preview slots, `ContEntry` /
+                    `MemberEntry`, `WorkspaceView`), the preview LOADER,
+                    cursor movement over skippable rows, and the selection
+                    loop. Knows nothing about agents.
   - `menu_picker` — the launcher's three MENUS built on that widget: the main
                     agent picker, the deletion submenu, `--stop`'s selector,
                     plus the F8 composition legend.

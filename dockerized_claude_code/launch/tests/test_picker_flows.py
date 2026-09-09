@@ -14,21 +14,8 @@ from unittest.mock import patch
 
 from launch.gui import menu_picker, picker_flows, picker_prompts
 from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, Instance, resolve_build, scan_all
-
-REGISTRY = scan_all(AGENTS_DIR)
-
-
-def make_inst(agent="poet", session="s", workspace="/tmp", *,
-              professions=(), specialties=(), policies=()):
-    """A real Instance resolved against the real registry (engine falls back
-    agent-name → default, exactly like a launch)."""
-    build = AgentBuild(engine=None, professions=tuple(professions),
-                       specialties=tuple(specialties), policies=tuple(policies))
-    return Instance(agent=agent, md_path=Path(f"/fake/{agent}.md"), session=session,
-                    workspace=workspace, is_brand_new=False,
-                    **resolve_build(build, agent, REGISTRY))
-
+from launch.tags import AgentBuild
+from launch.tests.fixtures import REGISTRY
 
 
 class TestCreateClusterFlow(unittest.TestCase):

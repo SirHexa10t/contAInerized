@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Benchmark: where a Cont-row preview's build time actually goes.
 
-The preview has three segments, composed by `ContEntry.preview`:
-  metadata     — the YAML block rendered through rich markdown (_render_md)
+The preview has three segments, composed by `ContEntry.preview` (through
+`picker_previews.session_preview`):
+  metadata     — the YAML block rendered through rich markdown (_ansi)
   last prompt  — the newest human prompt, read from EVERY session JSONL in the
                  state dir (_last_prompt_display → last_prompt_in_state)
-  tags         — the expanded tag list rendered through rich Text (_tags_preview)
+  tags         — the expanded tag list rendered through rich Text (_tag_lines)
 
 The question this settles: is the transcript read the dominant cost, and by how
 much? If it is, the picker can render the two cheap segments synchronously with
@@ -30,11 +31,11 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from rich.markdown import Markdown
+
 from ..agents_crud import list_all_instances
-from ..gui.menu_picker import ContEntry
-from ..gui.picker_previews import (
-    _last_prompt_display, _render_md, _tags_preview,
-)
+from ..gui.picker_previews import _ansi, _last_prompt_display, _tag_lines
+from ..gui.picker_widget import ContEntry, WorkspaceView
 from ..paths import AGENTS_DIR, instance_state_dir_path
 from ..tags import AgentBuild, Instance, resolve_build, scan_all
 
@@ -68,20 +69,19 @@ def main() -> None:
 
 
 def _entry(inst: Instance) -> ContEntry:
-    return ContEntry(identity=inst, workspace_display="/srv/api",
-                     is_current_dir=False, is_default_dir=False,
-                     is_invalid_dir=False, last_used_display="2 hours ago")
+    return ContEntry(identity=inst, workspace=WorkspaceView("/srv/api", None),
+                     last_used_display="2 hours ago")
 
 
 def _report(name: str, state_dir: Path, identity: Instance) -> None:
     inst = dataclasses.replace(identity, state_dir_override=state_dir)
     _last_prompt_display(state_dir)       # warmup: page cache + rich imports
 
-    metadata = _timed(lambda: _render_md(
+    metadata = _timed(lambda: _ansi(Markdown(
         "*Continue session `bench__bench`.*\n\n---\n\n```yaml\n"
         "Agent:     bench\nSession:   bench\nWorkspace: /srv/api\n"
-        "Engine:    default\nState:     /x\nLast used: 2 hours ago\n```\n"))
-    tags = _timed(lambda: _tags_preview(inst))
+        "Engine:    default\nState:     /x\nLast used: 2 hours ago\n```\n")))
+    tags = _timed(lambda: _ansi(_tag_lines(inst.active_tags, inst.invalid_tags)))
     prompt = _timed(lambda: _last_prompt_display(state_dir))
     # A fresh ContEntry per rep — cached_property would serve rep 1's answer.
     # Reported as a sanity check on the segment sum; the share is computed from

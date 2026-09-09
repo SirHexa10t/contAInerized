@@ -107,6 +107,16 @@ class TestSeparatorGuard(CoworkTmpRoot):
             grp.create_session("planner__x", "bad@label", "t")
         self.assertIn("bad@label", str(caught.exception))
 
+    def test_the_rule_is_the_launchers_shared_one_not_only_the_separators(self):
+        # Since 2026-09-09 cowork holds a label to the same rule the instance
+        # form and clusters use (`tags.identity.label_error`): a dotted project
+        # label — legal here before — is refused, with that rule's reason, and
+        # the guard still runs before any write.
+        with self.assertRaises(ValueError) as caught:
+            grp.create_session("planner__x", "proj.v2", "t")
+        self.assertIn("tmux", str(caught.exception))
+        self.assertEqual(grp.discover_sessions(), [])
+
     def test_ordinary_names_pass(self):
         s = grp.create_session("planner__x", "edge_case_tests", "t")
         self.assertEqual(s.with_coworker("golem__a").coworkers, ("golem__a",))

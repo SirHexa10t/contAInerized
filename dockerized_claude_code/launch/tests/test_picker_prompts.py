@@ -4,28 +4,12 @@ agent one-liner every membership form shows. Split out of test_menu_picker
 2026-09-03 with the code."""
 
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from launch.gui import picker_prompts
 from launch.gui.menu_picker import (
     _agent_description,
 )
-from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, Instance, resolve_build, scan_all
-
-REGISTRY = scan_all(AGENTS_DIR)
-
-
-def make_inst(agent="poet", session="s", workspace="/tmp", *,
-              professions=(), specialties=(), policies=()):
-    """A real Instance resolved against the real registry (engine falls back
-    agent-name → default, exactly like a launch)."""
-    build = AgentBuild(engine=None, professions=tuple(professions),
-                       specialties=tuple(specialties), policies=tuple(policies))
-    return Instance(agent=agent, md_path=Path(f"/fake/{agent}.md"), session=session,
-                    workspace=workspace, is_brand_new=False,
-                    **resolve_build(build, agent, REGISTRY))
 
 
 
@@ -46,6 +30,20 @@ class TestInstanceFields(unittest.TestCase):
         self.assertIsNotNone(session.auto)
         self.assertEqual(session.auto({"workspace": "/some/workspace/myproj"}),
                          "myproj")
+
+    def test_the_auto_filled_name_is_bent_legal(self):
+        # A dotted project dir used to pre-fill `my.app` — a name the field
+        # itself refuses (tmux addresses `session:window.pane`). The DEFAULT is
+        # bent (`my-app`); a name the user types never is.
+        _, session = picker_prompts.instance_fields("golem")
+        self.assertEqual(session.auto({"workspace": "/some/workspace/my.app"}), "my-app")
+        self.assertIsNone(session.validate("my-app"))
+        self.assertIsNotNone(session.validate("my.app"))
+        fields = picker_prompts._cluster_fields("", "devteam", derive="devteam")
+        self.assertEqual(fields[1].auto({"project": "/code/my.app"}), "devteam__my-app")
+        # Nothing legal left in the basename → the plain fallback, as for an empty path.
+        self.assertEqual(session.auto({"workspace": "/x/..."}), "golem")
+        self.assertEqual(fields[1].auto({"project": "/x/..."}), "devteam")
 
     def test_an_empty_path_falls_back_to_the_agent_name(self):
         # GUARDED before expanding: expand_user_path("") resolves to the CWD,
@@ -82,6 +80,21 @@ class TestInstanceFields(unittest.TestCase):
     def test_a_fresh_rename_is_fine(self):
         self.assertIsNone(self.error("newname", existing=["mysess"],
                                      current="mysess"))
+
+    def test_illegal_characters_are_errors_with_the_shared_rules_reason(self):
+        # The gap cluster/solo.py documented — a dotted project dir naming an
+        # instance that reaches tmux as an address — closes at the field: the
+        # instance name is held to the same rule clusters and cowork use.
+        self.assertIn("tmux", self.error("my.app"))
+        self.assertIn("ref name", self.error("a~b"))
+        self.assertIn("path component", self.error("a/b"))
+        self.assertIsNone(self.error("my-app_2"))
+
+    def test_the_cluster_name_field_applies_the_same_rule(self):
+        with patch.object(picker_prompts.cluster_state, "exists", return_value=False):
+            self.assertIn("ref name", picker_prompts._session_field_error("a~b"))
+            self.assertEqual(picker_prompts._session_field_error(""), "cannot be empty")
+            self.assertIsNone(picker_prompts._session_field_error("team"))
 
     def test_empty_is_an_error(self):
         self.assertIsNotNone(self.error(""))

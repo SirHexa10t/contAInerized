@@ -15,17 +15,15 @@ import unittest
 from pathlib import Path
 
 from launch.gui import picker_widget
-from launch.tests.test_menu_picker import make_inst
 from launch.gui.picker_widget import (
-    PickerEntry, _cont_tags_column, _cursor_step, _focusable_indices,
-    _tags_column,
+    STYLE_WORKSPACE_HINT, PickerCwdHint, PickerEntry, PickerRowMarker,
+    WorkspaceView, _accent_style, _cont_tags_column, _cursor_step,
+    _focusable_indices, _tags_column,
 )
-from launch.gui.styles import STYLE_TAG_INVALID, STYLE_TAG_SAFE, STYLE_TAG_WARN
-from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, Instance, resolve_build, scan_all
+from launch.gui.styles import STYLE_TAG_INVALID, STYLE_TAG_SAFE, STYLE_TAG_WARN, UiClass
+from launch.tags import AgentBuild, Instance, resolve_build
 from launch.tags.base import SQUASH_AT
-
-REGISTRY = scan_all(AGENTS_DIR)
+from launch.tests.fixtures import REGISTRY, make_inst
 
 
 def _six_tags() -> list:
@@ -329,6 +327,17 @@ class TestRowMarkers(unittest.TestCase):
         # Dim furniture, no tab: a second tab would read as a second agent.
         self.assertNotIn("bg:", style)
 
+    def test_a_cluster_row_is_top_level_and_its_members_nest_beneath_it(self):
+        # A cluster is not an instance OF its template (nothing is shared
+        # after creation), so its row carries no indent — unlike an instance
+        # row under its agent — while its members take the instance depth.
+        ((_, cluster_text),) = picker_widget.PickerRowMarker.CLSTR.lead
+        ((_, member_text),) = picker_widget.PickerRowMarker.MEMBER.lead
+        ((_, instance_text),) = picker_widget.PickerRowMarker.CONT.lead
+        self.assertFalse(cluster_text.startswith(" "))
+        self.assertEqual(len(member_text) - len(member_text.lstrip(" ")),
+                         len(instance_text) - len(instance_text.lstrip(" ")))
+
     def test_the_leads_are_universal_unicode_not_private_use(self):
         # The whole point of ▶/▸ over Nerd-Font wedges: stock fonts cover them.
         # PUA ranges: BMP E000–F8FF, planes 15/16 F0000–10FFFD. Emoji (1F3xx)
@@ -358,6 +367,104 @@ class TestRowMarkers(unittest.TestCase):
         tab_bg = picker_widget.STYLE_TAB.split("bg:", 1)[1].split()[0]
         self.assertEqual(picker_widget.PickerRowMarker.NEW.accent, f"fg:{tab_bg}")
         self.assertEqual(picker_widget.PickerRowMarker.CONT.accent, "fg:ansiyellow")
+
+
+class TestEnterGate(unittest.TestCase):
+    """Enter's per-row gate, `pickable`: a focusable row Enter must leave
+    ALONE — no exit, no result, no redraw — while Del / F2 keep working (a
+    cluster member launches with its cluster; the pause that used to explain
+    so told the operator nothing new). Driven through the picker's REAL
+    binding against a captured Application, like the form tests."""
+
+    def _press_enter(self, entries):
+        from unittest.mock import MagicMock, patch
+        from prompt_toolkit.keys import Keys
+        captured = {}
+
+        class FakeApp:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            def invalidate(self) -> None: ...
+
+            def run(self) -> None: ...
+
+        with patch.object(picker_widget, "Application", FakeApp):
+            picker_widget.pick_with_preview("t", entries)
+        binding = next(b for b in captured["key_bindings"].bindings
+                       if tuple(b.keys) == (Keys.Enter,))
+        event = MagicMock()
+        binding.handler(event)
+        return event
+
+    def test_enter_on_an_unpickable_row_does_nothing(self):
+        event = self._press_enter([PickerEntry(display=[("", "member")], value="m",
+                                               pickable=False)])
+        event.app.exit.assert_not_called()
+
+    def test_enter_on_a_pickable_row_selects_it(self):
+        event = self._press_enter([PickerEntry(display=[("", "row")], value="r")])
+        event.app.exit.assert_called_once()
+
+    def test_an_unpickable_row_stays_focusable_for_the_other_keys(self):
+        rows = [PickerEntry(value=0, pickable=False), PickerEntry(value=1)]
+        self.assertEqual(_focusable_indices(rows, [0, 1]), [0, 1])
+
+
+class TestAccentStyle(unittest.TestCase):
+    """The preview's accent bar reads the highlighted row's KIND off its
+    marker — the widget no longer needs to know what an Instance or Agent is
+    to colour it, and the cyan the cluster markers always declared finally
+    shows (it was dead: the old isinstance dispatch never returned it)."""
+
+    def test_the_marker_decides_the_colour_not_the_value(self):
+        cont = PickerEntry(value=make_inst(), marker=PickerRowMarker.CONT)
+        self.assertEqual(_accent_style(cont), PickerRowMarker.CONT.accent)
+        cluster = PickerEntry(value="an opaque cluster row", marker=PickerRowMarker.CLSTR)
+        self.assertEqual(_accent_style(cluster), "fg:ansicyan")
+
+    def test_no_row_no_marker_or_no_accent_falls_back_to_the_divider(self):
+        self.assertEqual(_accent_style(None), UiClass.DIVIDER.css)
+        self.assertEqual(_accent_style(PickerEntry(value=1)), UiClass.DIVIDER.css)
+        self.assertEqual(_accent_style(PickerEntry(marker=PickerRowMarker.TOOLS)),
+                         UiClass.DIVIDER.css)
+
+
+class TestWorkspaceView(unittest.TestCase):
+    """A row's workspace as one fact: the path, and at most one cwd hint in
+    front of it."""
+
+    def test_the_hint_precedes_the_path(self):
+        view = WorkspaceView("/w", PickerCwdHint.DEFAULT)
+        self.assertEqual(view.fragments,
+                         [PickerCwdHint.DEFAULT.fragment, (STYLE_WORKSPACE_HINT, "/w")])
+
+    def test_no_hint_is_just_the_path(self):
+        self.assertEqual(WorkspaceView("/w", None).fragments,
+                         [(STYLE_WORKSPACE_HINT, "/w")])
+
+
+class TestTagsColumnProblems(unittest.TestCase):
+    """`_tags_column` takes the unresolvable names directly, so a cluster's
+    or a member's OWN stale tag renders with the same alert chip an
+    instance's does — `_cont_tags_column` is now just the Instance-fed form."""
+
+    def _problem(self, name="typo"):
+        from launch.tags.registry import TagProblem
+        return TagProblem(name=name, axis="specialties", kind="specialty",
+                          parentheses=("{", "}"), reason="unknown",
+                          actual_kind=None, options=())
+
+    def test_problems_follow_the_tags_in_the_alert_style(self):
+        fragments, width = _tags_column([REGISTRY.professions["code"]],
+                                        problems=[self._problem()])
+        self.assertEqual("".join(t for _, t in fragments), "[code] {typo} ")
+        self.assertIn((STYLE_TAG_INVALID, "{typo}"), fragments)
+        self.assertEqual(width, len("[code] {typo} "))
+
+    def test_problems_alone_still_render(self):
+        fragments, _ = _tags_column([], problems=[self._problem()])
+        self.assertEqual(fragments, [(STYLE_TAG_INVALID, "{typo}"), ("", " ")])
 
 
 if __name__ == "__main__":

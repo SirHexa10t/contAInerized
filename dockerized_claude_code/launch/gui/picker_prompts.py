@@ -28,13 +28,12 @@ from pathlib import Path
 
 from ..agents_crud import creatable_agents
 from ..cluster import state as cluster_state
-from ..cluster.member import ClusterError, valid_label
 from ..file_access import (
     expand_user_path, is_dir, path_exists, read_text, tab_complete_paths,
 )
 from ..paths import DEFAULT_WORKSPACE, instance_state_dir_path
 from ..tags import Registry
-from ..tags.identity import SESSION_SEP
+from ..tags.identity import SESSION_SEP, label_error, suggested_label
 from .form_core import TextField
 
 CONFIRM_PROMPT_FMT = "\n  {message}  (y/N) "
@@ -108,15 +107,13 @@ def _agent_rows(registry: Registry) -> list[tuple[str, str]]:
 
 
 def _session_field_error(value: str, current: str | None = None) -> str | None:
-    """The cluster-name field's live complaint, or None. `current` is the name
-    an EDIT arrived with — keeping your own name is never a collision (the
-    same allowance prompt_session gives instances)."""
-    if not value:
-        return "cannot be empty"
-    try:
-        valid_label(value, "session name")
-    except ClusterError as error:
-        return str(error)
+    """The cluster-name field's live complaint, or None: the shared label rule
+    (`tags.identity.label_error` — its message names the place the character
+    would misbehave), then the collision rule. `current` is the name an EDIT
+    arrived with — keeping your own name is never a collision (the same
+    allowance the instance field gives)."""
+    if (error := label_error(value)) is not None:
+        return error
     if value != current and cluster_state.exists(value):
         return "a cluster of this name already exists"
     return None
@@ -143,11 +140,13 @@ def _cluster_fields(project: str, session: str, *,
     `<template>__<workspace-basename>` and keeps following the path as it is
     typed, until the user touches the name field — the same shape instance
     ids have (`<agent>__<session>`), and the same "basename is the default
-    name" rule prompt_session used. An edit passes no `derive`: the existing
-    name sits still, renames are deliberate."""
+    name" rule prompt_session used. The basename is bent legal first
+    (`suggested_label`: `my.app` → `my-app`), so a dotted project dir never
+    pre-fills a name the field then refuses. An edit passes no `derive`: the
+    existing name sits still, renames are deliberate."""
     def auto_name(values: dict[str, str]) -> str:
         raw = values.get("project", "").strip()
-        base = Path(expand_user_path(raw)).name if raw else ""
+        base = suggested_label(Path(expand_user_path(raw)).name) if raw else ""
         return f"{derive}__{base}" if base else str(derive)
     return [
         TextField(key="project", label="project path", value=project,
@@ -160,11 +159,15 @@ def _cluster_fields(project: str, session: str, *,
 
 def _suffix_field_error(agent: str, value: str,
                         current: str | None = None) -> str | None:
-    """The instance-name field's live complaint, or None — the collision rule
-    prompt_session enforced, as a validator: `<agent>__<value>` must not name
+    """The instance-name field's live complaint, or None. First the shared
+    label rule (`tags.identity.label_error`): the name becomes a directory,
+    part of a docker `--name` and, under `{muxer}`, a tmux address —
+    cluster/solo.py documented a dot from a dotted project dir reaching tmux
+    that way, a gap closed here, at the field, since 2026-09-09. Then the
+    collision rule prompt_session enforced: `<agent>__<value>` must not name
     an existing instance, except the one an edit arrived as."""
-    if not value:
-        return "cannot be empty"
+    if (error := label_error(value)) is not None:
+        return error
     candidate = f"{agent}{SESSION_SEP}{value}"
     if value != current and path_exists(instance_state_dir_path(candidate)):
         return f"instance '{candidate}' already exists"
@@ -177,12 +180,14 @@ def instance_fields(agent: str, *, workspace: str | None = None,
     """The instance form's two text fields — project path FIRST, then the
     session name that completes `<agent>__<name>`, auto-derived from the
     path's basename until the user types their own (exactly the cluster
-    form's rule, exactly prompt_session's old default). An edit passes the
-    stored values plus `current`, which pins the name (renames stay
-    deliberate) and exempts it from its own collision check."""
+    form's rule, exactly prompt_session's old default), bent legal by
+    `suggested_label` so a dotted project dir never pre-fills a name the
+    field then refuses. An edit passes the stored values plus `current`,
+    which pins the name (renames stay deliberate) and exempts it from its
+    own collision check."""
     def auto_suffix(values: dict[str, str]) -> str:
         raw = values.get("workspace", "").strip()
-        return (Path(expand_user_path(raw)).name if raw else "") or agent
+        return (suggested_label(Path(expand_user_path(raw)).name) if raw else "") or agent
     return [
         TextField(key="workspace", label="project path",
                   value=workspace if workspace is not None else DEFAULT_WORKSPACE,

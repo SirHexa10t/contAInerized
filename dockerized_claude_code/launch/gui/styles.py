@@ -12,6 +12,10 @@ form in sight.
                          field-driven tag colouring: a new tag never touches
                          UI code, because the colour is derived from the
                          tag's own fields (warn / stance / conf)
+  STYLE_AGENT_NAME / RICH_AGENT_NAME
+                         the one blue every NAME wears (agent, instance,
+                         cluster, member, a form field's value), in both
+                         toolkits' spellings
   _normalize / _plain    the display coercers filter matching runs on
   _fragment_source       the typing-only adapter every FormattedTextControl
                          call site passes its fragment builder through
@@ -86,6 +90,13 @@ STYLE_TAG_ENGINE     = "fg:ansibrightcyan"
 STYLE_UNDERLINE      = "underline"   # the fullname lead-in of description text
 STYLE_TAG_INVALID    = "fg:ansiblack bg:ansired"   # a stored tag name that no longer resolves (picker Cont rows)
 STYLE_LOCKED         = "fg:ansibrightblack"         # a form row the user can't toggle (grayed; e.g. [code]'s always-on Python)
+# Every NAME the launcher shows — agent, instance, cluster, member — and the
+# value typed into a form field wear this one blue, so a name reads the same
+# wherever it appears. It was defined four times under four names (2026-09-09)
+# before landing here; the rich spelling exists because previews render
+# through rich while rows render through prompt_toolkit.
+STYLE_AGENT_NAME     = "bold fg:ansibrightblue"
+RICH_AGENT_NAME      = "bold bright_blue"
 
 _STYLE_BY_STANCE = {
     PolicyStance.ALLOW:      STYLE_TAG_ALLOW,

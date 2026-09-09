@@ -12,25 +12,28 @@ the widget and every menu built with it. The seam is one-way and was already
 implicit: nothing in here refers to a single menu-side name.
 
 What lives here:
-  - `PickerEntry` / `ContEntry`   the row contract, including the DEFERRED
+  - `PickerEntry` / `ContEntry` / `MemberEntry`
+                                  the row contract, including the DEFERRED
                                   preview slots (a row may hand over a
                                   callable instead of text, so a slow
                                   preview never blocks the first paint)
-  - `PickerAction` / `PickerRowMarker` / `PickerCwdHint`
-                                  the outcome enum, and the two row
-                                  decorations whose glyphs+styles are
-                                  data on the enum rather than branches
-                                  in the renderer
+  - `PickerAction` / `PickerRowMarker` / `PickerCwdHint` / `WorkspaceView`
+                                  the outcome enum, and the row decorations
+                                  whose glyphs+styles are data on an enum
+                                  rather than branches in a renderer — plus
+                                  a row's workspace as ONE fact (path + its
+                                  cwd relation)
   - `_PreviewLoader`              when to compute a preview and where to
                                   park it
   - `_tags_column` / `_cont_tags_column`
                                   the tag-chip columns rows render with
-  - `_ScrollingControl`, `_cursor_step`, `_focusable_indices`
-                                  navigation over rows the cursor may skip
+  - `_ScrollingControl`, `_cursor_step`, `_focusable_indices`, `_accent_style`
+                                  navigation over rows the cursor may skip,
+                                  and the accent bar's colour
   - `pick_with_preview`           the application + key bindings + loop
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -49,10 +52,11 @@ from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
 
-from ..tags import Agent, Instance, Tag
+from ..cluster.member import Member
+from ..tags import Instance, Tag, TagProblem
 from ..tags.base import SQUASH_AT, first_glyph
 from ..utils import reset_terminal
-from .picker_previews import _last_prompt_display, cont_preview
+from .picker_previews import _last_prompt_display, cont_preview, member_preview
 from .styles import (
     STATUS_HEIGHT, STYLE_DICT, STYLE_TAG_INVALID, TITLE_HEIGHT, UiClass,
     _fragment_source, _normalize, _plain, squashed_tag_style, tag_style,
@@ -92,8 +96,13 @@ STYLE_TAB_TIP        = "fg:ansigreen"                       # its fading end: fo
 STYLE_NEST_MARK      = "fg:ansibrightblack"                 # instance rows: dim marker, indented under the agent's tab
 # The cluster-template rows wear the same tab shape in CYAN — a third kind
 # beside create-green and continue-yellow, same colour its preview accent shows.
-# Existing clusters nest beneath in the CONT shape (also cyan), their members a
-# level deeper still — shape says create/continue, colour says cluster.
+# An existing cluster is a TOP-LEVEL row in the CONT shape (also cyan), listed
+# after every template row rather than indented under its own: a cluster is
+# not an instance OF a template the way an instance is of its agent — nothing
+# is shared after creation (no common CLAUDE.md), so nesting would claim a
+# relationship that is not there (operator, 2026-09-09). Its MEMBERS nest
+# beneath it, one level in, exactly as instances nest under their agent —
+# shape says create/continue, colour says cluster, depth says "belongs to".
 STYLE_CLUSTER_TAB     = "bg:ansicyan fg:black bold"
 STYLE_CLUSTER_TAB_TIP = "fg:ansicyan"
 STYLE_CLUSTER_NEST    = "fg:ansicyan"
@@ -112,6 +121,7 @@ TAB_TIP = "▓▒░"
 # sneak back in and reintroduce the short-triangle rendering.
 BLOCK_ELEMENTS = range(0x2580, 0x25A0)
 TAG_EMPHASIS         = "bold underline"   # style SUFFIX for tags an emphasize set names (see _tags_column) — on top of the tag's own color, so the color language survives the shout
+STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"   # the workspace path at a row's tail
 
 
 class PickerAction(Enum):
@@ -159,8 +169,10 @@ class PickerRowMarker(Enum):
                "fg:ansicyan")
     # "Cont.", the same word instance rows use — an existing cluster IS a
     # continuation; the cyan is what says "cluster" (kind = colour, verb = word).
-    CLSTR   = (((STYLE_CLUSTER_NEST, "   ▸ Cont."),),           "fg:ansicyan")
-    MEMBER  = (((STYLE_NEST_MARK, "        · "),),              "fg:ansicyan")
+    # No indent: a cluster is a top-level row, not a child of its template
+    # (see the STYLE_CLUSTER_* comment); its members take the indent instead.
+    CLSTR   = (((STYLE_CLUSTER_NEST, "▸ Cont."),),              "fg:ansicyan")
+    MEMBER  = (((STYLE_NEST_MARK, "   · "),),                   "fg:ansicyan")
     TOOLS  = ((("fg:ansicyan", "🧰 Toolkits"),),               "")
     DELMNU = ((("fg:ansired", "⚠️ DELETE‼️"),),                "")
     DLET   = ((("fg:ansired", "🗑 DELETE"),),                  "")
@@ -185,14 +197,15 @@ class PickerRowMarker(Enum):
         return sum(len(text) for _, text in self.lead) + len(suffix)
 
 class PickerCwdHint(Enum):
-    """The cwd-relation tag shown on a Cont row's workspace. CURRENT/DEFAULT
-    mark a healthy relation to where the launcher was invoked from; INVALID
-    flags a stored workspace path that no longer exists / isn't a directory
-    so the user can spot it before continuing (or hit F2 to repoint it).
-    Same bundling rationale as PickerRowMarker — label text and style are a
-    fixed pair, not two parallel constants. CURRENT/DEFAULT share a yellow
-    style; kept as separate enum members so the colours can diverge later
-    without re-threading call sites."""
+    """The cwd-relation tag shown on a row's workspace. CURRENT/DEFAULT mark
+    a healthy relation to where the launcher was invoked from; INVALID flags
+    a stored workspace path that no longer exists / isn't a directory so the
+    user can spot it before continuing (or hit F2 to repoint it). Same
+    bundling rationale as PickerRowMarker — label text and style are a fixed
+    pair, not two parallel constants. CURRENT/DEFAULT share a yellow style;
+    kept as separate enum members so the colours can diverge later without
+    re-threading call sites. Which one applies is `menu_picker`'s call (it
+    knows the launch site); a row carries the answer as `WorkspaceView`."""
     CURRENT = ("(CURRENT DIR) ", "bold fg:ansiyellow")
     DEFAULT = ("(DEFAULT DIR) ", "bold fg:ansiyellow")
     INVALID = ("(INVALID DIR) ", "bold fg:ansired")
@@ -208,21 +221,34 @@ class PickerCwdHint(Enum):
         return (self.style, self.label)
 
 @dataclass(frozen=True)
+class WorkspaceView:
+    """How a row's workspace reads on screen: the path as stored (or the
+    caller's placeholder when nothing is stored) and its relation to where
+    the launcher runs — at most ONE hint, because a path is the cwd, or the
+    default, or invalid, never two of those. It was three booleans on the row
+    until 2026-09-09, whose docstring had to say only one could be true;
+    instance rows, cluster rows and `--stop`'s rows all carry this one."""
+    display: str
+    hint: PickerCwdHint | None
+
+    @property
+    def fragments(self) -> list[tuple[str, str]]:
+        """The row's tail: the hint, if any, then the path, dim italic."""
+        tail = [(STYLE_WORKSPACE_HINT, self.display)]
+        return [self.hint.fragment, *tail] if self.hint is not None else tail
+
+@dataclass(frozen=True)
 class ContEntry:
     """One Cont/DELETE row's data — what `continuable_instances` produces and
     `pick_with_preview` consumes. `identity` is what the picker hands back
-    on selection; the *_display strings are pre-rendered for the agent-name
-    column / hint area; the is_*_dir booleans drive the
-    CURRENT/DEFAULT/INVALID workspace tags (only one can be True per row —
-    invalid implies ws_resolved is None, which makes the other two False).
-    `is_running` means a container for this instance is up right now, so the
-    row renders greyed with the RUNNING tag and is information-only — docker
-    would refuse a second container on the same `--name` anyway."""
+    on selection; `workspace` is the stored path with its cwd relation (the
+    CURRENT/DEFAULT/INVALID hint) as one fact; `last_used_display` is
+    pre-rendered for the pane. `is_running` means a container for this
+    instance is up right now, so the row renders greyed with the RUNNING tag
+    and is information-only — docker would refuse a second container on the
+    same `--name` anyway."""
     identity: Instance
-    workspace_display: str
-    is_current_dir: bool
-    is_default_dir: bool
-    is_invalid_dir: bool
+    workspace: WorkspaceView
     last_used_display: str
     is_running: bool = False
 
@@ -256,8 +282,29 @@ class ContEntry:
     def _compose(self, prompt: str | None) -> str:
         """The preview text — built by `picker_previews`, which owns every
         row kind's pane content; this row only supplies its own values."""
-        return cont_preview(self.identity, self.workspace_display,
+        return cont_preview(self.identity, self.workspace.display,
                             self.last_used_display, prompt)
+
+@dataclass(frozen=True, kw_only=True)
+class MemberEntry(ContEntry):
+    """A cluster MEMBER's row data: a ContEntry whose `identity` is the
+    Instance the member launches as (`Cluster.member_instance` — a member is
+    an instance in all but placement), plus what only a member has: which
+    `cluster` it belongs to, its `Member` record (agent, role, OWN build), and
+    the names of the tags it `inherited` from the cluster, so the pane can
+    mark them. Everything the deferred-preview machinery does for an instance
+    — the child-process `Last prompt` read, the `[loading…]` stand-in, the
+    per-screen-session cache — happens here unchanged; only the pane's facts
+    differ (`member_preview`). Keyword-only because a dataclass subclass may
+    not add required fields after the base's defaulted `is_running`."""
+    member: Member
+    cluster: str
+    inherited: frozenset[str]
+
+    def _compose(self, prompt: str | None) -> str:
+        return member_preview(self.identity, self.member, self.cluster,
+                              self.workspace.display, self.last_used_display,
+                              prompt, self.inherited)
 
 @dataclass(frozen=True)
 class PickerEntry:
@@ -270,18 +317,26 @@ class PickerEntry:
     scale with everyone's conversation history). `value` is what the picker
     hands back on selection (Agent for Create rows, Instance
     for Cont/Delete rows, `_OPEN_DELMENU` for the delete-menu opener, `None`
-    for Back rows). `deletable` / `modifiable` default True; the producer
-    sets them False to disable Del / F2 on the row (Create / Back / opener).
-    `selectable=False` makes the row INFORMATION-ONLY: still rendered, but the
-    cursor never lands on it, so Enter / Del / F2 can't target it (a running
-    instance — see RUNNING_HINT). `display` defaults to a fresh empty list per
-    instance to keep the dataclass safe — never shared across rows."""
+    for Back rows). `marker` names the row's KIND — the same marker whose lead
+    the producer splatted into `display` — so the widget can colour the
+    preview's accent bar without knowing what the value is. `deletable` /
+    `modifiable` / `pickable` gate Del / F2 / Enter per row and default True;
+    the producer sets them False to make that key inert there (Create / Back
+    / opener rows take no Del or F2; a cluster MEMBER takes no Enter — it
+    launches with its cluster, and an inert key beats a pause that explains
+    so every time). `selectable=False` makes the row INFORMATION-ONLY:
+    still rendered, but the cursor never lands on it, so no key can target
+    it (a running instance — see RUNNING_HINT).
+    `display` defaults to a fresh empty list per instance to keep the
+    dataclass safe — never shared across rows."""
     display: list[tuple[str, str]] = field(default_factory=list)
     preview: str | Callable[[], str] = ""
     preview_quick: str | Callable[[], str] | None = None   # cheap stand-in pane shown while `preview` resolves
     value: Any = None
+    marker: PickerRowMarker | None = None
     deletable: bool = True
     modifiable: bool = True
+    pickable: bool = True
     selectable: bool = True
 
     @property
@@ -381,6 +436,7 @@ def _deferred_preview(entry: "ContEntry", *, quick: bool = False) -> Callable[[]
 
 def _tags_column(tags: Iterable[Tag],
                  emphasize: frozenset[str] = frozenset(),
+                 problems: Sequence[TagProblem] = (),
                  ) -> tuple[list[tuple[str, str]], int]:
     """Render a tag set for cont-row / Create-row display as prompt_toolkit
     `(style, text)` fragments. Returns (fragments, visible width); empty input
@@ -396,65 +452,44 @@ def _tags_column(tags: Iterable[Tag],
     one-character `squash_glyph` on a chip of its usual color
     (`squashed_tag_style`) — the full names move to the row's preview pane,
     which lists every tag expanded. Both forms space-separate, so two adjacent
-    chips of the same color read as two tags rather than one block."""
+    chips of the same color read as two tags rather than one block.
+
+    `problems` — stored names that no longer resolve — follow the tags in the
+    red-background/black-foreground alert style so a stale/typo'd tag is
+    impossible to miss (they also block the thing from starting). The
+    SQUASH_AT threshold counts BOTH parts: six tags where one is invalid are
+    exactly as crowded as six valid ones, and mixing one squashed part with
+    one labelled part would make the alert look like a different feature
+    rather than one of the row's tags. A squashed invalid tag stays visible
+    for the same reason the labelled form does — its chip is the alert red no
+    valid tag uses."""
     tag_list = list(tags)
-    if not tag_list:
+    if not tag_list and not problems:
         return [], 0
-    squash = len(tag_list) >= SQUASH_AT
-    fragments: list[tuple[str, str]] = []
+    squash = len(tag_list) + len(problems) >= SQUASH_AT
+    chips: list[tuple[str, str]] = []
     for tag in tag_list:
-        if fragments:
-            fragments.append(("", " "))
         style, text = ((squashed_tag_style(tag_style(tag)), tag.squash_glyph)
                        if squash else (tag_style(tag), tag.label))
         if tag.name in emphasize:
             style = f"{style} {TAG_EMPHASIS}"
-        fragments.append((style, text))
+        chips.append((style, text))
+    chips += [(STYLE_TAG_INVALID, first_glyph(problem.name) if squash else problem.label)
+              for problem in problems]
+    fragments: list[tuple[str, str]] = []
+    for chip in chips:
+        if fragments:
+            fragments.append(("", " "))
+        fragments.append(chip)
     fragments.append(("", " "))   # trailing separator — bakes into the column width
-    visible = sum(len(text) for _, text in fragments)
-    return fragments, visible
+    return fragments, sum(len(text) for _, text in fragments)
 
 def _cont_tags_column(inst: Instance,
                       emphasize: frozenset[str] = frozenset(),
                       ) -> tuple[list[tuple[str, str]], int]:
-    """A Cont row's tag column: the resolved tags (via `_tags_column`)
-    followed by any `invalid_tags` — stored names that no longer resolve —
-    in the red-background/black-foreground alert style so a stale/typo'd tag
-    is impossible to miss. The invalid tags also block the instance from
-    starting (see select_agent / resolve_target).
-
-    The SQUASH_AT threshold counts BOTH parts: six tags where one is invalid
-    are exactly as crowded as six valid ones, and mixing one squashed part
-    with one labelled part would make the alert look like a different feature
-    rather than one of the row's tags. A squashed invalid tag stays visible
-    for the same reason the labelled form does — its chip is the alert red no
-    valid tag uses."""
-    problems = inst.invalid_tags
-    if len(inst.active_tags) + len(problems) >= SQUASH_AT:
-        chips = [(squashed_tag_style(tag_style(tag))
-                  + (f" {TAG_EMPHASIS}" if tag.name in emphasize else ""),
-                  tag.squash_glyph)
-                 for tag in inst.active_tags]
-        chips += [(STYLE_TAG_INVALID, first_glyph(problem.name))
-                  for problem in problems]
-        fragments: list[tuple[str, str]] = []
-        for chip in chips:
-            if fragments:
-                fragments.append(("", " "))
-            fragments.append(chip)
-        fragments.append(("", " "))
-        return fragments, sum(len(text) for _, text in fragments)
-    fragments, width = _tags_column(inst.active_tags, emphasize)
-    for problem in problems:
-        if fragments:
-            fragments.append(("", " "))
-            width += 1
-        fragments.append((STYLE_TAG_INVALID, problem.label))
-        width += len(problem.label)
-    if problems:
-        fragments.append(("", " "))   # trailing separator, matching _tags_column
-        width += 1
-    return fragments, width
+    """A Cont row's tag column: the instance's resolved tags followed by its
+    `invalid_tags` — `_tags_column` fed from the one identity record."""
+    return _tags_column(inst.active_tags, emphasize, problems=inst.invalid_tags)
 
 def _focusable_indices(entries: list[PickerEntry], shown: list[int]) -> list[int]:
     """Row indices the cursor may land on: visible after filtering AND
@@ -474,6 +509,18 @@ def _cursor_step(entries: list[PickerEntry], shown: list[int], cursor: int, delt
     if cursor not in landable:
         return landable[0]
     return landable[(landable.index(cursor) + delta) % len(landable)]
+
+def _accent_style(entry: PickerEntry | None) -> str:
+    """The preview's left-edge accent bar: the highlighted row's KIND colour,
+    read off its marker — green for an agent row, yellow for a Cont row, cyan
+    for anything cluster-shaped — and the dim divider colour for no row, a row
+    without a marker, or a marker without an accent (the menu openers). Until
+    2026-09-09 this dispatched on `isinstance(value, Instance | Agent)`, the
+    widget's one piece of agent knowledge — and so never showed the cyan the
+    cluster markers declare."""
+    if entry is None or entry.marker is None or not entry.marker.accent:
+        return UiClass.DIVIDER.css
+    return entry.marker.accent
 
 class _ScrollingControl(FormattedTextControl):
     """A `FormattedTextControl` that turns the wheel into a caller-supplied step.
@@ -674,8 +721,13 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         # The selectable check is belt-and-braces: move()/refilter() keep the
         # cursor off information-only rows, but it also covers the
         # nothing-focusable case (every visible row is information-only).
-        if state["shown"] and entries[state["cursor"]].selectable:
-            state["result"] = (PickerAction.SELECT, entries[state["cursor"]].value)
+        # An unpickable row swallows Enter outright — no exit, no redraw,
+        # no message: the picker simply stays where it is.
+        if not state["shown"]:
+            return
+        entry = entries[state["cursor"]]
+        if entry.selectable and entry.pickable:
+            state["result"] = (PickerAction.SELECT, entry.value)
             event.app.exit()
 
     @kb.add("escape")
@@ -734,17 +786,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             event.app.exit()
 
     def accent_style() -> str:
-        """Colour the preview's left-edge accent bar based on the selected row's kind:
-        green for Create rows (Agent), yellow for Cont rows (Instance), dim
-        default for menu/back rows."""
-        if not state["shown"]:
-            return UiClass.DIVIDER.css
-        value = entries[state["cursor"]].value
-        if isinstance(value, Instance):             # cont row
-            return PickerRowMarker.CONT.accent      # yellow — the kind colour the grey lead no longer carries
-        if isinstance(value, Agent):                # new row
-            return PickerRowMarker.NEW.accent       # green
-        return UiClass.DIVIDER.css
+        return _accent_style(entries[state["cursor"]] if state["shown"] else None)
 
     body = HSplit([
         Window(FormattedTextControl(_fragment_source(title_fragments)), height=TITLE_HEIGHT),

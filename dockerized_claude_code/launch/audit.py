@@ -13,6 +13,16 @@ Reports:
   - badworkspace (entry's workspace points to a non-existent or non-directory path)
   - bad_tags (entry references an engine/profession/specialty/policy that the
     tag tree doesn't define, or puts a name on the wrong axis)
+  - bad_name (an instance's session, or a cluster's directory name, that the
+    launcher's label rule refuses — `tags.identity.label_error`, applied to
+    every NEW name since 2026-09-09, so these predate it or were made by
+    hand. Such an instance still launches but cannot be recruited into a
+    group and, under {muxer}, mistargets tmux — F2 in the picker renames it;
+    such a cluster is SKIPPED by discovery and never shows in the picker —
+    rename its directory)
+  - bad_cluster (a clusters/<name>/cluster.toml that fails to load — corrupt
+    TOML, a member with an illegal id, a missing project — which discovery
+    skips silently)
   - store issues (instances.toml not valid TOML; a MISSING file is fine —
     instances then run on their agents' `.lego` defaults)
   - oauth issues (.claude.json / .credentials.json missing, empty, or not valid JSON)
@@ -37,17 +47,20 @@ from pathlib import Path
 from typing import Any
 
 from .agents_crud import list_all_instances
+from .cluster import state as cluster_state
+from .cluster.member import ClusterError
 from .cowork import control, group as grp, lifecycle, mailbox
 from .file_access import (
-    agent_md_index, is_dir, iter_files, iter_subdirs, path_exists, read_text,
+    agent_md_index, is_dir, is_file, iter_files, iter_subdirs, path_exists,
+    read_text,
 )
 from .paths import (
     ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE, INSTANCES_FILE,
-    cowork_outbox_path, group_hosting_dir, hub_pid_path, instance_state_dir_path,
-    state_history_path,
+    cluster_state_path, clusters_dir, cowork_outbox_path, group_hosting_dir,
+    hub_pid_path, instance_state_dir_path, state_history_path,
 )
 from .tags import Registry, TagError, scan_all
-from .tags.identity import SESSION_SEP
+from .tags.identity import SESSION_SEP, label_error
 from .tags.store import entry_to_build
 
 Issue = tuple[str, str, str]   # (kind, target, message)
@@ -119,6 +132,46 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
                 registry.validate_build(entry_to_build(entry), f"instances.toml[{instance_id}]")
             except TagError as e:
                 out.append(("bad_tags", instance_id, str(e)))
+    return out
+
+
+def _illegal_instance_names(instances: list[str]) -> list[Issue]:
+    """Instance dirs whose SESSION half the label rule refuses
+    (`tags.identity.label_error` — the rule the form has applied to every new
+    name since 2026-09-09, so these predate it or were made by hand). They
+    still launch as plain instances, but cannot be recruited into a group and
+    would mistarget tmux under {muxer}; F2 in the picker renames them."""
+    out: list[Issue] = []
+    for dir_name in instances:
+        _, _, session = dir_name.partition(SESSION_SEP)
+        if (error := label_error(session)) is not None:
+            out.append(("bad_name", dir_name,
+                        f"session name {error} — F2 in the picker renames it"))
+    return out
+
+
+def _cluster_issues() -> list[Issue]:
+    """Findings under clusters/: a dir whose NAME the label rule refuses
+    (`bad_name` — `cluster_state.discover` skips it silently, so the picker
+    never shows it) and a cluster.toml that fails to load for any other
+    reason (`bad_cluster` — corrupt TOML, a member with an illegal id, a
+    missing project key). Degrades to no findings on a host that never made
+    a cluster; a subdir without cluster.toml is not a cluster (discovery
+    ignores it too)."""
+    out: list[Issue] = []
+    for directory in sorted(iter_subdirs(clusters_dir()), key=lambda d: d.name):
+        if not is_file(cluster_state_path(directory.name)):
+            continue
+        if (error := label_error(directory.name)) is not None:
+            out.append(("bad_name", directory.name,
+                        f"cluster name {error} — the picker cannot show it; "
+                        f"rename the directory"))
+            continue
+        try:
+            cluster_state.load(directory.name)
+        except (ClusterError, tomllib.TOMLDecodeError, OSError) as e:
+            out.append(("bad_cluster", directory.name,
+                        f"cluster.toml fails to load — discovery skips it: {e}"))
     return out
 
 
@@ -205,8 +258,10 @@ def main() -> None:
         if not state_history_path(instance_state_dir_path(dir_name)).is_file():
             issues.append(("no_history", dir_name, "no history.jsonl found (instance never started?)"))
 
+    issues.extend(_illegal_instance_names(instances))
     issues.extend(_store_entry_issues(entries, actual, registry))
     issues.extend(_cowork_issues())
+    issues.extend(_cluster_issues())
 
     if not issues:
         print(f"All clear. {len(instances)} instance(s) under {AGENTS_STATE}.")
