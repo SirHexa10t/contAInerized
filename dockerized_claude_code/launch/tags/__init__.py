@@ -1,11 +1,11 @@
-"""The tag system — four *kinds* of tag (engine / profession / specialty /
+"""The tag system — five *kinds* of tag (ai / engine / profession / specialty /
 policy), whose *members* are discovered from the `agents/` file tree rather
 than hard-coded (design: `refactoring-replan.md`).
 
 Public surface:
   - `Tag`, `DockerContribution`, `TagError` — base record + parsed docker
     contribution + the fail-loud exception (from `base`).
-  - `Engine`, `Profession`, `Specialty`, `Policy` — the four kind classes,
+  - `Ai`, `Engine`, `Profession`, `Specialty`, `Policy` — the five kind classes,
     each with a `scan(agents_dir)` classmethod. `Profession.discover_layers`
     and `Specialty` also surface `Layer` / `Combo`.
   - `merge_fragments` — deep-merge of policy settings fragments.
@@ -19,8 +19,10 @@ Public surface:
     `~/.claude-agents/<profession>_profile.toml` that toggles them.
 """
 
+from .ai import Ai, Rendering, Standard, Tier, sorted_ais
 from .base import DockerContribution, Tag, TagError
-from .engine import Engine
+from .budget import BEST, CHEAPEST, Budget, is_standard, rank_of, sorted_standards
+from .engine import Engine, sorted_engines, standard_rank
 from .identity import (
     Agent, Instance, agent_md_path, effective_engine_name, image_chain,
     load_agent, resolve_build,
@@ -34,6 +36,8 @@ from . import addendums, migrations, store, toolkit_profile
 
 __all__ = [
     "Tag", "DockerContribution", "TagError",
+    "Ai", "Tier", "Standard", "Rendering", "Budget", "BEST", "CHEAPEST", "is_standard", "rank_of",
+    "sorted_standards", "sorted_ais", "sorted_engines", "standard_rank",
     "Engine", "Profession", "Specialty", "Policy", "PolicyStance",
     "Layer", "Combo", "scan_combos", "merge_fragments", "ToolkitEntry",
     "AgentBuild", "load_lego",

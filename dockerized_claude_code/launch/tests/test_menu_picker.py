@@ -73,6 +73,16 @@ class TestContinuableInstances(unittest.TestCase):
         self.assertIn("{auto}", preview)
         self.assertIn(REGISTRY.specialties["auto"].short_description, preview)
 
+    def test_preview_lists_the_ai_before_the_tags(self):
+        # Which AI runs the instance is the first thing the pane says about
+        # its tags (operator, 2026-09-13); the fixture resolves to the default.
+        entries = self._entries([make_inst("golem", "a", self.ws, specialties=["auto"])])
+        preview = entries[0].preview
+        ai = REGISTRY.default_ai
+        self.assertIn(ai.label, preview)
+        self.assertLess(preview.index(ai.label), preview.index("{auto}"))
+        self.assertIn(ai.fullname, preview)
+
     def test_preview_without_history_has_no_last_prompt_field(self):
         # The field drops out entirely rather than showing an empty label.
         entries = self._entries([make_inst("golem", "a", self.ws)])
@@ -194,6 +204,28 @@ class TestRowAssembly(unittest.TestCase):
                 self.assertEqual((row.display[0],),
                                  menu_picker.PickerRowMarker.CONT.lead)
 
+    def test_instance_rows_wear_the_ai_before_the_name_and_agent_rows_none(self):
+        # The AI column sits between the tags and the name on INSTANCE rows,
+        # in the AI's own colours (operator, 2026-09-13). An agent row carries
+        # none: which AI runs is decided when an instance is created, it is
+        # not a property of the agent (operator, 2026-09-14) — nor does the
+        # Create pane show one.
+        ai = REGISTRY.default_ai
+        entries = self.entries()
+        inst_rows = [e for e in entries if isinstance(e.value, Instance)]
+        agent_rows = [e for e in entries if isinstance(e.value, menu_picker.Agent)]
+        self.assertTrue(inst_rows and agent_rows)
+        for row in inst_rows:
+            with self.subTest(instance=row.value.instance):
+                text = "".join(t for _, t in row.display)
+                self.assertLess(text.index(ai.label), text.index(row.value.instance))
+                self.assertIn((ai.style, ai.label), row.display)
+        for row in agent_rows:
+            with self.subTest(agent=row.value.name):
+                self.assertNotIn(ai.label, "".join(t for _, t in row.display))
+                self.assertNotIn(ai.label, row.preview)
+                self.assertNotIn("Tags:", row.preview)
+
     def test_each_shipped_template_gets_a_cluster_row(self):
         # The real tree ships devteam.legoset; its row opens the creation flow
         # (the value carries the template path for the dispatcher).
@@ -313,14 +345,17 @@ class TestPromptStop(unittest.TestCase):
         self.assertEqual([o.key for o in captured["options"]], ["golem__up"])
 
     def test_no_running_hint_and_the_row_keeps_the_picker_anatomy(self):
-        # tags · name · workspace — but never "(RUNNING)": in this list it
-        # would say nothing.
+        # tags · AI · name · workspace — but never "(RUNNING)": in this list
+        # it would say nothing.
         insts = [make_inst("golem", "up", self.ws, specialties=["auto"])]
         _, captured = self._run(insts, running={"golem__up"})
         row = self._row_text(captured["options"][0])
         self.assertIn("golem__up", row)
         self.assertIn(self.ws, row)
         self.assertNotIn("(RUNNING)", row)
+        ai = REGISTRY.default_ai
+        self.assertLess(row.index("{auto}"), row.index(ai.label))
+        self.assertLess(row.index(ai.label), row.index("golem__up"))
 
     def test_muxer_is_emphasized_other_tags_are_not(self):
         insts = [make_inst("golem", "up", self.ws,
@@ -509,6 +544,22 @@ class TestClusterRows(unittest.TestCase):
         self.assertFalse(row.preview_ready)              # a callable: the transcript read waits for the first highlight
         self.assertIsNotNone(row.preview_quick)          # and the instant form stands in meanwhile
         self.assertIs(row.marker, menu_picker.PickerRowMarker.MEMBER)
+
+    def test_member_rows_wear_their_own_ai_after_the_name(self):
+        # A member's AI is its own (the cluster forces none): the row shows it
+        # right after the member id, before its own tags; a cluster row shows
+        # no AI at all.
+        self.save("team", (self.Member.of("golem"),
+                           self.Member("researcher", "alien", build=AgentBuild(ai="grok"))))
+        rows = {e.value.member_id: e for e in self.entries()
+                if isinstance(e.value, menu_picker._MemberRow)}
+        golem, alien = self.text(rows["golem"]), self.text(rows["researcher__alien"])
+        default, grok = REGISTRY.default_ai, REGISTRY.ais["grok"]
+        self.assertLess(golem.index("golem"), golem.index(default.label))
+        self.assertIn((grok.style, grok.label), rows["researcher__alien"].display)
+        self.assertNotIn(default.label, alien)
+        (cluster_row,) = self.cluster_rows()
+        self.assertNotIn(default.label, self.text(cluster_row))
 
     def test_enter_is_inert_on_every_member_row_but_f2_and_del_are_not(self):
         # A member launches with its cluster: Enter must do nothing there —

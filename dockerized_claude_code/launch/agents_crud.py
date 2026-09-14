@@ -8,12 +8,12 @@ Sections:
     writers (load → mutate → save over tags.store) + state-dir lifecycle
   - install_latest_md — source `.md` + chain-keyed addendum section →
     state-dir CLAUDE.md in one overwrite (tags.addendums supplies the text)
-  - compute_resume_flag — Instance → claude resume args (["--continue"] | [])
+  - compute_resume_flag — Instance → resume args (["--continue"] | [])
   - resolve_pick — name string → Agent (create) | Instance (cont) factory
     used by run.py's CLI parsing
   - creatable_agents / instance_from_store — picker-entry factories
   - _agent_sort_key — Create-row ordering (profession group, then the
-    engine's model family via tags.engine.engine_sort_key, then name)
+    engine's capability standard via tags.engine.standard_rank, then name)
 
 Identity types (Agent / Instance) and the store primitives live in the tags
 package; this module wires them to the filesystem lifecycle. menu_picker and
@@ -22,6 +22,7 @@ run.py import from here; nothing here imports them back.
 
 import json
 
+from .ai import active_harness
 from .file_access import (
     copy_file, ensure_dir, force_remove, home_relative, is_dir, iter_subdirs,
     move_path, path_exists, read_text, write_text,
@@ -35,7 +36,7 @@ from .tags import (
     Agent, Instance, Registry, TagError, addendums, load_agent, resolve_build,
     store,
 )
-from .tags.engine import engine_sort_key
+from .tags.engine import standard_rank
 from .tags.identity import SESSION_SEP
 from .tags.policy import merge_fragments
 from .utils import ordering_index_or_end, plural, prompt_keypress
@@ -198,20 +199,20 @@ def compute_resume_flag(inst: Instance) -> list[str]:
                   f"claude has silently DROPPED the history of a ~92 MB one at "
                   f"launch (plans/ISSUES.md) — if this conversation matters, "
                   f"consider retiring it for a fresh session soon.")
-        return ["--continue"]
+        return [active_harness().continue_flag]
     print(f"  (Instance '{inst.instance}' has no prior conversation; starting fresh.)")
     return []
 
 
-def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], tuple[int, tuple[int, int]], str]:
+def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], int, str]:
     """Create-row ordering: profession-less agents first (then by each
-    profession's registry position), engine model family/version within a
-    group, name as the tiebreak."""
+    profession's registry position), the engine's capability standard within a
+    group (strongest first — the same rank whatever AI runs), name as the
+    tiebreak."""
     prof_order = list(registry.professions)
     prof_key = tuple(sorted(ordering_index_or_end(p, prof_order) for p in agent.build.professions))
     engine = registry.engines.get(agent.build.engine or agent.name) or registry.engines.get("default")
-    model = engine.conf_map.get("ANTHROPIC_MODEL", "") if engine else ""
-    return (prof_key, engine_sort_key(model), agent.name)
+    return (prof_key, -standard_rank(engine), agent.name)
 
 
 # ============================================================

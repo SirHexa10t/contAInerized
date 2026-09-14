@@ -1,0 +1,7 @@
+# Cheapest tier: the AI's cheapest tier, thinking off, no memory, no background
+# agents, no telemetry — for fast, mechanical, low-stakes work.
+standard          = "cheapest"
+thinking          = false
+memory            = false
+background_agents = false
+telemetry         = false

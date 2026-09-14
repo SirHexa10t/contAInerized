@@ -477,6 +477,16 @@ Quitting takes a while somehow... Both in a mux (herdr) exit, and in a regular i
 
 Markdown (color/stylize) the output of quick-questions
 
+Add project name to banner within clusters (because the member instances usually don't have that name)
+
+Add warning when changing Claude's harness: they allegedly charge orders-of-magnitude more tokens when using any harness other than Claude Code
+    Find citations?
+    Look into other AIs? Do others do the same?
+
+Instead of "steps" in the `engines`, call them "standards". And aside from "best" and "cheapest", they'll be enumerable - we'll consider standards by breakthrough-capapbilities of AI through different dates (i.e. there'd be a standard "2024Q2" if that's when the model that set that standard had released. And it can only be inferior to "2024Q4", for example, as the standards only rise through time)
+
+
+
 
 
 

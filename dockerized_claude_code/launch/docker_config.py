@@ -37,6 +37,7 @@ import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from .ai import active_harness
 from .claude_code_config import set_terminal_title
 from .container_env import (
     ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
@@ -49,10 +50,9 @@ from .firewall import (
     wait_for_critical_addresses,
 )
 from .paths import (
-    BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, COWORK_IN_CONTAINER,
+    BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, cowork_dir_path, COWORK_IN_CONTAINER,
     DEFAULT_WORKSPACE, DOCKER_BASE_MOUNTS, DOCKERIZED_CLAUDE_ROOT,
-    INSTALL_FAILURES_LOG_IN_CONTAINER,
-    LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION, cowork_dir_path,
+    INSTALL_FAILURES_LOG_IN_CONTAINER, LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION,
     state_commands_dir, state_settings_path,
 )
 from .tags import DockerContribution, Instance
@@ -475,14 +475,14 @@ def set_container_mounts(inst_id: Instance) -> None:
         ensure_dir(cowork_dir)
         add_docker_mount(cowork_dir, str(COWORK_IN_CONTAINER))
     add_docker_mount(state_settings_path(inst_id.state_dir),
-                     f"{CLAUDE_CONFIG_IN_CONTAINER}/settings.json:{RO_MOUNT_OPTION}")
+                     f"{state_settings_path(CLAUDE_CONFIG_IN_CONTAINER)}:{RO_MOUNT_OPTION}")
     # The commands dir is ASSEMBLED per instance (shared commands + each active
     # command the active tags declare) by agents_crud.install_commands, then mounted whole and
     # read-only. Mounting the shared repo dir here instead, and letting tags mount
     # their own files over it, is what produced `mount: read-only file system` at
     # container start — docker cannot create a mountpoint inside a read-only mount.
     add_docker_mount(state_commands_dir(inst_id.state_dir),
-                     f"{CLAUDE_CONFIG_IN_CONTAINER}/commands:{RO_MOUNT_OPTION}")
+                     f"{state_commands_dir(CLAUDE_CONFIG_IN_CONTAINER)}:{RO_MOUNT_OPTION}")
     for source, target in DOCKER_BASE_MOUNTS.items():
         add_docker_mount(source, target)
 
@@ -554,11 +554,12 @@ def prompt_install_failures(image: str, instance: str) -> None:
     )
 
 
-def effort_args(conf: dict[str, str], claude_args: list[str]) -> list[str]:
-    """CLI args pinning the session's effort to the conf's
-    CLAUDE_CODE_EFFORT_LEVEL (e.g. ["--effort", "max"]), or [] when the conf
-    doesn't set a level or the user passed their own --effort through
-    (theirs wins — both the `--effort max` and `--effort=max` forms count).
+def effort_args(effort: str | None, claude_args: list[str]) -> list[str]:
+    """CLI args pinning the session's effort to the instance's effort word
+    (`Instance.effort` — its AI's word for its engine's step, e.g.
+    ["--effort", "max"]), or [] when there is no effort or the user passed
+    their own --effort through (theirs wins — both the `--effort max` and
+    `--effort=max` forms count).
 
     Why a CLI flag when the same value already ships as a -e env var: on
     newly-launched models (Opus 4.7/4.8, Fable 5) Claude Code pins a fresh
@@ -568,10 +569,10 @@ def effort_args(conf: dict[str, str], claude_args: list[str]) -> list[str]:
     argv for --effort as the user's confirmation. Passing the documented
     flag is the supported way to declare the level so the session both runs
     at it and reports it."""
-    effort = conf.get("CLAUDE_CODE_EFFORT_LEVEL")
-    if not effort or any(a == "--effort" or a.startswith("--effort=") for a in claude_args):
+    harness = active_harness()
+    if not effort or any(a == harness.effort_flag or a.startswith(f"{harness.effort_flag}=") for a in claude_args):
         return []
-    return ["--effort", effort]
+    return [harness.effort_flag, effort]
 
 
 def run_cluster_container(session: str, image: str,
@@ -662,9 +663,10 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     # generated startup script instead of claude's own argv. Assembled here
     # because this is where that argv is known, and only for an interactive
     # launch — quickie's print mode has no terminal to split.
+    harness = active_harness()
     agent_argv = (
-        ["claude"]
-        + effort_args(inst.conf, claude_args)
+        [harness.binary]
+        + effort_args(inst.effort, claude_args)
         + resume_flag
         + list(inst.claude_args)
         + claude_args
@@ -687,7 +689,7 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     elif entry_flags:
         command = inner_links + agent_argv
     else:
-        command = agent_argv[1:]        # `claude` comes from the image ENTRYPOINT
+        command = agent_argv[1:]        # the binary comes from the image ENTRYPOINT
 
     # Spawn the updater BEFORE docker_subprocess (which blocks for the
     # container's lifetime). No-op for non-{firewall} launches.
@@ -701,7 +703,7 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
         + conf_env_args(inst.conf)         # -e flags setting each engine-conf key=value in the container
         + env_forward_flags(contributions)  # tag-conditional -e flags (WHITELIST_ADDRESSES)
         + [image]
-        + (["-p", print_prompt] if print_prompt is not None else [])   # one-shot print mode (quickie)
+        + ([harness.print_flag, print_prompt] if print_prompt is not None else [])   # one-shot print mode (quickie)
         + command                          # see the chain assembly above
     )
     if stream_renderer is not None:

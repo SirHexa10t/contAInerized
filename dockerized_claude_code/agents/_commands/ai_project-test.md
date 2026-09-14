@@ -41,23 +41,23 @@ for tool in ruff mypy; do
     fi
 done
 
-# Python runtime deps (prompt_toolkit, python-dotenv, rich) — needed by the
+# Python runtime deps (prompt_toolkit, rich) — needed by the
 # suite's run/picker tests and the dry-run step.
 # `pip3 --user --break-system-packages` is the cheap path: doesn't need root, and the
 # --break-system-packages flag bypasses PEP 668's externally-managed marker on Debian/Ubuntu
 # (no-op everywhere else). `uv pip install` without a venv refuses outright, so we don't try it.
 # install_dependencies.sh is the canonical path (creates ~/pydev venv); fall through to that
 # hint if pip3 isn't available either.
-if python3 -c "import prompt_toolkit, dotenv, rich" 2>/dev/null; then
-    echo "✓ Python runtime deps (prompt_toolkit, python-dotenv, rich)"
+if python3 -c "import prompt_toolkit, rich" 2>/dev/null; then
+    echo "✓ Python runtime deps (prompt_toolkit, rich)"
 else
     echo "✗ Python runtime deps MISSING — installing..."
     if command -v pip3 >/dev/null 2>&1; then
-        pip3 install --user --break-system-packages prompt_toolkit python-dotenv rich 2>&1 | tail -3 | sed 's/^/    /'
+        pip3 install --user --break-system-packages prompt_toolkit rich 2>&1 | tail -3 | sed 's/^/    /'
     else
         echo "    pip3 not in PATH — run 'install_dependencies.sh' from the project root to set up the ~/pydev venv."
     fi
-    python3 -c "import prompt_toolkit, dotenv, rich" 2>/dev/null && echo "  ✓ runtime deps now available" || echo "  ✗ runtime deps still missing"
+    python3 -c "import prompt_toolkit, rich" 2>/dev/null && echo "  ✓ runtime deps now available" || echo "  ✗ runtime deps still missing"
 fi
 ```
 

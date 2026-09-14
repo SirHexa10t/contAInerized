@@ -21,9 +21,9 @@ from typing import Callable, cast, overload
 
 from ..paths import toolkit_profile_path, ui_profile_path
 from ..tags import (
-    AgentBuild, Engine, Policy, Profession, Registry, Specialty, Tag,
-    ToolkitEntry,
+    AgentBuild, Ai, Engine, Policy, Profession, Registry, Specialty, Tag, ToolkitEntry,
 )
+from ..tags.ai import sorted_ais
 from ..tags.engine import sorted_engines
 from ..tags.toolkit_profile import load_profile, save_profile
 from ..tags.ui_profile import load_ui_form, load_ui_profile, save_ui_profile
@@ -32,7 +32,7 @@ from .form_core import (
 )
 from .styles import STYLE_UNDERLINE, UiClass, tag_style
 
-def _tag_row(tag: Tag, checked: bool, group: str | None = None) -> FormOption:
+def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None = None) -> FormOption:
     """One selectable form row: colored kind-punctuated label + the tag's
     short description, a dim `(requires: …)` parenthetical when it has
     prerequisites, and the full description as the focused-row body — led by
@@ -47,6 +47,8 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None) -> FormOption:
     always_on = getattr(tag, "always_on", False)
     label: list[tuple[str, str]] = [(tag_style(tag), tag.label), ("", " ")]
     label.append(("", tag.short_description))
+    if isinstance(tag, Engine) and ai is not None and tag.budget.standard:
+        label.append((UiClass.STATUS.css, f"  {ai.tier(tag.budget.standard).model}"))   # the engine's words in tag.info; the model is the AI's tier for its standard
     if always_on:
         label.append((UiClass.STATUS.css, "  (always-on)"))
     if tag.requires:
@@ -65,16 +67,17 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *,
                       engines: bool = True,
                       locked: frozenset[str] = frozenset(),
                       ) -> list[FormOption]:
-    """The full sectioned form: one header per kind (its nutshell), engines
-    as a radio group at the top (pre-dotted from `current.engine` — the
+    """The full sectioned form: one header per kind (its nutshell), the AI
+    as a radio group at the very top (pre-dotted from `current.ai`, else the
+    tree's default member), engines as a radio group beneath it (pre-dotted from `current.engine` — the
     caller passes the RESOLVED engine, so the dot shows what would actually
     run), then professions / specialties / policies as checkboxes pre-checked
     from `current`'s axis lists. Policies are ordered by shortname WITH its
     leading symbol (`!` < `+` < `-` in ASCII), so same-stance policies sit
     together: demands, then grants, then denials.
 
-    `engines=False` drops that whole section — the CLUSTER-level form, where
-    per-member thinking budgets have no meaning. `locked` names tags that
+    `engines=False` drops the AI and engine sections — the CLUSTER-level form,
+    where per-member choices (which AI, how hard it thinks) have no meaning. `locked` names tags that
     render checked-and-inert (the treatment an `always_on` policy gets):
     the cluster form locks {mux}/{clstr}, and a MEMBER's form locks whatever
     its cluster already imposes, so a member can see what applies to it
@@ -90,8 +93,16 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *,
 
     out: list[FormOption] = []
     if engines:
+        # The AI leads: it decides which model each engine's standard below means,
+        # and like the engine it is per member — the cluster form omits both.
+        # Pre-dotted from the build's ai, else the tree's default member.
+        effective_ai = registry.ai_for(current)
+        if registry.ais:
+            out.append(header(Ai))
+            out += [_tag_row(tag, checked=(effective_ai is not None and tag.name == effective_ai.name), group="ai")
+                    for tag in sorted_ais(registry.ais.values())]
         out.append(header(Engine))
-        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
+        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine", ai=effective_ai)
                 for tag in sorted_engines(registry.engines.values())]
     for kind_cls, members in ((Profession, list(registry.professions.values())),
                               (Specialty, list(registry.specialties.values())),
@@ -111,8 +122,8 @@ def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
     (operator request, 2026-09-02: set `{cc}` once for the cluster instead of
     once per member). Returns the cluster's tag set, or None on Esc.
 
-    Three differences from the instance form, all deliberate: no ENGINE
-    section (a thinking budget is per member), `locked` rows for the tags
+    Three differences from the instance form, all deliberate: no AI and no
+    ENGINE section (which AI runs and how hard it thinks are per member), `locked` rows for the tags
     that make a cluster a cluster ({mux}/{clstr} — checked and inert, the
     `always_on` treatment), and a preamble that says plainly what the
     selection does, because "these tags are forced on every member" is not
@@ -233,6 +244,7 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
     # Always-on (static) tags come back checked — they're locked rows — but
     # are never part of the build: applied unconditionally, never persisted.
     build = AgentBuild(
+        ai=next((n for n in registry.ais if n in picked), current.ai),
         engine=next((n for n in registry.engines if n in picked), current.engine),
         professions=tuple(n for n in registry.professions if n in picked),
         specialties=tuple(n for n in registry.specialties if n in picked),

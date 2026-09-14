@@ -1,0 +1,63 @@
+# Gemini's TIER for every capability standard — the same keys as every
+# agents/ai/*/efforts.tiers; agents/ai/capability.standards says what the
+# standards are and how a tier is chosen (the cheapest live, rated
+# configuration that meets the standard, else the AI's best, flagged). Index
+# v4.3 (est. = AA's estimate) and prices in USD per 1M tokens in / out, read
+# 2026-09-14 from an AA model page's embedded records.
+#
+# Gemini 3 thinks by LEVEL (thinkingLevel MINIMAL / LOW / MEDIUM / HIGH; the
+# knobs mapping sets it on the `launcher` alias); Gemini 2.5 by token budget —
+# no tier uses a 2.5 model. "Live" means ai.google.dev's model page lists the
+# id, which it does for every id below (AA marks 3.5 Flash and 3.1 Flash-Lite
+# superseded by 3.6 Flash and 3.5 Flash-Lite, not withdrawn). Only `cheapest`
+# is an id the CLI's own model tables know (its `flash-lite` tier); every other
+# tier is pinned under the verbatim-request assumption recorded in
+# plans/adding_an_ai.md — the CLI's resolution table has no rule for an unknown
+# id, so it is assumed to request it as written. Gemini's ceiling is 3.8 Flash
+# at 41.19, so 2026Q2 and 2026Q3 fall short.
+
+[scale]
+efforts = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+
+[cheapest]                       # unrated at MINIMAL (16.03 at HIGH) · 0.25 / 1.5 — Google's cheapest listed model at its lowest level; the CLI's own `flash-lite` tier
+model  = "gemini-3.1-flash-lite"
+effort = "MINIMAL"
+
+[2025Q1]                         # 22.66 · 0.3 / 2.5 — 3.1 Flash-Lite at HIGH (16.03) misses 17.71; 3.5 Flash-Lite at HIGH is the cheapest rated tier that meets it
+model  = "gemini-3.5-flash-lite"
+effort = "HIGH"
+
+[2025Q2]                         # 22.66 · 0.3 / 2.5 — meets 21.87
+model  = "gemini-3.5-flash-lite"
+effort = "HIGH"
+
+[2025Q3]                         # 33.79 · 0.75 / 3.75 — the 3.6 / 3.7 / 3.8 Flash tiers share a price; 3.8 at LOW is the lowest index meeting 24.88
+model  = "gemini-3.8-flash"
+effort = "LOW"
+
+[2025Q4]                         # 33.79 · 0.75 / 3.75 — meets 30.45
+model  = "gemini-3.8-flash"
+effort = "LOW"
+
+[2026Q1]                         # 39.43 · 0.75 / 3.75 — the lowest measured index above 38.98 at that price (3.7 Flash MEDIUM 39.62 is an estimate; 3.8 Flash MEDIUM 40.00)
+model  = "gemini-3.7-flash"
+effort = "HIGH"
+
+[2026Q2]                         # FALLS SHORT of 49.70: Gemini's best, 41.19
+model  = "gemini-3.8-flash"
+effort = "HIGH"
+
+[2026Q3]                         # FALLS SHORT of 53.37: Gemini's best
+model  = "gemini-3.8-flash"
+effort = "HIGH"
+
+[best]                           # 41.19 · 0.75 / 3.75 — the strongest Gemini
+model  = "gemini-3.8-flash"
+effort = "HIGH"
+
+# Also rated: 3.8 Flash medium 40.00; 3.7 Flash medium 39.62 est. / low 36.95
+# est.; 3.6 Flash 34.34; 3.5 Flash high 32.98 / medium 33.63 est. / minimal
+# 23.85 est. (1.5 / 9 — dearer than the 3.6–3.8 Flash line, so no tier);
+# 3.1 Pro Preview 30.36 (2 / 12) — left out because the CLI
+# re-resolves it to 2.5 Pro (16.66) without preview access; gemini-3-pro-preview
+# was SHUT DOWN 2026-03-09 and is still the CLI's `pro` / `auto` target.

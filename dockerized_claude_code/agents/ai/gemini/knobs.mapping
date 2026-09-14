@@ -1,0 +1,55 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Gemini CLI's own
+# settings (shape and rules: ai/claude/knobs.mapping). UPPER_CASE keys are
+# environment variables Gemini CLI reads; dotted keys are settings.json paths
+# (user file under GEMINI_CLI_HOME; string values may interpolate `${VAR}`), so
+# a Gemini adapter renders them into that file — nothing does yet. Sources, all
+# read 2026-09-10: geminicli.com/docs/reference/configuration/ [G1],
+# .../cli/generation-settings/ [G3], the settings schema
+# github.com/google-gemini/gemini-cli/blob/main/schemas/settings.schema.json
+# [G4], ai.google.dev/gemini-api/docs/tokens [G10].
+
+[model]                                    # ↔ the tier's model id; the CLI resolves even an explicit id through modelIdResolutions (plans/adding_an_ai.md)
+GEMINI_MODEL = "{value}"
+
+[effort]                                   # ↔ the tier's thinkingLevel word (Gemini 3: MINIMAL / LOW / MEDIUM / HIGH [G4]); set on the `launcher` alias that extends the Gemini 3 preset
+"modelConfigs.customAliases.launcher.extends" = "chat-base-3"
+"modelConfigs.customAliases.launcher.modelConfig.generateContentConfig.thinkingConfig.thinkingLevel" = "{value}"
+
+[thinking.on]                              # thinking itself is always on for Gemini 3; this SHOWS it (default off) [G1]
+"ui.inlineThinkingMode" = "full"
+
+[thinking.off]                             # the nearest to "no thinking": hide it; the level (MINIMAL) is the tier's
+"ui.inlineThinkingMode" = "off"
+
+[memory.on]                                # background memory extraction, patches held for review in /memory inbox (experimental; default false) [G4]
+"experimental.autoMemory" = "true"
+
+[memory.off]
+"experimental.autoMemory" = "false"
+
+[background_agents.off]                    # a deliberate over-approximation of Claude's background-task / cron switches: subagents off (default true) [G4]; scheduled tasks: none
+"experimental.enableAgents" = "false"
+
+[telemetry.off]                            # opposite polarity to Claude's switch [G1][G4]
+GEMINI_TELEMETRY_ENABLED = "false"
+"privacy.usageStatisticsEnabled" = "false"
+
+# tool_search — NOT FOUND: no tool-discovery switch; mcp.allowed / mcp.excluded pick servers [G1]
+
+[max_output_tokens]                        # per alias [G3][G4]; the models cap at 65,536
+"modelConfigs.customAliases.launcher.modelConfig.generateContentConfig.maxOutputTokens" = "{value}"
+
+[tool_output_tokens]                       # Gemini's cap is in CHARACTERS for every tool (default 40000; "about 4 characters" per token [G10]) — plus the token-denominated distillation clips behind experimental.contextManagement, raised in step
+"tools.truncateToolOutputThreshold" = "{value*4}"
+"contextManagement.tools.distillation.maxOutputTokens" = "{value}"
+"contextManagement.tools.distillation.summarizationThresholdTokens" = "{value}"
+
+[compact_at_percent]                       # a FRACTION of the context window here (default 0.5) [G4]
+"model.compressionThreshold" = "{value/100}"
+
+# Reference, not budget (kept from the former default/gemini.conf): GEMINI_CLI_HOME (config root),
+# GEMINI.md / context.fileName (persona), GEMINI_SYSTEM_MD (replaces the system prompt),
+# general.defaultApprovalMode and tools.* (policy seam), hooks.AfterAgent ≈ Stop /
+# hooks.BeforeAgent ≈ UserPromptSubmit, `gemini -p` + `-o stream-json` (headless), auth
+# GEMINI_API_KEY / GOOGLE_API_KEY / GOOGLE_APPLICATION_CREDENTIALS, model.maxSessionTurns,
+# modelConfigs.overrides[].match.overrideScope (per-subagent model).

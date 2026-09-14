@@ -1,0 +1,9 @@
+shortname         = "Claude"
+fullname          = "Anthropic Claude"
+short_description = "careful, human-like reasoning and writing; strong at coding and long documents"
+full_description  = "Anthropic's Claude line (Fable, Opus, Sonnet, Haiku). Known for careful, nuanced reasoning in a natural, human-like voice, for coding and multi-step agent work, and for holding long documents in context; built with safety as a design goal."
+vendor            = "Anthropic"
+harness           = "Claude Code"      # the agent CLI bundled with this AI (launch/ai/claude_code.py is its adapter)
+default           = true               # the AI an instance runs when its build names none (exactly one member may say so)
+fg                = "#ff8700"          # the ⟪Claude⟫ tag: orange on near-black gray, after the logo (darkened from #3a3a3a, operator 2026-09-14)
+bg                = "#262626"

@@ -1,0 +1,43 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Codex's own
+# settings (shape and rules: ai/claude/knobs.mapping). Every key is a
+# config.toml key (dotted = nested table), also settable per launch as
+# `codex -c key=value`; Codex reads no budget from the environment. Sources,
+# read 2026-09-10: learn.chatgpt.com/docs/config-file/config-reference [C1],
+# .../models [C4], platform.openai.com/docs/models/<slug> [C8].
+
+[model]                                    # ↔ the tier's slug [C4]
+model = "{value}"
+
+[effort]                                   # ↔ the tier's effort: minimal / low / medium / high / xhigh [C1] (`max`: a probe)
+model_reasoning_effort = "{value}"
+
+[thinking.on]                              # reasoning is inherent; this sets what of it is shown [C1]
+model_reasoning_summary = "detailed"
+
+[thinking.off]
+model_reasoning_summary = "none"
+
+[memory.on]                                # Memories (off by default) [C1]; memories.use_memories / generate_memories default true
+"features.memories" = "true"
+
+[memory.off]
+"features.memories" = "false"
+
+[background_agents.off]                    # a deliberate over-approximation of Claude's background-task / cron switches: the multi-agent tools off (default true) [C1]
+"agents.enabled" = "false"
+
+# telemetry — NOT FOUND: no telemetry switch in the reference (diagnostics only: RUST_LOG, log_dir) [C1][C2]
+# tool_search — NOT FOUND: mcp_servers.<id>.enabled_tools picks tools; tool_suggest.* is about connectors [C1]
+# max_output_tokens — NOT FOUND: no output-token cap in the configuration surface (the models cap at 128,000) [C1][C8]
+
+[tool_output_tokens]                       # one token budget for storing any tool output in history [C1]
+tool_output_token_limit = "{value}"
+
+# compact_at_percent — not mappable: model_auto_compact_token_limit is an ABSOLUTE token count, and the window Codex runs
+#   with under ChatGPT sign-in is unconfirmed (plans/adding_an_ai.md, probes); unset, Codex "uses model defaults" [C1]
+
+# Reference, not budget (kept from the former default/chatgpt.conf): CODEX_HOME (config root, CODEX_SQLITE_HOME),
+# AGENTS.md / AGENTS.override.md (persona, project_doc_max_bytes 32 KiB), model_instructions_file /
+# developer_instructions, approval_policy / sandbox_mode / default_permissions (policy seam), hooks.<Event>
+# with Claude's names (Stop, UserPromptSubmit …), `codex exec` + `--json` (headless), CODEX_API_KEY /
+# CODEX_ACCESS_TOKEN / OPENAI_API_KEY (auth), agents.default_subagent_model / max_concurrent_threads_per_session.

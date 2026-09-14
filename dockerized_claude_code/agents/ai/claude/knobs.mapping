@@ -1,0 +1,54 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Claude Code's own
+# settings. Each table is one purpose; its rows are the native key(s) and the
+# value to set. `{value}` is the budget's number or the tier's word; a purpose
+# with on/off sub-tables takes the budget's boolean. A purpose absent from this
+# file is one this AI cannot express — the launcher records it as unmapped,
+# never invents a key. Every key below is a Claude Code environment variable
+# (docs.claude.com → Claude Code → Settings → Environment variables), forwarded
+# as `-e KEY=VALUE`. Written 2026-09-13 from the former claude.conf files; the
+# reference notes they carried are kept here, beside the keys they explain.
+
+[model]                                    # ↔ the tier's model id (efforts.tiers)
+ANTHROPIC_MODEL = "{value}"
+
+[effort]                                   # ↔ the tier's effort word: low / medium / high / max — also passed as `--effort` (docker_config.effort_args says why both)
+CLAUDE_CODE_EFFORT_LEVEL = "{value}"
+
+[thinking.on]
+CLAUDE_CODE_ENABLE_THINKING = "1"
+
+[thinking.off]                             # golem: no extended thinking at all
+CLAUDE_CODE_ENABLE_THINKING = "0"
+MAX_THINKING_TOKENS = "0"
+
+[memory.on]                                # poet: explicitly keep auto-memory on, so it learns which references land
+CLAUDE_CODE_DISABLE_AUTO_MEMORY = "0"
+
+[memory.off]                               # golem: no memory, and no prompt caching to warm
+CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"
+DISABLE_PROMPT_CACHING = "1"
+
+[background_agents.off]                    # golem's "no background subagents": background tasks and scheduled runs off
+CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"
+CLAUDE_CODE_DISABLE_CRON = "1"
+
+[telemetry.off]                            # golem: no nonessential traffic (telemetry, update checks)
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+
+[tool_search.on]                           # researcher / breakthrough / poet: surface specialized tools when relevant
+ENABLE_TOOL_SEARCH = "true"
+
+[max_output_tokens]                        # Claude Code's default is 32000 (max 64000) when unset
+CLAUDE_CODE_MAX_OUTPUT_TOKENS = "{value}"
+
+[tool_output_tokens]                       # one budget word, two Claude caps: full reads of large files, and verbose MCP / library output
+CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = "{value}"
+MAX_MCP_OUTPUT_TOKENS = "{value}"
+
+[compact_at_percent]                       # compact the context at this percentage of the window (Claude's own default is higher; lower it for many-tool-call sessions)
+CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "{value}"
+
+# Not budget words, kept as reference from the former default/claude.conf:
+#   CLAUDE_CODE_SUBAGENT_MODEL, CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS — subagent controls (probed 2026-09; plans/ISSUES.md)
+#   CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING — Anthropic's switch for adaptive reasoning on the 4.6 models
+#   CLAUDE_CONFIG_DIR — the config root (the harness adapter's `config_dir_env`, not a budget)

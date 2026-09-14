@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
+from ..ai import DEFAULT_AI_KEY, harness_for, refusal_for
 from ..agents_crud import (
     compute_resume_flag, install_commands, install_latest_md, install_settings,
 )
@@ -120,6 +121,11 @@ def refusal(pairs: list[tuple[Member, Instance]]) -> str | None:
     entrypoint (the solo startup script) is the one exemption: this launch
     replaces it with the cluster-shaped script."""
     from . import solo
+    # A member on an AI without a harness adapter cannot run — same rule and
+    # message as a solo instance, named per member.
+    for member, inst in pairs:
+        if inst.ai is not None and (refused := refusal_for(inst.ai.name, inst.ai.label)) is not None:
+            return f"member {member.id!r}:\n{refused}"
     offending: list[str] = []
     for member, inst in pairs:
         for contribution in inst.docker_contributions:
@@ -238,11 +244,13 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
         install_commands(inst)
         config = container_member_dir(cluster.session, member.id)
         # The engine conf rides the WINDOW env — the per-pane `-e` property
-        # that chose tmux — so two members genuinely run different models.
+        # that chose tmux — so two members genuinely run different models. The
+        # harness is the MEMBER's AI's (refusal() has made sure it has one).
+        harness = harness_for(inst.ai.name) if inst.ai else harness_for(DEFAULT_AI_KEY)
         env_for[member.id] = {
             **inst.conf,
-            "CLAUDE_CONFIG_DIR": str(config),
-            "CLAUDE_CODE_SESSION_NAME": member.id,
+            harness.config_dir_env: str(config),
+            **({harness.session_name_env: member.id} if harness.session_name_env else {}),
             # The bottom status line — member id, project, user, cluster,
             # tags. Per-member and so per-TAB env: container-wide it could
             # only carry one member's line, which is why members had a blank
@@ -252,8 +260,8 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
                 build_cluster_status_line(inst, member.id),
         }
         command_for[member.id] = (
-            "claude",
-            *effort_args(inst.conf, []),
+            harness.binary,
+            *effort_args(inst.effort, []),
             *compute_resume_flag(inst),
             *inst.claude_args,
         )
@@ -262,13 +270,13 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
         # launcher places credentials host-side — the same trust shape as solo
         # instances, and the reason no agent ever needs to copy a credential.
         member_dir = cluster_member_dir(cluster.session, member.id)
-        mounts.append((str(CREDENTIALS_FILE), f"{config}/.credentials.json"))
-        mounts.append((str(ACCOUNT_FILE), f"{config}/.claude.json"))
+        mounts.append((str(CREDENTIALS_FILE), f"{config}/{harness.credentials_filename}"))
+        mounts.append((str(ACCOUNT_FILE), f"{config}/{harness.account_filename}"))
         # The merged settings mount READ-ONLY over their rw view through the
         # /cluster mount — same shadowing trick as solo, same reason: a member
         # must not be able to relax its own policies.
         mounts.append((str(state_settings_path(member_dir)),
-                       f"{config}/settings.json:{RO_MOUNT_OPTION}"))
+                       f"{config}/{harness.settings_filename}:{RO_MOUNT_OPTION}"))
         needs_caches = needs_caches or any(
             p.name == "code" for p in inst.professions)
 

@@ -21,6 +21,7 @@ docker_config calls in from set_container_env (status line) and
 run_container (terminal title); run.py prints the banner; nothing else
 does."""
 
+from .ai import active_harness
 from .file_access import home_dir, read_json_field, user_firewall_whitelist_lines
 from .paths import ACCOUNT_FILE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
 from .tags import Instance, PolicyStance, Tag
@@ -134,10 +135,11 @@ def build_cluster_status_line(inst: Instance, member_id: str) -> str:
 
 def set_terminal_title(name: str) -> None:
     """Send an OSC 0 escape so the terminal emulator's window/tab title
-    becomes `Claude Code — <name>`. Helps the user tell concurrent agent
-    tabs apart. Called by docker_config.run_container just before exec'ing
-    the container."""
-    print(f"\033]0;Claude Code — {name}\007", end="", flush=True)
+    becomes `<CLI> — <name>` (`Claude Code — golem__s1`; the CLI's name is
+    the catalog's, so another AI titles its own tabs). Helps the user tell
+    concurrent agent tabs apart. Called by docker_config.run_container just
+    before exec'ing the container."""
+    print(f"\033]0;{active_harness().name} — {name}\007", end="", flush=True)
 
 
 def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
@@ -151,7 +153,8 @@ def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
     kind punctuation comes from each tag's `.label`."""
     print(f"  Agent definition: {inst.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
     if inst.engine:
-        print(f"  Engine:           {inst.engine.label} — {inst.engine.path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+        model = inst.model
+        print(f"  Engine:           {inst.engine.label}{f' {model}' if model else ''} — {inst.engine.path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
     if inst.professions:
         print(f"  Professions:      {' '.join(p.label for p in inst.professions)}")
     if inst.specialties:

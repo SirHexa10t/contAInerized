@@ -29,6 +29,7 @@ from ..transcripts import (
 )
 from ..paths import INBOX_SEPARATOR, instance_state_dir_path, state_md_path
 from .base import DockerContribution, Tag
+from .ai import Ai, Rendering
 from .engine import Engine
 from .lego import AgentBuild
 from .policy import Policy
@@ -223,6 +224,7 @@ class Instance:
     professions: tuple[Profession, ...] = ()
     specialties: tuple[Specialty, ...] = ()
     policies: tuple[Policy, ...] = ()
+    ai: Ai | None = None                        # the AI this instance runs on (resolved: its build's, else the tree's default); None only in fixture trees without an ai/ shelf
     invalid_tags: tuple[TagProblem, ...] = ()   # store names that no longer resolve (see resolve_store_build); block start, flagged in the picker
     state_dir_override: Path | None = None      # when set, the state dir lives HERE instead of under instances/ — quickie parks its throwaway threads under quickie/ (default None = the normal instances/ home)
 
@@ -260,6 +262,7 @@ class Instance:
         """The instance's axis selections as name strings — what the store
         persists and the form pre-checks (inverse of resolve_build)."""
         return AgentBuild(
+            ai=self.ai.name if self.ai else None,
             engine=self.engine.name if self.engine else None,
             professions=tuple(p.name for p in self.professions),
             specialties=tuple(s.name for s in self.specialties),
@@ -311,9 +314,28 @@ class Instance:
                 if wanted not in active]
 
     @property
+    def rendering(self) -> "Rendering | None":
+        """The engine's budget in this instance's AI's settings — None when
+        either side is missing (a fixture tree)."""
+        return self.ai.render(self.engine.budget) if self.engine and self.ai else None
+
+    @property
     def conf(self) -> dict[str, str]:
-        """The engine's effective env conf (`-e KEY=VALUE` source + effort)."""
-        return self.engine.conf_map if self.engine else {}
+        """The instance's native settings (`-e KEY=VALUE` source for Claude
+        Code): its engine's budget rendered by its AI."""
+        rendering = self.rendering
+        return rendering.map if rendering else {}
+
+    @property
+    def model(self) -> str:
+        """The model id the instance's AI runs for its engine's standard, or ""."""
+        return self.ai.tier(self.engine.budget.standard).model if self.engine and self.ai and self.engine.budget.standard else ""
+
+    @property
+    def effort(self) -> str | None:
+        """The effort word the instance's AI uses for its engine's standard (the
+        `--effort` flag's value on Claude Code), or None."""
+        return self.ai.tier(self.engine.budget.standard).effort if self.engine and self.ai and self.engine.budget.standard else None
 
     @property
     def is_muxer(self) -> bool:
@@ -403,6 +425,7 @@ def resolve_build(build: AgentBuild, agent: str, registry: Registry) -> dict:
     the caller has validated away upstream."""
     engine = registry.engines.get(effective_engine_name(build, agent, registry))
     return {
+        "ai": registry.ai_for(build),
         "engine": engine,
         "professions": tuple(registry.professions[n] for n in build.professions),
         "specialties": tuple(registry.specialties[n] for n in build.specialties),

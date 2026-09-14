@@ -78,7 +78,7 @@ from .member import ClusterError, Member, split_member_id, valid_label
 _FILE_HEADER = (
     "# Cluster state — one table per member, keyed by <agent>__<role>.\n"
     "# Launcher-owned: rewritten whenever the cluster is created or modified.\n"
-    "# Member tables carry the same four tag axes as instances.toml; the agent\n"
+    "# Member tables carry the same tag axes as instances.toml; the agent\n"
     "# and role are read back out of the table name, not stored twice.\n"
 )
 _AXES = ("professions", "specialties", "policies")
@@ -118,9 +118,9 @@ class Cluster:
         # per-member choice, and the cluster form omits that section.
         missing = tuple(name for name in LOCKED_SPECIALTIES
                         if name not in self.tags.specialties)
-        if missing or self.tags.engine is not None:
+        if missing or self.tags.engine is not None or self.tags.ai is not None:
             object.__setattr__(self, "tags", replace(
-                self.tags, engine=None,
+                self.tags, engine=None, ai=None,
                 specialties=tuple(self.tags.specialties) + missing))
         if not self.members:
             raise ClusterError(
@@ -187,6 +187,7 @@ class Cluster:
         """`build` minus everything the CLUSTER already carries — what a
         member's own table stores. The inverse of `member_build`."""
         return AgentBuild(
+            ai=build.ai,
             engine=build.engine,
             professions=tuple(n for n in build.professions
                               if n not in self.tags.professions),
@@ -203,6 +204,7 @@ class Cluster:
         def union(shared: tuple[str, ...], own: tuple[str, ...]) -> tuple[str, ...]:
             return tuple(shared) + tuple(n for n in own if n not in shared)
         return AgentBuild(
+            ai=member.build.ai,
             engine=member.build.engine,
             professions=union(self.tags.professions, member.build.professions),
             specialties=union(self.tags.specialties, member.build.specialties),
@@ -283,8 +285,9 @@ def dumps(cluster: Cluster) -> str:
         # up top, not repeated N times.
         entry = build_entry(cluster.own_build(member.build), workspace=None)
         table = [f"[{toml_emit.key(member.id)}]"]
-        if entry.get("engine") is not None:
-            table.append(f"engine = {toml_emit.string(entry['engine'])}")
+        for scalar in ("ai", "engine"):
+            if entry.get(scalar) is not None:
+                table.append(f"{scalar} = {toml_emit.string(entry[scalar])}")
         for axis in _AXES:
             table.append(toml_emit.string_list(axis, entry.get(axis, [])))
         blocks.append("\n".join(table) + "\n")

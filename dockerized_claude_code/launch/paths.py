@@ -12,6 +12,8 @@ listing is file-access work, not a path constant."""
 
 import os
 from pathlib import Path
+
+from .ai.claude_code import CLAUDE_CODE as _HARNESS   # the ONE in-project import of this leaf: the harness's file and dir names (see the config-root block)
 from typing import Callable, Iterator
 
 
@@ -27,8 +29,7 @@ from typing import Callable, Iterator
 
 DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root — one above launch/
 AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .lego + kind subtrees (engine/ profession/ specialty/ policy/)
-ENGINE_DIR = AGENTS_DIR / "engine"                                # engine tags — engine/<name>/{tag.info, engine.conf}
-DEFAULT_CONF = ENGINE_DIR / "default" / "engine.conf"             # fallback engine conf when an agent names none
+ENGINE_DIR = AGENTS_DIR / "engine"                                # engine tags — engine/<name>/{tag.info, <ai>.conf}: one budget file per supported AI, named by launch/ai/catalog.py (this leaf does not know which AI runs; the scan in tags/engine.py does)
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
 BASE_SETTINGS_FILE = SETTINGS_DIR / "settings.json"                # shared Claude Code settings base — merged with each instance's policy fragments into <state>/settings.json (agents_crud.install_settings); NOT mounted directly
 SHARED_COMMANDS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_commands"   # slash commands EVERY instance gets; assembled into state_commands_dir per launch
@@ -50,8 +51,8 @@ FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"  
 
 _HOME = Path.home()
 AGENTS_STATE = _HOME / ".claude-agents"
-ACCOUNT_FILE = AGENTS_STATE / ".claude.json"                       # shared OAuth account info
-CREDENTIALS_FILE = AGENTS_STATE / ".credentials.json"             # shared API credentials
+ACCOUNT_FILE = AGENTS_STATE / _HARNESS.account_filename            # shared OAuth account info (the harness's filename)
+CREDENTIALS_FILE = AGENTS_STATE / _HARNESS.credentials_filename    # shared API credentials (the harness's filename)
 INSTANCES_FILE = AGENTS_STATE / "instances.toml"                 # per-instance axis store — one table per instance id: {workspace, engine, professions[], specialties[], policies[]} (tags/store.py; retired-format conversions live in tags/migrations.py)
 CACHE_ROOT = AGENTS_STATE / "cache"
 
@@ -140,8 +141,12 @@ if not Path(DEFAULT_WORKSPACE).is_dir():
 # uses; others (z/Z, cached/delegated, propagation) would join here.
 
 CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
-CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / ".claude"
-SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "skills"
+# The config root and the files under it take the HARNESS's names from its
+# adapter record (launch/ai/claude_code.py) — one definition. Bound here at
+# import, so these constants are Claude-bound until the switch turns them into
+# functions of `active_harness()` (plans/adding_an_ai.md, order of work step 2).
+CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / _HARNESS.config_dir_name
+SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / _HARNESS.skills_dirname
 # The operator's tmux overrides (settings/tmux.conf) inside the container. The
 # generated muxer startup script sources this LAST — after the launcher's own
 # options — so a user's line wins over any default. Landmark rather than a
@@ -215,8 +220,8 @@ INIT_FIREWALL_SH = AGENTS_DIR / "specialty" / "firewall" / "init-firewall.sh"   
 
 DOCKER_BASE_MOUNTS = {
     # Per-instance state files (these source constants serve other modules too — audit, agents_crud)
-    ACCOUNT_FILE:                               f"{CLAUDE_HOME_IN_CONTAINER}/.claude.json",                         # shared OAuth account info
-    CREDENTIALS_FILE:                           f"{CLAUDE_CONFIG_IN_CONTAINER}/.credentials.json",                  # shared API credentials — Claude Code refreshes the token in place
+    ACCOUNT_FILE:                               f"{CLAUDE_HOME_IN_CONTAINER}/{_HARNESS.account_filename}",           # shared OAuth account info
+    CREDENTIALS_FILE:                           f"{CLAUDE_CONFIG_IN_CONTAINER}/{_HARNESS.credentials_filename}",    # shared API credentials — Claude Code refreshes the token in place
     # Project-bundled sources — inlined since DOCKER_BASE_MOUNTS is their only consumer
     # NOTE: custom_commands/ is deliberately NOT here. Commands are assembled per
     # instance (shared + every command the active tags declare) into
@@ -361,21 +366,21 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # FIREWALL_NOTICE addendum points the agent at to classify a `ConnectionRefused`
 # (still resolving / failed / not listed) — accepts any base dir, including
 # CLAUDE_CONFIG_IN_CONTAINER for the in-container view.
-state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / "CLAUDE.md"
-state_settings_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / "settings.json"   # launcher-generated (base settings + policy fragments); RO-mounted over ~/.claude/settings.json
+state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.persona_filename
+state_settings_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.settings_filename   # launcher-generated (base settings + policy fragments); RO-mounted over ~/.claude/settings.json
 # The instance's slash-command dir, ASSEMBLED per launch from the shared
 # custom_commands/ plus every AGENTS_COMMANDS_DIR file the active tags declare,
 # then RO-mounted whole over ~/.claude/commands. It replaces a direct mount of
 # custom_commands/, because docker cannot create a mountpoint for a per-tag file
 # inside a read-only mount — `mount: read-only file system` at container start.
 # One assembled dir, one mount.
-state_commands_dir:      Callable[[Path], Path]        = lambda state_dir: state_dir / "commands"
+state_commands_dir:      Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.commands_dirname
 state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / "domains_pending_resolve.yml"
 # Per-launch input log Claude Code writes directly under the state dir (sibling
 # of `projects/`, not nested with the session transcripts). `last_history_mtime`
 # uses its mtime as the "last launched" signal; audit's `no_history` check
 # treats absence as "instance never started".
-state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / "history.jsonl"
+state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.history_filename
 
 # {cowork} group-hosting builders. `group_hosting_dir` is the root: one subdir per
 # participating instance, each bind-mounted into that instance's container as
@@ -458,7 +463,7 @@ cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: FIREWA
 # `-workspace`). Returns the glob iterator directly; caller filters
 # history.jsonl out and checks per-file size. `Path.glob` on a missing dir
 # yields an empty iterator, so no existence-check needed at the call site.
-state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / "projects" / "-workspace").glob("*.jsonl")
+state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / _HARNESS.transcripts_dirname / "-workspace").glob("*.jsonl")   # "-workspace": Claude Code's cwd slug for /workspace — the transcript LAYOUT is the reader's (a later seam)
 
 # Instances live under ~/.claude-agents/instances/ — their own subdir keeps the
 # AGENTS_STATE root uncluttered (cache/, firewall_cache/, user_extras/, the store

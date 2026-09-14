@@ -50,13 +50,13 @@ _FILE_HEADER = (
 def dumps(mapping: dict[str, dict[str, Any]]) -> str:
     """Serialize the store: header comment, then one key-sorted table per
     instance. Only the shapes this store holds are supported — optional
-    strings (`workspace`, `engine`; omitted when None) and string lists
+    strings (`workspace`, `ai`, `engine`; omitted when None) and string lists
     (the three axes)."""
     blocks = [_FILE_HEADER]
     for instance_id in sorted(mapping):
         entry = mapping[instance_id]
         lines = [f"[{toml_emit.key(instance_id)}]"]
-        for field in ("workspace", "engine"):
+        for field in ("workspace", "ai", "engine"):
             if entry.get(field) is not None:
                 lines.append(f"{field} = {toml_emit.string(entry[field])}")
         for axis in ("professions", "specialties", "policies"):
@@ -87,6 +87,7 @@ def entry_to_build(entry: dict[str, Any]) -> AgentBuild:
     parses to, so the form and resolve paths are shared between fresh creates
     and stored instances)."""
     return AgentBuild(
+        ai=entry.get("ai"),
         engine=entry.get("engine"),
         professions=tuple(entry.get("professions", [])),
         specialties=tuple(entry.get("specialties", [])),
@@ -100,6 +101,7 @@ def build_entry(build: AgentBuild, workspace: str | None) -> dict[str, Any]:
     the file boundary."""
     return {
         "workspace":   workspace,
+        "ai":          build.ai,
         "engine":      build.engine,
         "professions": list(build.professions),
         "specialties": list(build.specialties),

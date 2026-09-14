@@ -8,12 +8,14 @@ widget's business."""
 
 import dataclasses
 import tempfile
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from launch.gui import menu_picker, picker_previews, picker_widget
 from launch.tags import AgentBuild
+from launch.gui.picker_previews import cont_preview, engine_fact
 from launch.tests.fixtures import REGISTRY, make_inst
 
 
@@ -287,6 +289,36 @@ class TestClusterAndMemberPreviews(unittest.TestCase):
         mux_line = next(line for line in text.splitlines() if "{mux}" in line)
         self.assertIn("(cluster-wide)", mux_line)
         self.assertIn("{cc}", text)                      # the member's REAL build, cluster tags included
+
+    def test_a_member_pane_lists_its_ai_first_and_the_cluster_pane_lists_it_per_member(self):
+        ai = REGISTRY.default_ai
+        golem = next(m for m in self._entry().members if m.member.id == "golem")
+        text = _plain_text(golem.preview_quick)
+        tag_lines = text.split("Tags:")[1].splitlines()
+        first = next(line for line in tag_lines if line.strip())
+        self.assertIn(ai.label, first)
+        self.assertNotIn("(cluster-wide)", first)        # its own, not the cluster's
+        # The cluster pane's member lines carry each member's AI too.
+        cluster_text = _plain_text(self._entry().preview)
+        members = cluster_text.split("Members:")[1]
+        self.assertEqual(members.count(ai.label), 2)
+
+    def test_an_instance_pane_lists_its_ai_first(self):
+        inst = make_inst("golem", "a", "/tmp", specialties=["auto"])
+        text = re.sub(r"\s+", " ", _plain_text(cont_preview(inst, "/tmp", "(never)", None)))   # the pane wraps long lines
+        ai = REGISTRY.default_ai
+        self.assertLess(text.index(ai.label), text.index("{auto}"))
+        self.assertIn(ai.fullname, text)
+        self.assertIn(ai.short_description, text)
+
+
+class TestEngineFact(unittest.TestCase):
+    def test_names_the_engine_and_the_model_its_budget_pins(self):
+        inst = make_inst("golem", "a", "/tmp")
+        fact = engine_fact(inst)
+        self.assertTrue(fact.startswith("golem"))
+        self.assertIn(inst.model, fact)
+        self.assertTrue(inst.model)   # the fixture's engine has a step, so the assertion above is not vacuous
 
 
 if __name__ == "__main__":

@@ -25,8 +25,9 @@ isolated Docker container with persistent per-instance state.
   timer runs while it reasons, then the answer streams in as it's generated.
   (The model's own reasoning *text* isn't shown — current models redact it in
   headless mode — so the timer is the progress signal during long thinks.) The
-  default uses the `quick` (Sonnet) engine; **`--explain`** answers with a
-  `trivia` agent that draws out connections and related tidbits (Opus), and
+  default uses the `quick` engine; **`--explain`** answers with a `trivia`
+  agent that draws out connections and related tidbits (on the `reliable`
+  engine), and
   **`--research`** uses a source-checking research agent (mutually exclusive
   with `--explain`). Each question's thread is saved under
   `~/.claude-agents/quickie/`, sharing one `communal/` workspace you can drop
@@ -60,9 +61,19 @@ isolated Docker container with persistent per-instance state.
   row's workspace is the fallback target, or `(INVALID DIR)` (red) when the
   stored workspace path no longer exists or isn't a directory — hit F2 to
   repoint it.
-- **A four-kind tag system, discovered from the file tree** — every agent
-  instance composes from members of `agents/{engine,profession,specialty,policy}/`:
-  - `(engine)` — how hard it thinks: an `engine.conf` of model/effort env vars.
+- **A five-kind tag system, discovered from the file tree** — every agent
+  instance composes from members of `agents/{ai,engine,profession,specialty,policy}/`:
+  - `⟪AI⟫` — which AI runs it: `⟪Claude⟫`, `⟪Gemini⟫`, `⟪ChatGPT⟫`, `⟪Grok⟫`, each
+    coloured after its logo. A member dir holds the vendor, its agent CLI's
+    name, its TIER for each of the launcher's CAPABILITY STANDARDS — a model
+    and an effort (`efforts.tiers`; the dated standards themselves are the
+    kind's shared `agents/ai/capability.standards`) and the launcher's budget
+    words in that AI's settings (`knobs.mapping`). One member is the default; only Claude has a harness
+    adapter today, so the others can be described, not yet launched.
+  - `(engine)` — how hard it thinks: a `tag.budget` in the launcher's OWN
+    words (a step such as `high`, switches such as `memory = false`, amounts
+    such as `max_output_tokens = 36000`) — no AI's key names; the instance's
+    AI translates it.
   - `[profession]` — tools it can use: a Dockerfile image layer (`[code]`
     adds Rust + Node + uv; `[webdev]` adds the playwright CLI).
   - `{specialty}` — exceptional access or running conditions: `{auto}` skips
@@ -79,12 +90,12 @@ isolated Docker container with persistent per-instance state.
     `instances.toml` (`<-su>` ships that way: sudo is denied everywhere).
 
   Adding a member is a folder with a `tag.info` (and optionally a
-  `Dockerfile` / `tag.docker` / `policy.json`) — no launcher code. Tree
+  `tag.budget` / `Dockerfile` / `tag.docker` / `policy.json`) — no launcher code. Tree
   position encodes requirements: `profession/code/webdev/` means `[webdev]`
   requires `[code]`. Selections are made in a kind-sectioned form at
-  create/modify time — engines as a radio group up top, checkboxes for the
-  rest (requirements auto-check; risky picks and unmet companion requests
-  warn in red) — and persist per instance.
+  create/modify time — the AI, then the engines, as radio groups up top,
+  checkboxes for the rest (requirements auto-check; risky picks and unmet
+  companion requests warn in red) — and persist per instance.
 - **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
   `~/.claude-agents/cache/` and bind-mount into `[code]`-tagged containers
   (the base image has no compilers to use them). One agent's downloads
@@ -177,8 +188,8 @@ Host requirements:
   the install script enforces the floor, and newer is better). On macOS this is
   Docker Desktop (which bundles a recent engine).
 - **Python 3.12+**
-- Three Python packages: **`prompt_toolkit`** (picker UI), **`python-dotenv`**
-  (`engine.conf` parsing), **`rich`** (markdown rendering for agent previews)
+- Two Python packages: **`prompt_toolkit`** (picker UI) and **`rich`** (markdown
+  rendering for agent previews); every launcher-authored file is TOML, read by the stdlib
   — the canonical list lives in `pyproject.toml`'s `[project]` table
 
 Inside the container, the runtime image is built incrementally as a chain of
@@ -225,7 +236,7 @@ download URL so you can install it manually, then re-run to set up Python.
 
 Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop)
 and [Python 3.12+](https://www.python.org/downloads/) from their official
-sites, then `pip install prompt_toolkit python-dotenv rich`
+sites, then `pip install prompt_toolkit rich`
 (mirrors `pyproject.toml`'s `[project]` dependencies) in your shell of choice.
 
 Or — recommended — install Docker Desktop on the Windows host and run the
@@ -249,7 +260,7 @@ Then confirm the toolchain:
 
 ```bash
 docker version
-python3 -c "import prompt_toolkit, dotenv, rich; print('ok')"
+python3 -c "import prompt_toolkit, rich; print('ok')"
 ```
 
 If either errors out, fix it before proceeding — `run.py` exits early with a
@@ -369,7 +380,7 @@ red under the banner.
 | Enter | Select — launch the highlighted instance or cluster, or create from an agent / cluster template. Inert on a cluster member: members launch with their cluster |
 | Del | Delete the highlighted row (with confirmation): an instance and its state dir, a cluster and its members, or one member out of its cluster |
 | F2 | Redefine the highlighted row in one form: an instance's project path, name and tags; a cluster's tags, then its name, project and membership; a member's own tags (the cluster's show locked) |
-| F8 | Toggle the composition legend — overlays one table per kind (engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
+| F8 | Toggle the composition legend — overlays one table per kind (AIs / engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
 
 Rows for existing things — instances, clusters, cluster members — share one
@@ -422,20 +433,40 @@ wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
    The `.lego` only sets the form's *starting point* — every instance can
    deviate at create/modify time, and the chosen set persists per instance
    in `instances.toml`.
-3. (Optional) Give the agent its own engine: `agents/engine/<name>/` with an
-   `engine.conf` (env vars like `ANTHROPIC_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`)
-   and a `tag.info` (description). Nested engine folders overlay their
-   parent's conf key-by-key.
+3. (Optional) Give the agent its own engine: `agents/engine/<name>/` with a
+   `tag.info` (description) and a `tag.budget` in the launcher's own words —
+   `standard` (`cheapest`, `best`, or a dated quarter from
+   `agents/ai/capability.standards` — the frontier's level then, e.g. `2025Q4`),
+   switches (`thinking`, `memory`, `background_agents`, `telemetry`,
+   `tool_search`) and amounts (`max_output_tokens`, `tool_output_tokens`,
+   `compact_at_percent`). Every `agents/ai/*/efforts.tiers` says which model
+   and effort meet the standard on that AI, and its `knobs.mapping` translates
+   the rest. Nested
+   engine folders overlay their parent's budget key-by-key.
 4. Re-run `python3 run.py` — the new agent appears in the picker, grouped by
-   profession set and sorted by engine model family (Fable > Opus > Sonnet >
-   Haiku) then version.
+   profession set and sorted by its engine's capability standard (most
+   capable first), the same order whatever AI runs.
 
 ### Adding a tag
 
 Every tag kind is discovered from the tree — a new member is a folder, not
 launcher code:
 
-- **Engine**: `agents/engine/<name>/{tag.info, engine.conf}`.
+- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers, knobs.mapping}` — `tag.info`
+  adds `vendor`, `harness` (the agent CLI's name), `default` (exactly one
+  member says true) and the tag's own colours `fg` / `bg` as hex; `efforts.tiers`
+  answers every capability standard (`[cheapest]`, each dated quarter of
+  `agents/ai/capability.standards`, `[best]` — a `model` and an `effort` each,
+  the AI's `[scale]` of effort words) with the Artificial Analysis index and
+  the token cost as comments; `knobs.mapping` maps the
+  budget purposes (`[model]`, `[effort]`, `[thinking.on]`, `[memory.off]`,
+  `[max_output_tokens]` …) to native settings as `{value}` templates, with
+  `{value/100}` and `{value*4}` for unit conversions. A purpose the AI cannot
+  express is left out; rendering reports it as unmapped.
+- **Engine**: `agents/engine/<name>/{tag.info, tag.budget}` — the budget in the
+  launcher's own words (above). The descriptions name the TIER (cheap,
+  everyday, dependable), never a model: the picker renders the model the AI
+  runs for the engine's step beside them.
 - **Profession**: `agents/profession/<name>/{tag.info, Dockerfile}` (+
   optional `tag.docker` naming the build-args its Dockerfile consumes).
   Nest it under another profession to declare a requirement
@@ -473,8 +504,7 @@ how `{dood}` claims its `_dood` image layer).
 `instances.toml`.
 Point your editor at the TOML grammar for those extensions/filenames to get
 syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
-"toml", "*.info": "toml", "*.docker": "toml"}`). `engine.conf` is dotenv
-(`KEY=value`), and `policy.json` is JSON.
+"toml", "*.info": "toml", "*.docker": "toml"}`). An engine's `tag.budget` and an AI's `efforts.tiers` / `knobs.mapping` are TOML too (map `*.budget`, `*.tiers` and `*.mapping` to `toml` as well).json` is JSON.
 
 ## Persistent State Layout
 
@@ -621,14 +651,16 @@ check.sh                             # the quality gate — see "Quality gate" b
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), bind-mount dicts (DOCKER_BASE_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
   utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_keypress, call_or_exit. No disk access. Leaf module.
+  ai/                                # the code half of "which AI runs" — LEAF package: catalog.py (DEFAULT_AI_KEY + the call-time active_ai_key() / set_active_ai(); the AIs themselves are tag members under agents/ai/) + harness.py (Harness — an agent CLI's names: binary, flags, config-root files, env vars, critical hosts) + claude_code.py (CLAUDE_CODE, the one record; harness_for() / active_harness() in __init__)
   file_access.py                     # every disk-touching call routes through here — agent_md_index, atomic write_text, force_remove (sudo + `sudo -k` fallback), per-instance state-dir probes, optional-creds discovery.
   tags/                              # the tag system — kinds as classes, members discovered from agents/
     base.py                          #   Tag record + DockerContribution + tag.info/tag.docker parsing + the STRICT tree rule + TagError
-    engine.py, profession.py,        #   the four kind classes, each with its own scanner; profession also discovers
-    specialty.py, policy.py          #   hidden `_<name>` layers; specialty adds combos.info; policy adds merge_fragments
+    ai.py, engine.py, profession.py, #   the five kind classes, each with its own scanner; ai renders an engine's budget in its settings
+    specialty.py, policy.py          #   (Ai.render); profession discovers hidden `_<name>` layers; specialty adds combos.info; policy adds merge_fragments
+    budget.py                        #   the engine budget vocabulary — Budget (tag.budget), the capability-standard spelling and order (cheapest < YYYYQn < best), the switches and amounts every AI's knobs.mapping translates
     registry.py                      #   scan_all(agents_dir) → Registry: discover + cross-validate + look up
     lego.py                          #   AgentBuild + `.lego` loading (an agent's default tag selections)
-    identity.py                      #   Agent (pickable) + Instance (fully-resolved launch: chain, build_steps, docker_contributions, conf, claude_args, unmet_wants)
+    identity.py                      #   Agent (pickable) + Instance (fully-resolved launch: ai, chain, build_steps, docker_contributions, conf = the engine's budget rendered by the AI, model, effort, claude_args, unmet_wants)
     store.py                         #   instances.toml load/save (stdlib tomllib in; small TOML emitter out)
     toolkit_profile.py               #   per-profession <profession>_profile.toml — "(Edit Preferences)" install toggles ([code]); same tomllib-in / emitter-out shape as store
     migrations.py                    #   ISOLATED one-shot conversions from retired on-disk formats (legacy two-map JSON → instances.toml)
@@ -652,7 +684,9 @@ launch/
   tests/                             # unittest suite. Run it together with ruff + mypy via `bash check.sh` from the project root.
 agents/                              # agent definitions + the tag tree
   <name>.md, <name>.lego             #   persona + default tag selections, per agent
-  engine/<name>/                     #   (engine) members — tag.info + engine.conf (nested folders overlay parent conf)
+  ai/capability.standards            #   the dated CAPABILITY STANDARDS every AI answers — a quarter whose frontier model raised the record, its index, its setter; the ends cheapest / best are each AI's own
+  ai/<name>/                         #   ⟪AI⟫ members — tag.info (vendor, harness, default, fg/bg) + efforts.tiers (this AI's tier — model + effort — per standard) + knobs.mapping (budget words → native settings)
+  engine/<name>/                     #   (engine) members — tag.info + tag.budget (standard + switches + amounts, AI-neutral; nested folders overlay the parent's)
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
   specialty/cowork/manager/          #   {manager} nests inside {cowork} — nesting IS the requires mechanism, so ticking the inner tag brings the outer one

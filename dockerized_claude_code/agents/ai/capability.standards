@@ -1,0 +1,71 @@
+# The launcher's CAPABILITY STANDARDS — the dated ones. An engine's tag.budget
+# names a standard (`standard = "2025Q4"`), and every agents/ai/*/efforts.tiers
+# answers each with that AI's TIER (a model and an effort). The two ends are
+# not written here: `cheapest` and `best` are each AI's own extremes.
+#
+# A dated standard is a quarter in which a model RAISED THE FRONTIER — the
+# highest Artificial Analysis Intelligence Index (v4.3) among the models
+# released that quarter beat every earlier quarter's. Standards only rise with
+# time (operator, 2026-09-14): a later quarter always means more capability,
+# so the order is in the key, and the launcher validates that the indices
+# climb. Quarters that set no new record (2024Q2, GPT-4o) are not standards;
+# quarters before 2025 are left out because they lie below or near every AI's
+# cheapest tier: 2024Q4's 15.23 (o1) is above Grok's cheapest (14.61 — it would
+# answer with grok-4.3 at low) and below Claude's (15.41) and Codex's (21.55);
+# Gemini's cheapest is unrated at its level (16.03 at HIGH).
+#
+# Derived 2026-09-14 from the records embedded in an AA model page
+# (artificialanalysis.ai/models/<slug>; ~650 records with release dates and
+# index values): for each quarter, the top index among the models released in
+# it; kept where it exceeds every earlier quarter's top. A standard is the
+# record as the quarter ENDS — within a quarter the bar usually rises in steps
+# (each entry's comment lists them, first breaker to last), and the level is
+# the last one. `estimated = true` marks a figure AA estimates rather than
+# measured on the v4.3 evaluations — the pre-2026 record holders are all
+# retired and estimated. To re-derive: repeat the extraction, append the
+# quarters that set new records, never rewrite an old one (an engine may name
+# it). Independent verification by the researcher was requested 2026-09-14.
+#
+# How an AI answers a standard (the rule its efforts.tiers follows): the
+# cheapest of its LIVE, RATED, LAUNCHABLE configurations whose index meets the
+# standard — cheapest by the VENDOR's list price, blended 3:1 the way AA blends
+# it ((3 × input + output) / 4; AA's own price figures are the cross-check, and
+# where the two disagree the vendor's bill is what the launcher pays) — then
+# the lowest index that still meets it; when none meets it, the AI's best tier,
+# flagged as falling short. `cheapest` is the lowest price at the lowest effort
+# (at a tie, the higher index); `best` the highest index. The tag.budget of an
+# engine therefore says "at least this capable", and each AI supplies the least
+# it takes.
+
+[2025Q1]                         # the only breaker of the quarter; its non-reasoning form (15.27) also passed 2024Q4's 15.23 (o1)
+set_by    = "Claude 3.7 Sonnet (reasoning) — Anthropic, 2025-02-24"
+index     = 17.71
+estimated = true
+
+[2025Q2]                         # bar raised in steps: o3 20.20 (04-16), Claude 4 Opus 20.64 (05-22), o3-pro 21.87 (06-10)
+set_by    = "o3-pro — OpenAI, 2025-06-10"
+index     = 21.87
+estimated = true
+
+[2025Q3]                         # steps: Grok 4 22.49 (07-10), Claude 4.1 Opus 22.85 (08-05), GPT-5 high 22.98 (08-07), GPT-5 Codex high 24.88 (09-23)
+set_by    = "GPT-5 Codex (high) — OpenAI, 2025-09-23"
+index     = 24.88
+estimated = true
+
+[2025Q4]                         # steps: Gemini 3 Pro Preview high 27.96 (11-18), Claude Opus 4.5 29.10 (11-24), GPT-5.2 xhigh 30.45 (12-11)
+set_by    = "GPT-5.2 (xhigh) — OpenAI, 2025-12-11"
+index     = 30.45
+estimated = true
+
+[2026Q1]                         # steps: Claude Opus 4.6 max 31.95 and GPT-5.3 Codex xhigh 32.50 (both 02-05), GPT-5.4 xhigh 38.98 (03-05)
+set_by    = "GPT-5.4 (xhigh) — OpenAI, 2026-03-05"
+index     = 38.98
+estimated = true
+
+[2026Q2]                         # steps: Claude Opus 4.7 max 40.69 est. (04-16), Opus 4.8 max 41.99 (05-28), Fable 5 max 49.70 (06-09) — measured from here on
+set_by    = "Claude Fable 5 (max, Opus 4.8 fallback) — Anthropic, 2026-06-09"
+index     = 49.70
+
+[2026Q3]                         # steps: Claude Opus 5 max 50.70 (07-24), Fable 5.1 max 53.37 (09-01); GPT-6 Astra max followed on 09-03 at 52.81, below the bar Fable 5.1 had set two days earlier
+set_by    = "Claude Fable 5.1 (max) — Anthropic, 2026-09-01"
+index     = 53.37

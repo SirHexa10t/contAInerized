@@ -16,9 +16,12 @@ Consumed only by launch/firewall/resolver.py."""
 
 BUILTIN_FIREWALL_DOMAINS = [
     # === Core launcher dependencies ===
-    # Anthropic
-    "api.anthropic.com",
-    "console.anthropic.com",
+    # The AI's own hosts are NOT listed here: the harness adapter record names
+    # them (launch/ai/claude_code.py, `critical_hosts` — api/console.anthropic.com
+    # for Claude Code) and firewall/resolver unions the ACTIVE harness's in at
+    # resolution time, so this list stays the launcher's own and one definition
+    # decides which hosts are critical. Product sites that are not critical stay
+    # data here.
     "www.claude.ai",
     # GitHub (git, releases, raw, codeload, container registry). The
     # githubusercontent hosts are the real asset CDNs: release-download URLs

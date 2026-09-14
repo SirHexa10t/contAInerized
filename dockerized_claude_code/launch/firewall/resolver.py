@@ -138,6 +138,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+from ..ai import active_harness
 from ..file_access import (
     force_remove, is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
 )
@@ -406,7 +407,11 @@ def _cascade(hosts: Iterable[str], on_resolved: Callable[[str, list[str]], None]
 # growing post-launch doesn't relax the claude-can't-modify-firewall
 # invariant.
 
-_CRITICAL_HOSTS = ("api.anthropic.com", "console.anthropic.com")
+def _critical_hosts() -> tuple[str, ...]:
+    """The hosts the active harness cannot operate without — from its adapter
+    record (`launch/ai`), read at call time so a switch of AI moves them with
+    the abort message below."""
+    return active_harness().critical_hosts
 
 # The critical hosts are served from Anthropic's OWN registered space — not a
 # CDN (verified via ARIN RDAP 2026-07-21: NET-160-79-104-0-1 "AP-2440",
@@ -577,7 +582,7 @@ def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: lis
         fresh_blocks = [b for b in _ANTHROPIC_BLOCKS if b not in _emitted_tokens]
         _emitted_tokens.update(fresh_blocks)
         critical_addresses.extend(tokens + fresh_blocks)
-        if host == _CRITICAL_HOSTS[0] and ips and _selftest_addr is None:
+        if host == _critical_hosts()[0] and ips and _selftest_addr is None:
             _selftest_addr = ips[0]
         _status.mark_resolved(host, ips, cdn=cdn_label or _ANTHROPIC_WIDEN_LABEL)
 
@@ -589,8 +594,8 @@ def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: lis
 
     if critical_failed:
         raise RuntimeError(
-            f"Critical Anthropic domains failed to resolve: {critical_failed}. "
-            f"Claude Code cannot operate without them; aborting launch."
+            f"Critical hosts of {active_harness().name} failed to resolve: {critical_failed}. "
+            f"{active_harness().name} cannot operate without them; aborting launch."   # the hosts and the words come from the same adapter record
         )
 
     global _phase2_thread
@@ -675,11 +680,15 @@ def start_whitelist_resolution(state_dir: Path) -> None:
     _emitted_tokens.clear()
     _fresh_resolutions.clear()
 
-    literals, hostnames, skipped = _expand_whitelist([*BUILTIN_FIREWALL_DOMAINS, *user_firewall_whitelist_lines()])
+    # The active harness's critical hosts lead the union — they are the ones
+    # phase 1 resolves first and aborts on — then the launcher's own list, then
+    # the user's file.
+    literals, hostnames, skipped = _expand_whitelist([*_critical_hosts(), *BUILTIN_FIREWALL_DOMAINS, *user_firewall_whitelist_lines()])
     _all_entries_by_host.clear()
     _all_entries_by_host.update(_index_by_host(hostnames))
-    critical = [t for t in hostnames if t.host in _CRITICAL_HOSTS]
-    rest = [t for t in hostnames if t.host not in _CRITICAL_HOSTS]
+    critical_hosts = _critical_hosts()
+    critical = [t for t in hostnames if t.host in critical_hosts]
+    rest = [t for t in hostnames if t.host not in critical_hosts]
 
     # Populate the pending list + skip reasons now that we've assembled them
     # (clearing already zeroed everything else in _status).

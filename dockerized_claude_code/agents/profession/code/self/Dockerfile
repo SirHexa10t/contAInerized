@@ -13,7 +13,7 @@
 #
 # Contents mirror pyproject.toml's [project] dependencies (the runtime imports
 # the unit tests need) plus the one gate checker [code] doesn't provide:
-#   - prompt_toolkit / python-dotenv / rich → pip3 --user as the claude user
+#   - prompt_toolkit / / rich → pip3 --user as the claude user
 #     (PEP 668 image, hence --break-system-packages; lands in ~/.local inside
 #     the image, which no runtime mount shadows)
 #   - mypy → uv tool install, the same pattern as ruff in [code] and
@@ -28,5 +28,5 @@ FROM ${PARENT_IMAGE}
 # versions — referenced in the no-op `:` so it keys the cache.
 ARG SOFTWARE_STACK_REFRESH=bootstrap
 RUN : "${SOFTWARE_STACK_REFRESH}" \
- && pip3 install --user --break-system-packages prompt_toolkit python-dotenv rich \
+ && pip3 install --user --break-system-packages prompt_toolkit rich \
  && uv tool install mypy

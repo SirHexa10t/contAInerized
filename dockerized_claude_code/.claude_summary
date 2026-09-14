@@ -8,7 +8,7 @@ Docker-based launcher for pre-made Claude Code agents. Each persona ships a `CLA
 
 ### Tech Stack
 
-- Python 3.12+ host launcher; deps (canonical list: `pyproject.toml` `[project]`): `prompt_toolkit` (picker TUI), `python-dotenv` (`engine.conf` parsing), `rich` (markdown previews); stdlib elsewhere (`tomllib` for every launcher-authored config, `urllib` for CDN-range fetches).
+- Python 3.12+ host launcher; deps (canonical list: `pyproject.toml` `[project]`): `prompt_toolkit` (picker TUI), `rich` (markdown previews); stdlib elsewhere (`tomllib` for every launcher-authored config, `urllib` for CDN-range fetches).
 - Plain **`docker build` / `docker run`** — no compose. Base image (root `Dockerfile`) = debian:trixie-slim + Claude Code + jq/yq/fd/ripgrep + iptables/sudo ({firewall} prerequisites, inert otherwise); per-layer Dockerfiles live in the tag tree.
 - Quality gate: `bash check.sh` — the single definition of a passing tree (`unittest discover -s launch/tests`, `ruff check .`, `mypy launch/ *.py`; `disallow_untyped_defs` for source, tests exempt). All three clean. `.github/workflows/ci.yml` only builds an environment and calls that script — inlining a check there fails `TestQualityGate` in test_essential_files.py.
 
@@ -84,7 +84,7 @@ Key mounts: workspace → `/workspace`; `~/.claude-agents/<instance>/` → `/hom
 
 ### Conventions and Patterns
 
-- **Everything launcher-authored is TOML** (`.lego`, `tag.info`, `tag.docker`, `combos.info`, `instances.toml`); policies are `.json` because Claude Code settings are JSON; engine budgets are dotenv `.conf`. `instances.toml` writing uses a small fixed-schema emitter (stdlib has no TOML writer); None values are omitted (TOML has no null).
+- **Everything launcher-authored is TOML** (`.lego`, `tag.info`, `tag.docker`, `combos.info`, `instances.toml`); policies are `.json` because Claude Code settings are JSON; engine budgets (`tag.budget`), the AI members' `efforts.tiers` / `knobs.mapping` and the AI kind's shared `capability.standards` are TOML as well. `instances.toml` writing uses a small fixed-schema emitter (stdlib has no TOML writer); None values are omitted (TOML has no null).
 - **Adding a tag = adding folders/files, no launcher code** (see `.claude_dev_guidelines` "A new tag"). `_apply_<name>` handlers in `tag_handlers.py` only for dynamic host-side work; `test_essential_files` pins which tags have handlers and that data-only tags (web, auto) have none.
 - **All disk I/O through `file_access`** (atomic `write_text`), **all paths in `paths.py`**, **all docker CLI calls in `docker_config`** (except the four live-container probes, which `container_probe` owns so the firewall can reach them without a cycle). Retired on-disk formats are known ONLY to `tags/migrations.py`.
 - Engine conf: nested engine dirs overlay parent conf key-by-key; valueless `KEY` lines are dropped. `CLAUDE_CODE_EFFORT_LEVEL` additionally becomes an explicit `--effort` CLI flag (`effort_args` — the env var alone doesn't pin fresh sessions).

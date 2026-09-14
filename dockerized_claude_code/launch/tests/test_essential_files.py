@@ -121,8 +121,14 @@ class TestUserExtrasTemplates(unittest.TestCase):
 
 
 class TestDefaultAgentConf(unittest.TestCase):
-    def test_default_conf_exists(self):
-        self.assertTrue(paths.DEFAULT_CONF.is_file())
+    def test_default_engine_ships_a_budget_with_a_standard(self):
+        # The fallback engine (`default`) must state a capability standard: every
+        # nested engine inherits from it, and an engine without one cannot
+        # be rendered for any AI.
+        from launch.tags.budget import BUDGET_FILE
+        from launch.tags import scan_all
+        self.assertTrue((paths.ENGINE_DIR / "default" / BUDGET_FILE).is_file())
+        self.assertIsNotNone(scan_all(paths.AGENTS_DIR).engines["default"].budget.standard)
 
 
 class TestQualityGate(unittest.TestCase):
@@ -217,11 +223,13 @@ class TestTagTreeDiscovery(unittest.TestCase):
             set(self.reg.engines),
         )
 
-    def test_engine_conf_resolves_through_new_tree(self):
-        self.assertIn("haiku", self.reg.engines["golem"].conf_map.get("ANTHROPIC_MODEL", ""))
-        self.assertIn("opus", self.reg.engines["reliable"].conf_map.get("ANTHROPIC_MODEL", ""))
-        self.assertIn("sonnet", self.reg.engines["quick"].conf_map.get("ANTHROPIC_MODEL", ""))
-        self.assertTrue(self.reg.engines["breakthrough"].conf_map.get("ANTHROPIC_MODEL"))
+    def test_engine_budgets_render_to_the_expected_claude_rungs(self):
+        claude = self.reg.default_ai
+        model = lambda name: claude.tier(self.reg.engines[name].budget.standard).model
+        self.assertIn("haiku", model("golem"))
+        self.assertIn("opus", model("reliable"))
+        self.assertIn("sonnet", model("quick"))
+        self.assertTrue(model("breakthrough"))
 
     def test_professions_discovered_with_nesting_requires(self):
         self.assertLessEqual({"code", "webdev"}, set(self.reg.professions))
@@ -723,7 +731,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertEqual(self_prof.commands,
                          ("ai_project-test", "ai_project-update-models"))
         dockerfile = (self_prof.path / "Dockerfile").read_text()
-        for dep in ("prompt_toolkit", "python-dotenv", "rich", "mypy"):
+        for dep in ("prompt_toolkit", "rich", "mypy"):
             self.assertIn(dep, dockerfile)
 
     def test_the_self_addendum_names_the_gate_and_the_tracker(self):
@@ -752,6 +760,42 @@ class TestTagTreeDiscovery(unittest.TestCase):
         descriptions = {command: text for _, command, text in _tag_commands(self.reg)}
         self.assertTrue(descriptions["/cowork"],
                         "/cowork's description: frontmatter is missing or unparsed")
+
+    def test_the_legend_opens_with_the_ais_by_purpose(self):
+        from launch.gui.menu_picker import _build_composition_legend
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", _build_composition_legend(self.reg))
+        self.assertLess(plain.index("AIs"), plain.index("Engines"))
+        # Content, not layout: the table wraps a long description cell, so
+        # a note can straddle a line break — compare on collapsed whitespace.
+        section = re.sub(r"\s+", " ", plain[plain.index("AIs"):plain.index("Engines")])
+        for ai in self.reg.ais.values():
+            with self.subTest(ai=ai.name):
+                self.assertIn(ai.label, section)
+                self.assertIn(ai.fullname, section)
+                self.assertIn(ai.short_description, section)
+                self.assertNotIn(ai.harness, section)       # no harness talk in the legend (operator, 2026-09-14)
+        self.assertNotIn("default", section)                 # nor a default marker
+        labels = [ai.label for ai in self.reg.ais.values()]
+        self.assertEqual(min(labels, key=section.index), self.reg.default_ai.label)   # the default still leads, unmarked
+
+    def test_the_legend_shows_each_engines_pinned_model(self):
+        from launch.gui.menu_picker import _build_composition_legend
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", _build_composition_legend(self.reg))
+        for eng in self.reg.engines.values():
+            with self.subTest(engine=eng.name):
+                self.assertIn(self.reg.default_ai.tier(eng.budget.standard).model, plain)
+
+    def test_engine_descriptions_name_the_tier_not_a_model(self):
+        # tag.info describes what a tier MEANS (cheap, everyday, dependable);
+        # the model is rendered beside it from the budget for the AI in use,
+        # so a description naming haiku / sonnet / opus would be wrong the
+        # day another AI runs — and stale the day Anthropic renames a family.
+        forbidden = ["fable", "mythos", "opus", "sonnet", "haiku", "claude", "anthropic",
+                     "gemini", "gpt", "codex", "grok"]
+        for eng in self.reg.engines.values():
+            text = f"{eng.short_description} {eng.full_description}".lower()
+            with self.subTest(engine=eng.name):
+                self.assertEqual([w for w in forbidden if w in text], [], text)
 
     def test_the_legend_renders_a_tag_commands_section(self):
         import re

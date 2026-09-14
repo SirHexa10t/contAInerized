@@ -17,6 +17,7 @@ from launch import paths
 from launch.cluster import launching, state
 from launch.cluster.legoset import assemble
 from launch.cluster.member import ClusterError, Member
+from launch.ai import HARNESSES
 from launch.docker_config import CONTAINER_NAME_PREFIX, run_cluster_container
 from launch.tags import AgentBuild, scan_all
 
@@ -87,6 +88,21 @@ class TestRefusal(LaunchingTmp):
         self.assertIsNotNone(reason)
         self.assertIn("researcher__guarded", reason)
         self.assertNotIn("golem,", reason)
+
+    def test_a_member_on_an_ai_without_an_adapter_refuses_by_member_name(self):
+        # Same rule and message as a solo launch (launch/ai.refusal_for), so
+        # a cluster never starts a member with Claude's binary and another
+        # AI's settings.
+        unadapted = next(a for a in REGISTRY.ais.values() if a.name not in HARNESSES)
+        clustered = self.cluster.with_member(Member(
+            agent="researcher", role="alien",
+            build=AgentBuild(ai=unadapted.name, specialties=("muxer", "cluster"))))
+        pairs = launching.member_instances(clustered, REGISTRY)
+        reason = launching.refusal(pairs)
+        self.assertIsNotNone(reason)
+        self.assertIn("researcher__alien", reason)
+        self.assertIn(unadapted.label, reason)
+        self.assertIn("plans/adding_an_ai.md", reason)
 
 
 class TestPrepare(LaunchingTmp):

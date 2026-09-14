@@ -9,7 +9,7 @@ imported back by it. Any shared mechanism (run_container's print mode,
 
 Personas are hidden agents (`_` prefix → excluded from the picker / CLI /
 audit), loaded by path so a question never touches the interactive machinery.
-The default is `_quickie` on the `quick`/Sonnet engine; `--explain` swaps in
+The default is `_quickie` on the `quick` engine; `--explain` swaps in
 `_trivia` (reliable/Opus) and `--research` a lean researcher build — see the
 QuickieAgent specs below.
 """
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ..agents_crud import compute_resume_flag, install_latest_md, install_settings
+from ..ai import active_harness, adopt, refusal_for
 from ..container_env import set_container_env
 from ..docker_config import ensure_image, require_docker, run_container, set_container_mounts
 from ..file_access import ensure_dir, ensure_shared_oauth_files
@@ -39,14 +40,9 @@ class QuickieAgent(NamedTuple):
 
 
 QUICK    = QuickieAgent("quickie",  AGENTS_DIR / "_quickie.md",   AGENTS_DIR / "_quickie.lego")   # default (quick/Sonnet)
-TRIVIA   = QuickieAgent("trivia",   AGENTS_DIR / "_trivia.md",    AGENTS_DIR / "_trivia.lego")    # --explain (reliable/Opus)
+TRIVIA   = QuickieAgent("trivia",   AGENTS_DIR / "_trivia.md",    AGENTS_DIR / "_trivia.lego")    # --explain (the `reliable` engine)
 RESEARCH = QuickieAgent("research", AGENTS_DIR / "researcher.md", AGENTS_DIR / "_research.lego")  # --research (researcher engine, lean/base image)
 
-# claude flags for a progress-showing one-shot: emit the full stream-json event
-# stream (needs --verbose) with token-level deltas (--include-partial-messages),
-# which render_stream turns into a thinking ticker + a streamed answer. See
-# launch/quickie/render.py for why reasoning text itself can't be shown.
-STREAM_ARGS = ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
 
 
 def _gibberish() -> str:
@@ -102,6 +98,9 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
     else:
         session, is_brand_new = _gibberish(), True
     inst = build_quickie_instance(registry, session, agent=agent, is_brand_new=is_brand_new)
+    if inst.ai is not None and (refused := refusal_for(inst.ai.name, inst.ai.label)) is not None:
+        sys.exit(refused)                        # a quickie lego on an AI without an adapter — same rule as run.py
+    adopt(inst.ai.name if inst.ai else None)
     resume_flag = compute_resume_flag(inst)      # ["--continue"] when the thread has a transcript; [] otherwise
 
     apply_tags(inst)                             # no-op for _quickie today (no handler tag); future-proof
@@ -111,5 +110,7 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
     set_container_env(inst)
     set_container_mounts(inst)
     image = ensure_image(inst)
-    run_container(inst, image, STREAM_ARGS, resume_flag, interactive=False,
+    # The harness's flags for a progress-showing one-shot event stream (the
+    # adapter says which; render_stream turns it into a ticker + streamed answer).
+    run_container(inst, image, list(active_harness().stream_args), resume_flag, interactive=False,
                   print_prompt=question, stream_renderer=render_stream)

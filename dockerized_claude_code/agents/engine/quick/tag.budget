@@ -1,0 +1,5 @@
+# Fast everyday tier: the end-of-2025 frontier (on Claude, Sonnet 5 at high),
+# thinking shown, ~60% of reliable's output budget. quickie's default engine.
+standard          = "2025Q4"
+thinking          = true
+max_output_tokens = 21600

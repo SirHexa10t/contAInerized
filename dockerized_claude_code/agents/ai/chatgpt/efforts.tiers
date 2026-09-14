@@ -1,0 +1,58 @@
+# Codex's TIER for every capability standard — the same keys as every
+# agents/ai/*/efforts.tiers; agents/ai/capability.standards says what the
+# standards are and how a tier is chosen (the cheapest live, rated
+# configuration that meets the standard, else the AI's best, flagged). Index
+# v4.3 (est. = AA's estimate) and prices in USD per 1M tokens in / out, read
+# 2026-09-14 from an AA model page's embedded records.
+#
+# Codex's scale is model_reasoning_effort minimal / low / medium / high / xhigh
+# (config-reference enum); the API pages list `max` above xhigh for every
+# current slug, and whether config.toml accepts it is a probe — until then
+# xhigh is the top the reference defends and no tier uses `max`. Slugs from
+# learn.chatgpt.com/docs/models: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra,
+# gpt-5.6-luna. Luna's page lists no `minimal`, so low is its floor.
+
+[scale]
+efforts = ["minimal", "low", "medium", "high", "xhigh"]
+
+[cheapest]                       # 21.55 · 0.2 / 1.2 — the cheapest model at its lowest effort
+model  = "gpt-5.6-luna"
+effort = "low"
+
+[2025Q1]                         # 21.55 · 0.2 / 1.2 — meets 17.71
+model  = "gpt-5.6-luna"
+effort = "low"
+
+[2025Q2]                         # 25.48 · 0.2 / 1.2 — low (21.55) misses 21.87 by 0.32
+model  = "gpt-5.6-luna"
+effort = "medium"
+
+[2025Q3]                         # 25.48 · 0.2 / 1.2 — meets 24.88
+model  = "gpt-5.6-luna"
+effort = "medium"
+
+[2025Q4]                         # 32.41 · 0.2 / 1.2 — meets 30.45 (Terra medium 30.42 misses by 0.03 at ten times the price)
+model  = "gpt-5.6-luna"
+effort = "high"
+
+[2026Q1]                         # 39.48 · 4 / 20 — Luna tops out at 34.77 (xhigh), Terra at 38.19; Sol at medium is the cheapest past 38.98
+model  = "gpt-5.6-sol"
+effort = "medium"
+
+[2026Q2]                         # 51.05 · 10 / 50 — Astra at medium (49.67) misses 49.70 by 0.03
+model  = "gpt-6-astra"
+effort = "high"
+
+[2026Q3]                         # FALLS SHORT of 53.37: Codex's best, 52.51 (52.81 at `max`, still short)
+model  = "gpt-6-astra"
+effort = "xhigh"
+
+[best]                           # 52.51 (52.81 at `max`, once the config is shown to accept it) · 10 / 50
+model  = "gpt-6-astra"
+effort = "xhigh"
+
+# Also rated: Astra max 52.81 / medium 49.67 / low 45.99; Sol max 47.06 / xhigh
+# 44.14 / high 42.50 / low 33.80 / non-reasoning 28.33 est.; Terra max 42.25 /
+# xhigh 38.19 / high 34.49 / medium 30.42 / low 27.92 / non-reasoning 22.30
+# est.; Luna max 37.50 / xhigh 34.77 / non-reasoning 16.76 est.; GPT-5.5 xhigh
+# 38.63 (deprecated, successor Sol). gpt-5.3-codex-spark is not rated.

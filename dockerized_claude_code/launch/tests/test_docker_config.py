@@ -25,8 +25,8 @@ def _run_inst(**over):
     """Duck-typed Instance for run_container tests — only the attrs it reads."""
     # `is_muxer` is read by run_container to decide whether the command becomes a
     # generated tmux script; False keeps these tests about the ordinary path.
-    defaults = dict(docker_contributions=[], conf={}, claude_args=[],
-                    instance="poet__x", is_muxer=False)
+    defaults = dict(docker_contributions=[], conf={}, effort=None, model="", claude_args=[],
+                    instance="poet__x", is_muxer=False, ai=None)
     defaults.update(over)
     return SimpleNamespace(**defaults)
 
@@ -200,34 +200,29 @@ class TestDockerStreamSubprocess(unittest.TestCase):
 
 
 class TestEffortArgs(unittest.TestCase):
-    """effort_args — the explicit --effort CLI flag derived from the conf's
-    CLAUDE_CODE_EFFORT_LEVEL. Pure function: (conf, claude_args) → arg list."""
+    """effort_args — the explicit --effort CLI flag derived from the instance's
+    effort word (its AI's word for its engine's step). Pure function:
+    (effort, claude_args) → arg list."""
 
-    def test_conf_effort_becomes_flag_pair(self):
-        self.assertEqual(effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "max"}, []),
-                         ["--effort", "max"])
+    def test_effort_word_becomes_flag_pair(self):
+        self.assertEqual(effort_args("max", []), ["--effort", "max"])
 
-    def test_conf_without_effort_yields_nothing(self):
-        self.assertEqual(effort_args({"ANTHROPIC_MODEL": "claude-fable-5"}, []), [])
-
-    def test_valueless_conf_key_yields_nothing(self):
-        # dotenv parses a bare `CLAUDE_CODE_EFFORT_LEVEL` line to None — no
-        # flag should be emitted for it.
-        self.assertEqual(effort_args({"CLAUDE_CODE_EFFORT_LEVEL": None}, []), [])
+    def test_no_effort_yields_nothing(self):
+        # a step whose model takes no effort (a non-reasoning model) → no flag
+        self.assertEqual(effort_args(None, []), [])
+        self.assertEqual(effort_args("", []), [])
 
     def test_user_passed_effort_wins(self):
         # `python3 run.py poet -- --effort low` must reach claude unchallenged —
         # emitting ours too would either conflict or silently override the user.
-        self.assertEqual(
-            effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "max"}, ["--effort", "low"]), [])
+        self.assertEqual(effort_args("max", ["--effort", "low"]), [])
 
     def test_user_passed_effort_equals_form_wins(self):
-        self.assertEqual(
-            effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "max"}, ["--effort=low"]), [])
+        self.assertEqual(effort_args("max", ["--effort=low"]), [])
 
     def test_unrelated_claude_args_dont_suppress(self):
         self.assertEqual(
-            effort_args({"CLAUDE_CODE_EFFORT_LEVEL": "medium"}, ["--print", "hi"]),
+            effort_args("medium", ["--print", "hi"]),
             ["--effort", "medium"])
 
 

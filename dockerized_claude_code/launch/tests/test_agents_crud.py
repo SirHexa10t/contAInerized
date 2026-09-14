@@ -1,4 +1,4 @@
-"""Tests for launch.agents_crud — model parsing + engine sort key, the
+"""Tests for launch.agents_crud — the
 instances.json writers (persist / delete / modify against a temp store), and
 the install_latest_md integration round-trip.
 
@@ -22,102 +22,8 @@ from launch.agents_crud import (
 )
 from launch.tags import AgentBuild, Instance, TagError, scan_all, store
 from launch.tags.identity import resolve_build
-from launch.tags.engine import (
-    ORDERED_MODEL_FAMILIES, engine_sort_key, parse_model_id,
-)
 from launch.tags import addendums
 from launch.tags.addendums import ADDENDUM_SECTION_TITLE, SEEK_SUMMARY
-
-
-# ============================================================
-# parse_model_id
-# ============================================================
-
-
-class TestParseModelId(unittest.TestCase):
-    def test_opus_with_minor(self):
-        self.assertEqual(parse_model_id("claude-opus-4-7"), ("opus", 4, 7))
-
-    def test_sonnet_with_minor(self):
-        self.assertEqual(parse_model_id("claude-sonnet-4-6"), ("sonnet", 4, 6))
-
-    def test_haiku_with_minor(self):
-        self.assertEqual(parse_model_id("claude-haiku-4-5-20251001"), ("haiku", 4, 5))
-
-    def test_major_only(self):
-        # Minor defaults to 0 when absent
-        self.assertEqual(parse_model_id("claude-opus-4"), ("opus", 4, 0))
-
-    def test_unknown_family(self):
-        self.assertIsNone(parse_model_id("claude-unknown-4-7"))
-
-    def test_empty_string(self):
-        self.assertIsNone(parse_model_id(""))
-
-    def test_garbage_string(self):
-        self.assertIsNone(parse_model_id("not-a-model"))
-
-    def test_family_in_middle(self):
-        # _FAMILY_RE uses `.search`, so the family can be anywhere
-        self.assertEqual(parse_model_id("some-prefix-opus-4-7"), ("opus", 4, 7))
-
-    def test_fable_family_recognised(self):
-        # Regression: the Claude 5 launch left "fable" out of
-        # ORDERED_MODEL_FAMILIES, so every fable-backed agent parsed as
-        # "unknown family" and sank below haiku in the picker.
-        self.assertEqual(parse_model_id("claude-fable-5"), ("fable", 5, 0))
-
-    def test_mythos_family_recognised(self):
-        # Pre-added insurance: mythos is fable's same-tier sibling
-        # (Project Glasswing); recognising it now means a future mythos conf
-        # can't repeat the fable-sorted-last bug.
-        self.assertEqual(parse_model_id("claude-mythos-5"), ("mythos", 5, 0))
-
-
-class TestOrderedModelFamilies(unittest.TestCase):
-    def test_priority_order(self):
-        # Most capable family first, haiku last — affects engine_sort_key.
-        self.assertEqual(ORDERED_MODEL_FAMILIES, ["fable", "mythos", "opus", "sonnet", "haiku"])
-
-    def test_every_shipped_engine_family_is_known(self):
-        # The picker sorts unknown families past the end — silently, which is
-        # how the fable gap went unnoticed. Guard: every ANTHROPIC_MODEL in
-        # the repo's shipped engine confs must parse to a known family.
-        registry = scan_all(paths.AGENTS_DIR)
-        for name, engine in registry.engines.items():
-            model = engine.conf_map.get("ANTHROPIC_MODEL", "")
-            if not model:
-                continue
-            with self.subTest(engine=name, model=model):
-                self.assertIsNotNone(
-                    parse_model_id(model),
-                    f"engine '{name}' model {model!r} has no recognised family — "
-                    f"add it to ORDERED_MODEL_FAMILIES or its agents sort last",
-                )
-
-
-class TestEngineSortKey(unittest.TestCase):
-    """engine_sort_key orders by family capability (fable → opus → sonnet →
-    haiku), version descending inside a family; engines with an unrecognised
-    or missing model sink past every known family."""
-
-    def test_fable_sorts_before_opus_and_haiku(self):
-        keys = {
-            "f": engine_sort_key("claude-fable-5"),
-            "o": engine_sort_key("claude-opus-4-8"),
-            "s": engine_sort_key("claude-sonnet-4-6"),
-            "h": engine_sort_key("claude-haiku-4-5"),
-        }
-        self.assertEqual(sorted(keys, key=keys.get), ["f", "o", "s", "h"])
-
-    def test_unknown_family_sinks_last(self):
-        self.assertLess(engine_sort_key("claude-haiku-4-5"), engine_sort_key("claude-mystery-9"))
-
-    def test_missing_model_sinks_last(self):
-        self.assertLess(engine_sort_key("claude-haiku-4-5"), engine_sort_key(""))
-
-    def test_higher_version_first_within_family(self):
-        self.assertLess(engine_sort_key("claude-opus-4-8"), engine_sort_key("claude-opus-4-7"))
 
 
 # ============================================================

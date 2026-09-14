@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..ai import active_harness
 from ..paths import (
     CLUSTER_IN_CONTAINER, WORKSPACE_IN_CONTAINER, WORKSPACES_IN_CONTAINER,
 )
@@ -47,9 +48,12 @@ from .state import Cluster
 from .panes import Pane
 from .worktree import Worktree, plan as plan_worktrees
 
-# What each member runs. A tuple so a caller can extend it (extra claude args)
-# without this module deciding the whole command line.
-DEFAULT_MEMBER_COMMAND = ("claude",)
+
+def default_member_command() -> tuple[str, ...]:
+    """What each member runs — the active harness's binary alone. A tuple so a
+    caller can extend it (extra CLI args) without this module deciding the
+    whole command line; a function so it follows `active_ai()`."""
+    return (active_harness().binary,)
 
 
 @dataclass(frozen=True)
@@ -147,7 +151,7 @@ class LaunchPlan:
 
 
 def build(cluster: Cluster, *, env_for: dict[str, dict[str, str]] | None = None,
-          command: tuple[str, ...] = DEFAULT_MEMBER_COMMAND,
+          command: tuple[str, ...] | None = None,
           command_for: dict[str, tuple[str, ...]] | None = None,
           personal_workspaces: bool = False) -> LaunchPlan:
     """A `LaunchPlan` for `cluster`.
@@ -161,14 +165,17 @@ def build(cluster: Cluster, *, env_for: dict[str, dict[str, str]] | None = None,
     `command_for` is the same shape for the member's ARGV — integration
     resolves per-member effort flags, `--continue`, and specialty claude_args
     (two members legitimately run different command lines). A member absent
-    from the map runs `command` (the shared default), so PoC callers and tests
-    keep passing one tuple.
+    from the map runs `command` — the shared default, the active harness's
+    binary alone unless the caller passes one (resolved at CALL time: a default
+    argument would bind the binary at import) — so PoC callers and tests keep
+    passing one tuple.
 
     Every member's own id is exported as `CLUSTER_MEMBER` (and the cluster's as
     `CLUSTER_SESSION`) because a cohabiting agent otherwise has no way to know
     which member it is — its persona is shared with its siblings, and `hostname`
     is the container's, not its own."""
     env_for = env_for or {}
+    command = command if command is not None else default_member_command()
     command_for = command_for or {}
     worktrees = {w.member: w for w in plan_worktrees(
         cluster.session, cluster.ids, _worktrees_root(cluster.session))}

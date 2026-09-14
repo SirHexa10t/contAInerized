@@ -5,17 +5,18 @@ merged preferences form's sections.
 Split out of test_tag_form 2026-09-03; the machinery those forms run on is
 tested in test_form_core.py."""
 
+import dataclasses
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from launch.gui import forms
 from launch.gui.forms import (
-    _form_requires, _tag_form_options, _toolkit_form_options, prompt_tags,
+    _form_requires, _tag_form_options, _tag_row, _toolkit_form_options, prompt_tags,
 )
 from launch.gui.styles import STYLE_UNDERLINE, _plain
 from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, scan_all
+from launch.tags import AgentBuild, Budget, scan_all
 from launch.tags.profession import ToolkitEntry
 
 REGISTRY = scan_all(AGENTS_DIR)
@@ -23,24 +24,52 @@ REGISTRY = scan_all(AGENTS_DIR)
 
 class TestTagFormOptions(unittest.TestCase):
     """_tag_form_options — the pure assembly behind the tag form: a header
-    row per kind, engines as a radio group at the top, then every
-    profession/specialty/policy (keyed by full name), pre-checked from the
-    given build, with requires parentheticals and short descriptions."""
+    row per kind, the AI then the engines as radio groups at the top, then
+    every profession/specialty/policy (keyed by full name), pre-checked from
+    the given build, with requires parentheticals and short descriptions."""
 
     def test_every_kind_member_appears_as_selectable_row(self):
         keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild()) if not o.header}
-        expected = (set(REGISTRY.engines) | set(REGISTRY.professions)
+        expected = (set(REGISTRY.ais) | set(REGISTRY.engines) | set(REGISTRY.professions)
                     | set(REGISTRY.specialties) | set(REGISTRY.policies))
         self.assertEqual(keys, expected)
 
     def test_one_header_per_kind_in_order(self):
         headers = [o.key for o in _tag_form_options(REGISTRY, AgentBuild()) if o.header]
-        self.assertEqual(headers, ["#engine", "#profession", "#specialty", "#policy"])
+        self.assertEqual(headers, ["#ai", "#engine", "#profession", "#specialty", "#policy"])
 
-    def test_engine_section_leads_the_form(self):
+    def test_the_ai_section_leads_the_form_and_the_engines_follow(self):
+        # The AI decides what every engine standard below it means, so it is
+        # asked first; between the two headers sit exactly the AI members.
         rows = _tag_form_options(REGISTRY, AgentBuild())
-        self.assertEqual(rows[0].key, "#engine")
+        self.assertEqual(rows[0].key, "#ai")
         self.assertTrue(rows[0].header)
+        engine_header = next(i for i, o in enumerate(rows) if o.key == "#engine")
+        self.assertEqual({o.key for o in rows[1:engine_header]}, set(REGISTRY.ais))
+
+    def test_ais_form_a_radio_group_dotted_from_the_build(self):
+        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini"))
+        ai_rows = [o for o in rows if o.key in REGISTRY.ais]
+        self.assertTrue(all(o.group == "ai" for o in ai_rows))
+        self.assertEqual({o.key for o in ai_rows if o.checked}, {"gemini"})
+
+    def test_the_default_ai_is_dotted_when_the_build_names_none(self):
+        # `.lego` / instances.toml leave `ai` unset for "the default"; the form
+        # shows what that resolves to rather than an undotted radio group.
+        rows = _tag_form_options(REGISTRY, AgentBuild())
+        self.assertEqual({o.key for o in rows if o.key in REGISTRY.ais and o.checked},
+                         {REGISTRY.default_ai.name})
+
+    def test_ai_rows_lead_with_the_default_then_go_by_name(self):
+        rows = _tag_form_options(REGISTRY, AgentBuild())
+        ai_keys = [o.key for o in rows if o.key in REGISTRY.ais]
+        self.assertEqual(ai_keys[0], REGISTRY.default_ai.name)
+        self.assertEqual(ai_keys[1:], sorted(ai_keys[1:]))
+
+    def test_ai_rows_wear_their_own_logo_colours(self):
+        for option in (o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key in REGISTRY.ais):
+            with self.subTest(ai=option.key):
+                self.assertIn(REGISTRY.ais[option.key].style, [style for style, _ in option.label])
 
     def test_engines_form_a_radio_group(self):
         rows = _tag_form_options(REGISTRY, AgentBuild(engine="poet"))
@@ -48,50 +77,70 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertTrue(all(o.group == "engine" for o in engine_rows))
         self.assertEqual({o.key for o in engine_rows if o.checked}, {"poet"})
 
-    def test_engines_ordered_by_model_then_output_budget(self):
+    def test_engines_ordered_by_standard_then_output_budget(self):
         # The CONTRACT, asserted as invariants rather than as a literal list:
-        # model family first (fable → opus → sonnet → haiku), then
-        # CLAUDE_CODE_MAX_OUTPUT_TOKENS descending within a family, then name.
-        # Derived so that adding or deleting an engine — including a throwaway
-        # probe tier — cannot break a test about ORDERING.
-        families = ["fable", "opus", "sonnet", "haiku"]
+        # capability standard first (strongest first — AI-neutral), then
+        # max_output_tokens descending within a standard, then name. Derived so
+        # that adding or deleting an engine — including a throwaway probe
+        # tier — cannot break a test about ORDERING.
         rows = _tag_form_options(REGISTRY, AgentBuild())
         engine_keys = [o.key for o in rows if o.key in REGISTRY.engines]
         self.assertGreater(len(engine_keys), 1)          # the ordering must have something to order
 
-        def family_rank(key: str) -> int:
-            model = REGISTRY.engines[key].conf_map.get("ANTHROPIC_MODEL", "")
-            return next((i for i, f in enumerate(families) if f in model), len(families))
+        def rank(key: str) -> int:
+            return -REGISTRY.engines[key].budget.rank
 
         def budget(key: str) -> int:
-            return int(REGISTRY.engines[key].conf_map.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS", 0))
+            return REGISTRY.engines[key].budget.max_output_tokens or 0
 
-        ranks = [family_rank(k) for k in engine_keys]
-        self.assertEqual(ranks, sorted(ranks), "model families must not interleave")
-        for rank in set(ranks):
-            block = [k for k in engine_keys if family_rank(k) == rank]
+        ranks = [rank(k) for k in engine_keys]
+        self.assertEqual(ranks, sorted(ranks), "standards must not interleave")
+        for r in set(ranks):
+            block = [k for k in engine_keys if rank(k) == r]
             budgets = [budget(k) for k in block]
-            self.assertEqual(budgets, sorted(budgets, reverse=True),
-                             f"budgets must descend within the {families[rank]} block")
+            self.assertEqual(budgets, sorted(budgets, reverse=True), "budgets must descend within a standard")
             for earlier, later in zip(block, block[1:]):
                 if budget(earlier) == budget(later):
                     self.assertLess(earlier, later, "equal budgets tiebreak by name")
 
-    def test_non_engine_rows_are_not_grouped(self):
+    def test_engine_rows_show_the_model_the_ai_runs_for_their_standard(self):
+        # The tier's words live in tag.info and name no model; the model shown
+        # beside them is the build's AI's tier for the engine's standard, so a
+        # different AI changes the label without a tag.info edit.
         rows = _tag_form_options(REGISTRY, AgentBuild())
-        self.assertTrue(all(o.group is None for o in rows
-                            if not o.header and o.key not in REGISTRY.engines))
+        ai = REGISTRY.default_ai
+        for option in (o for o in rows if o.key in REGISTRY.engines):
+            with self.subTest(engine=option.key):
+                label = "".join(text for _, text in option.label)
+                self.assertIn(ai.tier(REGISTRY.engines[option.key].budget.standard).model, label)
+        non_engine = next(o for o in rows if o.key in REGISTRY.professions)
+        self.assertNotIn("claude-", "".join(text for _, text in non_engine.label))
+
+    def test_an_engine_without_a_standard_shows_no_model(self):
+        # A nesting-only engine inherits its parent's standard at scan time; one
+        # whose effective budget still has none must render nothing after its
+        # description — not "None", not an empty parenthesis.
+        bare = dataclasses.replace(REGISTRY.engines["quick"], budget=Budget())
+        label = "".join(text for _, text in _tag_row(bare, checked=False, group="engine", ai=REGISTRY.default_ai).label)
+        self.assertEqual(label.rstrip(), f"{bare.label} {bare.short_description}")
+
+    def test_non_radio_rows_are_not_grouped(self):
+        rows = _tag_form_options(REGISTRY, AgentBuild())
+        radios = set(REGISTRY.ais) | set(REGISTRY.engines)
+        self.assertTrue(all(o.group is None for o in rows if not o.header and o.key not in radios))
 
     def test_build_prechecks_boxes(self):
-        # Locked always-on rows (<-su>) are checked regardless of the build.
+        # Locked always-on rows (<-su>) are checked regardless of the build;
+        # the AI radio always shows one dot (here the default's).
         build = AgentBuild(professions=("code",), specialties=("auto",))
         checked = {o.key for o in _tag_form_options(REGISTRY, build) if o.checked and not o.locked}
-        self.assertEqual(checked, {"code", "auto"})
+        self.assertEqual(checked, {"code", "auto", REGISTRY.default_ai.name})
 
     def test_nothing_prechecked_for_empty_build(self):
-        # ...except the locked always-on rows, which are always checked.
+        # ...except the locked always-on rows, which are always checked, and
+        # the AI radio, which always has a dot (tested above).
         rows = _tag_form_options(REGISTRY, AgentBuild())
-        self.assertFalse(any(o.checked for o in rows if not o.locked))
+        self.assertFalse(any(o.checked for o in rows if not o.locked and o.key not in REGISTRY.ais))
         self.assertEqual({o.key for o in rows if o.locked}, {"no-sudo"})
 
     def test_always_on_policy_row_is_locked_checked_and_marked(self):
@@ -178,6 +227,12 @@ class TestPromptTags(unittest.TestCase):
     def test_picked_engine_overrides_current(self):
         self.assertEqual(self._run(["golem"]).engine, "golem")
 
+    def test_ai_preserved_from_current(self):
+        self.assertEqual(self._run([], current=AgentBuild(engine="poet", ai="grok")).ai, "grok")
+
+    def test_picked_ai_overrides_current(self):
+        self.assertEqual(self._run(["gemini"], current=AgentBuild(engine="poet", ai="grok")).ai, "gemini")
+
     def test_preamble_names_instance_and_workspace(self):
         self._run([])
         preamble = self.form.call_args.kwargs["preamble"]
@@ -186,8 +241,8 @@ class TestPromptTags(unittest.TestCase):
 
     def test_empty_selection_yields_bare_build(self):
         build = self._run([])
-        self.assertEqual((build.professions, build.specialties, build.policies),
-                         ((), (), ()))
+        self.assertEqual((build.ai, build.professions, build.specialties, build.policies),
+                         (None, (), (), ()))     # ai None: "the default", as the store spells it
 
 
 class TestFormRequires(unittest.TestCase):

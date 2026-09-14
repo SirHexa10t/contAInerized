@@ -16,6 +16,7 @@ from pathlib import Path
 from ..paths import COMMANDS_DIR_NAME
 from .addendums import KNOWN_PLACEHOLDERS, referenced_placeholders
 from .base import Tag, TagError
+from .ai import Ai
 from .engine import Engine
 from .lego import AgentBuild
 from .policy import Policy
@@ -35,7 +36,7 @@ class TagProblem:
     list of valid names of that kind, for the "did you mean one of these"
     report. Produced by `Registry.resolve_store_build`."""
     name: str
-    axis: str                       # store key: professions / specialties / policies / engine
+    axis: str                       # store key: professions / specialties / policies / engine / ai
     kind: str                       # expected kind label (profession / specialty / policy / engine)
     parentheses: tuple[str, str]
     reason: str                     # "unknown" | "wrong_axis"
@@ -52,6 +53,7 @@ class TagProblem:
 class Registry:
     """Every discovered tag, grouped by kind, plus combo warnings. Names are
     unique across ALL kinds (validated), so `get`/`kind_of` search the union."""
+    ais: dict[str, Ai] = field(default_factory=dict)
     engines: dict[str, Engine] = field(default_factory=dict)
     professions: dict[str, Profession] = field(default_factory=dict)
     specialties: dict[str, Specialty] = field(default_factory=dict)
@@ -62,9 +64,20 @@ class Registry:
         # Mapping (not dict) so the per-kind dicts (dict[str, Engine], …) are
         # assignable here — dict's value type is invariant, Mapping's covariant.
         return [
-            ("engine", self.engines), ("profession", self.professions),
+            ("ai", self.ais), ("engine", self.engines), ("profession", self.professions),
             ("specialty", self.specialties), ("policy", self.policies),
         ]
+
+    @property
+    def default_ai(self) -> Ai | None:
+        """The AI an instance runs when its build names none — the member
+        marked `default = true` (the scan holds the kind to exactly one);
+        None only for a tree without an `ai/` shelf (fixtures)."""
+        return next((ai for ai in self.ais.values() if ai.default), None)
+
+    def ai_for(self, build: AgentBuild) -> Ai | None:
+        """The AI a build runs on: its named one, else the default."""
+        return self.ais[build.ai] if build.ai else self.default_ai
 
     def all_names(self) -> set[str]:
         return {n for _, m in self._kind_maps() for n in m}
@@ -91,6 +104,7 @@ class Registry:
     # kind definitions. Engine is a 0-or-1 axis; the three others are lists.
     def _axis_specs(self) -> "list[tuple[str, type[Tag], Mapping[str, Tag]]]":
         return [
+            ("ai", Ai, self.ais),
             ("engine", Engine, self.engines),
             ("professions", Profession, self.professions),
             ("specialties", Specialty, self.specialties),
@@ -99,6 +113,8 @@ class Registry:
 
     @staticmethod
     def _axis_names(build: AgentBuild, axis: str) -> list[str]:
+        if axis == "ai":
+            return [build.ai] if build.ai else []
         if axis == "engine":
             return [build.engine] if build.engine else []
         return list(getattr(build, axis))
@@ -129,6 +145,7 @@ class Registry:
         crash. (Shipped `.lego` files use the raising `validate_build`.)"""
         kept: dict[str, list[str]] = {"professions": [], "specialties": [], "policies": []}
         kept_engine: str | None = None
+        kept_ai: str | None = None
         problems: list[TagProblem] = []
         for axis, cls, kind_map in self._axis_specs():
             for name in self._axis_names(build, axis):
@@ -138,6 +155,8 @@ class Registry:
                 if actual == cls.root:
                     if axis == "engine":
                         kept_engine = name
+                    elif axis == "ai":
+                        kept_ai = name
                     else:
                         kept[axis].append(name)
                 else:
@@ -146,7 +165,7 @@ class Registry:
                         reason="unknown" if actual is None else "wrong_axis",
                         actual_kind=actual, options=tuple(sorted(kind_map)),
                     ))
-        cleaned = AgentBuild(engine=kept_engine, professions=tuple(kept["professions"]),
+        cleaned = AgentBuild(ai=kept_ai, engine=kept_engine, professions=tuple(kept["professions"]),
                              specialties=tuple(kept["specialties"]), policies=tuple(kept["policies"]))
         return cleaned, problems
 
@@ -169,6 +188,7 @@ def scan_all(agents_dir: Path) -> Registry:
     layers = Profession.discover_layers(agents_dir)
     fragments = Policy.discover_fragments(agents_dir)
     reg = Registry(
+        ais=_by_name(Ai.scan(agents_dir), "ai"),
         engines=_by_name(Engine.scan(agents_dir), "engine"),
         professions=_by_name(Profession.scan(agents_dir), "profession"),
         specialties=_by_name(Specialty.scan(agents_dir, layers, fragments), "specialty"),
@@ -189,7 +209,18 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
         professions require professions; specialties additionally require
         specialties (their own tree nests too — `{manager}` inside `cowork/`);
       - `wants` and combo references resolve to real tags (any kind);
-      - every declared command name resolves to a `commands/<name>.md` file."""
+      - every declared command name resolves to a `commands/<name>.md` file;
+      - every engine's capability standard is one the AIs define."""
+    # Every engine's standard is one the AIs answer (the shared file's
+    # quarters plus the ends) — a budget naming a quarter no efforts.tiers has
+    # a tier for would otherwise fail at render time, in a launch.
+    if reg.ais:
+        defined = next(iter(reg.ais.values())).standards
+        for engine in reg.engines.values():
+            if engine.budget.standard is not None and engine.budget.standard not in defined:
+                raise TagError(f"{engine.path}: standard {engine.budget.standard!r} is not one the AIs define "
+                               f"({', '.join(defined)} — agents/ai/capability.standards)")
+
     # Global name uniqueness across kinds.
     seen: dict[str, str] = {}
     for kind, m in reg._kind_maps():

@@ -1,0 +1,6 @@
+# Creative tier: the autumn-2025 frontier (on Claude, Sonnet 5 at medium) for
+# prose; memory explicitly on so it learns which references land; tool search on.
+standard          = "2025Q3"
+memory            = true
+tool_search       = true
+max_output_tokens = 18000

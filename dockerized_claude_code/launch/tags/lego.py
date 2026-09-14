@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .base import TagError, read_toml
 
-LEGO_KEYS = ("engine", "professions", "specialties", "policies")
+LEGO_KEYS = ("ai", "engine", "professions", "specialties", "policies")
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class AgentBuild:
     """A parsed `.lego`. `engine` is a single name (or None → fall back to
     `engine/<agent>/` then `engine/default/` at resolve time); the three
     axis lists are the pre-picked tag names."""
+    ai: str | None = None              # the AI to run on (None → the tree's default member)
     engine: str | None = None
     professions: tuple[str, ...] = ()
     specialties: tuple[str, ...] = ()
@@ -35,6 +36,8 @@ class AgentBuild:
         names = {*self.professions, *self.specialties, *self.policies}
         if self.engine:
             names.add(self.engine)
+        if self.ai:
+            names.add(self.ai)
         return names
 
 
@@ -50,6 +53,9 @@ def load_lego(path: Path) -> AgentBuild:
     engine = data.get("engine")
     if engine is not None and not isinstance(engine, str):
         raise TagError(f"{path}: 'engine' must be a string, got {type(engine).__name__}")
+    ai = data.get("ai")
+    if ai is not None and not isinstance(ai, str):
+        raise TagError(f"{path}: 'ai' must be a string, got {type(ai).__name__}")
 
     def string_list(key: str) -> tuple[str, ...]:
         raw = data.get(key, [])
@@ -58,6 +64,7 @@ def load_lego(path: Path) -> AgentBuild:
         return tuple(raw)
 
     return AgentBuild(
+        ai=ai,
         engine=engine,
         professions=string_list("professions"),
         specialties=string_list("specialties"),

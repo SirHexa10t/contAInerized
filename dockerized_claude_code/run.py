@@ -60,6 +60,7 @@ from launch.tags import (
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
 )
+from launch.ai import adopt, refusal_for
 from launch.utils import call_or_exit, exit_if_missing
 
 
@@ -284,6 +285,12 @@ def launch() -> None:
         launch_cluster(opts.picked, registry)
         return
     inst = resolve_target(opts.picked, registry)
+    # Refuse an AI the launcher has no harness adapter for — before persist and
+    # build, with the one message launch/ai keeps for it. The picker can show
+    # such an instance (the tag, its rendered settings); it cannot run it.
+    if inst.ai is not None and (refused := refusal_for(inst.ai.name, inst.ai.label)) is not None:
+        sys.exit(refused)
+    adopt(inst.ai.name if inst.ai else None)   # every harness word from here on is this AI's
     # Refuse a second container for an already-running instance. Placed on the
     # resolved identity so ONE check covers a CLI target, a picker row whose
     # running-snapshot went stale, and a fresh session name that collides with

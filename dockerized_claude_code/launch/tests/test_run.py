@@ -10,6 +10,7 @@ real agents/ tree registry (scan_all) — the same taxonomy a launch uses."""
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,7 @@ if str(_ROOT) not in sys.path:
 
 import run  # noqa: E402  — must come after the sys.path.insert above
 from launch.paths import AGENTS_DIR  # noqa: E402  — same reason
+from launch.ai import DEFAULT_AI_KEY, active_ai_key, set_active_ai  # noqa: E402  — same reason
 from launch.tags import Instance, scan_all  # noqa: E402  — same reason
 
 REGISTRY = scan_all(AGENTS_DIR)
@@ -155,7 +157,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
 
         `is_manager` is explicit (a bare MagicMock attribute is truthy, which
         would silently walk every test down the manager branch)."""
-        inst = MagicMock(is_brand_new=False, is_manager=is_manager)
+        inst = MagicMock(is_brand_new=False, is_manager=is_manager, ai=None)   # `ai=None`: a bare MagicMock's `.ai.name` is no adapter's key, and the launch would refuse
         opts = run.LaunchOptions(MagicMock(), [], dry_run, False)
 
         mocks = {
@@ -187,6 +189,35 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks = self._mock_pipeline(dry_run=False)
         run.launch()
         mocks["run_container"].assert_called_once()
+
+    def test_the_instances_ai_is_adopted_before_the_first_harness_word_is_read(self):
+        # The settings install, banner and title all read active_harness();
+        # they must read the launched instance's, so adoption follows the
+        # refusal check directly — and a stale choice from an earlier call is
+        # replaced (None: the store's "default").
+        self.addCleanup(set_active_ai, None)
+        mocks = self._mock_pipeline(dry_run=True)
+        seen = []
+        mocks["persist_instance"].side_effect = lambda inst: seen.append(active_ai_key())
+        mocks["resolve_target"].return_value.ai = SimpleNamespace(name="claude", label="⟪Claude⟫")
+        run.launch()
+        self.assertEqual(seen, ["claude"])
+        set_active_ai("gemini")
+        mocks["resolve_target"].return_value.ai = None
+        run.launch()
+        self.assertEqual(seen[-1], DEFAULT_AI_KEY)
+
+    def test_an_ai_without_an_adapter_exits_before_persist_and_build(self):
+        # The picker can describe an instance on any tree AI; the launch can
+        # run only the adapted ones — and says so before touching the store.
+        mocks = self._mock_pipeline(dry_run=False)
+        mocks["resolve_target"].return_value.ai = SimpleNamespace(name="no-such-ai", label="⟪Nobody⟫")
+        with self.assertRaises(SystemExit) as caught:
+            run.launch()
+        self.assertIn("⟪Nobody⟫", str(caught.exception))
+        mocks["persist_instance"].assert_not_called()
+        mocks["ensure_image"].assert_not_called()
+        mocks["run_container"].assert_not_called()
 
     def test_manager_launch_ensures_the_cowork_hub(self):
         mocks = self._mock_pipeline(dry_run=False, is_manager=True)

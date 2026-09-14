@@ -6,6 +6,7 @@ TestRunContainerModes); the transcript read is test_file_access's
 TestLastPromptInState."""
 
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from launch import paths
+from launch.ai import HARNESSES
 from launch.paths import AGENTS_DIR, quickie_communal_workspace, quickie_state_dir_path
 from launch.quickie import cli
 from launch.quickie.ask import RESEARCH, TRIVIA, _gibberish, ask, build_quickie_instance
@@ -86,6 +88,19 @@ class TestGibberish(unittest.TestCase):
 
 
 class TestAskGuard(unittest.TestCase):
+    def test_a_lego_on_an_ai_without_an_adapter_exits_before_any_docker_work(self):
+        unadapted = next(a for a in REGISTRY.ais.values() if a.name not in HARNESSES)
+        inst = dataclasses.replace(build_quickie_instance(REGISTRY, "abc123"), ai=unadapted)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(paths, "AGENTS_STATE", Path(tmp)), \
+             patch("launch.quickie.ask.build_quickie_instance", return_value=inst), \
+             patch("launch.quickie.ask.require_docker"), \
+             patch("launch.quickie.ask.ensure_image") as image, \
+             self.assertRaises(SystemExit) as caught:
+            ask("why?")
+        self.assertIn(unadapted.label, str(caught.exception))
+        image.assert_not_called()
+
     def test_empty_question_exits_before_any_docker_work(self):
         # The empty/whitespace guard is the first thing ask() does — no
         # scan_all, no require_docker, so it's safe to exercise here.

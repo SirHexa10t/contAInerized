@@ -1,0 +1,45 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Grok Build's own
+# settings (shape and rules: ai/claude/knobs.mapping). UPPER_CASE keys are
+# environment variables; dotted keys are config.toml paths under GROK_HOME
+# (user scope — a project .grok/config.toml may only carry MCP servers, plugins
+# and permission rules). Source: docs.x.ai/build/settings/reference.md, read
+# 2026-09-12, via a second reader's report re-verified on the page.
+
+[model]                                    # ↔ the tier's id, as xAI spells it (grok-4.6); GROK_DEFAULT_MODEL or `[models] default`
+GROK_DEFAULT_MODEL = "{value}"
+
+[effort]                                   # ↔ the tier's effort ("effort level if supported" — the accepted words are a probe)
+"models.default_reasoning_effort" = "{value}"
+
+[thinking.on]                              # shows thinking blocks (default true)
+GROK_SHOW_THINKING_BLOCKS = "1"
+
+[thinking.off]
+GROK_SHOW_THINKING_BLOCKS = "0"
+
+[memory.on]                                # cross-session memory master switch (default 0); nothing beyond the toggle is documented
+GROK_MEMORY = "1"
+
+[memory.off]
+GROK_MEMORY = "0"
+
+[background_agents.off]                    # a deliberate over-approximation, as for the others: subagents off
+GROK_SUBAGENTS = "0"
+
+# telemetry — NOT FOUND as a key; the enterprise page points at requirements.toml for disabling telemetry
+
+[tool_search.on]                           # on-demand MCP tool discovery (default 1) — the one analogue of ENABLE_TOOL_SEARCH among the other three AIs
+GROK_TOOL_SEARCH = "1"
+
+[max_output_tokens]                        # `[models] max_completion_tokens`
+"models.max_completion_tokens" = "{value}"
+
+# tool_output_tokens — not researched
+
+[compact_at_percent]                       # `[session] auto_compact_threshold_percent`, 0–100, default 85 — the only true percent analogue of Claude's
+"session.auto_compact_threshold_percent" = "{value}"
+
+# Reference, not budget: GROK_HOME (config root), the persona family (AGENTS.md, CLAUDE.md … read as-is, no size cap),
+# `--system-prompt-override` / `--rules`, `[permission]` rules with argument patterns and `[sandbox]` profiles (policy
+# seam), hooks with Claude's event names (only PreToolUse blocks), `grok -p` + `--output-format streaming-json` (ACP
+# events), XAI_API_KEY / `grok login --device-auth` (auth), the documented host table (cli-chat-proxy.grok.com, auth.x.ai).

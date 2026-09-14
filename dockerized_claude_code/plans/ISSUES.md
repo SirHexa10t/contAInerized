@@ -186,7 +186,7 @@ nothing has needed it yet.
 
 Settled by probing on Claude Code 2.1.226. The verdicts and their exact evidence
 now live where someone writing an engine will meet them —
-`agents/engine/default/engine.conf`, in the "Subagent controls" comment block —
+`agents/engine/default/claude.conf` (then `engine.conf`), in the "Subagent controls" comment block —
 rather than here, since this file tracks what is still open. In short: the
 concurrency cap, the depth cap and the subagent-model override all work;
 `MAX_SUBAGENTS_PER_SESSION` is **inert** (8 spawns against a cap of 3, no
@@ -638,6 +638,34 @@ everything it does not cover.
   --network=host` under Docker Desktop, and `{dood}`, which hard-fails on macOS
   (`_apply_dood` needs a host `docker` group — see `tag_handlers.py`, whose
   error message still reads as Linux-only).
+
+### The non-Claude AIs' model ids (`agents/ai/{gemini,chatgpt,grok}/efforts.tiers`) age silently — nothing launches them, and the bump command is Claude-only
+
+Every `agents/ai/<key>/efforts.tiers` pins model ids per capability standard
+(written 2026-09-10 to 13, each id verified against the vendors' pages — the
+read date is in each file's header; the per-engine `<ai>.conf` files they
+replaced on 2026-09-13 carried the same ids). Two things make the non-Claude
+ones rot without a signal:
+
+- **Nothing launches them.** An instance can be described on Gemini, ChatGPT
+  or Grok (the tag, the rendered settings), but only Claude has a harness
+  adapter (`plans/adding_an_ai.md`, status by seam). A stale id in those
+  files breaks no test and no launch.
+- **The model-bump command skips them.** `ai_project-update-models.md` reads
+  Anthropic's pages and bumps `agents/ai/claude/efforts.tiers` only (its scope
+  note says so).
+
+How fast this bites was measured while writing them: the Gemini CLI's own
+`pro` / `auto` tier aliases still resolve to `gemini-3-pro-preview`, which
+Google shut down on 2026-03-09 (`ai.google.dev/gemini-api/docs/deprecations`),
+and one of the launcher's own rungs (`gemini-3.1-pro-preview`) is a `-preview`
+id.
+
+**What would close it:** before any non-Claude adapter ships, extend the bump
+command to every catalog member (`launch/ai/catalog.py`) — one vendor page set
+per AI, the rung table in `plans/adding_an_ai.md` ("Tier equivalence") saying
+which id is which tier — and have it refresh each file's verified-on date.
+Until then, re-verify by hand before relying on either file.
 
 ## Known issues — testing technique
 

@@ -61,8 +61,8 @@ from ..cluster.legoset import ClusterTemplate
 from ..cluster.member import Member
 from ..file_access import read_text
 from ..transcripts import last_prompt_in_state
-from ..tags import Agent, AgentBuild, Engine, Instance, Registry, Tag, TagProblem
-from .styles import RICH_AGENT_NAME, RICH_BY_STYLE, tag_style
+from ..tags import Agent, AgentBuild, Ai, Engine, Instance, Registry, Tag, TagProblem
+from .styles import RICH_AGENT_NAME, rich_style, tag_style
 
 PREVIEW_WIDTH = 80                # rich renders at this width; prompt_toolkit re-wraps if the pane is narrower
 LAST_PROMPT_PREVIEW_CHARS = 250   # enough to recognise a conversation; not a transcript viewer
@@ -186,7 +186,7 @@ def _tag_lines(tags: Sequence[Tag], problems: Sequence[TagProblem], *,
     # background, and a red bar of trailing spaces would read as more alert.
     for tag in tags:
         lines.append("\n  ")
-        lines.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
+        lines.append(tag.label, style=rich_style(tag_style(tag)))
         lines.append(" " * (pad - len(tag.label)) + "  ")
         lines.append(tag.fullname or tag.name, style="underline")
         if tag.name in inherited:   # beside the name, so a long description wrapping cannot orphan it
@@ -215,18 +215,34 @@ def _resolve_tags(registry: Registry, build: AgentBuild,
     return [tag for name in names if (tag := registry.get(name)) is not None], problems
 
 
+def engine_fact(inst: Instance) -> str:
+    """The preview's Engine fact: the engine's name and, after it, the model
+    its budget pins for the AI in use — `quick  claude-sonnet-5` — so the
+    model shows without the engine's description having to name it."""
+    name = inst.engine.name if inst.engine else "(default)"
+    model = inst.model
+    return f"{name}  {model}" if model else name
+
+
+def _tags_with_ai(inst: Instance) -> tuple[Tag, ...]:
+    """The pane's tag list for an instance: its AI FIRST (which AI runs it is
+    the first thing to know), then its active tags."""
+    return (*((inst.ai,) if inst.ai else ()), *inst.active_tags)
+
+
 def cont_preview(inst: Instance, workspace_display: str,
                  last_used_display: str, prompt: str | None) -> str:
-    """A Cont row's pane — `session_preview` with an instance's facts."""
+    """A Cont row's pane — `session_preview` with an instance's facts; the
+    tag list opens with the instance's AI."""
     return session_preview(
         f"Continue session `{inst.instance}`.",
         [("Agent", inst.agent),
          ("Session", inst.session),
          ("Workspace", workspace_display),
-         ("Engine", inst.engine.name if inst.engine else "(default)"),
+         ("Engine", engine_fact(inst)),
          ("State", str(inst.state_dir)),
          ("Last used", last_used_display)],
-        tags=inst.active_tags, problems=inst.invalid_tags, prompt=prompt)
+        tags=_tags_with_ai(inst), problems=inst.invalid_tags, prompt=prompt)
 
 
 def member_preview(inst: Instance, member: Member, cluster: str,
@@ -244,18 +260,18 @@ def member_preview(inst: Instance, member: Member, cluster: str,
          ("Role", member.role),
          ("Cluster", cluster),
          ("Project", project_display),
-         ("Engine", inst.engine.name if inst.engine else "(default)"),
+         ("Engine", engine_fact(inst)),
          ("State", str(inst.state_dir)),
          ("Last used", last_used_display)],
-        tags=inst.active_tags, problems=inst.invalid_tags, prompt=prompt,
+        tags=_tags_with_ai(inst), problems=inst.invalid_tags, prompt=prompt,
         inherited=inherited, fix_target="this cluster can launch")
 
 
-def _member_line(identifier: str, engine: Engine | None, tags: Sequence[Tag],
+def _member_line(identifier: str, ai: Ai | None, engine: Engine | None, tags: Sequence[Tag],
                  problems: Sequence[TagProblem], last_used: str, *,
                  missing_agent: str | None = None) -> Text:
     """One member's line in its cluster's pane: bullet, BLUE name (the colour
-    names wear everywhere in the picker), its engine and OWN tag labels in
+    names wear everywhere in the picker), its AI, its engine and OWN tag labels in
     their legend colours — an unresolvable name in the alert style rather than
     vanishing — and when it last ran, dim. A member whose agent `.md` is gone
     (`missing_agent`) renders its name in the alert style with what to do."""
@@ -266,9 +282,9 @@ def _member_line(identifier: str, engine: Engine | None, tags: Sequence[Tag],
                     f"from the cluster", style="bold red")
         return line
     line.append(identifier, style=RICH_AGENT_NAME)
-    for tag in (*((engine,) if engine else ()), *tags):
+    for tag in (*((ai,) if ai else ()), *((engine,) if engine else ()), *tags):
         line.append("  ")
-        line.append(tag.label, style=RICH_BY_STYLE[tag_style(tag)])
+        line.append(tag.label, style=rich_style(tag_style(tag)))
     for problem in problems:
         line.append("  ")
         line.append(problem.label, style=STYLE_ALERT)
@@ -301,7 +317,9 @@ def _cluster_preview(cluster: cluster_state.Cluster, tags: Sequence[Tag],
 
 def _create_preview(agent: Agent) -> str:
     """Build the Create-row preview markdown from a creatable_agents Agent
-    and render to ANSI. Italic source line, horizontal rule, then the .md content as-is."""
+    and render to ANSI. Italic source line, horizontal rule, then the .md
+    content as-is. No AI here: which AI runs is decided when the instance is
+    created (the form's first question), not by the agent."""
     return _ansi(Markdown(
         f"*Create a new instance of `{agent.name}` — `agents/{agent.md_path.name}`*\n\n"
         f"---\n\n"

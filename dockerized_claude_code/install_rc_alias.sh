@@ -73,8 +73,8 @@ fi
 # The launcher deps must import under the venv python the aliases use.
 PY_OK="$("$PYDEV_PY" -c 'import sys; print(1 if sys.version_info >= (3, 10) else 0)' 2>/dev/null || printf 0)"
 [ "$PY_OK" = "1" ] || die "The ~/pydev venv python is older than 3.10; recreate it via install_dependencies.sh."
-"$PYDEV_PY" -c 'import prompt_toolkit, dotenv' >/dev/null 2>&1 \
-    || die "The ~/pydev venv is missing deps (prompt_toolkit / python-dotenv). Re-run install_dependencies.sh."
+"$PYDEV_PY" -c 'import prompt_toolkit, rich' >/dev/null 2>&1 \
+    || die "The ~/pydev venv is missing deps (prompt_toolkit / rich). Re-run install_dependencies.sh."
 
 # --- 5. Install each alias into every shell rc that exists ------------------
 

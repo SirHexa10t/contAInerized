@@ -22,7 +22,7 @@ description: Upgrade the project's agents by updating each `.conf` to the latest
 
 ## Where the model confs live
 
-`/workspace/agents/engine/<name>/engine.conf` — one conf per engine tag; the `ANTHROPIC_MODEL` line is the value to update (nested engine dirs inherit and override their parent's conf, so check the whole `engine/` tree). If that tree is missing or holds no `engine.conf` files, locate the correct directory (it's the one whose confs carry `ANTHROPIC_MODEL` lines); if you can't find it, ask the user where it lives before proceeding.
+`/workspace/agents/ai/claude/efforts.tiers` — the ONE place Claude model ids live since 2026-09-13: each standard's table (`[cheapest]`, `[2025Q4]`, … `[best]`) has the `model` to update (and the commented line-up beneath); the engines under `agents/engine/` name a STANDARD, never a model, so nothing there changes. Keep each tier on its line (`[best]` stays on the Fable line, `[cheapest]` on Haiku, the Sonnet tiers on Sonnet, the Opus tiers on Opus); a bumped id keeps meeting its standard only if its index does — the rule is in `agents/ai/capability.standards`. The sibling `agents/ai/{gemini,chatgpt,grok}/efforts.tiers` are OUT of this command's scope — their vendors' pages and tier names differ; the rung each follows is documented in the file's own comments and in `plans/adding_an_ai.md`. Refresh the Artificial Analysis index numbers in the comments only if you re-read the leaderboard.
 
 ## Rules
 

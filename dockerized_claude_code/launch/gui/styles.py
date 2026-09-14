@@ -8,7 +8,7 @@ rich tables), and keeping them behind a module named after one form made
 form in sight.
 
   UiClass / STYLE_DICT   the prompt_toolkit CSS classes and their styles
-  STYLE_TAG_* / tag_style / squashed_tag_style / RICH_BY_STYLE
+  STYLE_TAG_* / tag_style / squashed_tag_style / RICH_BY_STYLE / rich_style
                          field-driven tag colouring: a new tag never touches
                          UI code, because the colour is derived from the
                          tag's own fields (warn / stance / conf)
@@ -32,7 +32,7 @@ from typing import Callable, Iterable, cast
 
 from prompt_toolkit.formatted_text import AnyFormattedText
 
-from ..tags import PolicyStance, Tag
+from ..tags import Ai, PolicyStance, Tag
 
 # ============================================================
 # Shared style system (used by the form AND menu_picker)
@@ -122,24 +122,61 @@ def squashed_tag_style(style: str) -> str:
     more tags share a row and each collapses to `Tag.squash_glyph` — with the
     name gone, the color block is what still says "specialty, dangerous" or
     "policy, deny" at a glance. Derived from the style string rather than
-    listed per-constant so a new tag color cannot be forgotten here."""
-    color = next((token.removeprefix("fg:") for token in style.split()
+    listed per-constant so a new tag color cannot be forgotten here. A style
+    that already paints a background (an AI tag's logo colours) IS a chip and
+    is kept whole — turning Grok's black glyph into a black block would erase
+    it."""
+    tokens = style.split()
+    if any(token.startswith("bg:") for token in tokens):
+        return style
+    color = next((token.removeprefix("fg:") for token in tokens
                   if token.startswith("fg:")), "ansiwhite")
     return f"fg:ansiblack bg:{color}"
 
 
 def tag_style(tag: Tag) -> str:
-    """The style for one tag's label — dispatched on the kind-specific fields
-    (duck-typed: only specialties carry `warn`, only policies carry `stance`,
-    only engines carry `conf`)."""
+    """The style for one tag's label — the AI's own logo colours (the one kind
+    coloured per MEMBER, from its tag.info), else dispatched on the
+    kind-specific fields (duck-typed: only specialties carry `warn`, only
+    policies carry `stance`, only engines carry `budget`)."""
+    if isinstance(tag, Ai):
+        return tag.style
     if getattr(tag, "warn", False):
         return STYLE_TAG_WARN
     stance = getattr(tag, "stance", None)
     if stance is not None:
         return _STYLE_BY_STANCE[stance]
-    if hasattr(tag, "conf"):
+    if hasattr(tag, "budget"):
         return STYLE_TAG_ENGINE
     return STYLE_TAG_SAFE
+
+
+def rich_style(style: str) -> str:
+    """A prompt_toolkit style string as rich spells it — the picker draws rows
+    with prompt_toolkit and previews / the legend with rich, and one tag must
+    look the same in both. The fixed tag styles map through RICH_BY_STYLE; any
+    other (an AI's `fg:#hex bg:#hex`, a chip) converts token by token:
+    `fg:X` → `X`, `bg:Y` → `on Y`, attributes pass through, and rich's
+    `ansibrightred` is `bright_red`."""
+    if style in RICH_BY_STYLE:
+        return RICH_BY_STYLE[style]
+    parts: list[str] = []
+    for token in style.split():
+        if token.startswith("fg:"):
+            parts.append(_rich_color(token[3:]))
+        elif token.startswith("bg:"):
+            parts.append(f"on {_rich_color(token[3:])}")
+        else:
+            parts.append(token)
+    return " ".join(parts)
+
+
+def _rich_color(color: str) -> str:
+    """`ansibrightred` → `bright_red`, `ansired` → `red`; hex and rich names unchanged."""
+    if color.startswith("ansi"):
+        name = color.removeprefix("ansi")
+        return f"bright_{name.removeprefix('bright')}" if name.startswith("bright") else name
+    return color
 
 
 def _normalize(display: str | Iterable[tuple[str, str]]) -> list[tuple[str, str]]:

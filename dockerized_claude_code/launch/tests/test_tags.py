@@ -18,10 +18,11 @@ from unittest.mock import patch
 from launch import tags
 from launch.paths import COMMANDS_DIR_NAME
 from launch.tags import (
-    AgentBuild, Engine, Instance, Policy, PolicyStance, Profession, Registry, Specialty,
-    TagError, ToolkitEntry, addendums, image_chain, load_lego, merge_fragments, migrations,
-    resolve_build, scan_all, store,
+    AgentBuild, Budget, is_standard, rank_of, sorted_standards, Engine, Instance, Policy, PolicyStance, Profession, Registry,
+    Specialty, TagError, ToolkitEntry, addendums, image_chain, load_lego, merge_fragments,
+    migrations, resolve_build, scan_all, sorted_engines, store,
 )
+from launch.tags.ai import Ai
 from launch.tags.identity import FORBIDDEN_IN_LABELS, label_error, suggested_label
 
 
@@ -68,6 +69,34 @@ class TestSuggestedLabel(unittest.TestCase):
                     self.assertIsNone(label_error(bent))
 
 
+# The dated standards a fixture tree declares (the kind's shared file) and the
+# full key list a member's efforts.tiers must answer: the ends around them.
+FIXTURE_STANDARDS = ("2025Q1", "2026Q1")
+FIXTURE_KEYS = ("cheapest", *FIXTURE_STANDARDS, "best")
+FIXTURE_STANDARDS_FILE = (
+    '[2025Q1]\nset_by = "Model A"\nindex = 20.0\nestimated = true\n'
+    '[2026Q1]\nset_by = "Model B"\nindex = 40.0\n')
+
+
+# A complete, valid AI member for fixture trees: a tier for every fixture
+# standard on one test model, a two-word scale, and knobs enough to render an
+# engine's budget. The shared standards file rides along (one per tree; two
+# members merge to the same key).
+def ai_member(name="claude", *, default=True, model="claude-test", fg="#ff8700", bg="#3a3a3a"):
+    tiers = "".join(f'[{s}]\nmodel = "{model}"\neffort = "{"low" if s == "cheapest" else "high"}"\n' for s in FIXTURE_KEYS)
+    return {
+        "ai/capability.standards": FIXTURE_STANDARDS_FILE,
+        f"ai/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\nharness = "{name} CLI"\n'
+                                f'default = {str(default).lower()}\nfg = "{fg}"\nbg = "{bg}"\n'),
+        f"ai/{name}/efforts.tiers": '[scale]\nefforts = ["low", "high"]\n' + tiers,
+        f"ai/{name}/knobs.mapping": (
+            '[model]\nMODEL = "{value}"\n[effort]\nEFFORT = "{value}"\n'
+            '[thinking.on]\nTHINK = "1"\n[thinking.off]\nTHINK = "0"\n'
+            '[max_output_tokens]\nOUT = "{value}"\n[compact_at_percent]\nPCT = "{value/100}"\n'
+            '[tool_output_tokens]\nCHARS = "{value*4}"\n'),
+    }
+
+
 class TagTreeTestCase(unittest.TestCase):
     """Base: `tree({relpath: contents})` writes a fixture `agents/` dir under
     a per-test temp dir and returns its path. `dedent` is applied so tests can
@@ -86,8 +115,9 @@ class TagTreeTestCase(unittest.TestCase):
     # A small, valid, full-coverage tree reused by several tests.
     def full_tree(self) -> Path:
         return self.tree({
+            **ai_member(),
             "engine/default/tag.info": 'full_description = "baseline"\n',
-            "engine/default/engine.conf": 'CLAUDE_CODE_EFFORT_LEVEL=high\n',
+            "engine/default/tag.budget": 'standard = "best"\nthinking = true\n',
             "profession/code/tag.info": 'full_description = "coding toolchains"\n',
             "profession/code/Dockerfile": "FROM base\n",
             "profession/code/web/tag.info": 'full_description = "browser"\n',
@@ -111,46 +141,160 @@ class TagTreeTestCase(unittest.TestCase):
 # ============================================================
 
 class TestEngine(TagTreeTestCase):
-    def test_flat_engine_conf(self):
+    def test_flat_engine_budget(self):
         root = self.tree({
             "engine/golem/tag.info": 'full_description = "cheap"\n',
-            "engine/golem/engine.conf": 'ANTHROPIC_MODEL="claude-haiku-4-5"\nCLAUDE_CODE_EFFORT_LEVEL=low\n',
+            "engine/golem/tag.budget": 'standard = "cheapest"\nthinking = false\nmemory = false\n',
         })
         (golem,) = Engine.scan(root)
         self.assertEqual(golem.name, "golem")
         self.assertEqual(golem.label, "(golem)")
-        self.assertEqual(golem.conf_map,
-                         {"ANTHROPIC_MODEL": "claude-haiku-4-5", "CLAUDE_CODE_EFFORT_LEVEL": "low"})
+        self.assertEqual(golem.budget, Budget(standard="cheapest", thinking=False, memory=False))
+        self.assertEqual(golem.budget.rank, 0)
 
     def test_nested_engine_inherits_and_overrides(self):
         root = self.tree({
             "engine/thinker/tag.info": 'full_description = "t"\n',
-            "engine/thinker/engine.conf": 'ANTHROPIC_MODEL="claude-opus-4-8"\nCLAUDE_CODE_EFFORT_LEVEL=high\n',
+            "engine/thinker/tag.budget": 'standard = "2026Q1"\nmax_output_tokens = 30000\n',
             "engine/thinker/breakthrough/tag.info": 'full_description = "b"\n',
-            "engine/thinker/breakthrough/engine.conf": 'CLAUDE_CODE_EFFORT_LEVEL=max\n',
+            "engine/thinker/breakthrough/tag.budget": 'max_output_tokens = 40000\n',
         })
         by_name = {e.name: e for e in Engine.scan(root)}
-        # child inherits parent's model, overrides effort
-        self.assertEqual(by_name["breakthrough"].conf_map,
-                         {"ANTHROPIC_MODEL": "claude-opus-4-8", "CLAUDE_CODE_EFFORT_LEVEL": "max"})
+        # child inherits parent's standard, overrides the output budget
+        self.assertEqual(by_name["breakthrough"].budget, Budget(standard="2026Q1", max_output_tokens=40000))
         # parent untouched
-        self.assertEqual(by_name["thinker"].conf_map["CLAUDE_CODE_EFFORT_LEVEL"], "high")
+        self.assertEqual(by_name["thinker"].budget.max_output_tokens, 30000)
 
-    def test_engine_without_conf_is_empty(self):
-        root = self.tree({"engine/bare/tag.info": 'full_description = "no conf"\n'})
+    def test_engine_without_budget_is_empty(self):
+        root = self.tree({"engine/bare/tag.info": 'full_description = "no budget"\n'})
         (bare,) = Engine.scan(root)
-        self.assertEqual(bare.conf_map, {})
+        self.assertEqual(bare.budget, Budget())
+        self.assertEqual(bare.budget.rank, -1)
 
-    def test_valueless_conf_key_dropped(self):
+    def test_budget_typos_fail_loudly(self):
+        for body in ('standardd = "best"\n', 'standard = "ultra"\n', 'standard = "2025Q5"\n', 'thinking = "yes"\n',
+                     'max_output_tokens = -1\n', 'compact_at_percent = 150\n'):
+            with self.subTest(body=body), self.assertRaises(TagError):
+                Engine.scan(self.tree({"engine/x/tag.info": 'full_description = "x"\n',
+                                       "engine/x/tag.budget": body}))
+
+    def test_sorted_engines_rank_by_standard_then_output_then_name(self):
         root = self.tree({
-            "engine/x/tag.info": 'full_description = "x"\n',
-            "engine/x/engine.conf": 'BARE_KEY\nREAL=1\n',
+            "engine/a/tag.info": 'full_description = "a"\n', "engine/a/tag.budget": 'standard = "2025Q4"\nmax_output_tokens = 1000\n',
+            "engine/b/tag.info": 'full_description = "b"\n', "engine/b/tag.budget": 'standard = "best"\n',
+            "engine/c/tag.info": 'full_description = "c"\n', "engine/c/tag.budget": 'standard = "2025Q4"\nmax_output_tokens = 2000\n',
+            "engine/d/tag.info": 'full_description = "d"\n', "engine/d/tag.budget": 'standard = "2025Q4"\nmax_output_tokens = 1000\n',
         })
-        (x,) = Engine.scan(root)
-        self.assertEqual(x.conf_map, {"REAL": "1"})
+        self.assertEqual([e.name for e in sorted_engines(Engine.scan(root))], ["b", "c", "a", "d"])
 
     def test_missing_engine_root_yields_nothing(self):
         self.assertEqual(Engine.scan(self.tree({"profession/code/tag.info": 'full_description="c"\n'})), [])
+
+
+# ============================================================
+# Ai — the fifth kind: manifests, standards, tiers, knobs, rendering
+# ============================================================
+
+
+class TestStandardVocabulary(unittest.TestCase):
+    """tags/budget — the shape and order of a capability standard, without any
+    tree: the ends, dated quarters between them, rising with the date."""
+
+    def test_spelling(self):
+        for good in ("cheapest", "best", "2024Q4", "2025Q1", "2031Q3"):
+            self.assertTrue(is_standard(good), good)
+        for bad in ("low", "2025Q5", "2025Q0", "25Q1", "2025-Q1", "Best", "", None, 3):
+            self.assertFalse(is_standard(bad), repr(bad))
+
+    def test_order_is_in_the_key(self):
+        self.assertEqual(rank_of(None), -1)
+        self.assertEqual(rank_of("low"), -1)
+        self.assertLess(rank_of("cheapest"), rank_of("2024Q4"))
+        self.assertLess(rank_of("2024Q4"), rank_of("2025Q1"))      # the year outranks the quarter
+        self.assertLess(rank_of("2025Q1"), rank_of("2025Q4"))
+        self.assertLess(rank_of("2025Q4"), rank_of("2026Q1"))
+        self.assertLess(rank_of("9999Q4"), rank_of("best"))         # best tops every quarter there will be
+        self.assertEqual(sorted_standards(["best", "2026Q1", "cheapest", "2025Q3"]), ["cheapest", "2025Q3", "2026Q1", "best"])
+
+    def test_budget_rank_follows(self):
+        self.assertEqual(Budget().rank, -1)
+        self.assertEqual(Budget(standard="cheapest").rank, 0)
+        self.assertGreater(Budget(standard="best").rank, Budget(standard="2026Q3").rank)
+
+
+class TestAiKind(TagTreeTestCase):
+    def test_scan_reads_manifest_tiers_and_knobs(self):
+        (claude,) = Ai.scan(self.tree(ai_member()))
+        self.assertEqual((claude.name, claude.label, claude.vendor, claude.harness), ("claude", "⟪claude⟫", "Vendor", "claude CLI"))
+        self.assertTrue(claude.default)
+        self.assertEqual(claude.style, "fg:#ff8700 bg:#3a3a3a")
+        self.assertEqual(claude.standards, FIXTURE_KEYS)
+        self.assertEqual(claude.tier("cheapest").effort, "low")
+        self.assertEqual(claude.tier("2026Q1").model, "claude-test")
+        self.assertEqual(claude.knob("model"), (("MODEL", "{value}"),))
+        self.assertIsNone(claude.knob("telemetry.off"))
+
+    def test_render_fills_templates_and_converts_units(self):
+        (claude,) = Ai.scan(self.tree(ai_member()))
+        rendering = claude.render(Budget(standard="best", thinking=True, max_output_tokens=1000,
+                                         compact_at_percent=60, tool_output_tokens=100))
+        self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1",
+                                         "OUT": "1000", "CHARS": "400", "PCT": "0.6"})
+        self.assertEqual(rendering.unmapped, ())
+
+    def test_render_reports_what_the_ai_cannot_say(self):
+        (claude,) = Ai.scan(self.tree(ai_member()))
+        rendering = claude.render(Budget(standard="2025Q1", memory=False, telemetry=False))
+        self.assertEqual(rendering.unmapped, ("memory.off", "telemetry.off"))
+        self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high"})
+
+    def test_render_needs_a_standard(self):
+        (claude,) = Ai.scan(self.tree(ai_member()))
+        with self.assertRaises(TagError):
+            claude.render(Budget())
+
+    def test_exactly_one_default(self):
+        with self.assertRaises(TagError):
+            Ai.scan(self.tree({**ai_member("a"), **ai_member("b", fg="#000000", bg="#ffffff")}))   # two defaults
+        with self.assertRaises(TagError):
+            Ai.scan(self.tree(ai_member("a", default=False)))                                    # none
+        two = Ai.scan(self.tree({**ai_member("a"), **ai_member("b", default=False)}))
+        self.assertEqual([ai.name for ai in two if ai.default], ["a"])
+
+    def test_manifest_faults_fail_loudly(self):
+        base = ai_member()
+        faults = {
+            "bad colour": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('#ff8700', 'orange')},
+            "no harness": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('harness = "claude CLI"', 'harness = ""')},
+            "missing standard": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"].replace("[2026Q1]", "[2026Q2]")},
+            "undeclared standard": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"] + '[2027Q1]\nmodel = "x"\n'},
+            "no standards file": {"ai/capability.standards": None},
+            "an end written as a standard": {"ai/capability.standards": FIXTURE_STANDARDS_FILE + '[best]\nset_by = "x"\nindex = 99\n'},
+            "standards that do not rise": {"ai/capability.standards": FIXTURE_STANDARDS_FILE.replace("index = 40.0", "index = 19.0")},
+            "a standard that is not a quarter": {"ai/capability.standards": FIXTURE_STANDARDS_FILE.replace("[2026Q1]", "[2026Q5]")},
+            "a standard without its setter": {"ai/capability.standards": FIXTURE_STANDARDS_FILE.replace('set_by = "Model B"\n', "")},
+            "effort outside scale": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"].replace('effort = "low"', 'effort = "ultra"')},
+            "unknown purpose": {"ai/claude/knobs.mapping": base["ai/claude/knobs.mapping"] + '[colour]\nX = "1"\n'},
+            "bad template": {"ai/claude/knobs.mapping": base["ai/claude/knobs.mapping"].replace('"{value/100}"', '"{value^2}"')},
+            "missing knobs file": {"ai/claude/knobs.mapping": None},
+        }
+        for label, change in faults.items():
+            spec = {**base}
+            for path, contents in change.items():
+                if contents is None:
+                    spec.pop(path)
+                else:
+                    spec[path] = contents
+            with self.subTest(fault=label), self.assertRaises(TagError):
+                Ai.scan(self.tree(spec))
+
+    def test_members_do_not_nest(self):
+        spec = {**ai_member(), "ai/claude/mini/tag.info": 'full_description = "nested"\n'}
+        with self.assertRaises(TagError):
+            Ai.scan(self.tree(spec))
+
+    def test_missing_ai_root_yields_nothing(self):
+        self.assertEqual(Ai.scan(self.tree({"profession/code/tag.info": 'full_description="c"\n'})), [])
 
 
 # ============================================================
@@ -333,6 +477,13 @@ class TestResolveStoreBuild(TagTreeTestCase):
         self.assertEqual(prob.reason, "wrong_axis")
         self.assertEqual(prob.actual_kind, "policy")
         self.assertEqual(prob.kind, "specialty")
+
+    def test_unknown_ai_is_reported_on_its_own_axis(self):
+        reg = scan_all(self.full_tree())
+        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="mistral", engine="default"))
+        self.assertIsNone(cleaned.ai)
+        self.assertEqual([(p.axis, p.name, p.reason) for p in problems], [("ai", "mistral", "unknown")])
+        self.assertEqual(problems[0].options, ("claude",))
 
     def test_unknown_engine_reported_options_are_engines(self):
         _, problems = self.reg.resolve_store_build(AgentBuild(engine="ghost"))
@@ -566,6 +717,11 @@ class TestLego(TagTreeTestCase):
         self.assertEqual(build.engine, "researcher")
         self.assertEqual(build.professions, ("code",))
         self.assertEqual(build.selected(), {"researcher", "code", "auto", "firewall", "no-sudo"})
+
+    def test_ai_must_be_string(self):
+        root = self.tree({"x.lego": "ai = 3\n"})
+        with self.assertRaises(TagError):
+            load_lego(root / "x.lego")
 
     def test_engine_must_be_string(self):
         root = self.tree({"x.lego": 'engine = ["nope"]\n'})
@@ -837,7 +993,7 @@ class TestInstance(TagTreeTestCase):
     def _inst(self, **kw) -> Instance:
         base = dict(agent="researcher", md_path=Path("/x/researcher.md"),
                     session="proj", workspace="/tmp/ws", is_brand_new=True,
-                    engine=self.reg.engines["default"])
+                    engine=self.reg.engines["default"], ai=self.reg.default_ai)
         base.update(kw)
         return Instance(**base)
 
@@ -851,7 +1007,11 @@ class TestInstance(TagTreeTestCase):
         i = self._inst(professions=(self.reg.professions["code"],),
                        specialties=(self.reg.specialties["auto"],))
         self.assertEqual(i.chain, ["base", "code", "auto"])
-        self.assertIn("CLAUDE_CODE_EFFORT_LEVEL", i.conf)
+        # the engine's budget rendered by the instance's AI
+        self.assertEqual(i.conf, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1"})
+        self.assertEqual(i.model, "claude-test")
+        self.assertEqual(i.effort, "high")
+        self.assertEqual(i.build.ai, "claude")
 
     def test_claude_args_from_specialties(self):
         i = self._inst(specialties=(self.reg.specialties["auto"],))
@@ -891,6 +1051,10 @@ class TestResolveBuild(TagTreeTestCase):
         kw = resolve_build(AgentBuild(), "poet", self.reg)
         self.assertIs(kw["engine"], self.reg.engines["default"])
 
+    def test_ai_falls_back_to_the_trees_default_member(self):
+        self.assertIs(resolve_build(AgentBuild(), "poet", self.reg)["ai"], self.reg.default_ai)
+        self.assertIs(resolve_build(AgentBuild(ai="claude"), "poet", self.reg)["ai"], self.reg.ais["claude"])
+
 
 # ============================================================
 # Store — instances.toml load/save + legacy-map migration
@@ -898,6 +1062,12 @@ class TestResolveBuild(TagTreeTestCase):
 
 
 class TestStore(TagTreeTestCase):
+    def test_ai_is_a_scalar_field_omitted_when_unset(self):
+        text = store.dumps({"x__s": store.build_entry(AgentBuild(ai="gemini", engine="quick"), "/w")})
+        self.assertIn('ai = "gemini"', text)
+        self.assertEqual(store.entry_to_build({"ai": "gemini"}).ai, "gemini")
+        self.assertNotIn("ai =", store.dumps({"y__s": store.build_entry(AgentBuild(), "/w")}))
+
     def test_load_missing_is_empty(self):
         self.assertEqual(store.load(Path("/nonexistent/instances.toml")), {})
 
