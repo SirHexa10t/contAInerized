@@ -1,0 +1,46 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in OpenClaw's own
+# settings — keys are paths in ~/.openclaw/openclaw.json (JSON5;
+# OPENCLAW_CONFIG_PATH relocates the file, OPENCLAW_STATE_DIR the state root).
+# Read 2026-09-14 from docs.openclaw.ai's full-text export (llms-full.txt: the
+# agents.defaults reference, the models.providers reference, the Update
+# section), every key below confirmed against that export by the researcher
+# the same day. The authoritative schema is the binary's own `openclaw config
+# schema` — a probe once an image carries it. A purpose absent from
+# this file is one the docs do not express — the launcher records it as
+# unmapped, never invents a key.
+#
+# Unmapped, and why:
+#   memory             — memory search has a provider and a per-agent scope
+#                        (agents.entries.*.memory.search), no plain switch found.
+#   background_agents  — agents.defaults.subagents.maxConcurrent and
+#                        delegationMode (prefer / suggest) exist, but no
+#                        documented "off".
+#   tool_search        — none found.
+#   tool_output_tokens — no tool-result cap found.
+#   compact_at_percent — agents.defaults.compaction is absolute (enabled, mode,
+#                        keepRecentTokens), no percentage threshold.
+
+[providers]                                # OpenClaw spells a model provider/model; xAI's row: "OAuth: xai/auto; API key: xai/grok-4.3"
+claude  = "anthropic"
+chatgpt = "openai"
+gemini  = "google"
+grok    = "xai"
+
+[model]                                    # agents.defaults.model — a "provider/model" string (or { primary, fallbacks })
+"agents.defaults.model" = "{provider}/{value}"
+
+[effort]                                   # thinking level: off / minimal / low / medium / high / xhigh / adaptive / max — "the selected provider/model profile controls which values are valid" (`adaptive` keeps Gemini's provider-owned dynamic thinking); Gemini's upper-case tier words are a probe
+"agents.defaults.thinkingDefault" = "{value}"
+
+[thinking.on]                              # reasoning VISIBILITY (on / off / stream) — distinct from thinkingDefault, which sets the depth
+"agents.defaults.reasoningDefault" = "on"
+
+[thinking.off]
+"agents.defaults.reasoningDefault" = "off"
+
+[telemetry.off]                            # "no telemetry by default beyond a version check you can turn off": checkOnStart = false stops every automatic update request (feature statistics ride on it); telemetry.enabled is the anonymous-statistics opt-in itself (default false)
+"update.checkOnStart" = "false"
+"telemetry.enabled"   = "false"
+
+[max_output_tokens]                        # the provider-level output-token default (a per-model maxTokens overrides it)
+"models.providers.{provider}.maxTokens" = "{value}"

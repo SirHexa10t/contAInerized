@@ -13,11 +13,11 @@ from pathlib import Path
 
 from launch import paths
 from launch.ai import (
-    CLAUDE_CODE, DEFAULT_AI_KEY, HARNESSES, active_ai_key, active_harness, harness_for, refusal_for,
-    set_active_ai,
+    ADAPTERS, CLAUDE_CODE, DEFAULT_HARNESS_KEY, active_adapter, active_harness_key, adapter_for, refusal_for,
+    set_active_harness,
 )
 from launch.paths import AGENTS_DIR
-from launch.tags import BEST, CHEAPEST, scan_all, sorted_ais, sorted_engines, sorted_standards
+from launch.tags import BEST, CHEAPEST, scan_all, sorted_ais, sorted_engines, sorted_harnesses, sorted_standards
 from launch.tags.ai import load_standards
 from launch.tags import engine as engine_module
 
@@ -32,16 +32,19 @@ class TestAiMembers(unittest.TestCase):
         self.assertEqual({ai.shortname for ai in REGISTRY.ais.values()}, {"Claude", "Gemini", "ChatGPT", "Grok"})
 
     def test_claude_is_the_default_and_the_code_agrees(self):
-        # The tree marks the default; the code's constant must name the same
-        # member, or `active_ai_key()` would run an AI the tree does not default to.
+        # The tree marks the default AI; the code's default harness must be
+        # that AI's default harness, or `active_harness_key()` would run a CLI
+        # the tree does not default to.
         self.assertEqual(REGISTRY.default_ai.name, "claude")
-        self.assertEqual(DEFAULT_AI_KEY, REGISTRY.default_ai.name)
-        self.assertEqual(active_ai_key(), DEFAULT_AI_KEY)
+        self.assertEqual(DEFAULT_HARNESS_KEY, REGISTRY.default_ai.harness)
+        self.assertEqual(active_harness_key(), DEFAULT_HARNESS_KEY)
 
     def test_every_member_names_its_vendor_harness_and_colours(self):
         for ai in REGISTRY.ais.values():
             with self.subTest(ai=ai.name):
-                self.assertTrue(ai.vendor and ai.harness)
+                self.assertTrue(ai.vendor)
+                self.assertIn(ai.harness, REGISTRY.harnesses)                 # its default harness is a member …
+                self.assertTrue(REGISTRY.harnesses[ai.harness].runs(ai.name))  # … that runs it
                 self.assertRegex(ai.fg, r"^#[0-9a-f]{6}$")
                 self.assertRegex(ai.bg, r"^#[0-9a-f]{6}$")
                 self.assertEqual(ai.style, f"fg:{ai.fg} bg:{ai.bg}")
@@ -92,15 +95,17 @@ class TestAiOrder(unittest.TestCase):
 
 
 class TestRendering(unittest.TestCase):
-    """An engine's budget × an AI's files → that AI's native settings."""
+    """An engine's budget × an AI's tier × a harness's knobs → that CLI's native settings."""
 
-    def test_every_engine_renders_on_every_ai_with_its_model(self):
+    def test_every_engine_renders_on_every_ai_in_every_harness_that_runs_it(self):
         for engine in REGISTRY.engines.values():
             for ai in REGISTRY.ais.values():
-                with self.subTest(engine=engine.name, ai=ai.name):
-                    rendering = ai.render(engine.budget)
-                    self.assertTrue(rendering.settings)
-                    self.assertIn(ai.tier(engine.budget.standard).model, rendering.map.values())
+                for name in REGISTRY.harnesses_running(ai.name):
+                    with self.subTest(engine=engine.name, ai=ai.name, harness=name):
+                        rendering = REGISTRY.harnesses[name].render(engine.budget, ai)
+                        self.assertTrue(rendering.settings)
+                        model = ai.tier(engine.budget.standard).model
+                        self.assertTrue(any(model in value for value in rendering.map.values()), rendering.map)
 
     def test_claude_renders_the_budgets_as_the_former_env_files_did(self):
         # Behaviour parity with the claude.conf files the budgets replaced
@@ -109,7 +114,7 @@ class TestRendering(unittest.TestCase):
         # Haiku 4.5 takes no effort level (Anthropic's models overview, checked
         # by the researcher 2026-09-14); its thinking switch is the knob.
         claude = REGISTRY.ais["claude"]
-        render = lambda name: claude.render(REGISTRY.engines[name].budget).map
+        render = lambda name: REGISTRY.harnesses["claude-code"].render(REGISTRY.engines[name].budget, claude).map
         self.assertEqual(render("default"), {"ANTHROPIC_MODEL": "claude-fable-5-1", "CLAUDE_CODE_EFFORT_LEVEL": "max",
                                              "CLAUDE_CODE_ENABLE_THINKING": "1"})
         self.assertEqual(render("golem"), {
@@ -126,15 +131,15 @@ class TestRendering(unittest.TestCase):
 
     def test_unmapped_purposes_are_reported_never_invented(self):
         researcher = REGISTRY.engines["researcher"].budget
-        codex = REGISTRY.ais["chatgpt"].render(researcher)
+        codex = REGISTRY.harnesses["codex-cli"].render(researcher, REGISTRY.ais["chatgpt"])
         self.assertIn("max_output_tokens", codex.unmapped)       # Codex has no output cap
         self.assertIn("compact_at_percent", codex.unmapped)      # absolute tokens only
         self.assertFalse(any("output" in key.lower() and "tool" not in key for key in codex.map))
-        gemini = REGISTRY.ais["gemini"].render(REGISTRY.engines["poet"].budget)
+        gemini = REGISTRY.harnesses["gemini-cli"].render(REGISTRY.engines["poet"].budget, REGISTRY.ais["gemini"])
         self.assertEqual(gemini.unmapped, ("tool_search.on",))
 
     def test_unit_conversions_happen_once_at_the_boundary(self):
-        gemini = REGISTRY.ais["gemini"].render(REGISTRY.engines["researcher"].budget).map
+        gemini = REGISTRY.harnesses["gemini-cli"].render(REGISTRY.engines["researcher"].budget, REGISTRY.ais["gemini"]).map
         self.assertEqual(gemini["tools.truncateToolOutputThreshold"], "400000")   # 100000 tokens × 4 characters
         self.assertEqual(gemini["model.compressionThreshold"], "0.6")             # 60 % → a fraction
 
@@ -156,9 +161,62 @@ class TestEngineOrder(unittest.TestCase):
         self.assertEqual(engine_module.standard_rank(None), -1)
 
 
-class TestHarnessRecord(unittest.TestCase):
-    """The adapter's data half: one record per harness, reached through the
-    call-time accessors, never through a fallback to Claude's names."""
+class TestHarnessMembers(unittest.TestCase):
+    """agents/harness/ — the four launch partners' CLIs, each a complete
+    member wearing ⟦ ⟧, each running its AI."""
+
+    VENDOR_CLIS = {"claude-code", "gemini-cli", "codex-cli", "grok-build"}
+    OPEN_HARNESSES = {"opencode", "openclaw", "hermes"}
+
+    def test_the_seven_clis_are_members(self):
+        self.assertEqual(set(REGISTRY.harnesses), self.VENDOR_CLIS | self.OPEN_HARNESSES)
+        self.assertEqual({h.shortname for h in REGISTRY.harnesses.values()},
+                         {"ClaudeCode", "GeminiCLI", "CodexCLI", "GrokBuild", "OpenCode", "OpenClaw", "Hermes"})
+
+    def test_a_vendors_cli_runs_its_ai_and_an_open_harness_runs_all_four(self):
+        for name in self.VENDOR_CLIS:
+            self.assertEqual(len(REGISTRY.harnesses[name].ais), 1, name)
+        for name in self.OPEN_HARNESSES:
+            with self.subTest(harness=name):
+                self.assertEqual(set(REGISTRY.harnesses[name].ais), set(REGISTRY.ais))
+                self.assertTrue(REGISTRY.harnesses[name].needs_providers, "a multi-AI CLI spells the model with a provider slug")
+                self.assertEqual(set(dict(REGISTRY.harnesses[name].providers)), set(REGISTRY.ais))
+
+    def test_labels_wear_the_kinds_parentheses(self):
+        for harness in REGISTRY.harnesses.values():
+            self.assertEqual(harness.label, f"⟦{harness.shortname}⟧")
+
+    def test_every_member_names_its_vendor_ais_binary_and_package(self):
+        for harness in REGISTRY.harnesses.values():
+            with self.subTest(harness=harness.name):
+                self.assertTrue(harness.vendor and harness.binary and harness.package)
+                self.assertTrue(harness.ais)
+                for ai in harness.ais:
+                    self.assertIn(ai, REGISTRY.ais)
+                company = harness.vendor.split(" ")[0].lower()
+                self.assertIn(company, harness.full_description.lower())    # searchable by company, like the AIs
+
+    def test_every_ais_default_harness_is_its_vendors_cli(self):
+        # The vendor's own CLI is the default; the open harnesses are choices.
+        for ai in REGISTRY.ais.values():
+            with self.subTest(ai=ai.name):
+                self.assertIn(ai.harness, self.VENDOR_CLIS)
+                self.assertIn(ai.harness, REGISTRY.harnesses_running(ai.name))
+                self.assertEqual(set(REGISTRY.harnesses_running(ai.name)), {ai.harness} | self.OPEN_HARNESSES)
+
+    def test_the_default_ais_harnesses_lead_the_order(self):
+        # Every harness that runs the default AI comes first, by name — the
+        # vendor's CLI among them — then the rest by name.
+        ordered = sorted_harnesses(REGISTRY.harnesses.values(), REGISTRY.default_ai.name)
+        running = [h.name for h in ordered if h.runs(REGISTRY.default_ai.name)]
+        self.assertEqual([h.name for h in ordered[:len(running)]], sorted(running))
+        self.assertEqual([h.name for h in ordered[len(running):]], sorted(h.name for h in ordered[len(running):]))
+
+
+class TestAdapterRecord(unittest.TestCase):
+    """The adapter's data half: one record per harness the launcher can run,
+    keyed by the harness member it implements, reached through the call-time
+    accessors, never through a fallback to Claude Code's names."""
 
     def test_claude_code_defines_every_field(self):
         for field in dataclasses.fields(CLAUDE_CODE):
@@ -167,47 +225,50 @@ class TestHarnessRecord(unittest.TestCase):
                 self.assertIsNotNone(value)
                 self.assertTrue(value, f"{field.name} is empty")
 
-    def test_the_registry_is_keyed_by_the_ai_each_record_serves(self):
-        for key, harness in HARNESSES.items():
-            self.assertEqual(harness.ai_key, key)
-            self.assertIn(key, REGISTRY.ais, "a harness must serve a tree member")
-            self.assertEqual(harness.name, REGISTRY.ais[key].harness, "the tree names the same CLI")
-        self.assertIs(harness_for("claude"), CLAUDE_CODE)
+    def test_the_registry_is_keyed_by_the_harness_member_each_record_implements(self):
+        for key, adapter in ADAPTERS.items():
+            self.assertEqual(adapter.key, key)
+            self.assertIn(key, REGISTRY.harnesses, "an adapter must implement a tree member")
+            member = REGISTRY.harnesses[key]
+            self.assertEqual(adapter.name, member.fullname, "the tree names the same CLI")
+            self.assertEqual(adapter.binary, member.binary, "the tree names the same executable")
+        self.assertIs(adapter_for("claude-code"), CLAUDE_CODE)
 
-    def test_active_harness_follows_the_active_key(self):
-        self.assertEqual(active_harness().ai_key, active_ai_key())
+    def test_active_adapter_follows_the_active_key(self):
+        self.assertEqual(active_adapter().key, active_harness_key())
         try:
-            set_active_ai("gemini")
+            set_active_harness("gemini-cli")
             with self.assertRaises(LookupError) as caught:
-                active_harness()
-            self.assertIn("gemini", str(caught.exception))
+                active_adapter()
+            self.assertIn("gemini-cli", str(caught.exception))
         finally:
-            set_active_ai(None)
-        self.assertEqual(active_ai_key(), DEFAULT_AI_KEY)
+            set_active_harness(None)
+        self.assertEqual(active_harness_key(), DEFAULT_HARNESS_KEY)
 
-    def test_an_ai_without_an_adapter_raises_rather_than_borrowing_claudes_names(self):
-        unadapted = [name for name in REGISTRY.ais if name not in HARNESSES]
-        self.assertTrue(unadapted, "every AI has an adapter now — retire this test's premise")
+    def test_a_harness_without_an_adapter_raises_rather_than_borrowing_claude_codes_names(self):
+        unadapted = [name for name in REGISTRY.harnesses if name not in ADAPTERS]
+        self.assertTrue(unadapted, "every harness has an adapter now — retire this test's premise")
         for name in unadapted:
-            with self.subTest(ai=name), self.assertRaises(LookupError):
-                harness_for(name)
+            with self.subTest(harness=name), self.assertRaises(LookupError):
+                adapter_for(name)
 
 
 class TestRefusal(unittest.TestCase):
-    """refusal_for — the one message for an instance (run.py) or a cluster
-    member (launching.refusal) whose AI has no adapter: it names the AI, says
-    the launcher can describe but not run it, and points at the fix."""
+    """refusal_for — the one message for an instance (run.py, the quickie) or
+    a cluster member (launching.refusal) whose harness has no adapter: it
+    names the harness, says the launcher can describe but not run it, and
+    points at the fix."""
 
-    def test_an_adapted_ai_is_not_refused(self):
-        for key in HARNESSES:
-            self.assertIsNone(refusal_for(key, REGISTRY.ais[key].label))
+    def test_an_adapted_harness_is_not_refused(self):
+        for key in ADAPTERS:
+            self.assertIsNone(refusal_for(key, REGISTRY.harnesses[key].label))
 
-    def test_an_unadapted_ai_is_refused_by_label_with_the_way_out(self):
-        for ai in (a for a in REGISTRY.ais.values() if a.name not in HARNESSES):
-            with self.subTest(ai=ai.name):
-                reason = refusal_for(ai.name, ai.label)
+    def test_an_unadapted_harness_is_refused_by_label_with_the_way_out(self):
+        for harness in (h for h in REGISTRY.harnesses.values() if h.name not in ADAPTERS):
+            with self.subTest(harness=harness.name):
+                reason = refusal_for(harness.name, harness.label)
                 self.assertIsNotNone(reason)
-                self.assertIn(ai.label, reason)
+                self.assertIn(harness.label, reason)
                 self.assertIn("plans/adding_an_ai.md", reason)
                 self.assertIn("F2", reason)
 
@@ -248,7 +309,7 @@ class TestTheAdapterIsTheOnlyDefinition(unittest.TestCase):
                 continue
             offenders += [f"{path.relative_to(root)}:{line} {text!r}"
                           for line, text in _code_string_literals(path) if text in HARNESS_WORDS]
-        self.assertEqual(offenders, [], "read these from launch.ai (active_harness) or the AI's tree files instead")
+        self.assertEqual(offenders, [], "read these from launch.ai (active_adapter) or the tree files instead")
 
 
 class TestConsumersReadTheAdapter(unittest.TestCase):
@@ -257,17 +318,17 @@ class TestConsumersReadTheAdapter(unittest.TestCase):
 
     def test_effort_args_take_the_instances_effort_word(self):
         from launch.docker_config import effort_args
-        self.assertEqual(effort_args("max", []), [active_harness().effort_flag, "max"])
-        self.assertEqual(effort_args("max", [f"{active_harness().effort_flag}=low"]), [])
+        self.assertEqual(effort_args("max", []), [active_adapter().effort_flag, "max"])
+        self.assertEqual(effort_args("max", [f"{active_adapter().effort_flag}=low"]), [])
         self.assertEqual(effort_args(None, []), [])
 
     def test_the_cluster_member_command_is_the_harness_binary(self):
         from launch.cluster import launch_plan
-        self.assertEqual(launch_plan.default_member_command(), (active_harness().binary,))
+        self.assertEqual(launch_plan.default_member_command(), (active_adapter().binary,))
 
     def test_the_firewalls_critical_hosts_are_the_harnesss(self):
         from launch.firewall import resolver
-        self.assertEqual(resolver._critical_hosts(), active_harness().critical_hosts)
+        self.assertEqual(resolver._critical_hosts(), active_adapter().critical_hosts)
 
     def test_paths_carry_the_harnesss_filenames(self):
         self.assertEqual(paths.CLAUDE_CONFIG_IN_CONTAINER.name, CLAUDE_CODE.config_dir_name)

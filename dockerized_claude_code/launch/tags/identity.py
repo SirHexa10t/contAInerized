@@ -29,7 +29,8 @@ from ..transcripts import (
 )
 from ..paths import INBOX_SEPARATOR, instance_state_dir_path, state_md_path
 from .base import DockerContribution, Tag
-from .ai import Ai, Rendering
+from .ai import Ai
+from .harness import Harness, Rendering
 from .engine import Engine
 from .lego import AgentBuild
 from .policy import Policy
@@ -225,6 +226,7 @@ class Instance:
     specialties: tuple[Specialty, ...] = ()
     policies: tuple[Policy, ...] = ()
     ai: Ai | None = None                        # the AI this instance runs on (resolved: its build's, else the tree's default); None only in fixture trees without an ai/ shelf
+    harness: Harness | None = None              # the agent CLI it runs in (resolved: its build's, else its AI's default harness); None likewise
     invalid_tags: tuple[TagProblem, ...] = ()   # store names that no longer resolve (see resolve_store_build); block start, flagged in the picker
     state_dir_override: Path | None = None      # when set, the state dir lives HERE instead of under instances/ — quickie parks its throwaway threads under quickie/ (default None = the normal instances/ home)
 
@@ -263,6 +265,7 @@ class Instance:
         persists and the form pre-checks (inverse of resolve_build)."""
         return AgentBuild(
             ai=self.ai.name if self.ai else None,
+            harness=self.harness.name if self.harness else None,
             engine=self.engine.name if self.engine else None,
             professions=tuple(p.name for p in self.professions),
             specialties=tuple(s.name for s in self.specialties),
@@ -315,14 +318,15 @@ class Instance:
 
     @property
     def rendering(self) -> "Rendering | None":
-        """The engine's budget in this instance's AI's settings — None when
-        either side is missing (a fixture tree)."""
-        return self.ai.render(self.engine.budget) if self.engine and self.ai else None
+        """The engine's budget in this instance's harness's settings, for its
+        AI's tier — None when any side is missing (a fixture tree)."""
+        return (self.harness.render(self.engine.budget, self.ai)
+                if self.engine and self.ai and self.harness else None)
 
     @property
     def conf(self) -> dict[str, str]:
         """The instance's native settings (`-e KEY=VALUE` source for Claude
-        Code): its engine's budget rendered by its AI."""
+        Code): its engine's budget rendered by its harness for its AI."""
         rendering = self.rendering
         return rendering.map if rendering else {}
 
@@ -426,6 +430,7 @@ def resolve_build(build: AgentBuild, agent: str, registry: Registry) -> dict:
     engine = registry.engines.get(effective_engine_name(build, agent, registry))
     return {
         "ai": registry.ai_for(build),
+        "harness": registry.harness_for(build),
         "engine": engine,
         "professions": tuple(registry.professions[n] for n in build.professions),
         "specialties": tuple(registry.specialties[n] for n in build.specialties),

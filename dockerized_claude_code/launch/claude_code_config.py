@@ -21,7 +21,7 @@ docker_config calls in from set_container_env (status line) and
 run_container (terminal title); run.py prints the banner; nothing else
 does."""
 
-from .ai import active_harness
+from .ai import active_adapter
 from .file_access import home_dir, read_json_field, user_firewall_whitelist_lines
 from .paths import ACCOUNT_FILE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
 from .tags import Instance, PolicyStance, Tag
@@ -139,7 +139,7 @@ def set_terminal_title(name: str) -> None:
     the catalog's, so another AI titles its own tabs). Helps the user tell
     concurrent agent tabs apart. Called by docker_config.run_container just
     before exec'ing the container."""
-    print(f"\033]0;{active_harness().name} — {name}\007", end="", flush=True)
+    print(f"\033]0;{active_adapter().name} — {name}\007", end="", flush=True)
 
 
 def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:

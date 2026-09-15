@@ -1,4 +1,4 @@
-"""One-shot conversions of the user's `~/.claude-agents` state files from
+"""One-shot conversions of the user's `~/.ai-agents` state files from
 retired on-disk formats into the current `instances.toml` store.
 
 DELIBERATELY ISOLATED: this is the only module that knows retired formats
@@ -7,7 +7,13 @@ current store via `tags.store`; when a format retires, its knowledge moves
 here (and eventually ages out entirely) instead of leaking guards across
 the codebase.
 
-Currently handled — the pre-tags two-map format:
+Currently handled — the state dir's old NAME (`~/.claude-agents`, until
+2026-09-14: one AI, one harness): when the new dir is absent and the old one
+present, the old one is renamed into place — one move, nothing copied, so a
+running container's bind mounts (which follow the directory, not its path)
+survive. Both present → neither is touched, and the launch says so.
+
+And the pre-tags two-map format:
   agent_workspace_map.json   {instance_id: workspace_path_or_null}
   agent_modes_map.json       {instance_id: [mode, ...]}   modes ∈ web/auto/DooD
 
@@ -23,7 +29,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..file_access import path_exists, read_text
+from .. import paths
+from ..file_access import is_dir, move_path, path_exists, read_text
 from ..paths import AGENTS_DIR, AGENTS_STATE, INSTANCES_FILE
 from . import store
 from .lego import load_lego
@@ -44,9 +51,32 @@ _MODE_TRANSLATION: dict[str, list[tuple[str, str]]] = {
 }
 
 
+RETIRED_STATE_DIR_NAME = ".claude-agents"   # the state dir's name until 2026-09-14
+
+
+def relocate_state_dir() -> None:
+    """Rename a `~/.claude-agents` left by an older launcher to the current
+    state dir when the current one does not exist yet. Reads `paths.AGENTS_STATE`
+    at CALL time (a test redirects it), so the old dir is its sibling under
+    the same parent. Both present: hands off — the user decides which holds
+    the truth — but say so, every launch, until one is gone."""
+    new = paths.AGENTS_STATE
+    old = new.parent / RETIRED_STATE_DIR_NAME
+    if not is_dir(old):
+        return
+    if path_exists(new):
+        print(f"  Note: both {old} and {new} exist — the launcher uses {new.name}; "
+              f"merge or remove the old {old.name} when convenient")
+        return
+    move_path(old, new)
+    print(f"  Renamed {old} → {new} (the launcher's state dir since 2026-09-14)")
+
+
 def ensure_migrated() -> None:
-    """One-shot legacy migration, called at launcher startup (before anything
+    """One-shot legacy migrations, called at launcher startup (before anything
+    reads state): first the state dir's name, then the retired map format.
     reads the store). See the module docstring for the trigger conditions."""
+    relocate_state_dir()
     if path_exists(INSTANCES_FILE):
         return
     legacy = [p for p in (AGENT_WORKSPACE_MAP_FILE, AGENT_MODES_MAP_FILE) if path_exists(p)]

@@ -9,6 +9,8 @@ manifest parsing edge cases, and the registry's cross-cutting validation.
 """
 
 import textwrap
+import contextlib
+import io
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,11 +19,11 @@ from unittest.mock import patch
 
 from launch import tags
 from launch.paths import COMMANDS_DIR_NAME
+from launch import paths
 from launch.tags import (
-    AgentBuild, Budget, is_standard, rank_of, sorted_standards, Engine, Instance, Policy, PolicyStance, Profession, Registry,
-    Specialty, TagError, ToolkitEntry, addendums, image_chain, load_lego, merge_fragments,
-    migrations, resolve_build, scan_all, sorted_engines, store,
+    addendums, AgentBuild, Budget, Engine, Harness, image_chain, Instance, is_standard, load_lego, merge_fragments, migrations, Policy, PolicyStance, Profession, rank_of, Registry, resolve_build, scan_all, sorted_engines, sorted_standards, Specialty, store, TagError, ToolkitEntry,
 )
+from launch.tags.harness import sorted_harnesses
 from launch.tags.ai import Ai
 from launch.tags.identity import FORBIDDEN_IN_LABELS, label_error, suggested_label
 
@@ -79,21 +81,33 @@ FIXTURE_STANDARDS_FILE = (
 
 
 # A complete, valid AI member for fixture trees: a tier for every fixture
-# standard on one test model, a two-word scale, and knobs enough to render an
-# engine's budget. The shared standards file rides along (one per tree; two
-# members merge to the same key).
+# standard on one test model and a two-word scale. The shared standards file
+# rides along (one per tree; two members merge to the same key), and so does
+# the member's default harness, whose knobs render an engine's budget.
+FIXTURE_KNOBS = (
+    '[model]\nMODEL = "{value}"\n[effort]\nEFFORT = "{value}"\n'
+    '[thinking.on]\nTHINK = "1"\n[thinking.off]\nTHINK = "0"\n'
+    '[max_output_tokens]\nOUT = "{value}"\n[compact_at_percent]\nPCT = "{value/100}"\n'
+    '[tool_output_tokens]\nCHARS = "{value*4}"\n')
+
+
+def harness_member(name="claude-cli", *, ais=("claude",), binary="claude", knobs=FIXTURE_KNOBS):
+    """A complete, valid harness member for fixture trees: the CLI around the
+    AIs it names, with knobs enough to render an engine's budget."""
+    ais_list = ", ".join(f'"{a}"' for a in ais)
+    return {f"harness/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\n'
+                                         f'ais = [{ais_list}]\nbinary = "{binary}"\npackage = "npm {name}"\n'),
+            f"harness/{name}/knobs.mapping": knobs}
+
+
 def ai_member(name="claude", *, default=True, model="claude-test", fg="#ff8700", bg="#3a3a3a"):
     tiers = "".join(f'[{s}]\nmodel = "{model}"\neffort = "{"low" if s == "cheapest" else "high"}"\n' for s in FIXTURE_KEYS)
     return {
         "ai/capability.standards": FIXTURE_STANDARDS_FILE,
-        f"ai/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\nharness = "{name} CLI"\n'
+        **harness_member(f"{name}-cli", ais=(name,), binary=name),        # its default harness rides along — the registry insists on one
+        f"ai/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\nharness = "{name}-cli"\n'
                                 f'default = {str(default).lower()}\nfg = "{fg}"\nbg = "{bg}"\n'),
         f"ai/{name}/efforts.tiers": '[scale]\nefforts = ["low", "high"]\n' + tiers,
-        f"ai/{name}/knobs.mapping": (
-            '[model]\nMODEL = "{value}"\n[effort]\nEFFORT = "{value}"\n'
-            '[thinking.on]\nTHINK = "1"\n[thinking.off]\nTHINK = "0"\n'
-            '[max_output_tokens]\nOUT = "{value}"\n[compact_at_percent]\nPCT = "{value/100}"\n'
-            '[tool_output_tokens]\nCHARS = "{value*4}"\n'),
     }
 
 
@@ -114,7 +128,11 @@ class TagTreeTestCase(unittest.TestCase):
 
     # A small, valid, full-coverage tree reused by several tests.
     def full_tree(self) -> Path:
-        return self.tree({
+        return self.tree(self.full_tree_spec())
+
+    @staticmethod
+    def full_tree_spec() -> dict[str, str]:
+        return {
             **ai_member(),
             "engine/default/tag.info": 'full_description = "baseline"\n',
             "engine/default/tag.budget": 'standard = "best"\nthinking = true\n',
@@ -133,7 +151,7 @@ class TagTreeTestCase(unittest.TestCase):
             "specialty/combos.info": '[warnings]\n"dood + auto" = "both = danger"\n',
             "policy/no-sudo/tag.info": 'full_description = "no sudo"\nshortname = "-su"\n',
             "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
-        })
+        }
 
 
 # ============================================================
@@ -192,8 +210,113 @@ class TestEngine(TagTreeTestCase):
 
 
 # ============================================================
-# Ai — the fifth kind: manifests, standards, tiers, knobs, rendering
+# Ai — the fifth kind: manifests, standards, tiers
 # ============================================================
+
+
+class TestHarnessKind(TagTreeTestCase):
+    """Harness — the sixth kind: the agent CLI around an AI. One file per
+    member; the AIs it runs are names the REGISTRY checks (a kind scans alone)."""
+
+    def test_scan_reads_the_manifest(self):
+        (cli,) = Harness.scan(self.tree(harness_member("claude-cli", ais=("claude",), binary="claude")))
+        self.assertEqual((cli.name, cli.label, cli.vendor, cli.ais, cli.binary, cli.package),
+                         ("claude-cli", "⟦claude-cli⟧", "Vendor", ("claude",), "claude", "npm claude-cli"))
+        self.assertTrue(cli.runs("claude"))
+        self.assertFalse(cli.runs("gemini"))
+
+    def test_scan_reads_the_knobs(self):
+        (cli,) = Harness.scan(self.tree(harness_member()))
+        self.assertEqual(cli.knob("model"), (("MODEL", "{value}"),))
+        self.assertIsNone(cli.knob("telemetry.off"))
+        self.assertEqual(cli.providers, ())
+        self.assertFalse(cli.needs_providers)
+
+    def _pair(self, spec=None):
+        root = self.tree({**ai_member(), **(spec or {})})
+        (claude,) = Ai.scan(root)
+        harnesses = {h.name: h for h in Harness.scan(root)}
+        return claude, harnesses
+
+    def test_render_fills_templates_and_converts_units(self):
+        claude, harnesses = self._pair()
+        rendering = harnesses["claude-cli"].render(Budget(standard="best", thinking=True, max_output_tokens=1000,
+                                                          compact_at_percent=60, tool_output_tokens=100), claude)
+        self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1",
+                                         "OUT": "1000", "CHARS": "400", "PCT": "0.6"})
+        self.assertEqual(rendering.unmapped, ())
+
+    def test_render_reports_what_the_cli_cannot_say(self):
+        claude, harnesses = self._pair()
+        rendering = harnesses["claude-cli"].render(Budget(standard="2025Q1", memory=False, telemetry=False), claude)
+        self.assertEqual(rendering.unmapped, ("memory.off", "telemetry.off"))
+        self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high"})
+
+    def test_render_needs_a_standard(self):
+        claude, harnesses = self._pair()
+        with self.assertRaises(TagError):
+            harnesses["claude-cli"].render(Budget(), claude)
+
+    def test_a_multi_ai_cli_spells_the_model_with_its_provider_slug(self):
+        # `{provider}` in a value or a key resolves through [providers] by the
+        # AI's member name — the way OpenCode or OpenClaw write anthropic/<id>.
+        knobs = ('[providers]\nclaude = "anthropic"\n'
+                 '[model]\nmodel = "{provider}/{value}"\n'
+                 '[max_output_tokens]\n"models.{provider}.maxTokens" = "{value}"\n')
+        claude, harnesses = self._pair(harness_member("multi-cli", ais=("claude",), binary="multi", knobs=knobs))
+        multi = harnesses["multi-cli"]
+        self.assertTrue(multi.needs_providers)
+        rendering = multi.render(Budget(standard="best", max_output_tokens=500), claude)
+        self.assertEqual(rendering.map, {"model": "anthropic/claude-test", "models.anthropic.maxTokens": "500"})
+
+    def test_knob_faults_fail_loudly(self):
+        base = harness_member()
+        info_path = next(p for p in base if p.endswith("tag.info"))
+        knobs_path = next(p for p in base if p.endswith("knobs.mapping"))
+        info, knobs = base[info_path], base[knobs_path]
+        faults = {
+            "unknown purpose": knobs + '[colour]\nX = "1"\n',
+            "bad template": knobs.replace('"{value/100}"', '"{value^2}"'),
+            "bad key template": knobs.replace('[model]\nMODEL', '[model]\n"{model}.x"'),
+            "empty purpose table": knobs.replace('[model]\nMODEL = "{value}"\n', "[model]\n"),
+            "switch with a third state": knobs.replace("[thinking.on]", "[thinking.maybe]"),
+            "providers for an AI it does not run": knobs + '[providers]\nother = "x"\n',
+            "provider placeholder without a slug": knobs.replace('MODEL = "{value}"', 'MODEL = "{provider}/{value}"'),
+        }
+        for label, contents in faults.items():
+            with self.subTest(fault=label), self.assertRaises(TagError):
+                Harness.scan(self.tree({info_path: info, knobs_path: contents}))
+        with self.subTest(fault="missing knobs file"), self.assertRaises(TagError):
+            Harness.scan(self.tree({info_path: info}))
+
+    def test_members_do_not_nest(self):
+        spec = {**harness_member(), "harness/claude-cli/mini/tag.info": 'full_description = "nested"\n'}
+        with self.assertRaisesRegex(TagError, "do not nest"):
+            Harness.scan(self.tree(spec))
+
+    def test_manifest_faults_fail_loudly(self):
+        base = harness_member()
+        path = next(p for p in base if p.endswith("tag.info"))
+        text = base[path]
+        faults = {
+            "no ais": text.replace('ais = ["claude"]', "ais = []"),
+            "ais not a list": text.replace('ais = ["claude"]', 'ais = "claude"'),
+            "no binary": text.replace('binary = "claude"', 'binary = ""'),
+            "no vendor": text.replace('vendor = "Vendor"', 'vendor = ""'),
+            "no package": text.replace('package = "npm claude-cli"', 'package = ""'),
+        }
+        for label, contents in faults.items():
+            with self.subTest(fault=label), self.assertRaises(TagError):
+                Harness.scan(self.tree({**base, path: contents}))
+
+    def test_missing_harness_root_yields_nothing(self):
+        self.assertEqual(Harness.scan(self.tree({"placeholder.md": "x\n"})), [])
+
+    def test_the_default_ais_harnesses_lead_the_order(self):
+        a, b, c = (Harness.scan(self.tree({**harness_member("a-cli", ais=("a",)), **harness_member("b-cli", ais=("b",)),
+                                            **harness_member("c-cli", ais=("b", "a"))})))
+        self.assertEqual([h.name for h in sorted_harnesses([c, b, a], "a")], ["a-cli", "c-cli", "b-cli"])
+        self.assertEqual([h.name for h in sorted_harnesses([c, b, a], None)], ["a-cli", "b-cli", "c-cli"])
 
 
 class TestStandardVocabulary(unittest.TestCase):
@@ -223,35 +346,14 @@ class TestStandardVocabulary(unittest.TestCase):
 
 
 class TestAiKind(TagTreeTestCase):
-    def test_scan_reads_manifest_tiers_and_knobs(self):
+    def test_scan_reads_manifest_and_tiers(self):
         (claude,) = Ai.scan(self.tree(ai_member()))
-        self.assertEqual((claude.name, claude.label, claude.vendor, claude.harness), ("claude", "⟪claude⟫", "Vendor", "claude CLI"))
+        self.assertEqual((claude.name, claude.label, claude.vendor, claude.harness), ("claude", "⟪claude⟫", "Vendor", "claude-cli"))
         self.assertTrue(claude.default)
         self.assertEqual(claude.style, "fg:#ff8700 bg:#3a3a3a")
         self.assertEqual(claude.standards, FIXTURE_KEYS)
         self.assertEqual(claude.tier("cheapest").effort, "low")
         self.assertEqual(claude.tier("2026Q1").model, "claude-test")
-        self.assertEqual(claude.knob("model"), (("MODEL", "{value}"),))
-        self.assertIsNone(claude.knob("telemetry.off"))
-
-    def test_render_fills_templates_and_converts_units(self):
-        (claude,) = Ai.scan(self.tree(ai_member()))
-        rendering = claude.render(Budget(standard="best", thinking=True, max_output_tokens=1000,
-                                         compact_at_percent=60, tool_output_tokens=100))
-        self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1",
-                                         "OUT": "1000", "CHARS": "400", "PCT": "0.6"})
-        self.assertEqual(rendering.unmapped, ())
-
-    def test_render_reports_what_the_ai_cannot_say(self):
-        (claude,) = Ai.scan(self.tree(ai_member()))
-        rendering = claude.render(Budget(standard="2025Q1", memory=False, telemetry=False))
-        self.assertEqual(rendering.unmapped, ("memory.off", "telemetry.off"))
-        self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high"})
-
-    def test_render_needs_a_standard(self):
-        (claude,) = Ai.scan(self.tree(ai_member()))
-        with self.assertRaises(TagError):
-            claude.render(Budget())
 
     def test_exactly_one_default(self):
         with self.assertRaises(TagError):
@@ -265,7 +367,7 @@ class TestAiKind(TagTreeTestCase):
         base = ai_member()
         faults = {
             "bad colour": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('#ff8700', 'orange')},
-            "no harness": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('harness = "claude CLI"', 'harness = ""')},
+            "no harness": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('harness = "claude-cli"', 'harness = ""')},
             "missing standard": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"].replace("[2026Q1]", "[2026Q2]")},
             "undeclared standard": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"] + '[2027Q1]\nmodel = "x"\n'},
             "no standards file": {"ai/capability.standards": None},
@@ -274,9 +376,6 @@ class TestAiKind(TagTreeTestCase):
             "a standard that is not a quarter": {"ai/capability.standards": FIXTURE_STANDARDS_FILE.replace("[2026Q1]", "[2026Q5]")},
             "a standard without its setter": {"ai/capability.standards": FIXTURE_STANDARDS_FILE.replace('set_by = "Model B"\n', "")},
             "effort outside scale": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"].replace('effort = "low"', 'effort = "ultra"')},
-            "unknown purpose": {"ai/claude/knobs.mapping": base["ai/claude/knobs.mapping"] + '[colour]\nX = "1"\n'},
-            "bad template": {"ai/claude/knobs.mapping": base["ai/claude/knobs.mapping"].replace('"{value/100}"', '"{value^2}"')},
-            "missing knobs file": {"ai/claude/knobs.mapping": None},
         }
         for label, change in faults.items():
             spec = {**base}
@@ -484,6 +583,19 @@ class TestResolveStoreBuild(TagTreeTestCase):
         self.assertIsNone(cleaned.ai)
         self.assertEqual([(p.axis, p.name, p.reason) for p in problems], [("ai", "mistral", "unknown")])
         self.assertEqual(problems[0].options, ("claude",))
+
+    def test_an_incompatible_harness_is_dropped_and_reported_with_the_ones_that_could_run(self):
+        reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member("other", default=False)}))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="claude", harness="other-cli", engine="default"))
+        self.assertIsNone(cleaned.harness)                    # the AI's own harness applies at resolve time
+        self.assertEqual(cleaned.ai, "claude")
+        (prob,) = problems
+        self.assertEqual((prob.axis, prob.kind, prob.name, prob.reason, prob.label), ("harness", "harness", "other-cli", "incompatible", "⟦other-cli⟧"))
+        self.assertEqual(prob.options, ("claude-cli",))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="other", harness="other-cli"))
+        self.assertEqual((cleaned.harness, problems), ("other-cli", []))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(harness="ghost-cli"))
+        self.assertEqual([(p.axis, p.reason) for p in problems], [("harness", "unknown")])
 
     def test_unknown_engine_reported_options_are_engines(self):
         _, problems = self.reg.resolve_store_build(AgentBuild(engine="ghost"))
@@ -723,6 +835,14 @@ class TestLego(TagTreeTestCase):
         with self.assertRaises(TagError):
             load_lego(root / "x.lego")
 
+    def test_harness_must_be_string(self):
+        root = self.tree({"x.lego": "harness = 3\n"})
+        with self.assertRaisesRegex(TagError, "'harness' must be a string"):
+            load_lego(root / "x.lego")
+        root = self.tree({"x.lego": 'harness = "claude-cli"\n'})
+        self.assertEqual(load_lego(root / "x.lego").harness, "claude-cli")
+        self.assertIn("claude-cli", load_lego(root / "x.lego").selected())
+
     def test_engine_must_be_string(self):
         root = self.tree({"x.lego": 'engine = ["nope"]\n'})
         with self.assertRaisesRegex(TagError, "'engine' must be a string"):
@@ -743,6 +863,15 @@ class TestLego(TagTreeTestCase):
         # 'auto' is a specialty; listing it under professions is a wrong-axis error.
         with self.assertRaisesRegex(TagError, "'auto' is a specialty, not a profession"):
             reg.validate_build(AgentBuild(professions=("auto",)), Path("x.lego"))
+
+    def test_validate_build_rejects_a_harness_that_cannot_run_the_ai(self):
+        reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member("other", default=False)}))
+        with self.assertRaisesRegex(TagError, "harness 'other-cli' cannot run the 'claude' AI"):
+            reg.validate_build(AgentBuild(ai="claude", harness="other-cli"), Path("x.lego"))
+        with self.assertRaisesRegex(TagError, "cannot run the 'claude' AI"):          # the default AI, unnamed
+            reg.validate_build(AgentBuild(harness="other-cli"), Path("x.lego"))
+        reg.validate_build(AgentBuild(ai="other", harness="other-cli"), Path("x.lego"))   # a pair that works
+        reg.validate_build(AgentBuild(ai="other"), Path("x.lego"))                        # its default harness
 
     def test_validate_build_accepts_valid(self):
         reg = scan_all(self.full_tree())
@@ -818,12 +947,36 @@ class TestRegistryValidation(TagTreeTestCase):
     def test_full_tree_scans_clean(self):
         reg = scan_all(self.full_tree())
         self.assertIsInstance(reg, Registry)
+        self.assertEqual(set(reg.ais), {"claude"})
+        self.assertEqual(set(reg.harnesses), {"claude-cli"})
         self.assertEqual(set(reg.engines), {"default"})
         self.assertEqual(set(reg.professions), {"code", "web"})
         self.assertEqual(set(reg.specialties), {"auto", "dood", "firewall"})
         self.assertEqual(set(reg.policies), {"no-sudo"})
         self.assertEqual(reg.kind_of("web"), "profession")
         self.assertIsNone(reg.get("nonexistent"))
+
+    def test_an_ais_default_harness_must_be_a_member_that_runs_it(self):
+        base = self.full_tree_spec()
+        no_such = {**base, "ai/claude/tag.info": base["ai/claude/tag.info"].replace('harness = "claude-cli"', 'harness = "nope"')}
+        with self.assertRaisesRegex(TagError, "harness 'nope' is not a member"):
+            scan_all(self.tree(no_such))
+        runs_another = {**base, **harness_member("claude-cli", ais=("someone-else",))}
+        with self.assertRaisesRegex(TagError, "does not list 'claude'"):          # the AI's own check comes first
+            scan_all(self.tree(runs_another))
+        stray = {**base, **harness_member("stray-cli", ais=("someone-else",))}
+        with self.assertRaisesRegex(TagError, "ais names unknown AI 'someone-else'"):
+            scan_all(self.tree(stray))
+        two_ais = {**base, **ai_member("other", default=False), **harness_member("claude-cli", ais=("other",))}
+        with self.assertRaisesRegex(TagError, "does not list 'claude'"):
+            scan_all(self.tree(two_ais))
+
+    def test_a_harness_may_run_several_ais(self):
+        spec = {**self.full_tree_spec(), **ai_member("other", default=False),
+                **harness_member("claude-cli", ais=("claude", "other"))}
+        reg = scan_all(self.tree(spec))
+        self.assertEqual(reg.harnesses_running("other"), ("claude-cli", "other-cli"))
+        self.assertEqual(reg.harnesses_running("claude"), ("claude-cli",))
 
     def test_cross_kind_name_collision_raises(self):
         root = self.tree({
@@ -993,7 +1146,8 @@ class TestInstance(TagTreeTestCase):
     def _inst(self, **kw) -> Instance:
         base = dict(agent="researcher", md_path=Path("/x/researcher.md"),
                     session="proj", workspace="/tmp/ws", is_brand_new=True,
-                    engine=self.reg.engines["default"], ai=self.reg.default_ai)
+                    engine=self.reg.engines["default"], ai=self.reg.default_ai,
+                    harness=self.reg.harnesses["claude-cli"])
         base.update(kw)
         return Instance(**base)
 
@@ -1007,7 +1161,7 @@ class TestInstance(TagTreeTestCase):
         i = self._inst(professions=(self.reg.professions["code"],),
                        specialties=(self.reg.specialties["auto"],))
         self.assertEqual(i.chain, ["base", "code", "auto"])
-        # the engine's budget rendered by the instance's AI
+        # the engine's budget rendered by the instance's harness for its AI
         self.assertEqual(i.conf, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1"})
         self.assertEqual(i.model, "claude-test")
         self.assertEqual(i.effort, "high")
@@ -1055,10 +1209,68 @@ class TestResolveBuild(TagTreeTestCase):
         self.assertIs(resolve_build(AgentBuild(), "poet", self.reg)["ai"], self.reg.default_ai)
         self.assertIs(resolve_build(AgentBuild(ai="claude"), "poet", self.reg)["ai"], self.reg.ais["claude"])
 
+    def test_harness_falls_back_to_the_ais_default(self):
+        self.assertIs(resolve_build(AgentBuild(), "poet", self.reg)["harness"], self.reg.harnesses["claude-cli"])
+        reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member("other", default=False),
+                                  **harness_member("shared-cli", ais=("claude", "other"))}))
+        self.assertIs(resolve_build(AgentBuild(ai="other"), "poet", reg)["harness"], reg.harnesses["other-cli"])
+        self.assertIs(resolve_build(AgentBuild(ai="other", harness="shared-cli"), "poet", reg)["harness"], reg.harnesses["shared-cli"])
+        inst = Instance(agent="poet", md_path=Path("/fake/poet.md"), session="s", workspace="/w", is_brand_new=True,
+                        **resolve_build(AgentBuild(ai="other", harness="shared-cli"), "poet", reg))
+        self.assertEqual((inst.build.ai, inst.build.harness), ("other", "shared-cli"))   # round-trips into the store's shape
+
 
 # ============================================================
 # Store — instances.toml load/save + legacy-map migration
 # ============================================================
+
+
+class TestStateDirRelocation(unittest.TestCase):
+    """relocate_state_dir — the first migration step: an old `~/.claude-agents`
+    is renamed to the current state dir when that one does not exist yet;
+    both present → hands off, with a note."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        home = Path(self._tmp.name)
+        self.new, self.old = home / ".ai-agents", home / migrations.RETIRED_STATE_DIR_NAME
+        patcher = patch.object(paths, "AGENTS_STATE", self.new)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            migrations.relocate_state_dir()
+        return buf.getvalue()
+
+    def test_an_old_dir_is_renamed_into_place(self):
+        (self.old / "instances").mkdir(parents=True)
+        (self.old / "instances.toml").write_text("")
+        out = self._run()
+        self.assertFalse(self.old.exists())
+        self.assertTrue((self.new / "instances.toml").is_file() and (self.new / "instances").is_dir())
+        self.assertIn("Renamed", out)
+
+    def test_both_present_touches_neither_and_says_so(self):
+        self.old.mkdir()
+        (self.old / "a").write_text("")
+        self.new.mkdir()
+        (self.new / "b").write_text("")
+        out = self._run()
+        self.assertTrue((self.old / "a").is_file() and (self.new / "b").is_file())
+        self.assertIn("both", out)
+
+    def test_nothing_to_do_creates_nothing(self):
+        self.assertEqual(self._run(), "")
+        self.assertFalse(self.new.exists())
+
+    def test_ensure_migrated_relocates_first(self):
+        (self.old / "instances").mkdir(parents=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            migrations.ensure_migrated()
+        self.assertTrue((self.new / "instances").is_dir())
 
 
 class TestStore(TagTreeTestCase):
@@ -1067,6 +1279,13 @@ class TestStore(TagTreeTestCase):
         self.assertIn('ai = "gemini"', text)
         self.assertEqual(store.entry_to_build({"ai": "gemini"}).ai, "gemini")
         self.assertNotIn("ai =", store.dumps({"y__s": store.build_entry(AgentBuild(), "/w")}))
+
+    def test_harness_is_a_scalar_field_omitted_when_unset(self):
+        text = store.dumps({"x__s": store.build_entry(AgentBuild(ai="gemini", harness="gemini-cli", engine="quick"), "/w")})
+        self.assertIn('harness = "gemini-cli"', text)
+        self.assertLess(text.index('ai = "gemini"'), text.index('harness = "gemini-cli"'))   # ai · harness · engine, the axes' order
+        self.assertEqual(store.entry_to_build({"harness": "gemini-cli"}).harness, "gemini-cli")
+        self.assertNotIn("harness =", store.dumps({"y__s": store.build_entry(AgentBuild(), "/w")}))
 
     def test_load_missing_is_empty(self):
         self.assertEqual(store.load(Path("/nonexistent/instances.toml")), {})

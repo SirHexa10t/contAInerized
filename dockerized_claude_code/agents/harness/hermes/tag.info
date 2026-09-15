@@ -1,0 +1,8 @@
+shortname         = "Hermes"
+fullname          = "Hermes Agent"
+short_description = "Nous Research's self-improving agent: writes skills from experience, remembers, delegates; any provider"
+full_description  = "Nous Research's open-source agent (MIT) with a built-in learning loop: it writes skills from experience, keeps a curated memory, spawns sub-agents, and runs from a terminal or as a gateway to Telegram, Discord, Slack, WhatsApp and Signal. Runs any provider — Nous Portal, OpenRouter, Anthropic, OpenAI's Codex login, Google, xAI, local endpoints — configured in ~/.hermes/config.yaml as a provider and a model. Its installer brings a uv-managed Python 3.11 toolchain."
+vendor            = "Nous Research"
+ais               = ["claude", "chatgpt", "gemini", "grok"]   # provider registry names anthropic / openai-codex / gemini / xai (2026-09-14)
+binary            = "hermes"
+package           = "install.sh from hermes-agent.nousresearch.com (uv-managed Python 3.11 venv; no official npm package)"

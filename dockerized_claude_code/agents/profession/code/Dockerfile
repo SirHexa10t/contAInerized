@@ -15,12 +15,12 @@
 # cross-checks the split and the manifest↔ARG lockstep):
 #   - Language toolchains (rust / node / cmake / go / java / kotlin /
 #     ruby) — the picker's "(Edit Preferences)" form, persisted at
-#     ~/.claude-agents/code_profile.toml; each `ARG` name below is declared
+#     ~/.ai-agents/code_profile.toml; each `ARG` name below is declared
 #     by its entry's `build_arg` in the sibling template.form, so the
 #     manifest→ARG pairing is defined in THIS directory
 #     (container_env.toolkit_install_flags emits whatever the form names).
 #   - Service CLIs (gh ... railway) — creds-presence: a matching
-#     ~/.claude-agents/user_extras/optional_creds/<name>/ dir is the opt-in
+#     ~/.ai-agents/user_extras/optional_creds/<name>/ dir is the opt-in
 #     (container_env.install_creds_flags). Deliberately NOT form-toggleable.
 # Each tool gets its own ARG/RUN so toggling one only invalidates that tool's
 # layer (downstream layers re-run as no-ops). Order matters for cache

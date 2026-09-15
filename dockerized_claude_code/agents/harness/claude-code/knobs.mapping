@@ -2,7 +2,7 @@
 # settings. Each table is one purpose; its rows are the native key(s) and the
 # value to set. `{value}` is the budget's number or the tier's word; a purpose
 # with on/off sub-tables takes the budget's boolean. A purpose absent from this
-# file is one this AI cannot express — the launcher records it as unmapped,
+# file is one this CLI cannot express — the launcher records it as unmapped,
 # never invents a key. Every key below is a Claude Code environment variable
 # (docs.claude.com → Claude Code → Settings → Environment variables), forwarded
 # as `-e KEY=VALUE`. Written 2026-09-13 from the former claude.conf files; the

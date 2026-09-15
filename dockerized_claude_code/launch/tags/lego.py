@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .base import TagError, read_toml
 
-LEGO_KEYS = ("ai", "engine", "professions", "specialties", "policies")
+LEGO_KEYS = ("ai", "harness", "engine", "professions", "specialties", "policies")
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class AgentBuild:
     `engine/<agent>/` then `engine/default/` at resolve time); the three
     axis lists are the pre-picked tag names."""
     ai: str | None = None              # the AI to run on (None → the tree's default member)
+    harness: str | None = None         # the agent CLI to run it in (None → the AI's default harness)
     engine: str | None = None
     professions: tuple[str, ...] = ()
     specialties: tuple[str, ...] = ()
@@ -38,13 +39,15 @@ class AgentBuild:
             names.add(self.engine)
         if self.ai:
             names.add(self.ai)
+        if self.harness:
+            names.add(self.harness)
         return names
 
 
 def load_lego(path: Path) -> AgentBuild:
     """Parse an agent's `.lego`. Missing file → an all-empty `AgentBuild`
-    (equivalent to an empty file — both legal). Type-checks each key: `engine`
-    a string, the three axis keys lists of strings; anything else is a
+    (equivalent to an empty file — both legal). Type-checks each key: `ai`,
+    `harness` and `engine` strings, the three axis keys lists of strings; anything else is a
     `TagError` naming the file and key."""
     if not path.is_file():
         return AgentBuild()
@@ -56,6 +59,9 @@ def load_lego(path: Path) -> AgentBuild:
     ai = data.get("ai")
     if ai is not None and not isinstance(ai, str):
         raise TagError(f"{path}: 'ai' must be a string, got {type(ai).__name__}")
+    harness = data.get("harness")
+    if harness is not None and not isinstance(harness, str):
+        raise TagError(f"{path}: 'harness' must be a string, got {type(harness).__name__}")
 
     def string_list(key: str) -> tuple[str, ...]:
         raw = data.get(key, [])
@@ -65,6 +71,7 @@ def load_lego(path: Path) -> AgentBuild:
 
     return AgentBuild(
         ai=ai,
+        harness=harness,
         engine=engine,
         professions=string_list("professions"),
         specialties=string_list("specialties"),

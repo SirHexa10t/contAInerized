@@ -3,7 +3,7 @@ persistent per-instance state, plus the factories that turn on-disk state into
 the identity shapes the picker and run.py consume.
 
 Sections:
-  - list_all_instances — scan ~/.claude-agents/instances/ for `<agent>__<session>` dirs
+  - list_all_instances — scan ~/.ai-agents/instances/ for `<agent>__<session>` dirs
   - persist_instance / delete_instance / modify_instance — instances.toml
     writers (load → mutate → save over tags.store) + state-dir lifecycle
   - install_latest_md — source `.md` + chain-keyed addendum section →
@@ -22,7 +22,7 @@ run.py import from here; nothing here imports them back.
 
 import json
 
-from .ai import active_harness
+from .ai import active_adapter
 from .file_access import (
     copy_file, ensure_dir, force_remove, home_relative, is_dir, iter_subdirs,
     move_path, path_exists, read_text, write_text,
@@ -43,7 +43,7 @@ from .utils import ordering_index_or_end, plural, prompt_keypress
 
 
 def list_all_instances() -> list[str]:
-    """Every `{agent}__{session}` dir under ~/.claude-agents/instances/
+    """Every `{agent}__{session}` dir under ~/.ai-agents/instances/
     (filesystem order; callers that need a specific order sort themselves).
     Empty list on a fresh install — or before the user has moved pre-existing
     instances into instances/ (audit's `stray` check flags those); iter_subdirs
@@ -199,7 +199,7 @@ def compute_resume_flag(inst: Instance) -> list[str]:
                   f"claude has silently DROPPED the history of a ~92 MB one at "
                   f"launch (plans/ISSUES.md) — if this conversation matters, "
                   f"consider retiring it for a fresh session soon.")
-        return [active_harness().continue_flag]
+        return [active_adapter().continue_flag]
     print(f"  (Instance '{inst.instance}' has no prior conversation; starting fresh.)")
     return []
 

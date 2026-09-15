@@ -1,0 +1,8 @@
+shortname         = "GeminiCLI"
+fullname          = "Gemini CLI"
+short_description = "Google's open-source terminal agent for Gemini: Search grounding, MCP servers, checkpoints"
+full_description  = "Google's agent CLI for the Gemini models, open source (Apache-2.0). Reads GEMINI.md instruction files, grounds answers in Google Search, speaks MCP, checkpoints a session's file changes, and configures itself through settings.json with model aliases; Gemini 3 thinks by level rather than by token budget."
+vendor            = "Google"
+ais               = ["gemini"]
+binary            = "gemini"
+package           = "npm @google/gemini-cli"

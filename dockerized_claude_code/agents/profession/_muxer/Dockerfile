@@ -18,7 +18,7 @@
 # - **tmux** (the original pick, chosen for PoC-0 on researched grounds —
 #   cluster_plan.md's "Multiplexer options"): native per-window `-e` env and a
 #   shell-scriptable status line, both used by launch/cluster/tmux.py.
-#   The operator picks it in ~/.claude-agents/ui_profile.toml
+#   The operator picks it in ~/.ai-agents/ui_profile.toml
 #   (herdr_instead_of_tmux = false; the picker's "(Edit Preferences)" form
 #   edits it) — launch/cluster/__init__.backend() reads the preference, solo
 #   and cluster alike.

@@ -6,7 +6,7 @@ conversion that keeps one tag the same colour in a row and in a pane."""
 import unittest
 
 from launch.gui.styles import (
-    _STYLE_BY_STANCE, RICH_BY_STYLE, STYLE_TAG_ENGINE, STYLE_TAG_SAFE, STYLE_TAG_WARN, _normalize,
+    _STYLE_BY_STANCE, RICH_BY_STYLE, STYLE_TAG_ENGINE, STYLE_TAG_HARNESS, STYLE_TAG_SAFE, STYLE_TAG_WARN, _normalize,
     _plain, rich_style, squashed_tag_style, tag_style,
 )
 from launch.paths import AGENTS_DIR
@@ -30,6 +30,13 @@ class TestTagStyle(unittest.TestCase):
         for engine in REGISTRY.engines.values():
             with self.subTest(engine=engine.name):
                 self.assertEqual(tag_style(engine), STYLE_TAG_ENGINE)
+
+    def test_harnesses_are_the_harness_colour(self):
+        # One kind colour: the AI beside a harness is the tag coloured per member.
+        for harness in REGISTRY.harnesses.values():
+            with self.subTest(harness=harness.name):
+                self.assertEqual(tag_style(harness), STYLE_TAG_HARNESS)
+        self.assertEqual(rich_style(STYLE_TAG_HARNESS), "bright_magenta")
 
     def test_specialties_split_on_warn(self):
         for specialty in REGISTRY.specialties.values():

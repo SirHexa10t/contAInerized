@@ -38,7 +38,7 @@ class ToolkitEntry:
     """One row of a profession's `template.form` — a tool shown in the "Edit
     Toolkits" form. `run_command` + `language` are flavor shown in the focused
     row's panel (how you invoke it; what kind of language it is). `default`
-    seeds a fresh `~/.claude-agents/<profession>_profile.toml`; the user's
+    seeds a fresh `~/.ai-agents/<profession>_profile.toml`; the user's
     file wins after that (see `tags/toolkit_profile.py`).
 
     Two shapes:

@@ -1,8 +1,8 @@
 """The launcher-UI profile — profession-INDEPENDENT preferences, persisted at
-`~/.claude-agents/ui_profile.toml` (`paths.ui_profile_path`), manifested by
+`~/.ai-agents/ui_profile.toml` (`paths.ui_profile_path`), manifested by
 `settings/ui.form`.
 
-    # ~/.claude-agents/ui_profile.toml
+    # ~/.ai-agents/ui_profile.toml
     herdr_instead_of_tmux = true
 
 The toolkit profiles' sibling (tags/toolkit_profile.py), with two deliberate

@@ -97,9 +97,10 @@ from .forms import edit_profiles_menu, prompt_tags
 from .styles import (
     rich_style, STYLE_AGENT_NAME, STYLE_TAG_INVALID, tag_style,
 )
-from ..tags import Agent, Ai, Engine, Instance, Registry, Tag, resolve_build
+from ..tags import Agent, Ai, Engine, Harness, Instance, Registry, resolve_build, Tag
 from ..tags.ai import sorted_ais
 from ..tags.engine import sorted_engines, standard_rank
+from ..tags.harness import sorted_harnesses
 from ..utils import ordering_index_or_end, relative_time
 
 
@@ -122,10 +123,10 @@ DELMENU_LABEL  = "(Move onto deletions menu)"
 BACK_LABEL     = "(Move back to Agent Selection)"
 PREFERENCES_PREVIEW = ("One merged form, one section per profile file. Toolkits: which language "
                     "toolchains a configurable profession's shared image installs (today: [code]'s "
-                    "Rust / Node / CMake) — edits ~/.claude-agents/<profession>_profile.toml; a "
+                    "Rust / Node / CMake) — edits ~/.ai-agents/<profession>_profile.toml; a "
                     "changed toggle rebuilds only that tool's Docker layer on the next launch. "
                     "UI configs: launcher preferences — the {mux} backend, herdr vs tmux — edits "
-                    "~/.claude-agents/ui_profile.toml, read at every launch. Service CLIs "
+                    "~/.ai-agents/ui_profile.toml, read at every launch. Service CLIs "
                     "(gh, gcloud, aws, ...) are not chosen here — they install when matching creds "
                     "exist under user_extras/optional_creds/.")
 DELMENU_PREVIEW = "Open the deletion sub-menu to remove agent instances and their state directories."
@@ -341,12 +342,12 @@ def cluster_entries(registry: Registry, running: frozenset[str],
                 member=member, cluster=cluster.session, inherited=inherited))
         # The cluster pane lists each member with its OWN tags (the inherited
         # ones are the pane's tag list already) and its own last use.
-        lines = [_member_line(entry.member.id, entry.identity.ai, entry.identity.engine,
+        lines = [_member_line(entry.member.id, entry.identity.ai, entry.identity.harness, entry.identity.engine,
                               [t for t in entry.identity.active_tags if t.name not in inherited],
                               [p for p in entry.identity.invalid_tags if p.name not in inherited],
                               entry.last_used_display)
                  for entry in members]
-        lines += [_member_line(member.id, None, None, [], [], "", missing_agent=member.agent)
+        lines += [_member_line(member.id, None, None, None, [], [], "", missing_agent=member.agent)
                   for member in missing]
         tags, problems = _resolve_tags(registry, cluster.tags)
         last_used = _last_used_display(cluster.last_used_mtime)
@@ -361,34 +362,39 @@ def cluster_entries(registry: Registry, running: frozenset[str],
 # Row anatomy — what every row for an EXISTING thing looks like
 # ============================================================
 
-def _ai_column(ai: Ai | None) -> tuple[list[tuple[str, str]], int]:
-    """The AI column of a row — the ⟪label⟫ in the AI's own colours plus a
-    separating space, as (fragments, width); ([], 0) for a row with no AI (a
-    cluster row: its members carry theirs; an agent row: the AI is chosen
-    per instance). Sits between the tag column and the name (operator,
+def _runtime_column(ai: Ai | None, harness: Harness | None) -> tuple[list[tuple[str, str]], int]:
+    """The runtime column of a row — the AI's ⟪label⟫ in its own colours,
+    then the harness's ⟦label⟧ (operator, 2026-09-14), each followed by a
+    space — as (fragments, width); ([], 0) for a row with neither (a cluster
+    row: its members carry theirs; an agent row: both are chosen per
+    instance). Sits between the tag column and the name (operator,
     2026-09-13), padded per population like the tags."""
-    if ai is None:
-        return [], 0
-    return [(tag_style(ai), ai.label), ("", " ")], len(ai.label) + 1
+    frags: list[tuple[str, str]] = []
+    width = 0
+    for tag in (ai, harness):
+        if tag is not None:
+            frags += [(tag_style(tag), tag.label), ("", " ")]
+            width += len(tag.label) + 1
+    return frags, width
 
 
 def _session_row(lead: list[tuple[str, str]],
                  column: tuple[list[tuple[str, str]], int], column_width: int,
                  name: str, name_width: int, *, running: bool,
                  workspace: WorkspaceView,
-                 ai: tuple[list[tuple[str, str]], int] = ([], 0), ai_width: int = 0,
+                 runtime: tuple[list[tuple[str, str]], int] = ([], 0), runtime_width: int = 0,
                  ) -> list[tuple[str, str]]:
     """The anatomy every row for an EXISTING thing wears — an instance, a
     cluster, `--stop`'s rows: lead · tag column padded to its population's
-    widest · the AI column padded likewise · name padded likewise (grey when
+    widest · the runtime column (AI, harness) padded likewise · name padded likewise (grey when
     running, else the name blue) · a gap · `(RUNNING)` when running · the cwd
     hint · the workspace path. One definition (2026-09-09) is what lines the
     paths up in a column whatever the row kind, and what gave cluster rows the
     hints instance rows had."""
     frags, width = column
-    ai_frags, ai_len = ai
+    run_frags, run_len = runtime
     out = [*lead, *frags, ("", " " * (column_width - width)),
-           *ai_frags, ("", " " * (ai_width - ai_len)),
+           *run_frags, ("", " " * (runtime_width - run_len)),
            (STYLE_RUNNING_NAME if running else STYLE_AGENT_NAME, f"{name:<{name_width}}"),
            ("", "    ")]
     if running:
@@ -466,6 +472,8 @@ def _build_composition_legend(registry: Registry) -> str:
     parts: list[Any] = []
     sections: list[tuple[str, str, str, Iterable[Tag]]] = [
         ("AIs",         "AI",         "Which AI runs the agent — what each is for, coloured after its logo.", sorted_ais(registry.ais.values())),
+        ("Harnesses",   "Harness",    "Which agent CLI wraps the AI — the program the container runs; each names the AIs it runs.",
+         sorted_harnesses(registry.harnesses.values(), registry.default_ai.name if registry.default_ai else None)),
         ("Engines",     "Engine",     "How hard the agent thinks — a capability standard plus switches (most capable first).", sorted_engines(registry.engines.values())),
         ("Professions", "Profession", "Tools it can use — each is a docker image layer.", registry.professions.values()),
         ("Specialties", "Specialty",  "Exceptional access or running conditions.", registry.specialties.values()),
@@ -483,6 +491,8 @@ def _build_composition_legend(registry: Registry) -> str:
         for t in members:
             cells = [Text(t.label, style=rich_style(tag_style(t))),
                      Text.assemble((t.fullname, "underline"), f": {t.short_description}")]
+            if isinstance(t, Harness):
+                cells[1].append("  · runs " + " ".join(registry.ais[a].label for a in t.ais if a in registry.ais), style="dim")
             if isinstance(t, Engine):
                 default_ai = registry.default_ai
                 cells.append(Text(default_ai.tier(t.budget.standard).model if default_ai and t.budget.standard else "", style="dim"))   # "" for an engine with no standard
@@ -538,8 +548,8 @@ def prompt_stop(registry: Registry) -> list[str]:
                for e in live}
     col_width, name_width = _column_widths(columns.values(),
                                            (e.identity.instance for e in live))
-    ai_columns = {e.identity.instance: _ai_column(e.identity.ai) for e in live}
-    ai_width = max((w for _, w in ai_columns.values()), default=0)
+    runtime_columns = {e.identity.instance: _runtime_column(e.identity.ai, e.identity.harness) for e in live}
+    runtime_width = max((w for _, w in runtime_columns.values()), default=0)
     for entry in live:
         matched.add(entry.identity.instance)
         options.append(FormOption(
@@ -547,7 +557,7 @@ def prompt_stop(registry: Registry) -> list[str]:
             label=_session_row([], columns[entry.identity.instance], col_width,
                                entry.identity.instance, name_width,
                                running=False, workspace=entry.workspace,
-                               ai=ai_columns[entry.identity.instance], ai_width=ai_width),
+                               runtime=runtime_columns[entry.identity.instance], runtime_width=runtime_width),
             body=[("", f"last used {entry.last_used_display}   ·   stopping "
                        "ends the container; the conversation resumes on the "
                        "next launch")]))
@@ -611,12 +621,12 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         # the tags they force on every member plus their member count.
         tag_by_agent = {a.name: _tags_column(_resolve_tags(registry, a.build)[0]) for a in agents}
         tag_by_inst = {i.identity.instance: _cont_tags_column(i.identity) for i in instances}
-        # The AI column on Cont rows — the instance's resolved AI, padded per
-        # population. Agent (Create) rows carry none: which AI runs is decided
-        # when an instance is created, it is not a property of the agent
-        # (operator, 2026-09-14).
-        ai_by_inst = {i.identity.instance: _ai_column(i.identity.ai) for i in instances}
-        inst_ai_width = max((w for _, w in ai_by_inst.values()), default=0)
+        # The runtime column on Cont rows — the instance's resolved AI and
+        # harness, padded per population. Agent (Create) rows carry none:
+        # which AI runs, and in which CLI, is decided when an instance is
+        # created; neither is a property of the agent (operator, 2026-09-14).
+        runtime_by_inst = {i.identity.instance: _runtime_column(i.identity.ai, i.identity.harness) for i in instances}
+        inst_runtime_width = max((w for _, w in runtime_by_inst.values()), default=0)
         column_by_cluster = {c.cluster.session: _cluster_column(registry, c) for c in clusters}
         tag_col_width, agent_name_width = _column_widths(tag_by_agent.values(),
                                                          (a.name for a in agents))
@@ -649,7 +659,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                                          tag_by_inst[identity.instance], cont_col_width,
                                          identity.instance, instance_name_width,
                                          running=inst.is_running, workspace=inst.workspace,
-                                         ai=ai_by_inst[identity.instance], ai_width=inst_ai_width),
+                                         runtime=runtime_by_inst[identity.instance], runtime_width=inst_runtime_width),
                     preview=_deferred_preview(inst),   # reads transcripts on first highlight, not at menu open
                     preview_quick=_deferred_preview(inst, quick=True),
                     value=identity,
@@ -749,14 +759,14 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                 own_problems = [p for p in member_entry.identity.invalid_tags
                                 if p.name not in member_entry.inherited]
                 member_tags, _ = _tags_column(own_tags, problems=own_problems)
-                member_ai, _ = _ai_column(member_entry.identity.ai)
+                member_runtime, _ = _runtime_column(member_entry.identity.ai, member_entry.identity.harness)
                 entries.append(PickerEntry(
                     display=[
                         *PickerRowMarker.MEMBER.fragments(""),
                         (STYLE_RUNNING_NAME if cluster_entry.is_running else STYLE_AGENT_NAME,
                          member_entry.member.id),
                         ("", "  "),
-                        *member_ai,      # the member's AI right after its name — this anatomy leads with the name
+                        *member_runtime,     # the member's AI and harness right after its name — this anatomy leads with the name
                         *member_tags,
                     ],
                     preview=_deferred_preview(member_entry),   # the member's transcripts, read like an instance's

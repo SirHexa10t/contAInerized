@@ -138,7 +138,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from ..ai import active_harness
+from ..ai import active_adapter
 from ..file_access import (
     force_remove, is_file_recent, parse_lines, user_firewall_whitelist_lines, write_text,
 )
@@ -411,7 +411,7 @@ def _critical_hosts() -> tuple[str, ...]:
     """The hosts the active harness cannot operate without — from its adapter
     record (`launch/ai`), read at call time so a switch of AI moves them with
     the abort message below."""
-    return active_harness().critical_hosts
+    return active_adapter().critical_hosts
 
 # The critical hosts are served from Anthropic's OWN registered space — not a
 # CDN (verified via ARIN RDAP 2026-07-21: NET-160-79-104-0-1 "AP-2440",
@@ -594,8 +594,8 @@ def _phase1_worker(critical_hostnames: list[HostnameEntry], literal_entries: lis
 
     if critical_failed:
         raise RuntimeError(
-            f"Critical hosts of {active_harness().name} failed to resolve: {critical_failed}. "
-            f"{active_harness().name} cannot operate without them; aborting launch."   # the hosts and the words come from the same adapter record
+            f"Critical hosts of {active_adapter().name} failed to resolve: {critical_failed}. "
+            f"{active_adapter().name} cannot operate without them; aborting launch."   # the hosts and the words come from the same adapter record
         )
 
     global _phase2_thread

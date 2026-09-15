@@ -1,0 +1,46 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in OpenCode's own
+# settings — keys are paths in opencode.json (JSON / JSONC; the global file is
+# ~/.config/opencode/opencode.json, OPENCODE_CONFIG names another, the schema
+# is https://opencode.ai/config.json). Read 2026-09-14 from opencode.ai/docs
+# (config, models, agents, cli, rules) and the published schema. A purpose
+# absent from this file is one OpenCode's config does not express — the
+# launcher records it as unmapped, never invents a key.
+#
+# Unmapped, and why:
+#   effort             — no top-level key. Reasoning is a per-model option
+#                        under provider.<p>.models.<m>.options (reasoningEffort
+#                        for OpenAI and xAI, thinking.type + budgetTokens for
+#                        Anthropic) or a model VARIANT (agent.<name>.variant;
+#                        built-ins none / minimal / low / medium / high / xhigh,
+#                        or high / max thinking budgets): the key differs by
+#                        provider and carries the model id — a per-AI knob form
+#                        would express it.
+#   thinking.on/off    — no setting for showing reasoning was found.
+#   memory             — none built in (instructions come from AGENTS.md).
+#   tool_search        — none; `tools` is a name → boolean map.
+#   max_output_tokens  — per model only (provider.<p>.models.<m>.limit.output).
+#   compact_at_percent — compaction is turn- and token-based (compaction.auto /
+#                        .prune / .tail_turns / .preserve_recent_tokens /
+#                        .reserved), no percentage threshold.
+
+[providers]                                # OpenCode spells a model provider_id/model_id; the ids are Models.dev's (models.dev/api.json, 2026-09-14: every tier's model id is listed under these four)
+claude  = "anthropic"
+chatgpt = "openai"
+gemini  = "google"
+grok    = "xai"
+
+[model]                                    # the default model for primary agents (`--model` overrides per run)
+model = "{provider}/{value}"
+
+[background_agents.on]                     # subagent nesting depth: 1 = primary agents may launch subagents (the default)
+subagent_depth = "1"
+
+[background_agents.off]                    # 0 = "prevent all subagent launches" (docs/config)
+subagent_depth = "0"
+
+[telemetry.off]                            # OpenCode's own traffic beyond the model API is conversation sharing (opncd.ai) and update checks; OpenTelemetry spans are opt-in already
+share      = "disabled"
+autoupdate = "false"
+
+[tool_output_tokens]                       # bytes of a tool result before it is truncated to disk (default 51200); ~4 characters per token, the conversion Gemini CLI's mapping uses
+"tool_output.max_bytes" = "{value*4}"

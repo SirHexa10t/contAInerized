@@ -21,7 +21,7 @@ Verdicts:
 
 - **COMMON** — same structure everywhere; the launcher keeps one mechanism and
   the per-AI difference is DATA: a member dir under `agents/ai/<key>/`
-  (`tag.info`, `efforts.tiers`, `knobs.mapping`), a harness record
+  (`tag.info`, `efforts.tiers`; `knobs.mapping` moved to `agents/harness/<key>/` on 2026-09-14), a harness record
   (`launch/ai/<key>.py`), a filename.
 - **SPLIT** — the structure differs; the adapter owns one method per harness,
   tested per harness.
@@ -36,7 +36,7 @@ Verdicts:
 |---|---|---|---|---|---|
 | Distribution | npm `@anthropic-ai/claude-code` | npm `@google/gemini-cli` | npm `@openai/codex` | npm `@xai-official/grok` (or `curl … x.ai/cli/install.sh \| bash`; the enterprise page says npm avoids needing the `x.ai` host) | COMMON — one npm image layer; package and binary names are data |
 | Binary | `claude` | `gemini` | `codex` | `grok` | COMMON (data) |
-| Container user, paths, image tags | `claude`, `/home/claude`, `claude-agents:*`, `~/.claude-agents` | — | — | — | COMMON mechanism; the names are §14's cosmetic rename, last |
+| Container user, paths, image tags | `claude`, `/home/claude`, `claude-agents:*`, `~/.ai-agents` | — | — | — | COMMON mechanism; the names are §14's cosmetic rename, last |
 
 ## B. Invoking it (§2, §7)
 
@@ -94,7 +94,7 @@ Verdicts:
 
 | Facet | Claude Code | Gemini CLI | Codex CLI | Grok | Verdict |
 |---|---|---|---|---|---|
-| Budget | `agents/ai/claude/{efforts.tiers,knobs.mapping}` | `agents/ai/gemini/…` | `agents/ai/chatgpt/…` | `agents/ai/grok/…` | COMMON — done 2026-09-13: engines state a budget in the launcher's words (`tag.budget`); each AI's two files translate it |
+| Budget | `agents/ai/claude/efforts.tiers` + `agents/harness/claude-code/knobs.mapping` | `agents/ai/gemini/…` + `agents/harness/gemini-cli/…` | `agents/ai/chatgpt/…` + `agents/harness/codex-cli/…` | `agents/ai/grok/…` + `agents/harness/grok-build/…` | COMMON — done 2026-09-13: engines state a budget in the launcher's words (`tag.budget`); each AI's two files translate it |
 | Model key | `ANTHROPIC_MODEL` (env) | `GEMINI_MODEL` (env), `model.name` (settings) | `model` (toml) | `GROK_DEFAULT_MODEL` (env) / `[models] default` (toml); per-model `[model.<id>]` tables | COMMON — done: `Ai.model_key`, read through `tags/engine.pinned_model` |
 | Effort | `CLAUDE_CODE_EFFORT_LEVEL` low / medium / high / max, plus thinking on/off | `thinkingLevel` MINIMAL / LOW / MEDIUM / HIGH (Gemini 3), `thinkingBudget` tokens (Gemini 2.5) | `model_reasoning_effort` minimal / low / medium / high / xhigh (`max`: PROBE) | `[models] default_reasoning_effort` / `[model.<id>] reasoning_effort`, gated by `supports_reasoning_effort`; AA rates Grok 4.6 at low / medium / high / xhigh | COMMON vocabulary (Artificial Analysis's effort levels, `launch/ai/equivalence.EFFORT_LEVELS`); SPLIT key, casing, ceilings, and the 2.5 budget exception |
 | Thinking visibility | `CLAUDE_CODE_ENABLE_THINKING` | `ui.inlineThinkingMode` off / full | `model_reasoning_summary` auto / concise / detailed / none | `GROK_SHOW_THINKING_BLOCKS` / `[ui] show_thinking_blocks` (default true) | COMMON concept; SPLIT keys |
@@ -173,7 +173,7 @@ effort ceiling is not the rung's top.
 Grok became a tag member on 2026-09-13 (`agents/ai/grok/` — its tiers and
 knobs from this research), so an instance can be described on it. What it
 cannot yet do is launch: that takes a harness adapter (`launch/ai/grok.py`, a
-`Harness` record with its binary, flags, config-root files, env vars and the
+`Adapter` record (`launch/ai/adapter.py`; the harness itself is a tag member since 2026-09-14) with its binary, flags, config-root files, env vars and the
 hosts the enterprise page documents — the only one of the four that does).
 Two things are open before that: the telemetry key (NOT FOUND) and the
 session file format (NOT FOUND — `grok export` is the documented way out).
@@ -217,3 +217,7 @@ session file format (NOT FOUND — `grok export` is the documented way out).
    allowlist for a harness whose hosts are undocumented has to come from a
    probe (a run behind the launcher's own resolver, watching what fails), and
    the plan should say which rows are documented and which were observed.
+
+Credentials and account files per harness — what to mount where, the
+keys-per-AI / OAuth-per-harness rule, the probe results — live in
+`plans/credentials.md` (2026-09-14).

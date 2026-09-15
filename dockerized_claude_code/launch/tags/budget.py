@@ -2,8 +2,8 @@
 from `agents/engine/<tag>/tag.budget` (TOML). No AI's key names appear here:
 `standard` names one of the launcher's CAPABILITY STANDARDS, which every
 `agents/ai/<key>/efforts.tiers` spells out in that AI's model + effort, and
-the other keys are PURPOSES each AI's `knobs.mapping` translates into its
-native settings (`tags/ai.py`, `Ai.render`). So an engine author never learns
+the other keys are PURPOSES each harness's `knobs.mapping` translates into
+its native settings (`tags/harness.py`, `Harness.render`). So an engine author never learns
 an AI's vocabulary, and adding an AI never touches an engine (decision
 2026-09-13, plans/adding_an_ai.md).
 
@@ -15,8 +15,8 @@ the key itself and this module validates the FORMAT; which dated standards
 exist is tree data (`agents/ai/capability.standards`, read by `tags/ai.py`),
 and the registry checks every engine names one the AIs define.
 
-Leaf within the tag package: imports `base` only, so both `engine.py` (which
-owns the file) and `ai.py` (which translates it) can import it.
+Leaf within the tag package: imports `base` only, so `engine.py` (which owns
+the file), `ai.py` (the tiers) and `harness.py` (which translates it) can import it.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def sorted_standards(keys: Iterable[str]) -> list[str]:
 
 
 # The purposes an engine may state beside its standard: switches (a boolean → the
-# `<purpose>.on` / `.off` table of a knobs.mapping) and amounts (a positive
+# `<purpose>.on` / `.off` table of a harness's knobs.mapping) and amounts (a positive
 # integer → the `<purpose>` table, `{value}` filled in).
 SWITCHES = ("thinking", "memory", "background_agents", "telemetry", "tool_search")
 AMOUNTS = ("max_output_tokens", "tool_output_tokens", "compact_at_percent")

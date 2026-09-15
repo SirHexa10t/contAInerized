@@ -30,7 +30,7 @@ isolated Docker container with persistent per-instance state.
   engine), and
   **`--research`** uses a source-checking research agent (mutually exclusive
   with `--explain`). Each question's thread is saved under
-  `~/.claude-agents/quickie/`, sharing one `communal/` workspace you can drop
+  `~/.ai-agents/quickie/`, sharing one `communal/` workspace you can drop
   files into. **`q --history`** lists past threads (grey timestamp, id, last
   question; oldest first); **`q --answer <id>`** reprints a thread's saved
   answer; **`q --resume <id> "follow-up"`** continues one; **`q -h`** prints
@@ -38,7 +38,7 @@ isolated Docker container with persistent per-instance state.
 - **Multi-agent group hosting (`{cowork}` / `{manager}`)** — running
   instances can work together, coordinated by a host-side hub. Tag instances
   `{cowork}` to make them recruitable (each gets its own
-  `~/.claude-agents/group_hosting/<id>/` mounted at `/cowork`); tag one
+  `~/.ai-agents/group_hosting/<id>/` mounted at `/cowork`); tag one
   `{manager}` (nested inside `{cowork}`) to let it convene groups: it asks the
   hub for a roster, recruits peers, hands work out, reviews what comes back in
   per-coworker inboxes, and closes the group — all by writing request files
@@ -49,7 +49,7 @@ isolated Docker container with persistent per-instance state.
   injected into live sessions; files move as reviewed copies (never into a dir
   its owner is working in); every group keeps an append-only
   `conversation.md`. Watch a team live with
-  `tail -f ~/.claude-agents/group_hosting/hub.log`.
+  `tail -f ~/.ai-agents/group_hosting/hub.log`.
 - **Interactive picker** — full-screen TUI with type-to-filter, Del to
   delete an instance, F2 to modify its session name and/or workspace.
 - **Workspace-aware** — `$PWD` is the default workspace (unless `$PWD` is in
@@ -61,15 +61,22 @@ isolated Docker container with persistent per-instance state.
   row's workspace is the fallback target, or `(INVALID DIR)` (red) when the
   stored workspace path no longer exists or isn't a directory — hit F2 to
   repoint it.
-- **A five-kind tag system, discovered from the file tree** — every agent
-  instance composes from members of `agents/{ai,engine,profession,specialty,policy}/`:
+- **A six-kind tag system, discovered from the file tree** — every agent
+  instance composes from members of `agents/{ai,harness,engine,profession,specialty,policy}/`:
   - `⟪AI⟫` — which AI runs it: `⟪Claude⟫`, `⟪Gemini⟫`, `⟪ChatGPT⟫`, `⟪Grok⟫`, each
     coloured after its logo. A member dir holds the vendor, its agent CLI's
     name, its TIER for each of the launcher's CAPABILITY STANDARDS — a model
     and an effort (`efforts.tiers`; the dated standards themselves are the
-    kind's shared `agents/ai/capability.standards`) and the launcher's budget
-    words in that AI's settings (`knobs.mapping`). One member is the default; only Claude has a harness
-    adapter today, so the others can be described, not yet launched.
+    kind's shared `agents/ai/capability.standards`). One member is the default;
+    each names its default harness.
+  - `⟦Harness⟧` — which agent CLI wraps the AI: the vendors' own `⟦ClaudeCode⟧`,
+    `⟦GeminiCLI⟧`, `⟦CodexCLI⟧`, `⟦GrokBuild⟧`, and the open multi-model
+    `⟦OpenCode⟧`, `⟦OpenClaw⟧`, `⟦Hermes⟧`. A member dir names the vendor, the AIs
+    the CLI runs, its binary and its package, and carries the launcher's budget
+    words in that CLI's settings (`knobs.mapping`); an instance runs in its
+    AI's default harness unless it picks another that runs that AI. Only `⟦ClaudeCode⟧` has
+    an adapter in the launcher today, so instances in the other harnesses can
+    be described and stored, not yet launched.
   - `(engine)` — how hard it thinks: a `tag.budget` in the launcher's OWN
     words (a step such as `high`, switches such as `memory = false`, amounts
     such as `max_output_tokens = 36000`) — no AI's key names; the instance's
@@ -97,7 +104,7 @@ isolated Docker container with persistent per-instance state.
   checkboxes for the rest (requirements auto-check; risky picks and unmet
   companion requests warn in red) — and persist per instance.
 - **Shared toolchain caches** — Cargo, npm, pnpm, etc. live under
-  `~/.claude-agents/cache/` and bind-mount into `[code]`-tagged containers
+  `~/.ai-agents/cache/` and bind-mount into `[code]`-tagged containers
   (the base image has no compilers to use them). One agent's downloads
   benefit every later launch. Files older than 7 days are pruned from any
   cache that grows past 5 GB (skipped while a container is running).
@@ -106,7 +113,7 @@ isolated Docker container with persistent per-instance state.
   domain list (~130 entries: Anthropic + GitHub + package registries, plus
   language docs, cloud docs, dev-tooling sites, web standards, ML / data /
   databases). Drop extra entries, one per line, into
-  `~/.claude-agents/user_extras/firewall_whitelist.txt` — domains, raw IPv4
+  `~/.ai-agents/user_extras/firewall_whitelist.txt` — domains, raw IPv4
   addresses, CIDR ranges (`10.0.0.0/8`), and `*.wildcards` (honored via
   known-CDN-provider ranges — Cloudflare / Fastly / GitHub / CloudFront /
   Google — fetched live from each provider's published list and cached for
@@ -148,7 +155,7 @@ isolated Docker container with persistent per-instance state.
   red when an instance combines `{dood}` with `{auto}`.
 - **Optional credential passthrough** — drop your `~/.aws` (or `gcloud`,
   `kube`, `ssh`, `gh`, `.npmrc`, `.pypirc`) under
-  `~/.claude-agents/user_extras/optional_creds/` and the matching CLI
+  `~/.ai-agents/user_extras/optional_creds/` and the matching CLI
   inside the container picks it up automatically. See *Optional Host
   Mounts* below for the full table.
 - **"(Edit Preferences)" menu** — a row in the picker (above the delete menu)
@@ -159,7 +166,7 @@ isolated Docker container with persistent per-instance state.
   shown too but grayed out and un-toggleable — it ships in the base image,
   so it's always available. The focused row's panel names how you run the
   tool and what kind of language it is. Selections persist in
-  `~/.claude-agents/code_profile.toml`, which the launcher reads on every
+  `~/.ai-agents/code_profile.toml`, which the launcher reads on every
   `[code]` build; each tool's defaults, size, run command, language blurb,
   and the Dockerfile build-arg it drives live in
   `agents/profession/code/template.form`, beside the Dockerfile that
@@ -178,7 +185,10 @@ isolated Docker container with persistent per-instance state.
   orphaned state dirs, ghost `instances.toml` entries, bad workspaces,
   entries referencing unknown tags, missing or empty OAuth files, instances
   without a `history.jsonl` trace, and stray instance dirs still at the old
-  `~/.claude-agents/` root (they belong under `instances/`).
+  `~/.ai-agents/` root (they belong under `instances/`).
+  Since 2026-09-14 it also flags instances, cluster members and agents that
+  name no `ai` / `harness`: they run the tree's defaults, and anything older
+  than the two kinds is most likely meant for `claude` in `claude-code`.
 
 ## Tech Stack & Setup
 
@@ -308,7 +318,7 @@ Every container bind-mounts a host directory at `/workspace`. By default:
 
 You can also pick the workspace interactively when the launcher prompts. The
 form you type (with `~` expanded but symlinks preserved) is stored verbatim in
-the instance's `~/.claude-agents/instances.toml` entry.
+the instance's `~/.ai-agents/instances.toml` entry.
 
 ## How to Run
 
@@ -342,8 +352,8 @@ If you installed the shortcut aliases (see *Shortcut aliases* above), `ai …`
 is equivalent to `python3 run.py …`, and `q "…"` runs the quick-question tool.
 
 On first launch, Claude Code walks you through OAuth onboarding inside the
-container; the resulting `~/.claude-agents/.claude.json` and
-`~/.claude-agents/.credentials.json` are bind-mounted into every subsequent
+container; the resulting `~/.ai-agents/.claude.json` and
+`~/.ai-agents/.credentials.json` are bind-mounted into every subsequent
 container, so you never have to re-authenticate per agent.
 
 A successful launch prints a banner summarising the resolved agent (chain,
@@ -355,7 +365,7 @@ then drops you into Claude Code:
   Engine:           (researcher) — agents/engine/researcher
   Professions:      [code]
   Specialties:      {auto} {frwl}
-  User whitelist:   3 domains (from ~/.claude-agents/user_extras/firewall_whitelist.txt)
+  User whitelist:   3 domains (from ~/.ai-agents/user_extras/firewall_whitelist.txt)
   Building base → claude-agents:base...
   Building code → claude-agents:code...
 [docker build output]
@@ -380,7 +390,7 @@ red under the banner.
 | Enter | Select — launch the highlighted instance or cluster, or create from an agent / cluster template. Inert on a cluster member: members launch with their cluster |
 | Del | Delete the highlighted row (with confirmation): an instance and its state dir, a cluster and its members, or one member out of its cluster |
 | F2 | Redefine the highlighted row in one form: an instance's project path, name and tags; a cluster's tags, then its name, project and membership; a member's own tags (the cluster's show locked) |
-| F8 | Toggle the composition legend — overlays one table per kind (AIs / engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
+| F8 | Toggle the composition legend — overlays one table per kind (AIs / harnesses / engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
 
 Rows for existing things — instances, clusters, cluster members — share one
@@ -406,7 +416,7 @@ python3 -m launch.audit
 
 Reports tag-tree faults (malformed `tag.info`, dangling references),
 orphans (state dirs without an agent .md), stray instance dirs still at the
-`~/.claude-agents/` root (they now live under `instances/`), ghost
+`~/.ai-agents/` root (they now live under `instances/`), ghost
 `instances.toml` entries (entry without a state dir), bad workspaces (entry points nowhere),
 entries referencing unknown tags or the wrong axis, missing/empty OAuth
 files, names the launcher's label rule refuses (an instance's session or a
@@ -440,8 +450,8 @@ wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
    switches (`thinking`, `memory`, `background_agents`, `telemetry`,
    `tool_search`) and amounts (`max_output_tokens`, `tool_output_tokens`,
    `compact_at_percent`). Every `agents/ai/*/efforts.tiers` says which model
-   and effort meet the standard on that AI, and its `knobs.mapping` translates
-   the rest. Nested
+   and effort meet the standard on that AI, and the harness's `knobs.mapping`
+   translates the rest into that CLI's settings. Nested
    engine folders overlay their parent's budget key-by-key.
 4. Re-run `python3 run.py` — the new agent appears in the picker, grouped by
    profession set and sorted by its engine's capability standard (most
@@ -452,17 +462,25 @@ wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
 Every tag kind is discovered from the tree — a new member is a folder, not
 launcher code:
 
-- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers, knobs.mapping}` — `tag.info`
-  adds `vendor`, `harness` (the agent CLI's name), `default` (exactly one
-  member says true) and the tag's own colours `fg` / `bg` as hex; `efforts.tiers`
+- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers}` — `tag.info`
+  adds `vendor`, `harness` (the key of its default `agents/harness/` member),
+  `default` (exactly one member says true) and the tag's own colours `fg` /
+  `bg` as hex; `efforts.tiers`
   answers every capability standard (`[cheapest]`, each dated quarter of
   `agents/ai/capability.standards`, `[best]` — a `model` and an `effort` each,
   the AI's `[scale]` of effort words) with the Artificial Analysis index and
-  the token cost as comments; `knobs.mapping` maps the
+  the token cost as comments.
+- **Harness**: `agents/harness/<name>/{tag.info, knobs.mapping}` — `tag.info`
+  adds `vendor`, `ais` (the AI members the CLI runs: an AI's default harness
+  must list it, and an instance pairing a harness with an AI it cannot run
+  falls back to the AI's own), `binary` and `package`; `knobs.mapping` maps the
   budget purposes (`[model]`, `[effort]`, `[thinking.on]`, `[memory.off]`,
-  `[max_output_tokens]` …) to native settings as `{value}` templates, with
-  `{value/100}` and `{value*4}` for unit conversions. A purpose the AI cannot
-  express is left out; rendering reports it as unmapped.
+  `[max_output_tokens]` …) to that CLI's native settings as `{value}` templates,
+  with `{value/100}` and `{value*4}` for unit conversions and `{provider}` (from
+  a `[providers]` table, AI → the CLI's provider slug) where a multi-model CLI
+  spells `anthropic/<model>`. A purpose the CLI cannot express is left out;
+  rendering reports it as unmapped. Members do not nest. Launching in one needs
+  an adapter in `launch/ai/`, keyed by the member's name.
 - **Engine**: `agents/engine/<name>/{tag.info, tag.budget}` — the budget in the
   launcher's own words (above). The descriptions name the TIER (cheap,
   everyday, dependable), never a model: the picker renders the model the AI
@@ -504,12 +522,12 @@ how `{dood}` claims its `_dood` image layer).
 `instances.toml`.
 Point your editor at the TOML grammar for those extensions/filenames to get
 syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
-"toml", "*.info": "toml", "*.docker": "toml"}`). An engine's `tag.budget` and an AI's `efforts.tiers` / `knobs.mapping` are TOML too (map `*.budget`, `*.tiers` and `*.mapping` to `toml` as well).json` is JSON.
+"toml", "*.info": "toml", "*.docker": "toml"}`). An engine's `tag.budget`, an AI's `efforts.tiers` and a harness's `knobs.mapping` are TOML too (map `*.budget`, `*.tiers` and `*.mapping` to `toml` as well).json` is JSON.
 
 ## Persistent State Layout
 
 ```
-~/.claude-agents/
+~/.ai-agents/
   .claude.json                       # shared OAuth account info
   .credentials.json                  # shared API credentials
   instances.toml                     # per-instance tag selections + workspace — one table per <agent>__<session> (launcher-owned; the picker's F2 form is the supported editor)
@@ -532,13 +550,16 @@ syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
       projects/-workspace/...        # claude's per-project state, incl. history.jsonl
 ```
 
-(A `<agent>__<session>` dir found directly at the `~/.claude-agents/` root is a
+(A `<agent>__<session>` dir found directly at the `~/.ai-agents/` root is a
 leftover from the pre-`instances/` layout — the launcher only looks in
 `instances/` now, so move it there; `python -m launch.audit` flags any stray.)
 
-(Upgrading from the pre-tags layout? The first launch folds
-`agent_workspace_map.json` + `agent_modes_map.json` into `instances.toml`
-automatically and renames the originals `*.pre-rewrite.bak`.)
+(Upgrading from before 2026-09-14? The state dir was `~/.claude-agents/`; the
+first launch renames it to `~/.ai-agents/` in place — one move, nothing copied.
+If both exist, the launcher says so and touches neither. Upgrading from the
+pre-tags layout? The first launch folds `agent_workspace_map.json` +
+`agent_modes_map.json` into `instances.toml` automatically and renames the
+originals `*.pre-rewrite.bak`.)
 
 ## Optional Host Mounts
 
@@ -550,14 +571,14 @@ Each is independent; nothing here is required for a basic launch.
 | Mount | Source | Container path | Trigger |
 |---|---|---|---|
 | Workspace prompts | `<workspace>/.prompts/` | (left in-place at `/workspace/.prompts/`; surfaced by the in-container `man`) | dir present in workspace |
-| Toolchain caches | `~/.claude-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | instance has the `[code]` profession |
+| Toolchain caches | `~/.ai-agents/cache/<rel>` | `/home/claude/<rel>` (cargo/registry, .npm, .cache, …) | instance has the `[code]` profession |
 | Firewall scripts | `agents/specialty/firewall/{init-firewall,firewall-entrypoint}.sh` | `/usr/local/bin/` (ro) | instance has `{firewall}` (declared in its `tag.docker`) |
 | Docker socket | `/var/run/docker.sock` (host) | `/var/run/docker.sock` | instance has `{dood}` (declared in `_dood/tag.docker`) |
-| Optional creds | `~/.claude-agents/user_extras/optional_creds/<service>/` | varies by service (see below) | path exists on host |
+| Optional creds | `~/.ai-agents/user_extras/optional_creds/<service>/` | varies by service (see below) | path exists on host |
 
 ### Optional credentials (recognized services)
 
-Drop a directory or file under `~/.claude-agents/user_extras/optional_creds/`
+Drop a directory or file under `~/.ai-agents/user_extras/optional_creds/`
 and it gets bind-mounted into the container at the matching default location, so
 the corresponding CLI just works. Read-write (cloud CLIs need to refresh
 tokens, write cache, etc.). Anything not in this list is ignored — extend
@@ -591,7 +612,7 @@ CLI (those agents probably don't need cloud tools anyway).
 
 **Token files** (`<service>/token`): for services that authenticate via an
 env-var token (currently `jira` → `$JIRA_API_TOKEN`), put the secret in a
-plain-text file at `~/.claude-agents/user_extras/optional_creds/<service>/token`. The
+plain-text file at `~/.ai-agents/user_extras/optional_creds/<service>/token`. The
 launcher reads its trimmed contents at launch and forwards as the matching
 env var (the CLI in the container picks it up the same way it does on your
 host). Service→env-var mapping lives in `OPTIONAL_CREDS_TOKEN_ENV_VARS`
@@ -601,9 +622,9 @@ the launcher forwards every present token as a `-e` flag on `docker run`.
 To enable AWS in any `[code]` agent, for example:
 
 ```bash
-mkdir -p ~/.claude-agents/user_extras/optional_creds
-ln -s ~/.aws ~/.claude-agents/user_extras/optional_creds/aws    # symlink so host edits propagate
-# or:  cp -r ~/.aws ~/.claude-agents/user_extras/optional_creds/aws
+mkdir -p ~/.ai-agents/user_extras/optional_creds
+ln -s ~/.aws ~/.ai-agents/user_extras/optional_creds/aws    # symlink so host edits propagate
+# or:  cp -r ~/.aws ~/.ai-agents/user_extras/optional_creds/aws
 ```
 
 Next launch of any `[code]` agent: the code image rebuilds with `awscli`
@@ -651,7 +672,7 @@ check.sh                             # the quality gate — see "Quality gate" b
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), bind-mount dicts (DOCKER_BASE_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
   utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_keypress, call_or_exit. No disk access. Leaf module.
-  ai/                                # the code half of "which AI runs" — LEAF package: catalog.py (DEFAULT_AI_KEY + the call-time active_ai_key() / set_active_ai(); the AIs themselves are tag members under agents/ai/) + harness.py (Harness — an agent CLI's names: binary, flags, config-root files, env vars, critical hosts) + claude_code.py (CLAUDE_CODE, the one record; harness_for() / active_harness() in __init__)
+  ai/                                # the code half of "which harness runs" — LEAF package: catalog.py (DEFAULT_HARNESS_KEY + the call-time active_harness_key() / set_active_harness()), adapter.py (Adapter: an agent CLI's names — binary, flags, config-root files, env vars, hosts), claude_code.py (the one adapter), __init__ (ADAPTERS keyed by the harness member, adapter_for / active_adapter — a LookupError for a harness without one — refusal_for, adopt)
   file_access.py                     # every disk-touching call routes through here — agent_md_index, atomic write_text, force_remove (sudo + `sudo -k` fallback), per-instance state-dir probes, optional-creds discovery.
   tags/                              # the tag system — kinds as classes, members discovered from agents/
     base.py                          #   Tag record + DockerContribution + tag.info/tag.docker parsing + the STRICT tree rule + TagError
@@ -668,24 +689,25 @@ launch/
   container_env.py                   # env staging — ContainerEnvKey enum, the staged-value accumulator, `-e`/build-arg formatters, set_container_env orchestrator.
   docker_config.py                   # plain-docker orchestration — ensure_image (base + per-layer `docker build`), run_container (`docker run` assembly), tag.docker flag emitters (build_arg_flags / env_forward_flags / entrypoint_flags), bind-mount accumulator, docker CLI wrappers, dry-run gate, prompt_install_failures.
   tag_handlers.py                    # apply_tags(instance): stages declarative tag.docker mounts, then dispatches per-tag `_apply_<name>` handlers (code cache prep/prune, dood GID staging, firewall DNS kickoff). Tags without a handler are data-only no-ops.
-  firewall/                          # {firewall} subsystem (package): __init__ facade + resolver.py (two-phase DNS resolution — sync Phase 1 → streaming Phase 2 via docker exec iptables -I, CDN widening, cross-launch resolved-IP cache; getent on Linux, socket.getaddrinfo fallback where absent e.g. macOS) + whitelist.py (entry expansion) + status.py (agent-visible domains_pending_resolve.yml). Host caches live in ~/.claude-agents/firewall_cache/; curated domain list in template_code/firewall_domains.py.
+  firewall/                          # {firewall} subsystem (package): __init__ facade + resolver.py (two-phase DNS resolution — sync Phase 1 → streaming Phase 2 via docker exec iptables -I, CDN widening, cross-launch resolved-IP cache; getent on Linux, socket.getaddrinfo fallback where absent e.g. macOS) + whitelist.py (entry expansion) + status.py (agent-visible domains_pending_resolve.yml). Host caches live in ~/.ai-agents/firewall_cache/; curated domain list in template_code/firewall_domains.py.
   agents_crud.py                     # instance-state CRUD — instances.toml writers (persist/delete/modify), install_latest_md + install_settings (state-dir CLAUDE.md + merged settings.json), resolve_pick, picker-entry factories, engine sort keys.
   user_additions.py                  # optional_creds mounts + plant_user_extras (readme always; firewall_whitelist.txt under {firewall}).
   gui/                               # TUI subpackage (sole prompt_toolkit importer; run.py uses its __init__ re-exports). Nine modules, one role each, imported strictly one way — styles.py (the style system + tag colours every surface draws with) -> form_core.py (FormOption/TextField, the confirm gate, and run_form: the ONE scaffold both full-screen forms run on; checkbox_form is the multi-select row model on it) -> forms.py (the instance + cluster-wide tag forms, the merged "(Edit Preferences)" form) & cluster_form.py (the membership form: its agent rows + add/remove keys on the scaffold) -> picker_previews.py (session_preview — the one pane instances, cluster members and clusters render through — + the child-process transcript read) & picker_prompts.py (line prompts, inline dialogs, field validators) -> picker_flows.py (what each picker key MEANS: cluster create/edit, member re-tag, removals) & picker_widget.py (the reusable picker: row models incl. WorkspaceView / ContEntry / MemberEntry, the off-thread preview loader, the selection loop) -> menu_picker.py (the launcher's menus: select_agent, the deletion submenu, --stop's selector, the F8 legend; the shared Cont-row anatomy every existing thing wears).
   cowork/                            # {cowork}/{manager} multi-agent group hosting — leaf consumer of the core: group (durable state) + mailbox (messages + capture attribution) + sync (file plane) + journal + roster + control (agent-facing verbs) + lifecycle (hub singleton) + relay (the loop) + cli. Owns no docker calls; injection lives in docker_config. cowork.py at the repo root is its thin entry.
-  cluster/                           # {mux}/{clstr} COHABITING agents (PoC) — leaf consumer too: member (identity + name legality) + legoset (cluster templates) + state (cluster.toml) + worktree (writer safety) + tmux/herdr (multiplexer assembly — herdr by default; the switch is ~/.claude-agents/ui_profile.toml's herdr_instead_of_tmux, edited from the picker) + launch_plan + cli. cluster.py at the root is its entry, cluster_plan.md the design record.
+  cluster/                           # {mux}/{clstr} COHABITING agents (PoC) — leaf consumer too: member (identity + name legality) + legoset (cluster templates) + state (cluster.toml) + worktree (writer safety) + tmux/herdr (multiplexer assembly — herdr by default; the switch is ~/.ai-agents/ui_profile.toml's herdr_instead_of_tmux, edited from the picker) + launch_plan + cli. cluster.py at the root is its entry, cluster_plan.md the design record.
   quickie/                           # the `q` one-shot-question tool — leaf consumer of the core: cli.py (argparse dispatch) → ask.py (fixed-build Instance under quickie/<gibberish>, stream-json run) + render.py (thinking ticker + streamed answer) + history.py (--history listing / --answer replay). quick_question.py at the repo root is its thin entry.
   claude_code_config.py              # Claude-Code-side UX — build_status_line(instance) + set_terminal_title(name). Leaf-shaped.
   audit.py                           # state-correctness checker (run as `python -m launch.audit`).
   template_code/                     # user-facing copy / data. Pure data, no logic.
     docker_prompts.py                #   docker-side strings — build-step progress, {firewall} waiting line, install-failure prompt copy
     firewall_domains.py              #   the curated built-in whitelist domains (~135 entries)
-  template_files/                    # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.claude-agents/user_extras/.
+  template_files/                    # first-launch user-side files (firewall_whitelist.txt, optional_creds_readme.txt) planted into ~/.ai-agents/user_extras/.
   tests/                             # unittest suite. Run it together with ruff + mypy via `bash check.sh` from the project root.
 agents/                              # agent definitions + the tag tree
   <name>.md, <name>.lego             #   persona + default tag selections, per agent
   ai/capability.standards            #   the dated CAPABILITY STANDARDS every AI answers — a quarter whose frontier model raised the record, its index, its setter; the ends cheapest / best are each AI's own
-  ai/<name>/                         #   ⟪AI⟫ members — tag.info (vendor, harness, default, fg/bg) + efforts.tiers (this AI's tier — model + effort — per standard) + knobs.mapping (budget words → native settings)
+  ai/<name>/                         #   ⟪AI⟫ members — tag.info (vendor, default harness, default, fg/bg) + efforts.tiers (this AI's tier — model + effort — per standard)
+  harness/<name>/                    #   ⟦Harness⟧ members — tag.info (vendor, the AIs it runs, binary, package) + knobs.mapping (budget words → this CLI's native settings; {provider} slugs for a multi-model CLI); an adapter in launch/ai/ keyed by the member's name makes it launchable
   engine/<name>/                     #   (engine) members — tag.info + tag.budget (standard + switches + amounts, AI-neutral; nested folders overlay the parent's)
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings

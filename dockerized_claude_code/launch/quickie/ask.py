@@ -1,5 +1,5 @@
 """The quickie tool's orchestration — one direct question → a one-shot
-`claude -p` answer, its thread parked under `~/.claude-agents/quickie/`.
+`claude -p` answer, its thread parked under `~/.ai-agents/quickie/`.
 
 A deliberately lean cousin of run.py's `launch()`: no picker, no tag form, no
 store entry. It reuses the launcher's core helpers directly (setup, image
@@ -20,13 +20,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ..agents_crud import compute_resume_flag, install_latest_md, install_settings
-from ..ai import active_harness, adopt, refusal_for
+from ..ai import active_adapter, adopt, refusal_for
 from ..container_env import set_container_env
 from ..docker_config import ensure_image, require_docker, run_container, set_container_mounts
 from ..file_access import ensure_dir, ensure_shared_oauth_files
 from ..paths import AGENTS_DIR, quickie_communal_workspace, quickie_state_dir_path
 from ..tag_handlers import apply_tags
-from ..tags import Instance, Registry, TagError, load_lego, resolve_build, scan_all
+from ..tags import Instance, Registry, TagError, load_lego, migrations, resolve_build, scan_all
 from ..utils import call_or_exit
 from .render import render_stream
 
@@ -90,6 +90,7 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
         )
     require_docker()
     registry = call_or_exit(scan_all, AGENTS_DIR, exceptions=TagError)
+    migrations.ensure_migrated()                 # the state dir's old name, the retired map format — before anything is created under the dir
     ensure_dir(quickie_communal_workspace())   # the /workspace mount source must exist, else docker root-creates it
     if resume_session is not None:
         if not quickie_state_dir_path(resume_session).is_dir():
@@ -98,9 +99,9 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
     else:
         session, is_brand_new = _gibberish(), True
     inst = build_quickie_instance(registry, session, agent=agent, is_brand_new=is_brand_new)
-    if inst.ai is not None and (refused := refusal_for(inst.ai.name, inst.ai.label)) is not None:
-        sys.exit(refused)                        # a quickie lego on an AI without an adapter — same rule as run.py
-    adopt(inst.ai.name if inst.ai else None)
+    if inst.harness is not None and (refused := refusal_for(inst.harness.name, inst.harness.label)) is not None:
+        sys.exit(refused)                        # a quickie lego in a harness without an adapter — same rule as run.py
+    adopt(inst.harness.name if inst.harness else None)
     resume_flag = compute_resume_flag(inst)      # ["--continue"] when the thread has a transcript; [] otherwise
 
     apply_tags(inst)                             # no-op for _quickie today (no handler tag); future-proof
@@ -112,5 +113,5 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
     image = ensure_image(inst)
     # The harness's flags for a progress-showing one-shot event stream (the
     # adapter says which; render_stream turns it into a ticker + streamed answer).
-    run_container(inst, image, list(active_harness().stream_args), resume_flag, interactive=False,
+    run_container(inst, image, list(active_adapter().stream_args), resume_flag, interactive=False,
                   print_prompt=question, stream_renderer=render_stream)

@@ -1,7 +1,7 @@
 """`q --history` — list past question threads (oldest last-question first) — and
 `q --answer <id>` — print a thread's saved answer.
 
-A thread is a session dir under ~/.claude-agents/quickie/ (bar the shared
+A thread is a session dir under ~/.ai-agents/quickie/ (bar the shared
 `communal/` workspace); its last question / last answer come from the
 conversation transcript via file_access.last_prompt_in_state /
 last_answer_in_state — the same records `--resume` continues, so a thread

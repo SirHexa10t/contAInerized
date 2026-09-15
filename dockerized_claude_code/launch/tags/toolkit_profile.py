@@ -1,8 +1,8 @@
 """Per-profession toolkit profiles — the user's install toggles for a
 configurable profession's optional tools, persisted at
-`~/.claude-agents/<profession>_profile.toml` (`paths.toolkit_profile_path`).
+`~/.ai-agents/<profession>_profile.toml` (`paths.toolkit_profile_path`).
 
-    # ~/.claude-agents/code_profile.toml
+    # ~/.ai-agents/code_profile.toml
     rust = true
     node = true
     cmake = true

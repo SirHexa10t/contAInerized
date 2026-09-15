@@ -32,7 +32,7 @@ from typing import Callable, Iterable, cast
 
 from prompt_toolkit.formatted_text import AnyFormattedText
 
-from ..tags import Ai, PolicyStance, Tag
+from ..tags import Ai, Harness, PolicyStance, Tag
 
 # ============================================================
 # Shared style system (used by the form AND menu_picker)
@@ -87,6 +87,7 @@ STYLE_TAG_DENY       = "bold fg:ansibrightblue"
 STYLE_TAG_ALLOW      = "bold fg:#ff8700"
 STYLE_TAG_DEMAND     = "bold fg:ansiwhite"
 STYLE_TAG_ENGINE     = "fg:ansibrightcyan"
+STYLE_TAG_HARNESS    = "fg:ansibrightmagenta"   # the agent CLI around the AI — one kind colour (the AI beside it is the one coloured per member)
 STYLE_UNDERLINE      = "underline"   # the fullname lead-in of description text
 STYLE_TAG_INVALID    = "fg:ansiblack bg:ansired"   # a stored tag name that no longer resolves (picker Cont rows)
 STYLE_LOCKED         = "fg:ansibrightblack"         # a form row the user can't toggle (grayed; e.g. [code]'s always-on Python)
@@ -113,6 +114,7 @@ RICH_BY_STYLE = {
     STYLE_TAG_ALLOW:      "bold #ff8700",
     STYLE_TAG_DEMAND:     "bold white",
     STYLE_TAG_ENGINE:     "bright_cyan",
+    STYLE_TAG_HARNESS: "bright_magenta",
 }
 
 
@@ -137,10 +139,12 @@ def squashed_tag_style(style: str) -> str:
 def tag_style(tag: Tag) -> str:
     """The style for one tag's label — the AI's own logo colours (the one kind
     coloured per MEMBER, from its tag.info), else dispatched on the
-    kind-specific fields (duck-typed: only specialties carry `warn`, only
-    policies carry `stance`, only engines carry `budget`)."""
+    kind (harnesses) or the kind-specific fields (duck-typed: only specialties
+    carry `warn`, only policies carry `stance`, only engines carry `budget`)."""
     if isinstance(tag, Ai):
         return tag.style
+    if isinstance(tag, Harness):
+        return STYLE_TAG_HARNESS
     if getattr(tag, "warn", False):
         return STYLE_TAG_WARN
     stance = getattr(tag, "stance", None)

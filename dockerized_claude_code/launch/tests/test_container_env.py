@@ -162,7 +162,7 @@ class TestToolkitInstallFlags(unittest.TestCase):
         self.bare_profession = Profession(name="web", path=Path(self.tmp.name))   # no template.form
         # Deliberately a path that's never written — load_profile falls back
         # to manifest defaults, so tests never touch the real
-        # ~/.claude-agents/code_profile.toml.
+        # ~/.ai-agents/code_profile.toml.
         self.profile_path = Path(self.tmp.name) / "code_profile.toml"
         self._patch = patch("launch.container_env.toolkit_profile_path", lambda name: self.profile_path)
         self._patch.start()

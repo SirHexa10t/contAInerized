@@ -16,6 +16,7 @@ from launch.gui.menu_picker import (
 )
 from launch.gui.picker_widget import PickerCwdHint
 from launch.paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS
+from launch.gui.styles import STYLE_TAG_HARNESS
 from launch.tags import AgentBuild, Instance
 from launch.tests.fixtures import REGISTRY, make_inst
 
@@ -204,13 +205,14 @@ class TestRowAssembly(unittest.TestCase):
                 self.assertEqual((row.display[0],),
                                  menu_picker.PickerRowMarker.CONT.lead)
 
-    def test_instance_rows_wear_the_ai_before_the_name_and_agent_rows_none(self):
-        # The AI column sits between the tags and the name on INSTANCE rows,
-        # in the AI's own colours (operator, 2026-09-13). An agent row carries
-        # none: which AI runs is decided when an instance is created, it is
-        # not a property of the agent (operator, 2026-09-14) — nor does the
-        # Create pane show one.
+    def test_instance_rows_wear_the_ai_and_harness_before_the_name_and_agent_rows_none(self):
+        # The runtime column sits between the tags and the name on INSTANCE
+        # rows: the AI in its own colours (operator, 2026-09-13), then the
+        # harness (operator, 2026-09-14). An agent row carries neither: both
+        # are decided when an instance is created, they are not properties of
+        # the agent — nor does the Create pane show them.
         ai = REGISTRY.default_ai
+        harness = REGISTRY.harnesses[ai.harness]
         entries = self.entries()
         inst_rows = [e for e in entries if isinstance(e.value, Instance)]
         agent_rows = [e for e in entries if isinstance(e.value, menu_picker.Agent)]
@@ -218,13 +220,16 @@ class TestRowAssembly(unittest.TestCase):
         for row in inst_rows:
             with self.subTest(instance=row.value.instance):
                 text = "".join(t for _, t in row.display)
-                self.assertLess(text.index(ai.label), text.index(row.value.instance))
+                self.assertLess(text.index(ai.label), text.index(harness.label))
+                self.assertLess(text.index(harness.label), text.index(row.value.instance))
                 self.assertIn((ai.style, ai.label), row.display)
+                self.assertIn((STYLE_TAG_HARNESS, harness.label), row.display)
         for row in agent_rows:
             with self.subTest(agent=row.value.name):
-                self.assertNotIn(ai.label, "".join(t for _, t in row.display))
-                self.assertNotIn(ai.label, row.preview)
-                self.assertNotIn("Tags:", row.preview)
+                text = "".join(t for _, t in row.display)
+                self.assertNotIn(ai.label, text)
+                self.assertNotIn(harness.label, text)
+                self.assertNotIn("Tags:", row.preview)      # the pane is the persona alone (which may itself mention a tag)
 
     def test_each_shipped_template_gets_a_cluster_row(self):
         # The real tree ships devteam.legoset; its row opens the creation flow
@@ -303,7 +308,7 @@ class TestPromptStop(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         # Cluster rows read their members' state dirs; keep that off the
-        # real ~/.claude-agents.
+        # real ~/.ai-agents.
         from launch import paths as launch_paths
         redirect = patch.object(launch_paths, "AGENTS_STATE", Path(self.ws))
         redirect.start()
@@ -545,21 +550,26 @@ class TestClusterRows(unittest.TestCase):
         self.assertIsNotNone(row.preview_quick)          # and the instant form stands in meanwhile
         self.assertIs(row.marker, menu_picker.PickerRowMarker.MEMBER)
 
-    def test_member_rows_wear_their_own_ai_after_the_name(self):
-        # A member's AI is its own (the cluster forces none): the row shows it
-        # right after the member id, before its own tags; a cluster row shows
-        # no AI at all.
+    def test_member_rows_wear_their_own_ai_and_harness_after_the_name(self):
+        # A member's AI and harness are its own (the cluster forces neither):
+        # the row shows them right after the member id, before its own tags;
+        # a cluster row shows none.
         self.save("team", (self.Member.of("golem"),
                            self.Member("researcher", "alien", build=AgentBuild(ai="grok"))))
         rows = {e.value.member_id: e for e in self.entries()
                 if isinstance(e.value, menu_picker._MemberRow)}
         golem, alien = self.text(rows["golem"]), self.text(rows["researcher__alien"])
         default, grok = REGISTRY.default_ai, REGISTRY.ais["grok"]
+        default_harness, grok_harness = REGISTRY.harnesses[default.harness], REGISTRY.harnesses[grok.harness]
         self.assertLess(golem.index("golem"), golem.index(default.label))
+        self.assertLess(golem.index(default.label), golem.index(default_harness.label))
         self.assertIn((grok.style, grok.label), rows["researcher__alien"].display)
+        self.assertIn((STYLE_TAG_HARNESS, grok_harness.label), rows["researcher__alien"].display)   # its AI's default harness, resolved
         self.assertNotIn(default.label, alien)
+        self.assertNotIn(default_harness.label, alien)
         (cluster_row,) = self.cluster_rows()
         self.assertNotIn(default.label, self.text(cluster_row))
+        self.assertNotIn(default_harness.label, self.text(cluster_row))
 
     def test_enter_is_inert_on_every_member_row_but_f2_and_del_are_not(self):
         # A member launches with its cluster: Enter must do nothing there —

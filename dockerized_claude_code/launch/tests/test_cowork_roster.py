@@ -39,7 +39,7 @@ class RosterHarness(unittest.TestCase):
         self._patch(patch.object(paths, "AGENTS_STATE", self.state))
         # paths.INSTANCES_FILE is a CONSTANT computed at import, so patching
         # AGENTS_STATE does not move it — without this, store.save() in a test
-        # writes into the REAL ~/.claude-agents/instances.toml (found the hard
+        # writes into the REAL ~/.ai-agents/instances.toml (found the hard
         # way: the audit flagged this suite's fixture names as ghost entries).
         self._patch(patch.object(store, "INSTANCES_FILE",
                                  self.state / "instances.toml"))

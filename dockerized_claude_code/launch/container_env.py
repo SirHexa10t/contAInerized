@@ -181,7 +181,7 @@ def toolkit_install_flags(professions: Iterable[Profession]) -> dict[str, str]:
     """`{INSTALL_<TOOL>: '0' | '1'}` build-args for every configurable
     profession among `professions` (one with no template.form contributes
     nothing), driven purely by its toolkit profile
-    (`~/.claude-agents/<profession>_profile.toml`, defaulting per the
+    (`~/.ai-agents/<profession>_profile.toml`, defaulting per the
     manifest). Language toolchains only — the service CLIs are the separate,
     creds-driven `install_creds_flags` below; the two key sets are disjoint
     (test_essential_files guards it), so merging both dicts into the staged

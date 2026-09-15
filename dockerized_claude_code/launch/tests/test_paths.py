@@ -16,7 +16,7 @@ class TestHomeDerivedConstants(unittest.TestCase):
         self.assertEqual(paths._HOME, Path.home())
 
     def test_agents_state_under_home(self):
-        self.assertEqual(paths.AGENTS_STATE, Path.home() / ".claude-agents")
+        self.assertEqual(paths.AGENTS_STATE, Path.home() / ".ai-agents")
 
     def test_user_extras_under_agents_state(self):
         self.assertEqual(paths.USER_EXTRAS_DIR, paths.AGENTS_STATE / "user_extras")

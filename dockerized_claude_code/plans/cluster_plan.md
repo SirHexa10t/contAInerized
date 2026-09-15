@@ -62,7 +62,7 @@ picture. This is the one place the feature fits.
 A new session kind sits beside instances, not inside them.
 
 ```
-~/.claude-agents/
+~/.ai-agents/
   instances.toml                      # unchanged — solo instances
   instances/<agent>__<session>/       # unchanged — one solo instance's state
   clusters/
@@ -653,7 +653,7 @@ are per-cluster, not per-launcher):**
 > discovery needs siblings to see the same registration files; isolation wants
 > each member to keep its own `~/.claude` (separate memory/transcript/persona).
 > **Direction (from the conversation):** mount a **shared cluster directory** —
-> `~/.claude-agents/clusters/<session>/` — into every member, giving them a
+> `~/.ai-agents/clusters/<session>/` — into every member, giving them a
 > common surface with direct access, while the rest of `~/.claude` stays
 > per-member. That shared dir is also where the **message-queue** lives, so one
 > mount serves both. Residual question for the researcher: whether the

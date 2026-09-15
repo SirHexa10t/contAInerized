@@ -147,6 +147,20 @@ class TestClusterTags(ClusterTmp):
         self.assertEqual(loaded.tags.policies, ("free-bash",))
         self.assertEqual(loaded.members[0].build.specialties, ())
 
+    def test_member_tables_carry_ai_and_harness_as_scalars(self):
+        # Per member, like the engine — the cluster forces neither.
+        cluster = state.from_template(
+            "poc", Path("/tmp/p"),
+            (Member("researcher", "alien", build=AgentBuild(ai="grok", harness="grok-build", engine="golem")),),
+            template="devteam")
+        text = state.dumps(cluster)
+        self.assertIn('ai = "grok"', text)
+        self.assertIn('harness = "grok-build"', text)
+        loaded = state.loads("poc", text)
+        self.assertEqual((loaded.members[0].build.ai, loaded.members[0].build.harness), ("grok", "grok-build"))
+        self.assertEqual((loaded.member_build(loaded.members[0]).ai, loaded.member_build(loaded.members[0]).harness), ("grok", "grok-build"))
+        self.assertIsNone(loaded.tags.harness)
+
     def test_a_legacy_file_without_cluster_tags_still_loads(self):
         # Pre-2026-09-02 files repeat the forced pair in every member table
         # and carry no cluster-level keys. They must load into the new shape

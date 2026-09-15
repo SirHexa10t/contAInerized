@@ -113,7 +113,7 @@ permission bypass.
   help text and names Claude Code's built-in slash commands.
 
 Launcher-owned and agnostic: `/workspace`, `/workspaces/<id>`, `/cluster`,
-`/cowork`, `.claude_summary` (the name is ours), `~/.claude-agents` on the host.
+`/cowork`, `.claude_summary` (the name is ours), `~/.ai-agents` on the host.
 
 *A harness must supply:* its config root and the env var that relocates it (for
 clusters), a settings file it reads at that root (or another way to impose
@@ -219,7 +219,7 @@ plain stdout, dropping the thinking ticker).
   and, until 2026-09-10, `engine.conf`): the budget in the launcher's OWN words
   — a capability standard, switches, amounts — so this seam is now DATA in
   `agents/ai/<key>/`: `efforts.tiers` (the standard → that AI's model + effort) and
-  `knobs.mapping` (each purpose → that AI's native settings, `{value}`
+  `knobs.mapping` — in the HARNESS's dir since 2026-09-14 — (each purpose → that CLI's native settings, `{value}`
   templates with the unit conversions). `Ai.render(budget)` is the adapter
   boundary; `Instance.conf` is the rendering for the instance's AI. The
   FORWARDING is still Claude-shaped: `docker_config.conf_env_args` emits
@@ -240,8 +240,8 @@ means, if anything.
 
 ### 9. Authentication — ENV
 
-- `launch/paths.py:53-54` `ACCOUNT_FILE = ~/.claude-agents/.claude.json`,
-  `CREDENTIALS_FILE = ~/.claude-agents/.credentials.json`, mounted where Claude
+- `launch/paths.py:53-54` `ACCOUNT_FILE = ~/.ai-agents/.claude.json`,
+  `CREDENTIALS_FILE = ~/.ai-agents/.credentials.json`, mounted where Claude
   Code expects them (§3); `run.py` `setup_state` → `ensure_shared_oauth_files`
   so docker never creates them root-owned; `launch/audit.py` checks both.
 - `launch/claude_code_config.py` reads `oauthAccount.emailAddress` out of the
@@ -336,7 +336,7 @@ self-test target.
 
 The container user `claude` and `/home/claude`; image tags `claude-agents:*`;
 `container_probe.CONTAINER_NAME_PREFIX = "claude-code_"`; the host state root
-`~/.claude-agents` (`paths.AGENTS_STATE`) and `/var/log/claude-agents` in the
+`~/.ai-agents` (`paths.AGENTS_STATE`) and `/var/log/claude-agents` in the
 `[code]` image; `.claude_summary` / `.claude_dev_guidelines`; the module
 `launch/claude_code_config.py`; `Specialty.claude_args` / `LaunchOptions.claude_args`;
 `ContainerEnvKey.CLAUDE_AGENT_INSTANCE`; `run.py`'s parser description; README,
@@ -377,7 +377,7 @@ status-line hook (§10); the turn-end and pre-prompt hooks, and the prompt
 injection channel (§11-12); the critical hosts and widening blocks (§13).
 The natural selector is the **engine**: an engine already is "model + budget",
 and every key in an engine's budget file is harness-bound today — so the
-budget vocabulary (now `tag.budget` + the AI's `efforts.tiers` / `knobs.mapping`,
+budget vocabulary (now `tag.budget` + the AI's `efforts.tiers` + the harness's `knobs.mapping`,
 2026-09-13) already IS the per-harness data, and the harness's CLI would become an image
 layer selected by it, the way professions are layers. Policies become
 per-harness DATA rows (`policy.<harness>.json` beside today's `policy.json`),
@@ -398,8 +398,8 @@ make this launcher more than `docker run`.
 
 A is the only one whose cost is paid once. Its first step costs nothing
 functionally and is worth doing regardless — DONE 2026-09-12 as
-`launch/ai/harness.py` + `launch/ai/claude_code.py` with the call-time
-`active_ai()` / `active_harness()` (`adding_an_ai.md`, order of work step 1): gather the string `"claude"`, the
+`launch/ai/adapter.py` (`harness.py` until 2026-09-14) + `launch/ai/claude_code.py` with the call-time
+`active_harness_key()` / `active_adapter()` (`active_ai()` / `active_harness()` at first) (`adding_an_ai.md`, order of work step 1): gather the string `"claude"`, the
 flag names, the config-dir constants and the env-key names now scattered across
 `docker_config`, `agents_crud`, `launch_plan`, `launching`, `herdr`, `paths`
 and `engine.py` into ONE module (the `claude_code.py` adapter), with the rest

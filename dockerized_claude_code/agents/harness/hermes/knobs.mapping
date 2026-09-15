@@ -1,0 +1,51 @@
+# The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Hermes Agent's
+# own settings — keys are paths in ~/.hermes/config.yaml (YAML; HERMES_HOME
+# relocates the whole tree; secrets live in ~/.hermes/.env). Read 2026-09-14
+# from hermes-agent.nousresearch.com/docs (configuration, cli, providers; the
+# llms-full.txt export), the researcher reading independently. A purpose
+# absent from this file is one Hermes does not express — the launcher records
+# it as unmapped, never invents a key.
+#
+# Unmapped, and why:
+#   telemetry          — no analytics setting found (show_token_analytics is a
+#                        local estimate); privacy.redact_pii is about the
+#                        prompt, not phoning home.
+#   tool_search        — none found.
+#   max_output_tokens  — Hermes stopped reading model.max_tokens /
+#                        HERMES_MAX_TOKENS; output limits come from the
+#                        provider catalog.
+
+[providers]                                # Hermes takes the provider and the model as TWO keys; these are its provider registry names (docs/reference/environment-variables)
+claude  = "anthropic"                      # ANTHROPIC_API_KEY, or a Claude Max login
+chatgpt = "openai-codex"                   # the ChatGPT-subscription (Codex) backend — the ChatGPT tiers are Codex models
+gemini  = "gemini"                         # GOOGLE_API_KEY / GEMINI_API_KEY
+grok    = "xai"                            # XAI_API_KEY (`xai-oauth` for a SuperGrok login)
+
+[model]
+"model.provider" = "{provider}"
+"model.default"  = "{value}"               # the id as the provider expects it — the vendor's own for a direct provider
+
+[effort]                                   # agent.reasoning_effort: none / minimal / low / medium / high / xhigh / max / ultra (empty = medium); the auxiliary tasks (compression, vision …) take their own reasoning_effort. Gemini's tier words are upper-case (MINIMAL … HIGH) — a probe must show whether Hermes accepts them
+"agent.reasoning_effort" = "{value}"
+
+[thinking.on]                              # reasoning shown above each response in the CLI (default true; /reasoning show|hide) — the chat platforms have their own under display.platforms.<name>
+"display.show_reasoning" = "true"
+
+[thinking.off]
+"display.show_reasoning" = "false"
+
+[memory.on]                                # the persistent memory tools and the MEMORY.md guidance
+"memory.memory_enabled" = "true"
+
+[memory.off]
+"memory.memory_enabled" = "false"
+
+[background_agents.off]                    # remove the delegation toolset (delegate_task) everywhere — a YAML list value
+"agent.disabled_toolsets" = "[delegation]"
+
+[tool_output_tokens]                       # bytes of a tool result before truncation, and the file-read cap in characters (~4 per token)
+"tool_output.max_bytes" = "{value*4}"
+"file_read_max_chars"   = "{value*4}"
+
+[compact_at_percent]                       # compression.threshold is a FRACTION of the context window (default 0.50)
+"compression.threshold" = "{value/100}"
