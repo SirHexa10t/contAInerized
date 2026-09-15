@@ -16,13 +16,14 @@ Public surface:
     retired-format conversions.
   - `ToolkitEntry` — one row of a profession's optional `template.form`
     (`Profession.load_toolkit()`); `toolkit_profile` owns the per-user
-    `~/.claude-agents/<profession>_profile.toml` that toggles them.
+    `~/.ai-agents/<profession>_profile.toml` that toggles them.
 """
 
-from .ai import Ai, Rendering, Standard, Tier, sorted_ais
+from .ai import Ai, Standard, Tier, sorted_ais
 from .base import DockerContribution, Tag, TagError
 from .budget import BEST, CHEAPEST, Budget, is_standard, rank_of, sorted_standards
 from .engine import Engine, sorted_engines, standard_rank
+from .harness import Harness, Rendering, sorted_harnesses
 from .identity import (
     Agent, Instance, agent_md_path, effective_engine_name, image_chain,
     load_agent, resolve_build,
@@ -37,7 +38,7 @@ from . import addendums, migrations, store, toolkit_profile
 __all__ = [
     "Tag", "DockerContribution", "TagError",
     "Ai", "Tier", "Standard", "Rendering", "Budget", "BEST", "CHEAPEST", "is_standard", "rank_of",
-    "sorted_standards", "sorted_ais", "sorted_engines", "standard_rank",
+    "sorted_standards", "sorted_ais", "sorted_engines", "standard_rank", "Harness", "sorted_harnesses",
     "Engine", "Profession", "Specialty", "Policy", "PolicyStance",
     "Layer", "Combo", "scan_combos", "merge_fragments", "ToolkitEntry",
     "AgentBuild", "load_lego",

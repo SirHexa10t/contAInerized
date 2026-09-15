@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from launch import paths
-from launch.ai import HARNESSES
+from launch.ai import ADAPTERS
 from launch.paths import AGENTS_DIR, quickie_communal_workspace, quickie_state_dir_path
 from launch.quickie import cli
 from launch.quickie.ask import RESEARCH, TRIVIA, _gibberish, ask, build_quickie_instance
@@ -88,9 +88,9 @@ class TestGibberish(unittest.TestCase):
 
 
 class TestAskGuard(unittest.TestCase):
-    def test_a_lego_on_an_ai_without_an_adapter_exits_before_any_docker_work(self):
-        unadapted = next(a for a in REGISTRY.ais.values() if a.name not in HARNESSES)
-        inst = dataclasses.replace(build_quickie_instance(REGISTRY, "abc123"), ai=unadapted)
+    def test_a_lego_in_a_harness_without_an_adapter_exits_before_any_docker_work(self):
+        unadapted = next(h for h in REGISTRY.harnesses.values() if h.name not in ADAPTERS)
+        inst = dataclasses.replace(build_quickie_instance(REGISTRY, "abc123"), harness=unadapted)
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(paths, "AGENTS_STATE", Path(tmp)), \
              patch("launch.quickie.ask.build_quickie_instance", return_value=inst), \
@@ -178,7 +178,7 @@ class TestCli(unittest.TestCase):
         self.assertIn("--explain", buf.getvalue())
         self.assertIn("--answer", buf.getvalue())
         # argparse may hyphen-wrap the path across lines; compare whitespace-stripped.
-        self.assertIn("~/.claude-agents/quickie/communal/", "".join(buf.getvalue().split()))
+        self.assertIn("~/.ai-agents/quickie/communal/", "".join(buf.getvalue().split()))
 
 
 class TestHistoryOneLine(unittest.TestCase):
@@ -257,7 +257,7 @@ class TestRenderStream(unittest.TestCase):
 
 
 class TestCollectHistory(unittest.TestCase):
-    """collect_history walks ~/.claude-agents/quickie/, reads each thread's last
+    """collect_history walks ~/.ai-agents/quickie/, reads each thread's last
     question from its transcript, skips the communal workspace and threads with
     no question, and returns them ascending by date."""
 

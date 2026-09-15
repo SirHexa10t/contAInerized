@@ -290,24 +290,28 @@ class TestClusterAndMemberPreviews(unittest.TestCase):
         self.assertIn("(cluster-wide)", mux_line)
         self.assertIn("{cc}", text)                      # the member's REAL build, cluster tags included
 
-    def test_a_member_pane_lists_its_ai_first_and_the_cluster_pane_lists_it_per_member(self):
+    def test_a_member_pane_lists_its_ai_then_its_harness_first_and_the_cluster_pane_lists_them_per_member(self):
         ai = REGISTRY.default_ai
+        harness = REGISTRY.harnesses[ai.harness]
         golem = next(m for m in self._entry().members if m.member.id == "golem")
-        text = _plain_text(golem.preview_quick)
-        tag_lines = text.split("Tags:")[1].splitlines()
-        first = next(line for line in tag_lines if line.strip())
-        self.assertIn(ai.label, first)
-        self.assertNotIn("(cluster-wide)", first)        # its own, not the cluster's
-        # The cluster pane's member lines carry each member's AI too.
+        tags = re.sub(r"\s+", " ", _plain_text(golem.preview_quick).split("Tags:")[1])   # the pane wraps long lines
+        self.assertLess(tags.index(ai.label), tags.index(harness.label))
+        self.assertLess(tags.index(harness.label), tags.index("{mux}"))
+        self.assertLess(tags.index(harness.label), tags.index("(cluster-wide)"))    # its own, not the cluster's
+        # The cluster pane's member lines carry each member's AI and harness too.
         cluster_text = _plain_text(self._entry().preview)
         members = cluster_text.split("Members:")[1]
         self.assertEqual(members.count(ai.label), 2)
+        self.assertEqual(members.count(harness.label), 2)
 
-    def test_an_instance_pane_lists_its_ai_first(self):
+    def test_an_instance_pane_lists_its_ai_then_its_harness_first(self):
         inst = make_inst("golem", "a", "/tmp", specialties=["auto"])
         text = re.sub(r"\s+", " ", _plain_text(cont_preview(inst, "/tmp", "(never)", None)))   # the pane wraps long lines
         ai = REGISTRY.default_ai
-        self.assertLess(text.index(ai.label), text.index("{auto}"))
+        harness = REGISTRY.harnesses[ai.harness]
+        self.assertLess(text.index(ai.label), text.index(harness.label))
+        self.assertLess(text.index(harness.label), text.index("{auto}"))
+        self.assertIn(harness.fullname, text)
         self.assertIn(ai.fullname, text)
         self.assertIn(ai.short_description, text)
 

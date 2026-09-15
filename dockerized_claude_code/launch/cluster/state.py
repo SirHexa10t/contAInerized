@@ -115,12 +115,13 @@ class Cluster:
         # Cluster comes into being, whatever route built it — so no cluster
         # can exist whose members would not know they are members. `engine`
         # is deliberately NOT part of this: how hard a member thinks is a
-        # per-member choice, and the cluster form omits that section.
+        # per-member choice, and the cluster form omits that section — as
+        # are the AI and the harness that wraps it.
         missing = tuple(name for name in LOCKED_SPECIALTIES
                         if name not in self.tags.specialties)
-        if missing or self.tags.engine is not None or self.tags.ai is not None:
+        if missing or self.tags.engine is not None or self.tags.ai is not None or self.tags.harness is not None:
             object.__setattr__(self, "tags", replace(
-                self.tags, engine=None, ai=None,
+                self.tags, engine=None, ai=None, harness=None,
                 specialties=tuple(self.tags.specialties) + missing))
         if not self.members:
             raise ClusterError(
@@ -188,6 +189,7 @@ class Cluster:
         member's own table stores. The inverse of `member_build`."""
         return AgentBuild(
             ai=build.ai,
+            harness=build.harness,
             engine=build.engine,
             professions=tuple(n for n in build.professions
                               if n not in self.tags.professions),
@@ -205,6 +207,7 @@ class Cluster:
             return tuple(shared) + tuple(n for n in own if n not in shared)
         return AgentBuild(
             ai=member.build.ai,
+            harness=member.build.harness,
             engine=member.build.engine,
             professions=union(self.tags.professions, member.build.professions),
             specialties=union(self.tags.specialties, member.build.specialties),
@@ -285,7 +288,7 @@ def dumps(cluster: Cluster) -> str:
         # up top, not repeated N times.
         entry = build_entry(cluster.own_build(member.build), workspace=None)
         table = [f"[{toml_emit.key(member.id)}]"]
-        for scalar in ("ai", "engine"):
+        for scalar in ("ai", "harness", "engine"):
             if entry.get(scalar) is not None:
                 table.append(f"{scalar} = {toml_emit.string(entry[scalar])}")
         for axis in _AXES:

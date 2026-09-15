@@ -67,7 +67,7 @@ def _staged_env_vars():
     (one per template.form entry — value-independent, since
     toolkit_install_flags emits one key per manifest entry regardless; the
     profile path is patched to a throwaway location purely for hermeticity,
-    so this never touches the real ~/.claude-agents/code_profile.toml), the
+    so this never touches the real ~/.ai-agents/code_profile.toml), the
     creds-driven CLI INSTALL_<TOOL> flags, and the optional-cred token vars."""
     configurable = [p for p in REGISTRY.professions.values() if p.toolkit_path]
     with patch("launch.container_env.toolkit_profile_path", lambda name: Path("/nonexistent")):

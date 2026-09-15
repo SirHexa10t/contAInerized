@@ -28,7 +28,7 @@ from this plan remains unbuilt.
 `town_square/` becomes **`group_hosting/`**, so a path states its own role:
 
 ```
-~/.claude-agents/group_hosting/
+~/.ai-agents/group_hosting/
 ```
 
 "Host" is used in the hosting-a-session sense, not a machine: the `{manager}`
@@ -78,7 +78,7 @@ noted so the option is not rediscovered from scratch.
 
 ### Why this beats the state-dir squat
 
-- **The whole feature lives in one root**, `~/.claude-agents/group_hosting/`, instead
+- **The whole feature lives in one root**, `~/.ai-agents/group_hosting/`, instead
   of scattering across `instances/*/cowork/`.
 - **No squatting in Claude Code's own config namespace** (`~/.claude/` holds
   `projects/`, `skills/`, `commands/`, `todos/`), so no risk of a future version
@@ -105,7 +105,7 @@ The group key is `<manager-id>-<project-title>`, used identically in every tree 
 one string names the group everywhere.
 
 ```
-~/.claude-agents/group_hosting/
+~/.ai-agents/group_hosting/
   hub.state.json                              # hub-only — deliberately outside every mount
 
   <instance-id>/                              # mounted -> /cowork

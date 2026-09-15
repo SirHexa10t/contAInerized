@@ -43,14 +43,14 @@ FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"  
 
 
 # ============================================================
-# Host-side persistent state — everything under ~/.claude-agents
+# Host-side persistent state — everything under ~/.ai-agents
 # ============================================================
 # `_HOME` is the host user's home dir, captured once so paths built from it
 # don't repeatedly call Path.home(). Used by AGENTS_STATE and DEFAULTING_DIRS;
 # leading-underscore name marks it as paths-internal.
 
 _HOME = Path.home()
-AGENTS_STATE = _HOME / ".claude-agents"
+AGENTS_STATE = _HOME / ".ai-agents"                                 # renamed from ~/.ai-agents on 2026-09-14 (several AIs, several harnesses); tags/migrations.py moves an old dir into place
 ACCOUNT_FILE = AGENTS_STATE / _HARNESS.account_filename            # shared OAuth account info (the harness's filename)
 CREDENTIALS_FILE = AGENTS_STATE / _HARNESS.credentials_filename    # shared API credentials (the harness's filename)
 INSTANCES_FILE = AGENTS_STATE / "instances.toml"                 # per-instance axis store — one table per instance id: {workspace, engine, professions[], specialties[], policies[]} (tags/store.py; retired-format conversions live in tags/migrations.py)
@@ -144,7 +144,7 @@ CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
 # The config root and the files under it take the HARNESS's names from its
 # adapter record (launch/ai/claude_code.py) — one definition. Bound here at
 # import, so these constants are Claude-bound until the switch turns them into
-# functions of `active_harness()` (plans/adding_an_ai.md, order of work step 2).
+# functions of `active_adapter()` (plans/adding_an_ai.md, order of work step 2).
 CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / _HARNESS.config_dir_name
 SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / _HARNESS.skills_dirname
 # The operator's tmux overrides (settings/tmux.conf) inside the container. The
@@ -361,7 +361,7 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # describes WHAT, the type system handles HOW). Group comments call out what's
 # being built.
 
-# Per-state-dir files & subdirs (state_dir = ~/.claude-agents/<instance>/).
+# Per-state-dir files & subdirs (state_dir = ~/.ai-agents/<instance>/).
 # `state_domain_resolve_status_path` is the per-instance status file the
 # FIREWALL_NOTICE addendum points the agent at to classify a `ConnectionRefused`
 # (still resolving / failed / not listed) — accepts any base dir, including
@@ -465,7 +465,7 @@ cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: FIREWA
 # yields an empty iterator, so no existence-check needed at the call site.
 state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / _HARNESS.transcripts_dirname / "-workspace").glob("*.jsonl")   # "-workspace": Claude Code's cwd slug for /workspace — the transcript LAYOUT is the reader's (a later seam)
 
-# Instances live under ~/.claude-agents/instances/ — their own subdir keeps the
+# Instances live under ~/.ai-agents/instances/ — their own subdir keeps the
 # AGENTS_STATE root uncluttered (cache/, firewall_cache/, user_extras/, the store
 # file, and the OAuth files all sit at the root alongside it). No-arg builder
 # so it reads AGENTS_STATE at call time — tests patch `paths.AGENTS_STATE`, and

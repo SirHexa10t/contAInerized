@@ -3,8 +3,9 @@
 An engine is a BUDGET in the launcher's own words (`tags/budget.py`): a
 capability standard plus switches and amounts, read from
 `agents/engine/<name>/tag.budget`. It names no AI's model or setting — each
-AI's `agents/ai/<key>/efforts.tiers` and `knobs.mapping` translate the budget
-(`Ai.render`), so the same engine runs on any AI. Until 2026-09-13 an engine
+AI's `agents/ai/<key>/efforts.tiers` supplies the model and effort, each
+harness's `agents/harness/<key>/knobs.mapping` the native keys
+(`Harness.render`), so the same engine runs on any AI in any CLI. Until 2026-09-13 an engine
 carried one `<ai>.conf` per AI (`claude.conf` …) with that AI's env vars; the
 general budget replaced them.
 
@@ -38,7 +39,7 @@ from .budget import BUDGET_FILE, Budget, parse_budget
 @dataclass(frozen=True)
 class Engine(Tag):
     """A discovered engine. `budget` is the EFFECTIVE (inheritance-merged)
-    budget; `Ai.render(engine.budget)` turns it into one AI's settings."""
+    budget; `Harness.render(engine.budget, ai)` turns it into one CLI's settings."""
     parentheses: ClassVar[tuple[str, str]] = ("(", ")")
     root: ClassVar[str] = "engine"
     nutshell: ClassVar[str] = "how hard the agent THINKS"

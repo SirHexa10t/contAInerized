@@ -21,10 +21,11 @@ from typing import Callable, cast, overload
 
 from ..paths import toolkit_profile_path, ui_profile_path
 from ..tags import (
-    AgentBuild, Ai, Engine, Policy, Profession, Registry, Specialty, Tag, ToolkitEntry,
+    AgentBuild, Ai, Engine, Harness, Policy, Profession, Registry, Specialty, Tag, ToolkitEntry,
 )
 from ..tags.ai import sorted_ais
 from ..tags.engine import sorted_engines
+from ..tags.harness import sorted_harnesses
 from ..tags.toolkit_profile import load_profile, save_profile
 from ..tags.ui_profile import load_ui_form, load_ui_profile, save_ui_profile
 from .form_core import (
@@ -32,7 +33,7 @@ from .form_core import (
 )
 from .styles import STYLE_UNDERLINE, UiClass, tag_style
 
-def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None = None) -> FormOption:
+def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None = None, note: str = "") -> FormOption:
     """One selectable form row: colored kind-punctuated label + the tag's
     short description, a dim `(requires: …)` parenthetical when it has
     prerequisites, and the full description as the focused-row body — led by
@@ -43,12 +44,15 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None
     An always-on tag (a static policy like `<-su>`) renders locked: grayed,
     checked, inert to Space, with an `(always-on)` marker — the user sees
     it applies but can't change it (prompt_tags also filters it out of the
-    returned build; it's never persisted)."""
+    returned build; it's never persisted). `note` is a dim trailer the
+    caller adds (a harness row: the AIs it runs)."""
     always_on = getattr(tag, "always_on", False)
     label: list[tuple[str, str]] = [(tag_style(tag), tag.label), ("", " ")]
     label.append(("", tag.short_description))
     if isinstance(tag, Engine) and ai is not None and tag.budget.standard:
         label.append((UiClass.STATUS.css, f"  {ai.tier(tag.budget.standard).model}"))   # the engine's words in tag.info; the model is the AI's tier for its standard
+    if note:
+        label.append((UiClass.STATUS.css, f"  {note}"))
     if always_on:
         label.append((UiClass.STATUS.css, "  (always-on)"))
     if tag.requires:
@@ -69,15 +73,16 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *,
                       ) -> list[FormOption]:
     """The full sectioned form: one header per kind (its nutshell), the AI
     as a radio group at the very top (pre-dotted from `current.ai`, else the
-    tree's default member), engines as a radio group beneath it (pre-dotted from `current.engine` — the
+    tree's default member), the harness as a radio group under it (pre-dotted
+    from `current.harness`, else the AI's default), engines as a radio group beneath them (pre-dotted from `current.engine` — the
     caller passes the RESOLVED engine, so the dot shows what would actually
     run), then professions / specialties / policies as checkboxes pre-checked
     from `current`'s axis lists. Policies are ordered by shortname WITH its
     leading symbol (`!` < `+` < `-` in ASCII), so same-stance policies sit
     together: demands, then grants, then denials.
 
-    `engines=False` drops the AI and engine sections — the CLUSTER-level form,
-    where per-member choices (which AI, how hard it thinks) have no meaning. `locked` names tags that
+    `engines=False` drops the AI, harness and engine sections — the CLUSTER-level
+    form, where per-member choices (which AI, which CLI, how hard it thinks) have no meaning. `locked` names tags that
     render checked-and-inert (the treatment an `always_on` policy gets):
     the cluster form locks {mux}/{clstr}, and a MEMBER's form locks whatever
     its cluster already imposes, so a member can see what applies to it
@@ -101,6 +106,16 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *,
             out.append(header(Ai))
             out += [_tag_row(tag, checked=(effective_ai is not None and tag.name == effective_ai.name), group="ai")
                     for tag in sorted_ais(registry.ais.values())]
+        # Then the harness — the CLI around that AI; each row names the AIs
+        # it runs, and the warning zone says when the dotted pair cannot work
+        # (prompt_tags then falls back to the AI's own harness).
+        effective_harness = registry.harness_for(current)
+        if registry.harnesses:
+            out.append(header(Harness))
+            default_ai = registry.default_ai
+            out += [_tag_row(tag, checked=(effective_harness is not None and tag.name == effective_harness.name), group="harness",
+                             note="runs " + " ".join(registry.ais[a].label for a in tag.ais if a in registry.ais))
+                    for tag in sorted_harnesses(registry.harnesses.values(), default_ai.name if default_ai else None)]
         out.append(header(Engine))
         out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine", ai=effective_ai)
                 for tag in sorted_engines(registry.engines.values())]
@@ -122,8 +137,8 @@ def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
     (operator request, 2026-09-02: set `{cc}` once for the cluster instead of
     once per member). Returns the cluster's tag set, or None on Esc.
 
-    Three differences from the instance form, all deliberate: no AI and no
-    ENGINE section (which AI runs and how hard it thinks are per member), `locked` rows for the tags
+    Three differences from the instance form, all deliberate: no AI, HARNESS
+    or ENGINE section (which AI runs, in which CLI, how hard it thinks — all per member), `locked` rows for the tags
     that make a cluster a cluster ({mux}/{clstr} — checked and inert, the
     `always_on` treatment), and a preamble that says plainly what the
     selection does, because "these tags are forced on every member" is not
@@ -164,6 +179,23 @@ def _combo_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[
     return out
 
 
+def _harness_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[str]]]:
+    """A warning for every AI × harness pair that cannot run together, in the
+    combo-warning shape, so the form's red zone lights up the moment both are
+    dotted — and says what the launch will do instead (prompt_tags falls back
+    to the AI's own harness)."""
+    out: dict[frozenset[str], tuple[str, list[str]]] = {}
+    for ai in registry.ais.values():
+        own = registry.harnesses.get(ai.harness)
+        for harness in registry.harnesses.values():
+            if not harness.runs(ai.name):
+                out[frozenset({ai.name, harness.name})] = (
+                    f"{harness.label} cannot run {ai.label} — it runs "
+                    f"{' '.join(registry.ais[a].label for a in harness.ais if a in registry.ais)}.",
+                    [f"The launch will use {ai.label}'s own harness, {own.label}, instead." if own else ""])
+    return out
+
+
 def _form_requires(registry: Registry) -> dict[str, frozenset[str]]:
     """{tag name: prerequisite tag names} across the three form kinds — the
     shape checkbox_form's check-cascade consumes. Tags without prerequisites
@@ -189,10 +221,10 @@ def _form_wants(registry: Registry) -> dict[str, tuple[tuple[str, str], ...]]:
 
 
 def _form_labels(registry: Registry) -> dict[str, str]:
-    """{tag name: punctuated label} for EVERY tag, all four kinds. The wants
+    """{tag name: punctuated label} for EVERY tag, every kind. The wants
     zone displays through this map so its header shows what the rows show —
     `'{cowork}' wants '<+bash>'` — rather than bare manifest names the user
-    would have to translate. All kinds, not just the form's three: a want may
+    would have to translate. Every kind, not just the form's three: a want may
     point at any real tag."""
     return {tag.name: tag.label for tag in registry.get_all()}
 
@@ -227,7 +259,7 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
                 else [f"# instance:  {instance}",
                       f"# workspace: {workspace}"])
     result = checkbox_form(TITLE_TAGS_FORM, options,
-                           warnings=_combo_warnings(registry),
+                           warnings={**_combo_warnings(registry), **_harness_warnings(registry)},
                            requires=_form_requires(registry),
                            wants=_form_wants(registry),
                            labels=_form_labels(registry),
@@ -245,12 +277,18 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
     # are never part of the build: applied unconditionally, never persisted.
     build = AgentBuild(
         ai=next((n for n in registry.ais if n in picked), current.ai),
+        harness=next((n for n in registry.harnesses if n in picked), current.harness),
         engine=next((n for n in registry.engines if n in picked), current.engine),
         professions=tuple(n for n in registry.professions if n in picked),
         specialties=tuple(n for n in registry.specialties if n in picked),
         policies=tuple(n for n, p in registry.policies.items()
                        if n in picked and not p.always_on),
     )
+    # A harness that cannot run the picked AI is not stored: the instance
+    # falls back to the AI's own harness (the form's warning zone said so).
+    ai, harness = registry.ai_for(build), registry.harness_for(build)
+    if build.harness and ai is not None and harness is not None and not harness.runs(ai.name):
+        build = replace(build, harness=None)
     return build if fields is None else (values, build)
 
 def _toolkit_size_text(entry: ToolkitEntry) -> str:

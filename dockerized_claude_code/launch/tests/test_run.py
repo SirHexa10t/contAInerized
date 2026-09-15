@@ -24,7 +24,7 @@ if str(_ROOT) not in sys.path:
 
 import run  # noqa: E402  — must come after the sys.path.insert above
 from launch.paths import AGENTS_DIR  # noqa: E402  — same reason
-from launch.ai import DEFAULT_AI_KEY, active_ai_key, set_active_ai  # noqa: E402  — same reason
+from launch.ai import DEFAULT_HARNESS_KEY, active_harness_key, set_active_harness  # noqa: E402  — same reason
 from launch.tags import Instance, scan_all  # noqa: E402  — same reason
 
 REGISTRY = scan_all(AGENTS_DIR)
@@ -116,7 +116,7 @@ class TestParseCliFlags(unittest.TestCase):
         # A name like 'golem__<session>' with a state dir on disk → Instance
         # (not Agent). resolve_pick checks the state dir + the instances.json
         # store; we patch those points so the test stays hermetic (no writes
-        # to ~/.claude-agents/). The agent itself ("golem") must be a real one
+        # to ~/.ai-agents/). The agent itself ("golem") must be a real one
         # — the instance branch still requires <agent>.md via agent_md_index().
         instance_name = "golem__test_fixture"
         entry = {"workspace": "/tmp/ws", "engine": None,
@@ -157,7 +157,7 @@ class TestLaunchOrchestrator(unittest.TestCase):
 
         `is_manager` is explicit (a bare MagicMock attribute is truthy, which
         would silently walk every test down the manager branch)."""
-        inst = MagicMock(is_brand_new=False, is_manager=is_manager, ai=None)   # `ai=None`: a bare MagicMock's `.ai.name` is no adapter's key, and the launch would refuse
+        inst = MagicMock(is_brand_new=False, is_manager=is_manager, ai=None, harness=None)   # `harness=None`: a bare MagicMock's `.harness.name` is no adapter's key, and the launch would refuse
         opts = run.LaunchOptions(MagicMock(), [], dry_run, False)
 
         mocks = {
@@ -190,31 +190,31 @@ class TestLaunchOrchestrator(unittest.TestCase):
         run.launch()
         mocks["run_container"].assert_called_once()
 
-    def test_the_instances_ai_is_adopted_before_the_first_harness_word_is_read(self):
-        # The settings install, banner and title all read active_harness();
-        # they must read the launched instance's, so adoption follows the
-        # refusal check directly — and a stale choice from an earlier call is
-        # replaced (None: the store's "default").
-        self.addCleanup(set_active_ai, None)
+    def test_the_instances_harness_is_adopted_before_the_first_harness_word_is_read(self):
+        # The settings install, banner and title all read active_adapter();
+        # they must read the launched instance's harness, so adoption follows
+        # the refusal check directly — and a stale choice from an earlier call
+        # is replaced (None: the default).
+        self.addCleanup(set_active_harness, None)
         mocks = self._mock_pipeline(dry_run=True)
         seen = []
-        mocks["persist_instance"].side_effect = lambda inst: seen.append(active_ai_key())
-        mocks["resolve_target"].return_value.ai = SimpleNamespace(name="claude", label="⟪Claude⟫")
+        mocks["persist_instance"].side_effect = lambda inst: seen.append(active_harness_key())
+        mocks["resolve_target"].return_value.harness = SimpleNamespace(name="claude-code", label="⟦ClaudeCode⟧")
         run.launch()
-        self.assertEqual(seen, ["claude"])
-        set_active_ai("gemini")
-        mocks["resolve_target"].return_value.ai = None
+        self.assertEqual(seen, ["claude-code"])
+        set_active_harness("gemini-cli")
+        mocks["resolve_target"].return_value.harness = None
         run.launch()
-        self.assertEqual(seen[-1], DEFAULT_AI_KEY)
+        self.assertEqual(seen[-1], DEFAULT_HARNESS_KEY)
 
-    def test_an_ai_without_an_adapter_exits_before_persist_and_build(self):
-        # The picker can describe an instance on any tree AI; the launch can
-        # run only the adapted ones — and says so before touching the store.
+    def test_a_harness_without_an_adapter_exits_before_persist_and_build(self):
+        # The picker can describe an instance in any tree harness; the launch
+        # can run only the adapted ones — and says so before touching the store.
         mocks = self._mock_pipeline(dry_run=False)
-        mocks["resolve_target"].return_value.ai = SimpleNamespace(name="no-such-ai", label="⟪Nobody⟫")
+        mocks["resolve_target"].return_value.harness = SimpleNamespace(name="no-such-cli", label="⟦Nobody⟧")
         with self.assertRaises(SystemExit) as caught:
             run.launch()
-        self.assertIn("⟪Nobody⟫", str(caught.exception))
+        self.assertIn("⟦Nobody⟧", str(caught.exception))
         mocks["persist_instance"].assert_not_called()
         mocks["ensure_image"].assert_not_called()
         mocks["run_container"].assert_not_called()

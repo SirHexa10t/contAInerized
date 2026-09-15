@@ -1,1 +1,3 @@
+ai      = "claude"          # authored for Claude in Claude Code (implicit until 2026-09-14: the only option before the AI and harness kinds)
+harness = "claude-code"
 engine = "poet"

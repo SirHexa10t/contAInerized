@@ -110,7 +110,7 @@ class TestMuxerUserConf(unittest.TestCase):
 
 
 class TestUserExtrasTemplates(unittest.TestCase):
-    """Template files that the launcher plants into ~/.claude-agents/user_extras/
+    """Template files that the launcher plants into ~/.ai-agents/user_extras/
     on first launch."""
 
     def test_firewall_whitelist_template_exists(self):
@@ -764,10 +764,10 @@ class TestTagTreeDiscovery(unittest.TestCase):
     def test_the_legend_opens_with_the_ais_by_purpose(self):
         from launch.gui.menu_picker import _build_composition_legend
         plain = re.sub(r"\x1b\[[0-9;]*m", "", _build_composition_legend(self.reg))
-        self.assertLess(plain.index("AIs"), plain.index("Engines"))
+        self.assertLess(plain.index("AIs"), plain.index("Harnesses"))
         # Content, not layout: the table wraps a long description cell, so
         # a note can straddle a line break — compare on collapsed whitespace.
-        section = re.sub(r"\s+", " ", plain[plain.index("AIs"):plain.index("Engines")])
+        section = re.sub(r"\s+", " ", plain[plain.index("AIs"):plain.index("Harnesses")])
         for ai in self.reg.ais.values():
             with self.subTest(ai=ai.name):
                 self.assertIn(ai.label, section)
@@ -777,6 +777,19 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertNotIn("default", section)                 # nor a default marker
         labels = [ai.label for ai in self.reg.ais.values()]
         self.assertEqual(min(labels, key=section.index), self.reg.default_ai.label)   # the default still leads, unmarked
+
+    def test_the_legend_lists_the_harnesses_after_the_ais_with_the_ais_each_runs(self):
+        from launch.gui.menu_picker import _build_composition_legend
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", _build_composition_legend(self.reg))
+        self.assertLess(plain.index("Harnesses"), plain.index("Engines"))
+        section = re.sub(r"\s+", " ", plain[plain.index("Harnesses"):plain.index("Engines")])
+        for harness in self.reg.harnesses.values():
+            with self.subTest(harness=harness.name):
+                self.assertIn(harness.label, section)
+                self.assertIn(harness.fullname, section)
+                self.assertIn("runs " + " ".join(self.reg.ais[a].label for a in harness.ais), section)
+        labels = [h.label for h in self.reg.harnesses.values()]
+        self.assertEqual(min(labels, key=section.index), self.reg.harnesses[self.reg.default_ai.harness].label)   # the default AI's harness leads
 
     def test_the_legend_shows_each_engines_pinned_model(self):
         from launch.gui.menu_picker import _build_composition_legend

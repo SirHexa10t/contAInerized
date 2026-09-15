@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from launch.ai import active_harness
+from launch.ai import active_adapter
 from launch import claude_code_config
 from launch.claude_code_config import SQUASH_AT, colored_tag_chain
 from launch.tags import Instance, PolicyStance
@@ -139,7 +139,7 @@ class TestSetTerminalTitle(unittest.TestCase):
         with patch("builtins.print") as mock_print:
             claude_code_config.set_terminal_title("golem__s1")
         printed = mock_print.call_args.args[0]
-        self.assertTrue(printed.startswith(f"\033]0;{active_harness().name} — "))   # the CLI's name from the catalog, not a literal
+        self.assertTrue(printed.startswith(f"\033]0;{active_adapter().name} — "))   # the CLI's name from the catalog, not a literal
         self.assertIn("golem__s1", printed)
         self.assertTrue(printed.endswith("\007"))
 

@@ -2,7 +2,7 @@
 key shapes (whole-mount + trailing-`/` contents-mount).
 
 Each test isolates the docker_config._docker_mounts accumulator and patches
-optional_creds_service_path so the real ~/.claude-agents state is never
+optional_creds_service_path so the real ~/.ai-agents state is never
 touched."""
 
 import tempfile

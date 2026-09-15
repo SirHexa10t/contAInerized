@@ -1,0 +1,8 @@
+shortname         = "CodexCLI"
+fullname          = "Codex CLI"
+short_description = "OpenAI's terminal agent for ChatGPT's models: sandboxed by default, config.toml, AGENTS.md"
+full_description  = "OpenAI's agent CLI for the GPT models — the terminal half of ChatGPT's Codex coding product. Runs commands in a sandbox with approval modes, takes its model and reasoning settings from a config.toml, reads AGENTS.md instruction files, and connects MCP servers."
+vendor            = "OpenAI"
+ais               = ["chatgpt"]
+binary            = "codex"
+package           = "npm @openai/codex"

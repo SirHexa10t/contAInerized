@@ -1,4 +1,4 @@
-"""Claude Code — the harness for the `claude` AI: the one record of its names.
+"""Claude Code — the adapter for the `claude-code` harness (agents/harness/claude-code): the one record of its names.
 Every value here used to be a literal spelled in the module that consumed it
 (docker_config, agents_crud, quickie/ask, cluster/{launch_plan,herdr,launching},
 firewall/resolver, paths, tags/engine); gathered 2026-09-12 as step 1 of
@@ -9,10 +9,10 @@ own docs for the flags and files (`--continue`, `-p`, `--effort`,
 rows A–K for how each compares with the other harnesses.
 """
 
-from .harness import Harness
+from .adapter import Adapter
 
-CLAUDE_CODE = Harness(
-    ai_key="claude",
+CLAUDE_CODE = Adapter(
+    key="claude-code",
     name="Claude Code",
     binary="claude",
     herdr_agent_kind="claude",

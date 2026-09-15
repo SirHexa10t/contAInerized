@@ -1,5 +1,7 @@
 # Lean research build for `q --research`: the researcher engine + web-research,
 # but no professions → base image (fast first run). Reuses the researcher
 # persona (agents/researcher.md); this file only shifts the build.
+ai      = "claude"          # authored for Claude in Claude Code (implicit until 2026-09-14: the only option before the AI and harness kinds)
+harness = "claude-code"
 engine = "researcher"
 policies = ["web-research"]

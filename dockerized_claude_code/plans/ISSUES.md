@@ -513,7 +513,7 @@ everything it does not cover.
   pinned in `profession/_muxer/Dockerfile`). Until then the measured advice:
   `{muxer}` with tmux is the fully-verified stable path — since 2026-08-30 a
   persisted preference (`herdr_instead_of_tmux = false` in
-  `~/.claude-agents/ui_profile.toml`, edited from the picker's
+  `~/.ai-agents/ui_profile.toml`, edited from the picker's
   "(Edit Toolkits & UI)" form), which replaced the earlier `MUXER_BACKEND`
   env var and the flip-the-default option.
 - **A file mount's auto-created parent dir is ROOT-owned — FIXED for herdr,
@@ -710,3 +710,28 @@ Until then, re-verify by hand before relying on either file.
   rewrite). It is an archive of a completed pass, so it is stale by nature —
   but it reads as a task list, which misleads. Worth a header stating it is
   historical, or a prune.
+
+### One credentials pair for every AI — `~/.ai-agents/.claude.json` + `.credentials.json` are Claude Code's, mounted into every launch
+
+The host state dir keeps ONE account file and ONE credentials file, named by
+the Claude Code adapter (`launch/ai/claude_code.py`: `account_filename`,
+`credentials_filename`) and bound into `paths.ACCOUNT_FILE` /
+`paths.CREDENTIALS_FILE` at import; `run_container` and the cluster launch
+mount that pair into every container whatever the instance's AI or harness.
+Nothing selects a credentials file by AI or harness, and a second harness
+would need its own files (OpenCode's `auth.json` holds many providers, Codex
+keeps `auth.json` under `CODEX_HOME`, Gemini CLI its own OAuth cache …).
+
+Evidence: `paths.py` lines binding `_HARNESS.account_filename` /
+`_HARNESS.credentials_filename`; `launch/cluster/launching.py` mounts
+`harness.credentials_filename` from the same host pair for every member.
+
+What closes it: the design in `plans/credentials.md` (researched 2026-09-14,
+the report folded in the same day: per harness the auth files, relocation
+variables and refresh behaviour; a probe here showed Claude Code's
+`.claude.json` follows `CLAUDE_CONFIG_DIR`) once the operator decides its
+four open points — the keys-per-AI / OAuth-per-harness layout under
+`~/.ai-agents/credentials/`, `Adapter.auth_files` replacing the flat pair,
+`paths.py` no longer binding the pair at import, the audit checking each
+expected file. Opened 2026-09-14 (operator question: "do we have a system
+that determines which credentials file we'd use?" — not yet).

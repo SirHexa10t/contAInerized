@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from launch.gui import forms
 from launch.gui.forms import (
-    _form_requires, _tag_form_options, _tag_row, _toolkit_form_options, prompt_tags,
+    _form_requires, _harness_warnings, _tag_form_options, _tag_row, _toolkit_form_options, prompt_tags,
 )
 from launch.gui.styles import STYLE_UNDERLINE, _plain
 from launch.paths import AGENTS_DIR
@@ -30,22 +30,43 @@ class TestTagFormOptions(unittest.TestCase):
 
     def test_every_kind_member_appears_as_selectable_row(self):
         keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild()) if not o.header}
-        expected = (set(REGISTRY.ais) | set(REGISTRY.engines) | set(REGISTRY.professions)
+        expected = (set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines) | set(REGISTRY.professions)
                     | set(REGISTRY.specialties) | set(REGISTRY.policies))
         self.assertEqual(keys, expected)
 
     def test_one_header_per_kind_in_order(self):
         headers = [o.key for o in _tag_form_options(REGISTRY, AgentBuild()) if o.header]
-        self.assertEqual(headers, ["#ai", "#engine", "#profession", "#specialty", "#policy"])
+        self.assertEqual(headers, ["#ai", "#harness", "#engine", "#profession", "#specialty", "#policy"])
 
-    def test_the_ai_section_leads_the_form_and_the_engines_follow(self):
+    def test_the_ai_section_leads_the_form_then_the_harness_then_the_engines(self):
         # The AI decides what every engine standard below it means, so it is
-        # asked first; between the two headers sit exactly the AI members.
+        # asked first; the harness — the CLI around it — second; between the
+        # headers sit exactly each kind's members.
         rows = _tag_form_options(REGISTRY, AgentBuild())
         self.assertEqual(rows[0].key, "#ai")
         self.assertTrue(rows[0].header)
+        harness_header = next(i for i, o in enumerate(rows) if o.key == "#harness")
         engine_header = next(i for i, o in enumerate(rows) if o.key == "#engine")
-        self.assertEqual({o.key for o in rows[1:engine_header]}, set(REGISTRY.ais))
+        self.assertEqual({o.key for o in rows[1:harness_header]}, set(REGISTRY.ais))
+        self.assertEqual({o.key for o in rows[harness_header + 1:engine_header]}, set(REGISTRY.harnesses))
+
+    def test_harnesses_form_a_radio_group_dotted_from_the_build(self):
+        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini", harness="gemini-cli"))
+        harness_rows = [o for o in rows if o.key in REGISTRY.harnesses]
+        self.assertTrue(all(o.group == "harness" for o in harness_rows))
+        self.assertEqual({o.key for o in harness_rows if o.checked}, {"gemini-cli"})
+
+    def test_the_ais_default_harness_is_dotted_when_the_build_names_none(self):
+        for build, expected in ((AgentBuild(), REGISTRY.default_ai.harness), (AgentBuild(ai="grok"), "grok-build")):
+            rows = _tag_form_options(REGISTRY, build)
+            self.assertEqual({o.key for o in rows if o.key in REGISTRY.harnesses and o.checked}, {expected})
+
+    def test_harness_rows_say_which_ai_they_run(self):
+        rows = _tag_form_options(REGISTRY, AgentBuild())
+        for option in (o for o in rows if o.key in REGISTRY.harnesses):
+            with self.subTest(harness=option.key):
+                note = "runs " + " ".join(REGISTRY.ais[a].label for a in REGISTRY.harnesses[option.key].ais)
+                self.assertIn(note, _plain(option.label))
 
     def test_ais_form_a_radio_group_dotted_from_the_build(self):
         rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini"))
@@ -126,21 +147,23 @@ class TestTagFormOptions(unittest.TestCase):
 
     def test_non_radio_rows_are_not_grouped(self):
         rows = _tag_form_options(REGISTRY, AgentBuild())
-        radios = set(REGISTRY.ais) | set(REGISTRY.engines)
+        radios = set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines)
         self.assertTrue(all(o.group is None for o in rows if not o.header and o.key not in radios))
 
     def test_build_prechecks_boxes(self):
         # Locked always-on rows (<-su>) are checked regardless of the build;
-        # the AI radio always shows one dot (here the default's).
+        # the AI and harness radios always show one dot each (here the
+        # default AI's and its harness's).
         build = AgentBuild(professions=("code",), specialties=("auto",))
         checked = {o.key for o in _tag_form_options(REGISTRY, build) if o.checked and not o.locked}
-        self.assertEqual(checked, {"code", "auto", REGISTRY.default_ai.name})
+        self.assertEqual(checked, {"code", "auto", REGISTRY.default_ai.name, REGISTRY.default_ai.harness})
 
     def test_nothing_prechecked_for_empty_build(self):
         # ...except the locked always-on rows, which are always checked, and
-        # the AI radio, which always has a dot (tested above).
+        # the AI and harness radios, which always have a dot (tested above).
         rows = _tag_form_options(REGISTRY, AgentBuild())
-        self.assertFalse(any(o.checked for o in rows if not o.locked and o.key not in REGISTRY.ais))
+        radios = set(REGISTRY.ais) | set(REGISTRY.harnesses)
+        self.assertFalse(any(o.checked for o in rows if not o.locked and o.key not in radios))
         self.assertEqual({o.key for o in rows if o.locked}, {"no-sudo"})
 
     def test_always_on_policy_row_is_locked_checked_and_marked(self):
@@ -226,6 +249,28 @@ class TestPromptTags(unittest.TestCase):
 
     def test_picked_engine_overrides_current(self):
         self.assertEqual(self._run(["golem"]).engine, "golem")
+
+    def test_picked_harness_lands_in_the_build(self):
+        self.assertEqual(self._run(["gemini", "gemini-cli"]).harness, "gemini-cli")
+
+    def test_a_harness_that_cannot_run_the_picked_ai_falls_back_to_the_ais_own(self):
+        # The form's warning zone said so while both were dotted; the stored
+        # build names no harness, so the AI's default applies at resolve time.
+        self.assertIsNone(self._run(["claude", "gemini-cli"]).harness)
+        self.assertIsNone(self._run(["gemini-cli"]).harness)                 # the default AI cannot run in it either
+        self.assertEqual(self._run(["gemini", "gemini-cli"], current=AgentBuild(engine="poet", harness="claude-code")).harness, "gemini-cli")
+
+    def test_harness_warnings_name_every_pair_that_cannot_run_and_no_pair_that_can(self):
+        warnings = _harness_warnings(REGISTRY)
+        self.assertIn(frozenset({"claude", "gemini-cli"}), warnings)
+        self.assertNotIn(frozenset({"claude", "claude-code"}), warnings)
+        first, rest = warnings[frozenset({"claude", "gemini-cli"})]
+        self.assertIn("⟦GeminiCLI⟧", first)
+        self.assertIn("⟪Claude⟫", first)
+        self.assertIn("⟦ClaudeCode⟧", " ".join(rest))                        # what the launch falls back to
+        for ai in REGISTRY.ais.values():
+            for harness in REGISTRY.harnesses.values():
+                self.assertEqual(frozenset({ai.name, harness.name}) in warnings, not harness.runs(ai.name))
 
     def test_ai_preserved_from_current(self):
         self.assertEqual(self._run([], current=AgentBuild(engine="poet", ai="grok")).ai, "grok")

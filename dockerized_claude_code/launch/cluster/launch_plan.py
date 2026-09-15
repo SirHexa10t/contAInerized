@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..ai import active_harness
+from ..ai import active_adapter
 from ..paths import (
     CLUSTER_IN_CONTAINER, WORKSPACE_IN_CONTAINER, WORKSPACES_IN_CONTAINER,
 )
@@ -53,7 +53,7 @@ def default_member_command() -> tuple[str, ...]:
     """What each member runs — the active harness's binary alone. A tuple so a
     caller can extend it (extra CLI args) without this module deciding the
     whole command line; a function so it follows `active_ai()`."""
-    return (active_harness().binary,)
+    return (active_adapter().binary,)
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from ..ai import active_harness
+from ..ai import active_adapter
 from .member import valid_label
 from .panes import SHELL_LABEL, Pane
 
@@ -121,7 +121,7 @@ def _start_line(pane: Pane) -> str:
     A warning plus an empty pane is inspectable; a dead container is not."""
     failed = shlex.join(["echo", f"warning: member {pane.name!r} did not "
                          f"start; its pane is there, empty"])
-    harness = active_harness()
+    harness = active_adapter()
     if pane.command[0] == harness.binary and harness.herdr_agent_kind is not None:
         start = [BINARY, "agent", "start", pane.name, "--kind", harness.herdr_agent_kind,
                  "--pane"]

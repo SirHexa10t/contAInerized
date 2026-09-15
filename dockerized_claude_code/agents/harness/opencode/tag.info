@@ -1,0 +1,8 @@
+shortname         = "OpenCode"
+fullname          = "OpenCode"
+short_description = "the open-source terminal coding agent for any model: 75+ providers, AGENTS.md, a JSON config with a schema"
+full_description  = "Anomaly Innovations' open-source AI coding agent for the terminal (MIT; the repository now lives under anomalyco). Runs any model — 75+ providers through Models.dev, with API keys or a ChatGPT Plus/Pro login — spelled provider/model in opencode.json (a published JSON schema); reads AGENTS.md and, failing that, CLAUDE.md; sub-agents, MCP servers, skills, a headless `run` mode with session continue, and conversation sharing."
+vendor            = "Anomaly Innovations"
+ais               = ["claude", "chatgpt", "gemini", "grok"]   # Models.dev providers anthropic / openai / google / xai — every tier's model id is listed there (checked 2026-09-14)
+binary            = "opencode"
+package           = "npm opencode-ai"

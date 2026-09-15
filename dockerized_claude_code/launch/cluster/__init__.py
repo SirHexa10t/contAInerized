@@ -38,7 +38,7 @@ def backend() -> str:
     """The multiplexer backend for this launch — SOLO launches and cluster
     launches alike, which is why the switch lives here on the package rather
     than in either integrator. The choice is the OPERATOR'S PREFERENCE,
-    persisted in `~/.claude-agents/ui_profile.toml` (`herdr_instead_of_tmux`,
+    persisted in `~/.ai-agents/ui_profile.toml` (`herdr_instead_of_tmux`,
     herdr by default; edited from the picker's "(Edit Preferences)" form or
     by hand) and read fresh each launch. It superseded a `MUXER_BACKEND` env
     var, retired 2026-08-30 because files-and-flags is this launcher's house

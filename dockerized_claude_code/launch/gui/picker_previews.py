@@ -61,7 +61,7 @@ from ..cluster.legoset import ClusterTemplate
 from ..cluster.member import Member
 from ..file_access import read_text
 from ..transcripts import last_prompt_in_state
-from ..tags import Agent, AgentBuild, Ai, Engine, Instance, Registry, Tag, TagProblem
+from ..tags import Agent, AgentBuild, Ai, Engine, Harness, Instance, Registry, Tag, TagProblem
 from .styles import RICH_AGENT_NAME, rich_style, tag_style
 
 PREVIEW_WIDTH = 80                # rich renders at this width; prompt_toolkit re-wraps if the pane is narrower
@@ -224,10 +224,11 @@ def engine_fact(inst: Instance) -> str:
     return f"{name}  {model}" if model else name
 
 
-def _tags_with_ai(inst: Instance) -> tuple[Tag, ...]:
+def _runtime_tags(inst: Instance) -> tuple[Tag, ...]:
     """The pane's tag list for an instance: its AI FIRST (which AI runs it is
-    the first thing to know), then its active tags."""
-    return (*((inst.ai,) if inst.ai else ()), *inst.active_tags)
+    the first thing to know), the harness that wraps it second, then its
+    active tags."""
+    return (*((inst.ai,) if inst.ai else ()), *((inst.harness,) if inst.harness else ()), *inst.active_tags)
 
 
 def cont_preview(inst: Instance, workspace_display: str,
@@ -242,7 +243,7 @@ def cont_preview(inst: Instance, workspace_display: str,
          ("Engine", engine_fact(inst)),
          ("State", str(inst.state_dir)),
          ("Last used", last_used_display)],
-        tags=_tags_with_ai(inst), problems=inst.invalid_tags, prompt=prompt)
+        tags=_runtime_tags(inst), problems=inst.invalid_tags, prompt=prompt)
 
 
 def member_preview(inst: Instance, member: Member, cluster: str,
@@ -263,15 +264,15 @@ def member_preview(inst: Instance, member: Member, cluster: str,
          ("Engine", engine_fact(inst)),
          ("State", str(inst.state_dir)),
          ("Last used", last_used_display)],
-        tags=_tags_with_ai(inst), problems=inst.invalid_tags, prompt=prompt,
+        tags=_runtime_tags(inst), problems=inst.invalid_tags, prompt=prompt,
         inherited=inherited, fix_target="this cluster can launch")
 
 
-def _member_line(identifier: str, ai: Ai | None, engine: Engine | None, tags: Sequence[Tag],
+def _member_line(identifier: str, ai: Ai | None, harness: Harness | None, engine: Engine | None, tags: Sequence[Tag],
                  problems: Sequence[TagProblem], last_used: str, *,
                  missing_agent: str | None = None) -> Text:
     """One member's line in its cluster's pane: bullet, BLUE name (the colour
-    names wear everywhere in the picker), its AI, its engine and OWN tag labels in
+    names wear everywhere in the picker), its AI, its harness, its engine and OWN tag labels in
     their legend colours — an unresolvable name in the alert style rather than
     vanishing — and when it last ran, dim. A member whose agent `.md` is gone
     (`missing_agent`) renders its name in the alert style with what to do."""
@@ -282,7 +283,7 @@ def _member_line(identifier: str, ai: Ai | None, engine: Engine | None, tags: Se
                     f"from the cluster", style="bold red")
         return line
     line.append(identifier, style=RICH_AGENT_NAME)
-    for tag in (*((ai,) if ai else ()), *((engine,) if engine else ()), *tags):
+    for tag in (*((ai,) if ai else ()), *((harness,) if harness else ()), *((engine,) if engine else ()), *tags):
         line.append("  ")
         line.append(tag.label, style=rich_style(tag_style(tag)))
     for problem in problems:

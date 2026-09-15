@@ -1,5 +1,5 @@
 """User-side contributions to agent containers — optional credentials
-(~/.claude-agents/user_extras/optional_creds/<service>/) and the first-launch
+(~/.ai-agents/user_extras/optional_creds/<service>/) and the first-launch
 plant of the user-facing template files. Skills aren't handled here: bundled
 skills (`custom_skills/`) ride along in DOCKER_BASE_MOUNTS as a single dir
 mount, and workspace-side skills live at
@@ -31,11 +31,11 @@ from .tags import Instance
 
 
 # ============================================================
-# First-launch template files (~/.claude-agents/user_extras/...)
+# First-launch template files (~/.ai-agents/user_extras/...)
 # ============================================================
 
 def plant_user_extras(inst: Instance) -> None:
-    """Drop the user-facing helper files into ~/.claude-agents/user_extras/
+    """Drop the user-facing helper files into ~/.ai-agents/user_extras/
     so users discovering the directories know what to put in them:
       - optional_creds_readme.txt — always; refreshed when the template moves
         on (the file describes launcher behaviour and shouldn't drift behind).
@@ -50,11 +50,11 @@ def plant_user_extras(inst: Instance) -> None:
 
 
 # ============================================================
-# Optional credentials — ~/.claude-agents/user_extras/optional_creds/<service>/
+# Optional credentials — ~/.ai-agents/user_extras/optional_creds/<service>/
 # ============================================================
 
 def optional_creds_mounts() -> list[str]:
-    """For each entry under ~/.claude-agents/user_extras/optional_creds/ that
+    """For each entry under ~/.ai-agents/user_extras/optional_creds/ that
     matches a known service, stage a bind-mount onto the CLI's default config
     path inside the container. Read-write — cloud CLIs refresh tokens / write
     cache. Missing entries are silently skipped — opt-in is via presence on

@@ -35,7 +35,7 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
-from ..ai import DEFAULT_AI_KEY, harness_for, refusal_for
+from ..ai import DEFAULT_HARNESS_KEY, adapter_for, refusal_for
 from ..agents_crud import (
     compute_resume_flag, install_commands, install_latest_md, install_settings,
 )
@@ -121,10 +121,10 @@ def refusal(pairs: list[tuple[Member, Instance]]) -> str | None:
     entrypoint (the solo startup script) is the one exemption: this launch
     replaces it with the cluster-shaped script."""
     from . import solo
-    # A member on an AI without a harness adapter cannot run — same rule and
+    # A member in a harness without an adapter cannot run — same rule and
     # message as a solo instance, named per member.
     for member, inst in pairs:
-        if inst.ai is not None and (refused := refusal_for(inst.ai.name, inst.ai.label)) is not None:
+        if inst.harness is not None and (refused := refusal_for(inst.harness.name, inst.harness.label)) is not None:
             return f"member {member.id!r}:\n{refused}"
     offending: list[str] = []
     for member, inst in pairs:
@@ -245,8 +245,8 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
         config = container_member_dir(cluster.session, member.id)
         # The engine conf rides the WINDOW env — the per-pane `-e` property
         # that chose tmux — so two members genuinely run different models. The
-        # harness is the MEMBER's AI's (refusal() has made sure it has one).
-        harness = harness_for(inst.ai.name) if inst.ai else harness_for(DEFAULT_AI_KEY)
+        # adapter is the MEMBER's harness's (refusal() has made sure it has one).
+        harness = adapter_for(inst.harness.name if inst.harness else DEFAULT_HARNESS_KEY)
         env_for[member.id] = {
             **inst.conf,
             harness.config_dir_env: str(config),

@@ -486,7 +486,7 @@ def ensure_shared_oauth_files() -> None:
 
 
 # ============================================================
-# Optional credentials (~/.claude-agents/user_extras/optional_creds/)
+# Optional credentials (~/.ai-agents/user_extras/optional_creds/)
 # ============================================================
 
 @lru_cache(maxsize=None)
@@ -533,7 +533,7 @@ def optional_cred_tokens() -> dict[str, str]:
 
 
 # ============================================================
-# User firewall whitelist (~/.claude-agents/user_extras/firewall_whitelist.txt)
+# User firewall whitelist (~/.ai-agents/user_extras/firewall_whitelist.txt)
 # ============================================================
 
 @lru_cache(maxsize=None)

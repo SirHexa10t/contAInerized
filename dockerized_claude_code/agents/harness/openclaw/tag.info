@@ -1,0 +1,8 @@
+shortname         = "OpenClaw"
+fullname          = "OpenClaw"
+short_description = "a self-hosted gateway from chat apps to coding agents, with a terminal CLI; any provider"
+full_description  = "The OpenClaw Foundation's self-hosted agent gateway (MIT; an independent 501(c)(3)): one Gateway process serves Discord, Slack, Telegram, WhatsApp and two dozen other channels, a browser dashboard and a terminal CLI, routing to any model provider — Anthropic, OpenAI, Google, xAI and more — spelled provider/model in a JSON5 config. Sessions, memory search, sub-agents, compaction and automations are built in. A gateway first: the CLI talks to it, or runs embedded with --local."
+vendor            = "OpenClaw Foundation"
+ais               = ["claude", "chatgpt", "gemini", "grok"]   # model refs anthropic/…, openai/…, google/…, xai/… in its docs (2026-09-14)
+binary            = "openclaw"
+package           = "npm openclaw"

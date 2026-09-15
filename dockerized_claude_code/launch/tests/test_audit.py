@@ -21,9 +21,10 @@ from unittest.mock import patch
 
 from launch import paths
 from launch.audit import (
-    _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names,
-    _load_store, _store_entry_issues, _stray_root_instances, build_parser,
+    _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names, _implicit_axes,
+    _lego_issues, _load_store, _store_entry_issues, _stray_root_instances, build_parser,
 )
+from launch.tags import AgentBuild
 from launch.cowork import control, mailbox
 from launch.paths import AGENTS_DIR
 from launch.tags import scan_all
@@ -82,7 +83,7 @@ class TestCheckJsonFile(unittest.TestCase):
 def _entry(workspace, **axes):
     """A store entry dict with the given axis name lists (missing axes → [])."""
     return {
-        "workspace": workspace,
+        "workspace": workspace, "ai": "claude", "harness": "claude-code",
         "engine": axes.get("engine"),
         "professions": axes.get("professions", []),
         "specialties": axes.get("specialties", []),
@@ -173,9 +174,60 @@ class TestStoreEntryIssues(unittest.TestCase):
         self.assertNotIn("a__valid", kinds_by_target)
 
 
+class TestImplicitAxes(unittest.TestCase):
+    """implicit_ai / implicit_harness — an entry, member or .lego that names no
+    AI or harness runs the tree's defaults; the finding names them and says
+    what was most likely meant (claude in claude-code, the only option before
+    the two kinds existed)."""
+
+    def test_both_axes_unset_yield_two_findings_naming_the_defaults(self):
+        issues = _implicit_axes(AgentBuild(engine="poet"), "poet__x", REGISTRY)
+        self.assertEqual([k for k, _, _ in issues], ["implicit_ai", "implicit_harness"])
+        ai_msg, harness_msg = (m for _, _, m in issues)
+        self.assertIn(REGISTRY.default_ai.label, ai_msg)
+        self.assertIn('ai = "claude"', ai_msg)
+        self.assertIn(REGISTRY.harnesses[REGISTRY.default_ai.harness].label, harness_msg)
+        self.assertIn('harness = "claude-code"', harness_msg)
+        self.assertTrue(all(t == "poet__x" for _, t, _ in issues))
+
+    def test_an_explicit_ai_leaves_only_the_harness_finding_naming_that_ais_default(self):
+        (issue,) = _implicit_axes(AgentBuild(ai="grok"), "x", REGISTRY)
+        self.assertEqual(issue[0], "implicit_harness")
+        self.assertIn(REGISTRY.harnesses["grok-build"].label, issue[2])
+
+    def test_both_explicit_is_clean(self):
+        self.assertEqual(_implicit_axes(AgentBuild(ai="claude", harness="claude-code"), "x", REGISTRY), [])
+
+    def test_without_a_registry_the_hint_still_says_what_to_set(self):
+        issues = _implicit_axes(AgentBuild(), "x", None)
+        self.assertEqual(len(issues), 2)
+        self.assertNotIn("⟪", issues[0][2])
+        self.assertIn('ai = "claude"', issues[0][2])
+
+    def test_store_entries_and_lego_files_report_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = {"golem__old": {"workspace": tmp, "engine": "golem", "professions": [], "specialties": [], "policies": []},
+                       "golem__new": {"workspace": tmp, "ai": "claude", "harness": "claude-code", "engine": "golem"}}
+            kinds = [(k, t) for k, t, _ in _store_entry_issues(entries, {"golem__old", "golem__new"}, REGISTRY)]
+            self.assertEqual(kinds, [("implicit_ai", "golem__old"), ("implicit_harness", "golem__old")])
+            old, new, bad = (Path(tmp) / name for name in ("old.lego", "new.lego", "bad.lego"))
+            old.write_text('engine = "poet"\n')
+            new.write_text('ai = "claude"\nharness = "claude-code"\nengine = "poet"\n')
+            bad.write_text("engine = 3\n")
+            issues = _lego_issues([("old", old), ("new", new), ("bad", bad)], REGISTRY)
+            self.assertEqual([(k, t) for k, t, _ in issues], [("bad_lego", "bad.lego"), ("implicit_ai", "old.lego"), ("implicit_harness", "old.lego")])
+
+    def test_every_shipped_lego_is_explicit(self):
+        # The project's own agents were authored for Claude in Claude Code and
+        # say so, so they stay put if the tree's default ever moves — and the
+        # audit is clean out of the box.
+        from launch.file_access import agent_md_index
+        self.assertEqual(_lego_issues(((n, AGENTS_DIR / f"{n}.lego") for n in agent_md_index()), REGISTRY), [])
+
+
 class TestStrayRootInstances(unittest.TestCase):
     """_stray_root_instances flags `<agent>__<session>` dirs left at the old
-    ~/.claude-agents/ root (instances now live under instances/). The sibling
+    ~/.ai-agents/ root (instances now live under instances/). The sibling
     root dirs — cache/, user_extras/, instances/ itself — carry no `__` and
     must not be flagged."""
 
@@ -370,8 +422,16 @@ class TestClusterIssues(unittest.TestCase):
     def test_a_healthy_cluster_is_clean(self):
         from launch.cluster import state
         from launch.cluster.member import Member
+        state.save(state.from_template("team", Path("/tmp/p"),
+                                       (Member.of("golem", build=AgentBuild(ai="claude", harness="claude-code")),)))
+        self.assertEqual(_cluster_issues(REGISTRY), [])
+
+    def test_a_member_naming_no_ai_or_harness_is_reported_per_member(self):
+        from launch.cluster import state
+        from launch.cluster.member import Member
         state.save(state.from_template("team", Path("/tmp/p"), (Member.of("golem"),)))
-        self.assertEqual(_cluster_issues(), [])
+        self.assertEqual([(k, t) for k, t, _ in _cluster_issues(REGISTRY)],
+                         [("implicit_ai", "team[golem]"), ("implicit_harness", "team[golem]")])
 
     def test_a_dir_without_cluster_toml_is_not_a_cluster(self):
         (paths.clusters_dir() / "stray").mkdir(parents=True)

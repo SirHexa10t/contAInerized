@@ -1,5 +1,5 @@
 """Tests for launch.tags.toolkit_profile — default/load/save for a
-profession's `~/.claude-agents/<profession>_profile.toml`. Every load/save
+profession's `~/.ai-agents/<profession>_profile.toml`. Every load/save
 here uses a tmp path (never paths.toolkit_profile_path / AGENTS_STATE) —
 this module must never touch a real host's toolkit profile."""
 

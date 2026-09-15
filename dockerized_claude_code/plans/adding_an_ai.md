@@ -19,10 +19,12 @@ CLI that runs it (Claude Code, Gemini CLI, Codex CLI, Grok Build).
 
 | Seam (`harness_coupling.md` §) | State | Where the solution lives | Verified by |
 |---|---|---|---|
-| The AI as a TAG KIND (was: the catalog enum) | done 2026-09-13 — `agents/ai/<key>/` with `tag.info` (vendor, harness, `default`, colours), `efforts.tiers`, `knobs.mapping`; `launch/tags/ai.py` (`Ai`, scan + validation, `render`); an `ai` axis in `AgentBuild`, `.lego`, `instances.toml`, cluster tables and `Instance`; `launch/ai/catalog.py` keeps only `DEFAULT_AI_KEY` + the call-time `active_ai_key()` / `set_active_ai()` | `test_tags.TestAiKind`, `test_ai.TestAiMembers` |
+| Which credentials file for which AI / harness | RESEARCHED 2026-09-14, design proposed, awaiting decisions — `plans/credentials.md`: every harness's auth files, the two-axis rule (API keys are the AI's — static, shareable, uniform across all seven; OAuth grants are the harness's — refreshed in place, sometimes keyring- or hostname-bound, vendor-gated), the per-instance / shared / read-write split, a proposed `~/.ai-agents/credentials/{keys/<ai>.env, <harness>/…}` layout with `Adapter.auth_files` replacing the flat pair. Today ONE Claude Code pair is mounted into every launch; `paths.py` binds its names at import | `plans/credentials.md`, `paths.py`, `launch/ai/claude_code.py`, `cluster/launching.py` | — |
+| The HARNESS as a TAG KIND | done 2026-09-14 — `agents/harness/<key>/tag.info` (vendor, `ais` it runs, binary, package; `⟦ClaudeCode⟧` `⟦GeminiCLI⟧` `⟦CodexCLI⟧` `⟦GrokBuild⟧`, `launch/tags/harness.py`); an AI's `harness` field is the key of its default; a per-instance axis like the AI (`.lego`, `instances.toml`, cluster tables, `Instance.harness`, resolved to the build's else the AI's default; a pair the harness cannot run is refused in a `.lego` and dropped-and-flagged from the store); the form's second radio group, the picker's runtime column after the AI, second in every pane, a Harnesses legend section. The code half is keyed by it: `launch/ai/adapter.py` (`Adapter`), `ADAPTERS`, `adapter_for`, `active_adapter`, `DEFAULT_HARNESS_KEY`; refusal and adoption by the instance's harness | `test_tags.TestHarnessKind`, `test_ai.TestHarnessMembers` / `TestAdapterRecord` / `TestRefusal`, `test_forms`, `test_menu_picker`, `test_essential_files` |
+| The AI as a TAG KIND (was: the catalog enum) | done 2026-09-13 — `agents/ai/<key>/` with `tag.info` (vendor, harness, `default`, colours) and `efforts.tiers` (`knobs.mapping` moved to the harness 2026-09-14); `launch/tags/ai.py` (`Ai`, scan + validation, `render`); an `ai` axis in `AgentBuild`, `.lego`, `instances.toml`, cluster tables and `Instance`; `launch/ai/catalog.py` keeps only `DEFAULT_AI_KEY` + the call-time `active_ai_key()` / `set_active_ai()` | `test_tags.TestAiKind`, `test_ai.TestAiMembers` |
 | Model equivalence across AIs | done 2026-09-13 as DATA, re-cut 2026-09-14 into CAPABILITY STANDARDS — `agents/ai/capability.standards` lists the dated standards (the quarter a model raised the frontier's AA index: 2025Q1 … 2026Q3 today, setter and index recorded, estimates flagged) and each `agents/ai/<key>/efforts.tiers` answers every standard plus `cheapest` / `best` with that AI's model + effort — the cheapest configuration meeting it, else its best, flagged; the standard's date IS the order, and the registry checks every engine names a standard the AIs answer | `test_ai.TestAiMembers` (every standard, rising indices, efforts within scale), `TestEngineOrder`, `test_tags.TestStandardVocabulary` |
 | §8 — the engine budget FILE | done 2026-09-13 — ONE `agents/engine/<tag>/tag.budget` per engine in the launcher's own words (step, switches, amounts — `tags/budget.py`); the 24 per-AI `<ai>.conf` files are gone | `test_tags.TestEngine`, `test_essential_files` |
-| §8 — the budget's KEYS per AI | done 2026-09-13 — `agents/ai/<key>/knobs.mapping` translates each budget purpose into that AI's native settings (`{value}` templates, unit conversions once); a purpose an AI cannot express is absent and reported as unmapped by `Ai.render`; the sourced reference blocks of the former default confs live there as comments | `test_ai.TestRendering` (Claude renders exactly the former env files; unmapped purposes reported; conversions) |
+| §8 — the budget's KEYS per harness | done 2026-09-13, moved 2026-09-14 — `agents/harness/<key>/knobs.mapping` (the settings surface is the CLI's, not the model's; `{provider}` slugs for a multi-model CLI) translates each budget purpose into that AI's native settings (`{value}` templates, unit conversions once); a purpose an AI cannot express is absent and reported as unmapped by `Ai.render`; the sourced reference blocks of the former default confs live there as comments | `test_ai.TestRendering` (Claude renders exactly the former env files; unmapped purposes reported; conversions) |
 | §8 — the launcher READING those keys (model sort, effort flag, rendering into settings.json / config.toml) | mostly — `Instance.conf` is the engine's budget rendered by the instance's AI; engine order is the AI-neutral step rank; `effort_args` takes `Instance.effort`; only `-e KEY=VALUE` forwarding exists, so writing Gemini's settings.json / Codex's config.toml / Grok's config.toml from the rendering is the split half | `tags/ai.py`, `tags/engine.py`, `docker_config.py` | `test_ai.py` — no production module spells a harness word |
 | §10 / §14 — the CLI's name in strings a user reads | done 2026-09-12 for the live strings — `Ai.cli_name` ("Claude Code" / "Gemini CLI" / "Codex CLI"); the terminal title and the firewall abort read it through `active_ai()` (the abort's hosts come from the same adapter record — §13). The §14 renames (paths, module names, `claude_args`, the container user) stay open | `launch/ai/catalog.py`, `claude_code_config.set_terminal_title`, `firewall/resolver.py` | `test_ai.py`, `test_claude_code_config.py` |
 | §1 image and entrypoint | partly, 2026-09-12 — the binary and herdr's agent kind are adapter data (`Harness.binary`, `.herdr_agent_kind`), read by `docker_config`, `cluster/launch_plan`, `cluster/herdr`, `cluster/launching`; the image's install line and ENTRYPOINT are still Claude's (Dockerfiles) | `launch/ai/claude_code.py` | `test_ai.py` (consumers read the record; no production module spells `"claude"`) |
@@ -71,18 +73,10 @@ launch):
   that cannot meet it answers with its best, flagged as falling short. The
   ends are each AI's own cheapest and strongest. Inline comments carry the
   index and the token cost. `tags/ai.py` validates the file at scan.
-- **`knobs.mapping`** — the launcher's budget PURPOSES → this AI's native
-  settings: `[model]`, `[effort]`, `[<switch>.on]` / `[<switch>.off]` for
-  `thinking`, `memory`, `background_agents`, `telemetry`, `tool_search`, and
-  the amounts `[max_output_tokens]`, `[tool_output_tokens]`,
-  `[compact_at_percent]`; each row `native key = "template"` with `{value}`
-  (and `{value/N}` / `{value*N}` for the unit conversions — a percent to a
-  fraction, tokens to characters). Keys are the AI's OWN knob names exactly
-  as its docs spell them (env vars where the CLI reads env, settings paths
-  where it reads a file — quoted TOML keys carry the dots). Only sourced
-  knobs: a purpose the AI cannot express is LEFT OUT (with a comment saying
-  where you looked), never guessed; `Ai.render` reports it as unmapped.
-  Budget, not policy: approval / sandbox keys belong to the settings seam.
+- **`knobs.mapping`** — since 2026-09-14 a HARNESS file (`agents/harness/<key>/`),
+  not the AI's: the launcher's budget purposes → that CLI's native settings
+  (`Harness.render(budget, ai)`), with `{provider}` slugs where a multi-model
+  CLI spells `anthropic/<model>`. See the harness kind's row above.
 
 **Verify:** `test_ai.TestAiMembers` (every member complete, every step,
 efforts within the scale, one default that the code's `DEFAULT_AI_KEY`
@@ -105,10 +99,12 @@ words.
 
 ### 3. Give it a harness adapter (the code half)
 
-`launch/ai/<key>.py` — a `Harness` record (binary, flags, config-root files,
-env vars, critical hosts; `launch/ai/harness.py`) registered in
-`launch/ai/__init__.HARNESSES` under the member's key, with `name` equal to
-the member's `harness`. Until it exists, `harness_for(key)` raises and the
+`launch/ai/<key>.py` — an `Adapter` record (binary, flags, config-root files,
+env vars, critical hosts; `launch/ai/adapter.py`) registered in
+`launch/ai/__init__.ADAPTERS` under the HARNESS member's key
+(`agents/harness/<key>`), with `name` equal to that member's fullname and
+`binary` equal to its binary (a test holds them together). Until it exists,
+`adapter_for(key)` raises and the
 launcher refuses to launch an instance on that AI (`refusal_for`, checked in
 `run.py` before persist and build, and per member by the cluster launch — the
 picker still describes such an instance; F2 switches it back). The behaviour half — rendering the settings into the harness's
@@ -255,8 +251,9 @@ adapter per harness:
    files, the critical firewall hosts), the rest of the tree importing from
    it; and make the AI a call-time value (`active_ai()`), not an import-time
    one. No behaviour changes. **Done 2026-09-12:** `launch/ai/harness.py`
-   (`Harness`), `launch/ai/claude_code.py` (`CLAUDE_CODE`), `active_ai()` /
-   `active_harness()`; nine modules re-pointed; a test forbids the words
+   (`Harness`, renamed `adapter.py` / `Adapter` on 2026-09-14 when the harness
+   became a tag kind), `launch/ai/claude_code.py` (`CLAUDE_CODE`), `active_ai()` /
+   `active_harness()` (now `active_harness_key()` / `active_adapter()`); nine modules re-pointed; a test forbids the words
    elsewhere. Residue: `paths.py` binds the record at import.
 2. Decide and store the switch — a per-instance field defaulting from the
    catalog; the picker UI for it later. **Done 2026-09-13 as the AI TAG KIND**

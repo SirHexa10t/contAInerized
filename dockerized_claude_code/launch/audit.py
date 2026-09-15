@@ -5,7 +5,7 @@ Reports:
     tag.info, strict-rule violations, dangling requires; reported once,
     non-fatally, and per-entry tag validation is skipped)
   - stray root instances (a `<agent>__<session>` dir still at the old
-    ~/.claude-agents/ root — instances now live under instances/, so the
+    ~/.ai-agents/ root — instances now live under instances/, so the
     launcher no longer sees one left at the root)
   - orphan state dirs (instance dir present but no matching agent .md)
   - no_history (state dir has no history.jsonl — the last-used signal we rely on)
@@ -13,6 +13,13 @@ Reports:
   - badworkspace (entry's workspace points to a non-existent or non-directory path)
   - bad_tags (entry references an engine/profession/specialty/policy that the
     tag tree doesn't define, or puts a name on the wrong axis)
+  - implicit_ai / implicit_harness (an instances.toml entry, a cluster member
+    table or an agent .lego that names no `ai` / `harness` — it runs the
+    tree's default AI and that AI's default harness; anything written before
+    the two kinds existed (2026-09-13 / 14) is most likely meant for `claude`
+    in `claude-code`, the only option then: F2 dots them for an instance, a
+    line in the .lego for an agent)
+  - bad_lego (an agent's .lego fails to parse)
   - bad_name (an instance's session, or a cluster's directory name, that the
     launcher's label rule refuses — `tags.identity.label_error`, applied to
     every NEW name since 2026-09-09, so these predate it or were made by
@@ -26,7 +33,7 @@ Reports:
   - store issues (instances.toml not valid TOML; a MISSING file is fine —
     instances then run on their agents' `.lego` defaults)
   - oauth issues (.claude.json / .credentials.json missing, empty, or not valid JSON)
-  - cowork state under ~/.claude-agents/group_hosting/:
+  - cowork state under ~/.ai-agents/group_hosting/:
       orphan_group — a participant dir whose instance was deleted (the work
                      inside may still be wanted, so nothing auto-cleans it)
       bad_session  — a session.json discovery SKIPS: unreadable, filed in the
@@ -41,6 +48,7 @@ Run from the project root:
 """
 
 import argparse
+from collections.abc import Iterable
 import json
 import tomllib
 from pathlib import Path
@@ -59,22 +67,23 @@ from .paths import (
     cluster_state_path, clusters_dir, cowork_outbox_path, group_hosting_dir,
     hub_pid_path, instance_state_dir_path, state_history_path,
 )
-from .tags import Registry, TagError, scan_all
+from .tags import AgentBuild, Registry, TagError, scan_all
 from .tags.identity import SESSION_SEP, label_error
+from .tags.lego import load_lego
 from .tags.store import entry_to_build
 
 Issue = tuple[str, str, str]   # (kind, target, message)
 
 
 def _stray_root_instances(state_root: Path) -> list[Issue]:
-    """Instance dirs still sitting at the ~/.claude-agents/ ROOT — instances
+    """Instance dirs still sitting at the ~/.ai-agents/ ROOT — instances
     now live under instances/, and the launcher only looks there, so a
     `<agent>__<session>` dir left at the root is silently ignored (its history
     and tags are invisible). Report each so the user relocates it. The
     `SESSION_SEP in name` filter is the same one list_all_instances uses, so
     the sibling root dirs (cache/, firewall_cache/, user_extras/, instances/
     itself) are naturally skipped."""
-    return [("stray", d.name, "instance dir at the ~/.claude-agents/ root — move it into instances/")
+    return [("stray", d.name, "instance dir at the ~/.ai-agents/ root — move it into instances/")
             for d in sorted(iter_subdirs(state_root), key=lambda p: p.name)
             if SESSION_SEP in d.name]
 
@@ -109,6 +118,42 @@ def _check_json_file(path: Path) -> str | None:
     return None
 
 
+def _implicit_axes(build: AgentBuild, target: str, registry: Registry | None) -> list[Issue]:
+    """The `implicit_ai` / `implicit_harness` findings for one build (a store
+    entry, a cluster member, an agent's .lego): an unset axis runs the tree's
+    default — named when the tree scanned — and, for anything written before
+    the kinds existed, that default is most likely what was meant."""
+    out: list[Issue] = []
+    if build.ai is None:
+        default = registry.default_ai if registry else None
+        runs = f" — it runs the tree's default, {default.label}" if default else ""
+        out.append(("implicit_ai", target,
+                    f"names no ai{runs}; anything from before 2026-09-13 is most likely meant for "
+                    f"claude — set ai = \"claude\" (F2 dots it for an instance)"))
+    if build.harness is None:
+        harness = registry.harness_for(build) if registry else None
+        runs = f" — it runs its AI's default, {harness.label}" if harness else ""
+        out.append(("implicit_harness", target,
+                    f"names no harness{runs}; anything from before 2026-09-14 is most likely meant for "
+                    f"claude-code — set harness = \"claude-code\" (F2 dots it for an instance)"))
+    return out
+
+
+def _lego_issues(legos: Iterable[tuple[str, Path]], registry: Registry | None) -> list[Issue]:
+    """Findings for the agents' .lego files: `bad_lego` (fails to parse) and
+    the implicit-axis findings (`_implicit_axes`) — a shipped agent that names
+    no AI would silently follow a change of the tree's default."""
+    out: list[Issue] = []
+    for name, path in sorted(legos):
+        try:
+            build = load_lego(path)
+        except TagError as e:
+            out.append(("bad_lego", path.name, str(e)))
+            continue
+        out.extend(_implicit_axes(build, path.name, registry))
+    return out
+
+
 def _store_entry_issues(entries: dict[str, Any], actual: set[str],
                         registry: Registry | None) -> list[Issue]:
     """Per-entry findings for instances.toml, as (kind, instance_id, msg)
@@ -118,7 +163,9 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
       bad_tags     — axis references the tag tree can't resolve (unknown name
                      or wrong axis), caught via the same validate_build the
                      launcher itself uses; skipped when the tree failed to
-                     scan (`registry` is None) — the 'tags' issue covers it."""
+                     scan (`registry` is None) — the 'tags' issue covers it.
+      implicit_ai / implicit_harness — the entry names no ai / harness
+                     (`_implicit_axes`)."""
     out: list[Issue] = []
     for instance_id, entry in entries.items():
         if instance_id not in actual:
@@ -127,11 +174,13 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
         ws = entry.get("workspace")
         if not ws or not is_dir(ws):
             out.append(("badworkspace", instance_id, f"workspace not a directory: {ws}"))
+        build = entry_to_build(entry)
         if registry is not None:
             try:
-                registry.validate_build(entry_to_build(entry), f"instances.toml[{instance_id}]")
+                registry.validate_build(build, f"instances.toml[{instance_id}]")
             except TagError as e:
                 out.append(("bad_tags", instance_id, str(e)))
+        out.extend(_implicit_axes(build, instance_id, registry))
     return out
 
 
@@ -150,14 +199,15 @@ def _illegal_instance_names(instances: list[str]) -> list[Issue]:
     return out
 
 
-def _cluster_issues() -> list[Issue]:
+def _cluster_issues(registry: Registry | None = None) -> list[Issue]:
     """Findings under clusters/: a dir whose NAME the label rule refuses
     (`bad_name` — `cluster_state.discover` skips it silently, so the picker
-    never shows it) and a cluster.toml that fails to load for any other
-    reason (`bad_cluster` — corrupt TOML, a member with an illegal id, a
-    missing project key). Degrades to no findings on a host that never made
-    a cluster; a subdir without cluster.toml is not a cluster (discovery
-    ignores it too)."""
+    never shows it), a cluster.toml that fails to load for any other reason
+    (`bad_cluster` — corrupt TOML, a member with an illegal id, a missing
+    project key), and per member the implicit-axis findings
+    (`_implicit_axes`, target `<cluster>[<member>]`). Degrades to no findings
+    on a host that never made a cluster; a subdir without cluster.toml is not
+    a cluster (discovery ignores it too)."""
     out: list[Issue] = []
     for directory in sorted(iter_subdirs(clusters_dir()), key=lambda d: d.name):
         if not is_file(cluster_state_path(directory.name)):
@@ -168,10 +218,13 @@ def _cluster_issues() -> list[Issue]:
                         f"rename the directory"))
             continue
         try:
-            cluster_state.load(directory.name)
+            cluster = cluster_state.load(directory.name)
         except (ClusterError, tomllib.TOMLDecodeError, OSError) as e:
             out.append(("bad_cluster", directory.name,
                         f"cluster.toml fails to load — discovery skips it: {e}"))
+            continue
+        for member in (cluster.members if cluster else ()):
+            out.extend(_implicit_axes(member.build, f"{directory.name}[{member.id}]", registry))
     return out
 
 
@@ -260,8 +313,9 @@ def main() -> None:
 
     issues.extend(_illegal_instance_names(instances))
     issues.extend(_store_entry_issues(entries, actual, registry))
+    issues.extend(_lego_issues(((name, AGENTS_DIR / f"{name}.lego") for name in agent_md_index()), registry))
     issues.extend(_cowork_issues())
-    issues.extend(_cluster_issues())
+    issues.extend(_cluster_issues(registry))
 
     if not issues:
         print(f"All clear. {len(instances)} instance(s) under {AGENTS_STATE}.")

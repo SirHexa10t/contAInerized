@@ -1,0 +1,8 @@
+shortname         = "ClaudeCode"
+fullname          = "Claude Code"
+short_description = "Anthropic's terminal agent for Claude: skills, hooks, MCP servers, slash commands, sub-agents"
+full_description  = "Anthropic's agent CLI for the Claude models — the launcher's native harness: the settings, hooks, skills, slash commands, transcripts and memory files the launcher composes and mounts are Claude Code's. Runs in the terminal, resumes conversations per project, and scripts through a print mode with a streamed event log."
+vendor            = "Anthropic"
+ais               = ["claude"]         # the AI members this CLI runs (agents/ai/<key>)
+binary            = "claude"           # the executable in the image
+package           = "npm @anthropic-ai/claude-code"

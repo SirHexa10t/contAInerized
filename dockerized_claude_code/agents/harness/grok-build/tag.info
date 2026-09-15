@@ -1,0 +1,8 @@
+shortname         = "GrokBuild"
+fullname          = "Grok Build"
+short_description = "xAI's open-source terminal agent for Grok: reads Claude Code's skills, hooks, MCP servers and CLAUDE.md as they are"
+full_description  = "SpaceXAI (xAI)'s agent CLI for the Grok models, open source. Deliberately Claude Code-compatible: it reads CLAUDE.md, the .claude/settings.json hooks, skills, plugins and MCP servers with no conversion, and configures itself through a config.toml under GROK_HOME. Only its PreToolUse hook can block; its other hooks are advisory."
+vendor            = "SpaceXAI (xAI)"
+ais               = ["grok"]
+binary            = "grok"
+package           = "npm @xai-official/grok"

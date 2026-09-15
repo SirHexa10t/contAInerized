@@ -37,7 +37,7 @@ import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from .ai import active_harness
+from .ai import active_adapter
 from .claude_code_config import set_terminal_title
 from .container_env import (
     ContainerEnvKey, conf_env_args, container_env_args, stage_container_env,
@@ -569,7 +569,7 @@ def effort_args(effort: str | None, claude_args: list[str]) -> list[str]:
     argv for --effort as the user's confirmation. Passing the documented
     flag is the supported way to declare the level so the session both runs
     at it and reports it."""
-    harness = active_harness()
+    harness = active_adapter()
     if not effort or any(a == harness.effort_flag or a.startswith(f"{harness.effort_flag}=") for a in claude_args):
         return []
     return [harness.effort_flag, effort]
@@ -663,7 +663,7 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     # generated startup script instead of claude's own argv. Assembled here
     # because this is where that argv is known, and only for an interactive
     # launch — quickie's print mode has no terminal to split.
-    harness = active_harness()
+    harness = active_adapter()
     agent_argv = (
         [harness.binary]
         + effort_args(inst.effort, claude_args)
