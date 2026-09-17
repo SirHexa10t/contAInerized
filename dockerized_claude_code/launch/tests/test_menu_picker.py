@@ -625,3 +625,14 @@ class TestClusterRows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestLegendScopes(unittest.TestCase):
+    def test_the_legend_names_where_a_tag_may_not_go(self):
+        # An author writing a .lego by hand reads the legend and the tree,
+        # not the form (agent-writer, gate tag-scopes).
+        import re
+        text = re.sub(r"\x1b\[[0-9;]*m", "", menu_picker._build_composition_legend(REGISTRY))
+        flat = re.sub(r"\s+", " ", text)
+        self.assertIn("not on: member", flat)
+        self.assertIn("not on: cluster, member", flat)   # {frwl}, in SCOPES order
+        self.assertIn("not on: solo", flat)

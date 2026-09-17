@@ -14,19 +14,22 @@ The default is `_quickie` on the `quick` engine; `--explain` swaps in
 QuickieAgent specs below.
 """
 
+import dataclasses
 import sys
 import uuid
 from pathlib import Path
 from typing import NamedTuple
 
-from ..agents_crud import compute_resume_flag, install_latest_md, install_settings
+from ..agents_crud import compute_resume_flag
 from ..ai import active_adapter, adopt, refusal_for
-from ..container_env import set_container_env
+from ..container_env import set_container_env, set_instance_env
 from ..docker_config import ensure_image, require_docker, run_container, set_container_mounts
-from ..file_access import ensure_dir, ensure_shared_oauth_files
-from ..paths import AGENTS_DIR, quickie_communal_workspace, quickie_state_dir_path
+from ..file_access import ensure_dir
+from ..paths import CLAUDE_CONFIG_IN_CONTAINER, quickie_communal_workspace, quickie_state_dir_path
+from ..paths import AGENTS_DIR
+from ..staging import stage_instance
 from ..tag_handlers import apply_tags
-from ..tags import Instance, Registry, TagError, load_lego, migrations, resolve_build, scan_all
+from ..tags import Instance, Registry, TagError, load_lego, resolve_build
 from ..utils import call_or_exit
 from .render import render_stream
 
@@ -52,16 +55,22 @@ def _gibberish() -> str:
 
 
 def build_quickie_instance(registry: Registry, session: str, *,
-                           agent: QuickieAgent = QUICK, is_brand_new: bool = True) -> Instance:
+                           agent: QuickieAgent = QUICK, is_brand_new: bool = True,
+                           ai: str | None = None) -> Instance:
     """The Instance for one quickie question: `agent`'s hidden persona + lego
     (default QUICK; TRIVIA for `--explain`, RESEARCH for `--research`), the
     communal shared workspace mounted at /workspace, and a state dir parked
     under `quickie/` (via `state_dir_override`) rather than the main
-    `instances/`. `is_brand_new=False` marks a `--resume` so compute_resume_flag
-    can offer `--continue`. Pure construction — no disk/docker side effects — so
-    it's unit-testable on its own."""
+    `instances/`. `ai` (`--ai <name>`) swaps the lego's AI for another member
+    of `agents/ai/`, its harness falling back to that AI's default (the lego's
+    harness runs the lego's AI, not this one); None keeps the lego's — claude,
+    in every shipped quickie lego. `is_brand_new=False` marks a `--resume` so
+    compute_resume_flag can offer `--continue`. Pure construction — no
+    disk/docker side effects — so it's unit-testable on its own."""
     build = load_lego(agent.lego)
-    registry.validate_build(build, agent.lego)   # shipped file → the raising validate is right
+    if ai is not None:
+        build = dataclasses.replace(build, ai=ai, harness=None)
+    registry.validate_build(build, f"{agent.lego} --ai {ai}" if ai else agent.lego, scope="solo")   # shipped file → the raising validate is right; a quickie is a solo build
     return Instance(
         agent=agent.label,
         md_path=agent.md,
@@ -73,14 +82,18 @@ def build_quickie_instance(registry: Registry, session: str, *,
     )
 
 
-def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent = QUICK) -> None:
+def ask(question: str, registry: Registry, *, resume_session: str | None = None,
+        agent: QuickieAgent = QUICK, ai: str | None = None) -> None:
     """Answer one question one-shot with `agent` (QUICK default; TRIVIA for
-    `--explain`, RESEARCH for `--research`). With `resume_session` (an id from
-    `q --history`) the question continues that existing thread via `--continue`;
-    otherwise it opens a fresh thread under a throwaway id. Either way it stages
-    state like a normal launch (minus picker / form / store / optional-creds),
-    builds the image if it isn't cached, then runs `claude -p`. The thread
-    persists under `quickie/` for later resume."""
+    `--explain`, RESEARCH for `--research`), on the lego's AI or the `--ai`
+    one. `registry` is the tree the CLI's one startup opened
+    (`startup.open_launcher`, before parsing — the same first step every
+    entry takes). With `resume_session` (an id from `q --history`) the
+    question continues that existing thread via `--continue`; otherwise it
+    opens a fresh thread under a throwaway id. Either way it stages state like
+    a normal launch (minus picker / form / store / optional-creds), builds the
+    image if it isn't cached, then runs `claude -p`. The thread persists under
+    `quickie/` for later resume."""
     question = question.strip()
     if not question:
         sys.exit(
@@ -89,8 +102,6 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
             'Ask a question:  q "your question here"   (quote the whole question).'
         )
     require_docker()
-    registry = call_or_exit(scan_all, AGENTS_DIR, exceptions=TagError)
-    migrations.ensure_migrated()                 # the state dir's old name, the retired map format — before anything is created under the dir
     ensure_dir(quickie_communal_workspace())   # the /workspace mount source must exist, else docker root-creates it
     if resume_session is not None:
         if not quickie_state_dir_path(resume_session).is_dir():
@@ -98,17 +109,25 @@ def ask(question: str, *, resume_session: str | None = None, agent: QuickieAgent
         session, is_brand_new = resume_session, False
     else:
         session, is_brand_new = _gibberish(), True
-    inst = build_quickie_instance(registry, session, agent=agent, is_brand_new=is_brand_new)
+    inst = build_quickie_instance(registry, session, agent=agent, is_brand_new=is_brand_new, ai=ai)
     if inst.harness is not None and (refused := refusal_for(inst.harness.name, inst.harness.label)) is not None:
-        sys.exit(refused)                        # a quickie lego in a harness without an adapter — same rule as run.py
+        # A harness without an adapter — same rule as run.py; with --ai, say
+        # which AI's CLI that is, since the user named the AI, not the CLI.
+        lead = f"  --ai {ai}: {inst.ai.label if inst.ai else ai} answers through {inst.harness.label}, and\n" if ai else ""
+        sys.exit(lead + refused)
     adopt(inst.harness.name if inst.harness else None)
     resume_flag = compute_resume_flag(inst)      # ["--continue"] when the thread has a transcript; [] otherwise
 
     apply_tags(inst)                             # no-op for _quickie today (no handler tag); future-proof
-    install_latest_md(inst)
-    call_or_exit(install_settings, inst, registry, exceptions=TagError)
-    ensure_shared_oauth_files()
-    set_container_env(inst)
+    # The one per-agent staging every run shape calls (launch/staging.py) —
+    # a quickie keeps the default config root, like a solo instance.
+    staged = call_or_exit(stage_instance, inst, registry, harness=active_adapter(),
+                          config=str(CLAUDE_CONFIG_IN_CONTAINER), relocated=False,
+                          exceptions=(TagError, RuntimeError))
+    for notice in staged.notices:
+        print(notice)
+    set_container_env(inst.professions)
+    set_instance_env(inst)
     set_container_mounts(inst)
     image = ensure_image(inst)
     # The harness's flags for a progress-showing one-shot event stream (the

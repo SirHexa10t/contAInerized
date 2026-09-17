@@ -15,7 +15,7 @@ Code adapter). Adapters for the other harnesses grow here one seam at a time;
 plans/adding_an_ai.md is the checklist, plans/harness_commonality.md the
 matrix of what splits."""
 
-from .adapter import Adapter
+from .adapter import Adapter, AuthFile
 from .catalog import DEFAULT_HARNESS_KEY, active_harness_key, set_active_harness
 from .claude_code import CLAUDE_CODE
 
@@ -64,5 +64,5 @@ def active_adapter() -> Adapter:
     return adapter_for(active_harness_key())
 
 
-__all__ = ["ADAPTERS", "Adapter", "CLAUDE_CODE", "DEFAULT_HARNESS_KEY", "active_adapter", "active_harness_key",
+__all__ = ["ADAPTERS", "Adapter", "AuthFile", "CLAUDE_CODE", "DEFAULT_HARNESS_KEY", "active_adapter", "active_harness_key",
            "adopt", "adapter_for", "refusal_for", "set_active_harness"]

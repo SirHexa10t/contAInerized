@@ -39,6 +39,13 @@ class TestRepoLayout(unittest.TestCase):
         self.assertTrue(paths.TEMPLATE_FILES_DIR.is_dir())
 
 
+def _instructions(dockerfile) -> str:
+    """A Dockerfile's instruction lines, comments dropped — the contracts
+    below are about what a layer DOES, and the comments name the very words
+    they forbid ("never the weekly SOFTWARE_STACK_REFRESH")."""
+    return "\n".join(line for line in dockerfile.read_text().splitlines() if not line.lstrip().startswith("#"))
+
+
 class TestBaseDockerArtifacts(unittest.TestCase):
     def test_base_dockerfile_exists(self):
         self.assertTrue(paths.BASE_DOCKERFILE.is_file())
@@ -49,6 +56,67 @@ class TestBaseDockerArtifacts(unittest.TestCase):
         text = paths.BASE_DOCKERFILE.read_text()
         self.assertIn("iptables", text)
         self.assertIn("init-firewall.sh", text)   # the sudoers NOPASSWD line
+
+    def test_base_dockerfile_is_cli_less_and_never_rebuilds_weekly(self):
+        # The agent CLI, its env switches and the ENTRYPOINT are the harness
+        # layer's (built LAST); the weekly buster in the base is what
+        # invalidated the whole stack every week until 2026-09-16.
+        text = _instructions(paths.BASE_DOCKERFILE)
+        self.assertNotIn("ENTRYPOINT", text)
+        self.assertNotIn("SOFTWARE_STACK_REFRESH", text)
+        self.assertNotIn("claude.ai/install", text)
+        self.assertIn('PATH="/home/claude/.local/bin', text)   # where the harness layer's installer lands the binary
+
+
+class TestHarnessLayers(unittest.TestCase):
+    """The harness's Dockerfile is the tail of every chain: the CLI, its env
+    switches, the image ENTRYPOINT and the weekly OS upgrade — the ONLY layer
+    keyed on the weekly buster, so a week boundary rebuilds it alone."""
+
+    def setUp(self):
+        self.reg = scan_all(paths.AGENTS_DIR)
+
+    def _all_dockerfiles(self):
+        return [paths.BASE_DOCKERFILE, *sorted(paths.AGENTS_DIR.rglob("Dockerfile"))]
+
+    def test_every_runnable_harness_ships_its_layer_with_its_binary_as_entrypoint(self):
+        from launch.ai import ADAPTERS
+        for key, adapter in ADAPTERS.items():
+            harness = self.reg.harnesses[key]
+            with self.subTest(harness=key):
+                self.assertIsNotNone(harness.dockerfile, "an adapted harness without a layer is an image that starts nothing")
+                text = _instructions(harness.dockerfile)
+                self.assertIn(f'ENTRYPOINT ["{adapter.binary}"]', text)
+                self.assertIn("SOFTWARE_STACK_REFRESH", text)
+                self.assertIn("apt-get upgrade", text)                    # the weekly OS patch cadence rides the tail
+                self.assertIn("USER claude", text)                        # explicit — never the parent's last USER
+                self.assertIsNotNone(harness.docker)
+                self.assertEqual(harness.docker.build_arg_forward, ("SOFTWARE_STACK_REFRESH",))
+
+    def test_the_weekly_buster_is_the_harness_layers_word_alone(self):
+        harness_layers = {h.dockerfile for h in self.reg.harnesses.values() if h.dockerfile}
+        for dockerfile in self._all_dockerfiles():
+            with self.subTest(dockerfile=str(dockerfile.relative_to(paths.DOCKERIZED_CLAUDE_ROOT))):
+                self.assertEqual("SOFTWARE_STACK_REFRESH" in _instructions(dockerfile), dockerfile in harness_layers,
+                                 "a weekly buster below the tail cascades through every layer above it")
+
+    def test_only_the_tail_sets_an_entrypoint(self):
+        # The tail's ENTRYPOINT is the image's; one in a profession or
+        # specialty layer would be silently overridden. A specialty's
+        # entrypoint is a run-time --entrypoint contribution in its tag.docker
+        # ({firewall}, {muxer}), which is why the cluster's refusal exempts it.
+        harness_layers = {h.dockerfile for h in self.reg.harnesses.values() if h.dockerfile}
+        for dockerfile in self._all_dockerfiles():
+            with self.subTest(dockerfile=str(dockerfile.relative_to(paths.DOCKERIZED_CLAUDE_ROOT))):
+                self.assertEqual("ENTRYPOINT" in _instructions(dockerfile), dockerfile in harness_layers)
+
+    def test_the_cluster_layer_is_network_free(self):
+        # It once apt-installed the python3 the base already ships — a full
+        # `apt-get update` for a no-op. The shim is all it adds.
+        text = _instructions(self.reg.specialties["cluster"].layer.path / "Dockerfile")
+        self.assertNotIn("apt-get", text)
+        self.assertIn("cluster-chat", text)
+        self.assertIn("python3", _instructions(paths.BASE_DOCKERFILE))   # the interpreter the shim runs is the base's
 
 
 class TestTagHandlerArtifacts(unittest.TestCase):
@@ -459,20 +527,21 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertNotIn("app:exit", text)
         json.loads(text)      # and it stays valid JSON
 
-    def test_the_cluster_layer_ships_python_and_the_chat_shim(self):
+    def test_the_cluster_layer_ships_the_chat_shim_on_the_bases_python(self):
         # {clstr}'s reserved layer, now real. The work-protocol package is
         # python RO-mounted at /opt (drift-pinned to the package's own
-        # constant), the BASE image has no python, and the shim is the one
-        # executable entry — module-running the package exactly the way its
-        # standalone-import test does. Full python3, not -minimal: the pared
-        # stdlib lacks pieces the protocol needs (tomllib among them).
+        # constant), and the shim is the one executable entry — module-running
+        # the package exactly the way its standalone-import test does. The
+        # interpreter is the BASE image's full python3 (not -minimal: the pared
+        # stdlib lacks pieces the protocol needs, tomllib among them) — this
+        # layer installs no package of its own (TestHarnessLayers pins it
+        # network-free).
         from launch.cluster_work_protocol import PACKAGE_IN_CONTAINER
-        text = (paths.AGENTS_DIR / "profession" / "_cluster"
-                / "Dockerfile").read_text()
-        self.assertIn("--no-install-recommends python3", text)
+        text = _instructions(paths.AGENTS_DIR / "profession" / "_cluster" / "Dockerfile")
         self.assertIn("/usr/local/bin/cluster-chat", text)
         self.assertIn("python3 -m cluster_work_protocol.cli", text)
         self.assertIn(str(PACKAGE_IN_CONTAINER), text)
+        self.assertRegex(_instructions(paths.BASE_DOCKERFILE), r"apt-get install[^\n]*(\\\n[^\n]*)*python3 \\")
 
     def test_the_cluster_addendum_teaches_the_queue(self):
         # The protocol is prompt-level (the cowork lesson: agents follow
@@ -912,7 +981,7 @@ class TestAgentLegoFiles(unittest.TestCase):
         self.assertTrue(legos, "no .lego files found")
         for lego in legos:
             with self.subTest(lego=lego.name):
-                self.reg.validate_build(load_lego(lego), lego)   # raises on any bad reference
+                self.reg.validate_build(load_lego(lego), lego, scope="solo")   # raises on any bad reference
 
 
 class TestFirewallSpecialtyArtifacts(unittest.TestCase):
@@ -1204,3 +1273,35 @@ class TestNoImportCycles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestScopeDeclarations(unittest.TestCase):
+    """What the shipped tree declares about where a tag may not go — and the
+    scan rule, stated over the real tree: every tag with container reach
+    forbids `member`; a harness's Dockerfile ENTRYPOINT is an image fact the
+    rule does not touch."""
+
+    def setUp(self):
+        self.reg = scan_all(paths.AGENTS_DIR)
+
+    def test_the_shipped_declarations(self):
+        self.assertEqual({n: set(t.forbid_on) for n, t in self.reg.specialties.items() if t.forbid_on},
+                         {"dood": {"member"}, "firewall": {"member", "cluster"}, "muxer": {"member"},
+                          "read-only": {"member"}, "cluster": {"solo"}, "cluster-cowork": {"solo"}})
+        for kind in (self.reg.professions, self.reg.policies, self.reg.engines, self.reg.ais, self.reg.harnesses):
+            for tag in kind.values():
+                self.assertEqual(tag.forbid_on, frozenset(), tag.name)
+
+    def test_every_tag_with_container_reach_forbids_member(self):
+        for tag in self.reg.get_all():
+            layer = getattr(tag, "layer", None)
+            reaches = (any(c.container_level for c in (tag.docker, layer.docker if layer else None) if c)
+                       or bool(getattr(tag, "workspace_readonly", False)))
+            with self.subTest(tag=tag.name):
+                if reaches:
+                    self.assertIn("member", tag.forbid_on)
+
+    def test_a_harness_entrypoint_is_an_image_fact_not_a_contribution(self):
+        claude_code = self.reg.harnesses["claude-code"]
+        self.assertIn("ENTRYPOINT", claude_code.dockerfile.read_text())
+        self.assertFalse(claude_code.docker.container_level)     # its tag.docker is [build]-only
+        self.assertEqual(claude_code.forbid_on, frozenset())    # a harness is per member by design

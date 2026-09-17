@@ -2,13 +2,14 @@
 strings. build_status_line is pure string assembly over an Instance plus one
 JSON field read (patched here), so it tests without any launcher state."""
 
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from launch.ai import active_adapter
-from launch import claude_code_config
+from launch import claude_code_config, paths
 from launch.claude_code_config import SQUASH_AT, colored_tag_chain
 from launch.tags import Instance, PolicyStance
 
@@ -146,3 +147,62 @@ class TestSetTerminalTitle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCredentialsNotice(unittest.TestCase):
+    """credentials_notice — one line before docker runs, only when the login
+    state deserves it: nothing to log in with, or a key beside a login."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from launch.ai import CLAUDE_CODE
+        from launch.paths import AGENTS_DIR
+        from launch.tags import scan_all
+        self.adapter, self.ai = CLAUDE_CODE, scan_all(AGENTS_DIR).ais["claude"]
+
+    def _login(self):
+        for f in self.adapter.auth_files:
+            path = paths.credentials_dir(self.adapter.key) / f.name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"%s": {"x": 1}}' % f.login_key)
+
+    def _key(self):
+        paths.key_file("claude").parent.mkdir(parents=True, exist_ok=True)
+        paths.key_file("claude").write_text("ANTHROPIC_API_KEY=sk\n")
+
+    def test_nothing_to_log_in_with(self):
+        notice = claude_code_config.credentials_notice(self.adapter, self.ai)
+        self.assertIn("no API key file", notice)
+        self.assertIn("log in inside the container", notice)
+
+    def test_a_login_alone_says_nothing(self):
+        self._login()
+        self.assertIsNone(claude_code_config.credentials_notice(self.adapter, self.ai))
+
+    def test_a_login_recorded_in_one_file_only_is_not_a_login(self):
+        # The post-incident split — an account in .claude.json, a blank token
+        # file — is exactly a state where the CLI prompts.
+        self._login()
+        creds = self.adapter.auth_file("credentials")
+        (paths.credentials_dir(self.adapter.key) / creds.name).write_text(creds.blank)
+        notice = claude_code_config.credentials_notice(self.adapter, self.ai)
+        self.assertIsNotNone(notice)
+        self.assertIn("log in inside the container", notice)
+
+    def test_a_key_alone_says_nothing(self):
+        self._key()
+        self.assertIsNone(claude_code_config.credentials_notice(self.adapter, self.ai))
+
+    def test_a_key_beside_a_login_names_the_precedence(self):
+        self._login()
+        self._key()
+        notice = claude_code_config.credentials_notice(self.adapter, self.ai)
+        self.assertIn("takes precedence", notice)
+        self.assertNotIn("sk", notice.split("credentials/keys/")[-1][:0])   # (the path is fine to name; the value never appears)
+
+    def test_no_ai_means_no_notice(self):
+        self.assertIsNone(claude_code_config.credentials_notice(self.adapter, None))

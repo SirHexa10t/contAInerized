@@ -198,19 +198,20 @@ def _tag_lines(tags: Sequence[Tag], problems: Sequence[TagProblem], *,
         lines.append("\n  ")
         lines.append(problem.label, style=STYLE_ALERT)
         lines.append(" " * (pad - len(problem.label)) + "  ")
-        lines.append(f"{problem.reason.replace('_', ' ')} {problem.kind} — "
-                     f"fix it via F2 before {fix_target}")
+        lines.append(problem.hint if problem.reason == "forbidden" else
+                     f"{problem.reason.replace('_', ' ')} {problem.kind} — fix it via F2 before {fix_target}")
     return lines
 
 
-def _resolve_tags(registry: Registry, build: AgentBuild,
+def _resolve_tags(registry: Registry, build: AgentBuild, *, scope: str,
                   ) -> tuple[list[Tag], list[TagProblem]]:
     """A build's profession / specialty / policy names as Tag objects (build
-    order), plus a TagProblem for every name that resolves to nothing —
-    `Registry.resolve_store_build`'s non-raising partition, as objects. The
-    engine is left out: it is a fact line, not a tag-list entry. Rows use the
-    tags; panes use both."""
-    clean, problems = registry.resolve_store_build(build)
+    order), plus a TagProblem for every name that resolves to nothing or
+    cannot stand in `scope` (an agent's `.lego` is a `solo` build, a
+    cluster's shared set a `cluster` one) — `Registry.resolve_store_build`'s
+    non-raising partition, as objects. The engine is left out: it is a fact
+    line, not a tag-list entry. Rows use the tags; panes use both."""
+    clean, problems = registry.resolve_store_build(build, scope=scope)
     names = (*clean.professions, *clean.specialties, *clean.policies)
     return [tag for name in names if (tag := registry.get(name)) is not None], problems
 

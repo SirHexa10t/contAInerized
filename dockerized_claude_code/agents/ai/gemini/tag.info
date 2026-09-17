@@ -4,6 +4,7 @@ short_description = "natively multimodal with the longest context windows; the F
 full_description  = "Google's Gemini line (Pro, Flash, Flash-Lite). Built multimodal from the start — text, images, audio and video in one model — with the field's longest context windows and grounding in Google Search; the Flash and Flash-Lite tiers are its fast, cheap end."
 vendor            = "Google"
 harness           = "gemini-cli"       # its default harness — an agents/harness/ member
+key_env           = "GEMINI_API_KEY"        # the vendor's API-key variable: credentials/keys/gemini.env defines it — Gemini CLI (also via .gemini/.env), OpenCode, Hermes, OpenClaw; GOOGLE_API_KEY is the older alias
 default           = false
 fg                = "#ffffff"          # the ⟪Gemini⟫ tag: white on Google blue
 bg                = "#4285f4"

@@ -1,5 +1,9 @@
 shortname         = "cc"
 short_description = "cluster members must consult, not just cohabit"
+# Needs the queue, `cluster-chat` and a member roster — cluster machinery a
+# solo instance never has; greyed on the instance form (like {clstr}, which
+# it requires).
+forbid_on         = ["solo"]
 full_description  = "Turns a cluster from neighbours into a team: members are OBLIGED to run consequential decisions past each other through the work protocol's queue, instead of each planning and building alone in its own window. Before committing to anything costly to undo — the plan it is about to execute, an architecture or dependency choice, a schema change, a substantial rewrite, a roadmap shift — a member opens a GATE on the shared queue; every sibling then owes exactly one reply: a fold (`nop` — the honest 'outside my reach without deep work', and the commonest answer), a 0-10 stance with reasons and riders, or a hold when the thing diverges from the goals. The opener reads what came back and closes the gate with a resolution, and that whole exchange is the team's ordered, readable record. Its teeth are not prose: this tag installs a prompt-time briefing hook, so at the exact moment a task arrives a member is told what it has not read, which gates it owes a reply to, and that commitments need a gate first. Without this tag, cluster members share a container and a project but nothing obliges them to ask each other anything — which is what a live trial found them doing."
 
 # Nested inside {cluster} because the protocol has nothing to run on without

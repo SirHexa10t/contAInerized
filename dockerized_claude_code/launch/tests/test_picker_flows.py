@@ -64,6 +64,19 @@ class TestCreateClusterFlow(unittest.TestCase):
         self.assertEqual(cluster.member("researcher__primary").build.engine,
                          "researcher")
 
+    def test_a_member_whose_defaults_carry_a_member_forbidden_tag_is_refused_at_creation(self):
+        # feature-identifier.lego carries {firewall}: refused at creation,
+        # nothing saved, and the message says the cluster cannot carry it —
+        # not that the .lego is wrong (agent-writer, gate tag-scopes).
+        with patch.object(picker_flows, "_report_to_picker") as report:
+            self.flow([("golem", None), ("feature-identifier", None)])
+        from launch.cluster import state
+        self.assertIsNone(state.load("myteam"))
+        (message,), _ = report.call_args
+        self.assertIn("feature-identifier", message)
+        self.assertIn("not in a cluster", message)
+        self.assertNotIn(".lego", message)
+
     def test_the_form_opens_prefilled_with_the_template(self):
         form = self.flow([("golem", None)])
         prefill = form.call_args.args[1]

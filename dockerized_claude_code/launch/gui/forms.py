@@ -21,6 +21,7 @@ from typing import Callable, cast, overload
 
 from ..paths import toolkit_profile_path, ui_profile_path
 from ..tags import (
+    is_scope, scope_note,
     AgentBuild, Ai, Engine, Harness, Policy, Profession, Registry, Specialty, Tag, ToolkitEntry,
 )
 from ..tags.ai import sorted_ais
@@ -33,7 +34,8 @@ from .form_core import (
 )
 from .styles import STYLE_UNDERLINE, UiClass, tag_style
 
-def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None = None, note: str = "") -> FormOption:
+def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None = None, note: str = "",
+             inherited: bool = False, forbidden: str | None = None) -> FormOption:
     """One selectable form row: colored kind-punctuated label + the tag's
     short description, a dim `(requires: …)` parenthetical when it has
     prerequisites, and the full description as the focused-row body — led by
@@ -45,7 +47,15 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None
     checked, inert to Space, with an `(always-on)` marker — the user sees
     it applies but can't change it (prompt_tags also filters it out of the
     returned build; it's never persisted). `note` is a dim trailer the
-    caller adds (a harness row: the AIs it runs)."""
+    caller adds (a harness row: the AIs it runs).
+
+    Two more locked states, kept apart on purpose (gate tag-scopes): an
+    INHERITED tag — the cluster gave it to this member — is locked and
+    CHECKED with `(from the cluster)`, so it stays in the checked set and a
+    combo warning it completes (cluster `{dood}` + this member's `{auto}`)
+    still fires; a tag FORBIDDEN as this build's own (`forbidden` = the
+    scope note, e.g. `{dood}` on a member row) is locked and UNCHECKED with
+    the note, so it can neither be picked nor mistaken for active."""
     always_on = getattr(tag, "always_on", False)
     label: list[tuple[str, str]] = [(tag_style(tag), tag.label), ("", " ")]
     label.append(("", tag.short_description))
@@ -55,19 +65,23 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None
         label.append((UiClass.STATUS.css, f"  {note}"))
     if always_on:
         label.append((UiClass.STATUS.css, "  (always-on)"))
+    if inherited:
+        label.append((UiClass.STATUS.css, "  (from the cluster)"))
+    elif forbidden:
+        label.append((UiClass.STATUS.css, f"  ({forbidden})"))
     if tag.requires:
         label.append((UiClass.STATUS.css, f"  (requires: {', '.join(sorted(tag.requires))})"))
     return FormOption(
         key=tag.name,
         label=label,
         body=[(STYLE_UNDERLINE, tag.fullname), ("", f": {tag.full_description}")],
-        checked=True if always_on else checked,
+        checked=False if (forbidden and not inherited) else True if (always_on or inherited) else checked,
         group=group,
-        locked=always_on,
+        locked=bool(always_on or inherited or forbidden),
     )
 
 
-def _tag_form_options(registry: Registry, current: AgentBuild, *,
+def _tag_form_options(registry: Registry, current: AgentBuild, *, scope: str,
                       engines: bool = True,
                       locked: frozenset[str] = frozenset(),
                       ) -> list[FormOption]:
@@ -81,12 +95,20 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *,
     leading symbol (`!` < `+` < `-` in ASCII), so same-stance policies sit
     together: demands, then grants, then denials.
 
-    `engines=False` drops the AI, harness and engine sections — the CLUSTER-level
-    form, where per-member choices (which AI, which CLI, how hard it thinks) have no meaning. `locked` names tags that
-    render checked-and-inert (the treatment an `always_on` policy gets):
-    the cluster form locks {mux}/{clstr}, and a MEMBER's form locks whatever
-    its cluster already imposes, so a member can see what applies to it
-    without being able to opt out."""
+    `scope` is where the build being edited lives (`tags.SCOPES`: solo /
+    cluster / member): a tag whose `forbid_on` names it renders locked,
+    unchecked and grey with its `scope_note` — `{dood}` on a member row says
+    "cluster-wide only: F2 on the cluster row" — so the form itself shows
+    what a build cannot carry (operator request, 2026-09-16). `engines=False`
+    drops the AI, harness and engine sections — the CLUSTER-level form, where
+    per-member choices (which AI, which CLI, how hard it thinks) have no
+    meaning. `locked` names tags that render checked-and-inert (the treatment
+    an `always_on` policy gets): the cluster form locks {mux}/{clstr}, and a
+    MEMBER's form locks whatever its cluster already imposes, marked `(from
+    the cluster)`, so a member can see what applies to it without being able
+    to opt out — and an inherited tag stays CHECKED even where a member could
+    not add it itself, so the combo warnings it completes keep firing."""
+    is_scope(scope)
     checked = {*current.professions, *current.specialties, *current.policies}
 
     def header(kind_cls: type[Tag]) -> FormOption:
@@ -125,13 +147,15 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *,
                                               key=lambda p: p.shortname))):
         out.append(header(kind_cls))
         for tag in members:
-            row = _tag_row(tag, checked=tag.name in checked or tag.name in locked)
-            out.append(replace(row, locked=True) if tag.name in locked else row)
+            inherited = tag.name in locked
+            forbidden = scope_note(tag, scope) if scope in tag.forbid_on else None
+            out.append(_tag_row(tag, checked=tag.name in checked, inherited=inherited, forbidden=forbidden))
     return out
 
 
 def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
                         session: str, locked: frozenset[str],
+                        member_tags: frozenset[str] = frozenset(),
                         ) -> "AgentBuild | None":
     """The CLUSTER-level tag form — step one of creating or editing a cluster
     (operator request, 2026-09-02: set `{cc}` once for the cluster instead of
@@ -142,11 +166,18 @@ def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
     that make a cluster a cluster ({mux}/{clstr} — checked and inert, the
     `always_on` treatment), and a preamble that says plainly what the
     selection does, because "these tags are forced on every member" is not
-    something a tag list can imply on its own."""
-    options = _tag_form_options(registry, current, engines=False, locked=locked)
+    something a tag list can imply on its own.
+
+    `member_tags` are the names the members carry as their OWN (on disk for
+    an edit; the template's `.lego` defaults for a creation): a combo warning
+    is judged over the cluster's set UNION those, so ticking `{dood}`
+    cluster-wide on a cluster whose members already carry `{auto}` warns at
+    the moment of the decision — the moment cluster-wide `{dood}` makes that
+    combination reachable for every member (strict-reviewer, gate tag-scopes)."""
+    options = _tag_form_options(registry, current, scope="cluster", engines=False, locked=locked)
     result = checkbox_form(
         f"Cluster tags for '{session}'  (Space to toggle):", options,
-        warnings=_combo_warnings(registry),
+        warnings=_warnings_given(_combo_warnings(registry), member_tags),
         requires=_form_requires(registry),
         wants=_form_wants(registry),
         labels=_form_labels(registry),
@@ -167,6 +198,21 @@ def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
         specialties=tuple(n for n in registry.specialties if n in picked),
         policies=tuple(n for n, p in registry.policies.items()
                        if n in picked and not p.always_on))
+
+
+def _warnings_given(warnings: dict[frozenset[str], tuple[str, list[str]]],
+                    already: frozenset[str]) -> dict[frozenset[str], tuple[str, list[str]]]:
+    """`warnings` re-keyed for a form whose checked set is completed by tags
+    checked ELSEWHERE (`already` — the members' own tags, for the cluster
+    form): a combo minus those fires when this form ticks the rest. A combo
+    `already` covers entirely is not this form's to warn about, and one it
+    touches not at all is kept as is."""
+    out: dict[frozenset[str], tuple[str, list[str]]] = {}
+    for combo, entry in warnings.items():
+        remainder = combo - already
+        if remainder:
+            out[remainder] = entry
+    return out
 
 
 def _combo_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[str]]]:
@@ -231,17 +277,17 @@ def _form_labels(registry: Registry) -> dict[str, str]:
 
 @overload
 def prompt_tags(registry: Registry, current: AgentBuild, *,
-                instance: str, workspace: str | None = None,
+                instance: str, scope: str, workspace: str | None = None,
                 locked: frozenset[str] = frozenset(),
                 fields: None = None) -> "AgentBuild | None": ...
 @overload
 def prompt_tags(registry: Registry, current: AgentBuild, *,
-                instance: str, workspace: str | None = None,
+                instance: str, scope: str, workspace: str | None = None,
                 locked: frozenset[str] = frozenset(),
                 fields: list[TextField],
                 ) -> "tuple[dict[str, str], AgentBuild] | None": ...
 def prompt_tags(registry: Registry, current: AgentBuild, *,
-                instance: str, workspace: str | None = None,
+                instance: str, scope: str, workspace: str | None = None,
                 locked: frozenset[str] = frozenset(),
                 fields: list[TextField] | None = None,
                 ) -> "AgentBuild | tuple[dict[str, str], AgentBuild] | None":
@@ -253,8 +299,10 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
     Two shapes, one form: WITHOUT fields, `instance` + `workspace` are
     already-answered prompts echoed as the preamble (the member-tag-edit call
     site). WITH fields, the workspace/name ARE the fields — no terminal
-    prompt precedes the form — and the preamble only names the agent."""
-    options = _tag_form_options(registry, current, locked=locked)
+    prompt precedes the form — and the preamble only names the agent.
+    `scope` says where the build lives (solo / member) — the rows a tag's
+    `forbid_on` keeps out of it render greyed and come back unpicked."""
+    options = _tag_form_options(registry, current, scope=scope, locked=locked)
     preamble = ([f"# agent:  {instance}"] if fields is not None
                 else [f"# instance:  {instance}",
                       f"# workspace: {workspace}"])

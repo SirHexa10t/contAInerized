@@ -21,10 +21,12 @@ docker_config calls in from set_container_env (status line) and
 run_container (terminal title); run.py prints the banner; nothing else
 does."""
 
-from .ai import active_adapter
-from .file_access import home_dir, read_json_field, user_firewall_whitelist_lines
-from .paths import ACCOUNT_FILE, DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE
-from .tags import Instance, PolicyStance, Tag
+from collections.abc import Sequence
+
+from .ai import Adapter, active_adapter
+from .file_access import home_dir, read_json_field, user_firewall_whitelist_lines, home_relative, login_recorded, is_file
+from .paths import DOCKERIZED_CLAUDE_ROOT, FIREWALL_WHITELIST_FILE, auth_file_path, credentials_dir, key_file
+from .tags import Ai, Instance, PolicyStance, Tag
 from .tags.base import SQUASH_AT
 from .utils import plural
 
@@ -97,7 +99,7 @@ def build_status_line(inst: Instance) -> str:
     def cap(name: str) -> str:
         return name.replace('-', ' ').replace('_', ' ').title()
 
-    email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
+    email = _account_email()
     chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
     # Whole prefix (email + separator) drops out when the field is absent —
     # interpolating the raw lookup would render the literal string "None".
@@ -125,7 +127,7 @@ def build_cluster_status_line(inst: Instance, member_id: str) -> str:
     Staged per member (each tab's own `--env`), because container-wide env
     could only ever carry one member's line."""
     CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
-    email = read_json_field(ACCOUNT_FILE, "oauthAccount", "emailAddress")
+    email = _account_email()
     email_part = f"{GREEN}{email}{RESET} : " if email else ""
     chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
     return (f"{CYAN}● {member_id} {GREY}( {inst.workspace} ){RESET}"
@@ -142,7 +144,49 @@ def set_terminal_title(name: str) -> None:
     print(f"\033]0;{active_adapter().name} — {name}\007", end="", flush=True)
 
 
-def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
+def credentials_notice(adapter: Adapter, ai: Ai | None) -> str | None:
+    """One plain line before docker runs, when the login state deserves it
+    (plans/credentials.md): no key file and every auth file still blank — the
+    CLI will ask for a login inside the container, and that login is kept for
+    later launches; or a key file beside a stored login — the key wins (Claude
+    Code reads ANTHROPIC_API_KEY before its /login session, and asks once
+    whether to use it), so a subscription user should remove the key file.
+    None when there is nothing to say."""
+    if ai is None:
+        return None
+    key = key_file(ai.name)
+    # ALL of them: the post-incident split — account recorded, token blank —
+    # is exactly a state where the CLI will prompt (strict-reviewer, gate
+    # one-startup).
+    logged_in = all((path := auth_file_path(adapter, f.role)) is not None and login_recorded(path, f)
+                    for f in adapter.auth_files)
+    if is_file(key) and logged_in:
+        return (f"  Note: {home_relative(key)} is present — the key takes precedence over the stored "
+                f"{adapter.name} login for {ai.label}; remove the file to use the login instead.")
+    if not is_file(key) and not logged_in:
+        return (f"  Note: no API key file ({home_relative(key)}) and no {adapter.name} login yet — the CLI will ask "
+                f"you to log in inside the container; the login is kept under {home_relative(credentials_dir(adapter.key))}/ for later launches.")
+    return None
+
+
+def _account_email() -> str | None:
+    """The logged-in account's email from the harness's account file, or None
+    (no such file, no such field — the banner then shows no email)."""
+    account = auth_file_path(active_adapter(), "account")
+    return read_json_field(account, "oauthAccount", "emailAddress") if account else None
+
+
+def optional_creds_line(cred_names: Sequence[str]) -> str | None:
+    """The banner line naming the optional-creds services this container
+    mounts, or None when it mounts none — one spelling for the solo banner
+    and the cluster's (a cluster carries the operator's creds like every solo
+    instance, and says so the same way)."""
+    if not cred_names:
+        return None
+    return f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)"
+
+
+def print_launch_banner(inst: Instance, cred_names: Sequence[str]) -> None:
     """Print the multi-line summary that appears before docker builds the
     image — agent definition path, engine, one line per active tag axis, and
     creds counts when applicable. Each line is conditional on having
@@ -161,8 +205,8 @@ def print_launch_banner(inst: Instance, cred_names: list[str]) -> None:
         print(f"  Specialties:      {' '.join(s.label for s in inst.specialties)}")
     if inst.policies:
         print(f"  Policies:         {' '.join(p.label for p in inst.policies)}")
-    if cred_names:
-        print(f"  Optional creds:   {', '.join(cred_names)} (from user_extras/optional_creds/)")
+    if (creds_line := optional_creds_line(cred_names)) is not None:
+        print(creds_line)
     if any(s.name == "firewall" for s in inst.specialties):
         whitelist_count = len(user_firewall_whitelist_lines())
         display_path = "~/" + str(FIREWALL_WHITELIST_FILE.relative_to(home_dir()))

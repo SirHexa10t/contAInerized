@@ -13,7 +13,8 @@ listing is file-access work, not a path constant."""
 import os
 from pathlib import Path
 
-from .ai.claude_code import CLAUDE_CODE as _HARNESS   # the ONE in-project import of this leaf: the harness's file and dir names (see the config-root block)
+from .ai.adapter import Adapter
+from .ai.claude_code import CLAUDE_CODE as _HARNESS   # the in-project imports of this leaf: the config-root names (see that block) and the adapter type the credential builders take
 from typing import Callable, Iterator
 
 
@@ -51,8 +52,10 @@ FIREWALL_WHITELIST_TEMPLATE    = TEMPLATE_FILES_DIR / "firewall_whitelist.txt"  
 
 _HOME = Path.home()
 AGENTS_STATE = _HOME / ".ai-agents"                                 # renamed from ~/.ai-agents on 2026-09-14 (several AIs, several harnesses); tags/migrations.py moves an old dir into place
-ACCOUNT_FILE = AGENTS_STATE / _HARNESS.account_filename            # shared OAuth account info (the harness's filename)
-CREDENTIALS_FILE = AGENTS_STATE / _HARNESS.credentials_filename    # shared API credentials (the harness's filename)
+# Credentials live under AGENTS_STATE/credentials/ — see the builders
+# `credentials_dir` / `key_file` / `auth_file_mounts` below (call-time, per
+# harness and per AI; plans/credentials.md). Until 2026-09-15 one Claude Code
+# pair sat at the state root, bound here at import.
 INSTANCES_FILE = AGENTS_STATE / "instances.toml"                 # per-instance axis store — one table per instance id: {workspace, engine, professions[], specialties[], policies[]} (tags/store.py; retired-format conversions live in tags/migrations.py)
 CACHE_ROOT = AGENTS_STATE / "cache"
 
@@ -210,18 +213,17 @@ INIT_FIREWALL_SH = AGENTS_DIR / "specialty" / "firewall" / "init-firewall.sh"   
 # Always-on container bind-mounts
 # ============================================================
 # Source path (on host) → container target with any docker access-mode suffix
-# (`:ro`) baked in. Iterated by docker_config.set_container_mounts, which
-# calls add_docker_mount per entry — same {source: target} shape as the
-# _docker_mounts accumulator the function feeds. These are the static mounts
+# (`:ro`) baked in. `base_mounts()` turns it into the (source, target) pairs
+# both launch shapes feed to add_docker_mount. These are the static mounts
 # every launch gets — all mount staging lives in Python. Per-instance mounts (the picked
-# workspace + the picked instance's state dir) stage inline next to this
-# iteration since their host paths are derived from the picked instance, not
-# constants.
+# workspace + the picked instance's state dir) stage inline in
+# docker_config.set_container_mounts since their host paths are derived from
+# the picked instance, not constants; the agent's own files are
+# staging.stage_instance's.
 
 DOCKER_BASE_MOUNTS = {
-    # Per-instance state files (these source constants serve other modules too — audit, agents_crud)
-    ACCOUNT_FILE:                               f"{CLAUDE_HOME_IN_CONTAINER}/{_HARNESS.account_filename}",           # shared OAuth account info
-    CREDENTIALS_FILE:                           f"{CLAUDE_CONFIG_IN_CONTAINER}/{_HARNESS.credentials_filename}",    # shared API credentials — Claude Code refreshes the token in place
+    # The harness's auth files are NOT here: they depend on the instance's
+    # harness — `auth_file_mounts` stages them per launch (plans/credentials.md).
     # Project-bundled sources — inlined since DOCKER_BASE_MOUNTS is their only consumer
     # NOTE: custom_commands/ is deliberately NOT here. Commands are assembled per
     # instance (shared + every command the active tags declare) into
@@ -360,6 +362,67 @@ OPTIONAL_CREDS_TOKEN_ENV_VARS = {
 # Naming convention: `_path` suffix on every builder (file or dir — the name
 # describes WHAT, the type system handles HOW). Group comments call out what's
 # being built.
+
+# Credentials (plans/credentials.md, 2026-09-15): two axes under
+# AGENTS_STATE/credentials/. `keys/<ai>.env` — an API key is the AI's (its
+# vendor's variable, static, shareable, portable): passed to docker as
+# `--env-file` for whichever harness runs that AI. `<harness>/<file>` — an
+# OAuth grant is the harness's (refreshed in place, sometimes keyring- or
+# hostname-bound, vendor-gated): the adapter's `auth_files` say which files
+# and where the container expects them. Call-time, so a test that redirects
+# AGENTS_STATE moves these too.
+credentials_dir:         Callable[[str], Path]          = lambda harness: AGENTS_STATE / "credentials" / harness
+key_file:                Callable[[str], Path]          = lambda ai: AGENTS_STATE / "credentials" / "keys" / f"{ai}.env"
+
+
+def auth_file_mounts(adapter: Adapter, *, config: str, relocated: bool) -> list[tuple[str, str]]:
+    """The `(host source, container target[:ro])` pairs for one harness's auth
+    files. `config` is the CLI's config root inside the container for this
+    launch (the default root for a solo instance, the member's own dir in a
+    cluster); `relocated` says whether the relocation variable points there —
+    an `account`-anchored file then lives inside it, else at HOME (Claude
+    Code's `.claude.json` rule, probed 2026-09-14). Sources may repeat across
+    calls (every cluster member mounts the same host file), which is why the
+    result is a list of pairs, not a dict."""
+    out: list[tuple[str, str]] = []
+    for f in adapter.auth_files:
+        if f.scope != "shared":
+            raise NotImplementedError(f"{adapter.key}/{f.name}: per-instance auth files are not built yet (plans/credentials.md, decision 2)")
+        root = config if (f.anchor == "config" or relocated) else str(CLAUDE_HOME_IN_CONTAINER)
+        suffix = f":{RO_MOUNT_OPTION}" if f.mode == "ro" else ""
+        out.append((str(credentials_dir(adapter.key) / f.name), f"{root}/{f.name}{suffix}"))
+    return out
+
+
+def base_mounts() -> list[tuple[str, str]]:
+    """DOCKER_BASE_MOUNTS as `(host, target[:ro])` string pairs — the shape
+    both launch paths consume (the solo accumulator and the cluster's list),
+    so neither spells the iteration itself."""
+    return [(str(host), str(target)) for host, target in DOCKER_BASE_MOUNTS.items()]
+
+
+def settings_mount(state_dir: Path, config: str) -> tuple[str, str]:
+    """The launcher-generated settings file, READ-ONLY over the CLI's own
+    path inside `config` (the config root of this launch shape) — the mount
+    shadows the read-write view of the same file, so an agent cannot relax
+    its own policies. One definition for a solo instance and a cluster member."""
+    return (str(state_settings_path(state_dir)), f"{state_settings_path(Path(config))}:{RO_MOUNT_OPTION}")
+
+
+def commands_mount(state_dir: Path, config: str) -> tuple[str, str]:
+    """The assembled slash-command dir, READ-ONLY over the CLI's own path
+    inside `config` — the same shadow as `settings_mount`, for the same
+    reason (an agent must not edit the commands it was granted), and the
+    same one definition for a solo instance and a cluster member (whose dir
+    was writable through the /cluster mount until 2026-09-15)."""
+    return (str(state_commands_dir(state_dir)), f"{state_commands_dir(Path(config))}:{RO_MOUNT_OPTION}")
+
+
+def auth_file_path(adapter: Adapter, role: str) -> Path | None:
+    """The host path of the adapter's auth file playing `role`, or None."""
+    f = adapter.auth_file(role)
+    return credentials_dir(adapter.key) / f.name if f else None
+
 
 # Per-state-dir files & subdirs (state_dir = ~/.ai-agents/<instance>/).
 # `state_domain_resolve_status_path` is the per-instance status file the

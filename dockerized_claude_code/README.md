@@ -29,7 +29,12 @@ isolated Docker container with persistent per-instance state.
   agent that draws out connections and related tidbits (on the `reliable`
   engine), and
   **`--research`** uses a source-checking research agent (mutually exclusive
-  with `--explain`). Each question's thread is saved under
+  with `--explain`). The question goes to **claude** unless **`--ai <name>`**
+  names another AI member of `agents/ai/` (`q -h` lists them and says which
+  can answer today — the ones whose CLI has an adapter; the others are
+  refused with what an adapter needs). If the run ends without an answer —
+  Claude Code not logged in, a rate limit — the CLI's own words print on
+  stderr, with how to log in (once, through a normal launch). Each question's thread is saved under
   `~/.ai-agents/quickie/`, sharing one `communal/` workspace you can drop
   files into. **`q --history`** lists past threads (grey timestamp, id, last
   question; oldest first); **`q --answer <id>`** reprints a thread's saved
@@ -189,6 +194,9 @@ isolated Docker container with persistent per-instance state.
   Since 2026-09-14 it also flags instances, cluster members and agents that
   name no `ai` / `harness`: they run the tree's defaults, and anything older
   than the two kinds is most likely meant for `claude` in `claude-code`.
+  It checks the credentials too: each adapted harness's login files (present,
+  valid JSON, mode 600) and each AI's key file (mode 600, docker's grammar,
+  the vendor's variable and nothing else).
 
 ## Tech Stack & Setup
 
@@ -203,18 +211,24 @@ Host requirements:
   — the canonical list lives in `pyproject.toml`'s `[project]` table
 
 Inside the container, the runtime image is built incrementally as a chain of
-layers. The root `Dockerfile` (the **base** stage) installs Claude Code +
-`uv` + ripgrep + iptables — what every agent needs. On top of that, each
-image-bearing tag supplies its own Dockerfile from the agents/ tree
-(`agents/profession/code/Dockerfile` adds `build-essential`, Rust, Node;
+layers. The root `Dockerfile` (the **base** stage) installs `uv` + ripgrep +
+python3 + iptables — what every agent needs whatever CLI it runs in. On top
+of that, each image-bearing tag supplies its own Dockerfile from the agents/
+tree (`agents/profession/code/Dockerfile` adds `build-essential`, Rust, Node;
 `agents/profession/code/webdev/Dockerfile` adds the playwright CLI;
 `agents/profession/code/_dood/Dockerfile` is `{dood}`'s layer), plus an
 optional `tag.docker` declaring its build-args, mounts, capabilities, and
 entrypoint. Run-only specialties (`{auto}`, `{firewall}`) contribute
-container config without an image layer. Intermediate images are tagged
-`claude-agents:base`, `claude-agents:code`, `claude-agents:code.dood`,
-etc., so common prefixes are cached. Nothing else needs to be on the host
-for the agents themselves.
+container config without an image layer. LAST comes the **harness** layer
+(`agents/harness/claude-code/Dockerfile`): the agent CLI itself, its env
+switches and the image's `ENTRYPOINT`, plus the weekly OS security upgrade —
+last so the weekly refresh rebuilds that one layer and nothing beneath it
+(until 2026-09-16 the CLI lived in the base and every layer rebuilt weekly).
+Images are tagged `claude-agents:base`, `claude-agents:code`,
+`claude-agents:code.dood.claude-code`, etc., so common prefixes are cached;
+a layer that changes (a rebuilt parent, a toggled toolchain) leaves its old
+image untagged — `docker image prune` reclaims those. Nothing else needs to
+be on the host for the agents themselves.
 
 ### Install — Linux
 
@@ -300,6 +314,7 @@ ai poet                               # new instance of poet, no picker
 q "why do elephants have big ears?"   # one-shot question (quote it)
 q --explain "how do rainbows form?"   # answer + connections & related tidbits (trivia, Opus)
 q --research "latest on <topic>?"     # deeper, source-checked (research agent)
+q --ai gemini "how old is the moon?"  # ask another AI (q -h lists them; today only claude's CLI can answer)
 q --history                           # list past question threads (grey timestamp, id, question)
 q --answer <id>                       # reprint a past thread's answer
 q --resume <id> "and their trunks?"   # continue a thread (id from --history)
@@ -351,10 +366,22 @@ python3 cowork.py close boss__proj-widget               # end a group; its files
 If you installed the shortcut aliases (see *Shortcut aliases* above), `ai …`
 is equivalent to `python3 run.py …`, and `q "…"` runs the quick-question tool.
 
-On first launch, Claude Code walks you through OAuth onboarding inside the
-container; the resulting `~/.ai-agents/.claude.json` and
-`~/.ai-agents/.credentials.json` are bind-mounted into every subsequent
-container, so you never have to re-authenticate per agent.
+Two ways in (plans/credentials.md). An API key: put the vendor's variable in
+`~/.ai-agents/credentials/keys/<ai>.env` (`ANTHROPIC_API_KEY=…`, one line,
+docker's `--env-file` grammar — no quotes, no `export`; the launcher fixes the
+mode to 600 and refuses a line docker would mis-read) and every harness that
+runs that AI receives it. Or a login: on first launch the CLI walks you through
+its OAuth onboarding inside the container, and the resulting files land under
+`~/.ai-agents/credentials/<harness>/` (Claude Code: `.credentials.json` and
+`.claude.json`), bind-mounted read-write into every later container, so you
+never re-authenticate per agent. Both present: the key wins — Claude Code reads
+`ANTHROPIC_API_KEY` before its stored login and asks once whether to use it —
+so a subscription user keeps no key file; the launcher says so before it runs.
+A key in the container's environment is readable by every process in it,
+every cluster member, and `docker inspect`; prefer the login where the vendor
+allows it. A cluster's members likewise share the operator's optional
+credentials (`user_extras/optional_creds/`), exactly as every solo instance
+does — one container, one set of mounts, named in the launch banner.
 
 A successful launch prints a banner summarising the resolved agent (chain,
 skills, optional creds, whitelist), then builds each chain step incrementally,
@@ -389,7 +416,7 @@ red under the banner.
 | Backspace | Edit the filter |
 | Enter | Select — launch the highlighted instance or cluster, or create from an agent / cluster template. Inert on a cluster member: members launch with their cluster |
 | Del | Delete the highlighted row (with confirmation): an instance and its state dir, a cluster and its members, or one member out of its cluster |
-| F2 | Redefine the highlighted row in one form: an instance's project path, name and tags; a cluster's tags, then its name, project and membership; a member's own tags (the cluster's show locked) |
+| F2 | Redefine the highlighted row in one form: an instance's project path, name and tags; a cluster's tags, then its name, project and membership; a member's own tags (the cluster's show locked and marked `(from the cluster)`; a tag the row's scope cannot carry — `{dood}` per member, `{clstr}` on a solo instance — is greyed with the reason, e.g. `cluster-wide only: F2 on the cluster row`) |
 | F8 | Toggle the composition legend — overlays one table per kind (AIs / harnesses / engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
 
@@ -490,7 +517,7 @@ launcher code:
   Nest it under another profession to declare a requirement
   (`profession/code/webdev/` ⇒ `[webdev]` requires `[code]`).
 - **Specialty**: `agents/specialty/<name>/tag.info` (fields: `description`,
-  `warn`, `claude_args`, `[wants]`). If it needs an image layer, add a
+  `warn`, `claude_args`, `workspace_readonly`, `forbid_on`, `[wants]`). If it needs an image layer, add a
   hidden `_<name>/Dockerfile` under the profession it depends on (that tree
   position supplies the requirement — see `_dood` under `code/`). Static
   container config (mounts, `cap_add`, `entrypoint`, env forwards) goes in
@@ -500,6 +527,24 @@ launcher code:
   Claude Code settings fragment. Fragments merge (lists concatenate; a
   scalar conflict aborts the launch naming both policies) on top of
   `settings/settings.json`, and the result is mounted read-only.
+
+**Where a tag may not go — `forbid_on`.** A build lives in one of three
+scopes: a **solo** instance (an agent's `.lego` is its defaults), a
+**cluster**'s shared tag set (every member inherits it), or a **member**'s own
+additions. `forbid_on = ["member"]` in a tag's `tag.info` keeps it out of a
+scope, and that one declaration is what every surface reads: the tag form
+greys the row with the reason, the F8 legend shows `not on: …`, cluster
+creation and launch refuse with the same words, and the audit reports it as
+`forbidden_tag`. Shipped: `{dood}` and `{ro}` forbid `member` — one container
+has one docker socket and one workspace mount, so they are set on the whole
+cluster (the cluster's tag form) and every member inherits them; `{frwl}`
+forbids `member` and `cluster` (wrapping a cluster's entrypoint with the
+firewall chain is not built); `{clstr}` and `{cc}` forbid `solo` (cluster
+creation applies them). The scan insists every tag with container reach (a
+`tag.docker` capability, mount, env forward or entrypoint; `workspace_readonly`)
+forbids `member`, so the declaration cannot lag the physics. It covers
+container features, not image layers: a layer-claiming tag joins the cluster's
+union image, cluster-wide in effect but not impossible per member.
 
 `tag.info` is TOML: `short_description` (a few words, shown right next to
 the form row and in the F8 legend), `full_description` (the focused row's
@@ -528,8 +573,9 @@ syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
 
 ```
 ~/.ai-agents/
-  .claude.json                       # shared OAuth account info
-  .credentials.json                  # shared API credentials
+  credentials/                       # two axes (plans/credentials.md): API keys are the AI's, logins are the harness's
+    keys/<ai>.env                    # an API key: one 0600 file per AI, docker --env-file grammar (NAME=value verbatim, no quotes, no export) defining the vendor's variable the AI's tag.info names — passed to whichever harness runs that AI
+    <harness>/                       # a harness's login state, the files its adapter names, mounted read-write where the CLI keeps them (claude-code/: .credentials.json + .claude.json)
   instances.toml                     # per-instance tag selections + workspace — one table per <agent>__<session> (launcher-owned; the picker's F2 form is the supported editor)
   cache/                             # shared toolchain caches (cargo, npm, …); mounted into [code] agents only
   firewall_cache/                    # {firewall} host-side caches — resolved DNS + per-provider CDN ranges (host-only, TTL'd, rebuilt when stale)
@@ -652,27 +698,50 @@ the failed tool names + the exact retry command:
 The keypress gate sits between the build and `docker run`, so the warning
 isn't immediately clobbered when Claude Code's TUI takes over.
 
-`--refresh-installs` busts both cache-buster build-args (`SOFTWARE_STACK_REFRESH`
-and `FORCE_INSTALLS_REFRESH`) with a per-launch timestamp, forcing every
-install layer in the `[code]` Dockerfile to rebuild — already-installed tools
-fast-path through their package manager's no-op (`apt install -y` on a
-present package, `npm install -g` on a present global, etc.); previously-
-failed installs get a fresh shot. Successful installs strip their own name
-from the failure log so the warning clears once a retry actually works.
+`--refresh-installs` (on `run.py` and on `cluster.py launch`, where the union
+image gets the same prompt with `python3 cluster.py launch <session>
+--refresh-installs` as its retry line) re-pulls the Debian base and busts both
+cache-buster build-args (`SOFTWARE_STACK_REFRESH` and `FORCE_INSTALLS_REFRESH`)
+with a per-launch timestamp, forcing every install layer to rebuild —
+already-installed tools fast-path through their package manager's no-op
+(`apt install -y` on a present package, `npm install -g` on a present global,
+etc.); previously-failed installs get a fresh shot. Successful installs strip
+their own name from the failure log so the warning clears once a retry
+actually works.
+
+### What rebuilds when — the cache cadence
+
+Three cadences, each on its own build-arg, so an ordinary launch hits the
+cache everywhere:
+
+- **Weekly** (`SOFTWARE_STACK_REFRESH`, `%Y-W%W`): the harness layer only —
+  the agent CLI reinstalls (its autoupdater is off, so this is its only
+  update path) and `apt-get upgrade` patches every OS package in the image,
+  whatever layer installed it. It is the LAST layer, so nothing else rebuilds.
+- **On demand** (`FORCE_INSTALLS_REFRESH`, via `--refresh-installs`): `uv`,
+  `rich-cli`, every `[code]` toolchain and service CLI, `ruff`, playwright,
+  `[self]`'s dev deps — and the Debian base is re-pulled, so the whole stack
+  rebuilds from a fresh image.
+- **Never on their own**: the apt layers of the base and the professions,
+  cached from their first build until a Dockerfile edit or a refresh above.
+
+The first launch after 2026-09-16 rebuilds the stack once (the base
+Dockerfile changed); after that, expect a week boundary to rebuild exactly
+one layer per chain.
 
 ## Project Layout
 
 ```
 run.py                               # entry point + staged launch() orchestrator (scan tags → migrate store → resolve → resume? → persist → apply tags → setup → build → run). --stop opens a multi-select of RUNNING instances/clusters and stops the picked containers ({mux} highlighted — sticky sessions are the ones that outlive their terminal)
 quick_question.py                    # entry point for the `q` quickie tool → launch.quickie.main (argparse; --explain/--research/--history/--answer/--resume; print-mode one-shot)
-Dockerfile                           # base image — Claude Code + uv + ripgrep + iptables/sudo ({firewall} prerequisites); built with `network: host` to dodge BuildKit DNS issues
+Dockerfile                           # base image — uv + python3 + ripgrep + iptables/sudo ({firewall} prerequisites); the agent CLI is the harness layer's (agents/harness/<name>/Dockerfile, built last); built with `network: host` to dodge BuildKit DNS issues
 cluster.py                           # entry point for CLUSTER mode (PoC) — N cohabiting agents in one container, switched between in one multiplexer (herdr or tmux — the ui_profile.toml preference, editable from the picker's "(Edit Preferences)" form) → launch.cluster.cli. Design record: cluster_plan.md
 check.sh                             # the quality gate — see "Quality gate" below
 .github/workflows/ci.yml             # CI — sets up an environment and calls check.sh
 launch/
   paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), bind-mount dicts (DOCKER_BASE_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
   utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_keypress, call_or_exit. No disk access. Leaf module.
-  ai/                                # the code half of "which harness runs" — LEAF package: catalog.py (DEFAULT_HARNESS_KEY + the call-time active_harness_key() / set_active_harness()), adapter.py (Adapter: an agent CLI's names — binary, flags, config-root files, env vars, hosts), claude_code.py (the one adapter), __init__ (ADAPTERS keyed by the harness member, adapter_for / active_adapter — a LookupError for a harness without one — refusal_for, adopt)
+  ai/                                # the code half of "which harness runs" — LEAF package: catalog.py (DEFAULT_HARNESS_KEY + the call-time active_harness_key() / set_active_harness()), adapter.py (Adapter: an agent CLI's names — binary, flags, config-root files, env vars, hosts, and its AuthFile list: the login files under credentials/<harness>/, each with its container anchor and mount mode), claude_code.py (the one adapter), __init__ (ADAPTERS keyed by the harness member, adapter_for / active_adapter — a LookupError for a harness without one — refusal_for, adopt)
   file_access.py                     # every disk-touching call routes through here — agent_md_index, atomic write_text, force_remove (sudo + `sudo -k` fallback), per-instance state-dir probes, optional-creds discovery.
   tags/                              # the tag system — kinds as classes, members discovered from agents/
     base.py                          #   Tag record + DockerContribution + tag.info/tag.docker parsing + the STRICT tree rule + TagError

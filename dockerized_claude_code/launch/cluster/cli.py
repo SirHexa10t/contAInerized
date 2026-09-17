@@ -34,6 +34,9 @@ from . import launch_plan, state, tmux, worktree
 from .legoset import (
     discover_templates, instantiate, load_legoset, validate,
 )
+from ..container_env import REFRESH_INSTALLS_HELP
+from ..startup import open_launcher
+from ..tags import Registry, TagError
 from .member import ClusterError
 
 EXIT_OK = 0
@@ -80,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     running.add_argument("--dry-run", action="store_true",
                          help="assemble everything and print the docker "
                               "commands instead of running them")
+    running.add_argument("--refresh-installs", action="store_true", help=REFRESH_INSTALLS_HELP)
     return parser
 
 
@@ -94,13 +98,18 @@ def main(argv: list[str]) -> int:
     handlers = {"create": _create, "list": _list, "plan": _plan,
                 "script": _script, "destroy": _destroy, "launch": _launch}
     try:
-        return handlers[args.command](args)
-    except ClusterError as error:
+        # The one startup every entry point shares (launch/startup.py): the
+        # state-dir migrations BEFORE any verb reads or writes the state dir,
+        # then the tree. Before 2026-09-15 `launch` scanned on its own and ran
+        # no migrations — it mounted blank login files into every member.
+        registry = open_launcher()
+        return handlers[args.command](args, registry)
+    except (ClusterError, TagError) as error:
         print(f"  Refusing: {error}")
         return EXIT_REFUSED
 
 
-def _create(args: argparse.Namespace) -> int:
+def _create(args: argparse.Namespace, registry: Registry) -> int:
     """Instantiate a template: validate, persist state, then make the worktrees.
 
     State first, worktrees second, so a worktree failure leaves a cluster that
@@ -130,6 +139,11 @@ def _create(args: argparse.Namespace) -> int:
     if refusal is not None:
         print(f"  Refusing: {refusal}")
         return EXIT_REFUSED
+    # A tag at a scope its `forbid_on` refuses — a member whose `.lego`
+    # defaults carry {frwl} — is met HERE, before anything is written, in
+    # the words every surface uses (state.forbidden_tags); not at launch.
+    if problems := state.forbidden_tags(cluster, registry):
+        raise ClusterError("this cluster cannot launch:\n    " + "\n    ".join(problems))
 
     state.save(cluster)
     print(f"  Cluster '{cluster.session}' — {len(cluster.members)} member(s) "
@@ -171,7 +185,7 @@ def _make_worktrees(cluster: state.Cluster) -> int:
     return EXIT_OK
 
 
-def _list(args: argparse.Namespace) -> int:
+def _list(args: argparse.Namespace, registry: Registry) -> int:
     """Clusters (default) or the templates they can be built from."""
     if args.templates:
         templates = discover_templates(AGENTS_DIR)
@@ -199,7 +213,7 @@ def _list(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _plan(args: argparse.Namespace) -> int:
+def _plan(args: argparse.Namespace, registry: Registry) -> int:
     """Print what a launch would do, without doing any of it.
 
     The PoC's main review artifact: it shows the mounts, the per-member windows
@@ -208,7 +222,7 @@ def _plan(args: argparse.Namespace) -> int:
     cluster = _resolve(args.session)
     if cluster is None:
         return EXIT_REFUSED
-    cluster = _picker_ordered(cluster)
+    cluster = _picker_ordered(cluster, registry)
     plan = launch_plan.build(cluster, personal_workspaces=_has_worktrees(cluster))
 
     print(f"  cluster '{plan.session}' — {len(plan.members)} member(s)")
@@ -234,7 +248,7 @@ def _plan(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _script(args: argparse.Namespace) -> int:
+def _script(args: argparse.Namespace, registry: Registry) -> int:
     """Emit the tmux startup script a container entrypoint would run.
 
     Also writes the banner file, because the script's status line reads it and a
@@ -242,7 +256,7 @@ def _script(args: argparse.Namespace) -> int:
     cluster = _resolve(args.session)
     if cluster is None:
         return EXIT_REFUSED
-    cluster = _picker_ordered(cluster)
+    cluster = _picker_ordered(cluster, registry)
     plan = launch_plan.build(cluster, personal_workspaces=_has_worktrees(cluster))
     # Written host-side, read container-side — two paths for one file.
     banner = cluster_banner_path(cluster.session)
@@ -263,7 +277,7 @@ def _script(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _launch(args: argparse.Namespace) -> int:
+def _launch(args: argparse.Namespace, registry: Registry) -> int:
     """Build the union image and run the cluster. The heavy lifting lives in
     `launching` (assembly) and `docker_config` (execution); this verb resolves,
     gates on docker, and dispatches. `--dry-run` rides docker_config's own
@@ -271,7 +285,6 @@ def _launch(args: argparse.Namespace) -> int:
     real, and the docker commands print instead of running — same contract as
     `run.py --dry-run`."""
     from ..docker_config import require_docker, running_cluster_report, set_dry_run
-    from ..tags import scan_all
     from . import launching
     cluster = _resolve(args.session)
     if cluster is None:
@@ -283,11 +296,11 @@ def _launch(args: argparse.Namespace) -> int:
     if (report := running_cluster_report(cluster.session)) is not None:
         print(report)
         return EXIT_REFUSED
-    launching.launch(cluster, scan_all(AGENTS_DIR))
+    launching.launch(cluster, registry, refresh_installs=args.refresh_installs)
     return EXIT_OK
 
 
-def _destroy(args: argparse.Namespace) -> int:
+def _destroy(args: argparse.Namespace, registry: Registry) -> int:
     """Remove the worktrees, then the state — the one definition lives in
     `state.destroy` (the picker's Del shares it); this verb only narrates."""
     cluster = _resolve(args.session)
@@ -309,15 +322,14 @@ def _has_worktrees(cluster: state.Cluster) -> bool:
     return any(cluster.worktree(identifier).is_dir() for identifier in cluster.ids)
 
 
-def _picker_ordered(cluster: state.Cluster) -> state.Cluster:
+def _picker_ordered(cluster: state.Cluster, registry: Registry) -> state.Cluster:
     """The cluster with members in the DERIVED display/window order — what the
     real launch uses (launching reorders the same way), so these preview verbs
     never show a sequence the launch would then contradict."""
     import dataclasses
-    from ..tags import scan_all
     return dataclasses.replace(
         cluster,
-        members=state.picker_order(cluster.members, scan_all(AGENTS_DIR)))
+        members=state.picker_order(cluster.members, registry))
 
 
 def _resolve(session: str) -> state.Cluster | None:

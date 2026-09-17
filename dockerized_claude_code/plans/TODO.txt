@@ -491,6 +491,22 @@ Add to [web] a couple of other tools. Notably, `dig`.
 In Picker, add break-lines between cluster instances; they'll be unselectable, and non-removable in the typed-keyword filtering
     Should help distinguish between different clusters' members when filtering
 
+In clusters, save `shell` (tab's) history, and reload it on next launch
+
+`Form` has "claude-fable-5-1", and "claude-opus-5" mentioned. This isn't right - they should be effort-levels instead.
+
+In picker ui, Cluster instances should have a yellow vertical line on the border with the preview/legend pane, like regular instances. Blue should be reserved for new clusters.
+
+
+
+
+
+
+
+
+
+
+
 
 
 

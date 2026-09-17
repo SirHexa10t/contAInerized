@@ -276,16 +276,21 @@ class Instance:
     def build_steps(self) -> list[tuple[str, Path, DockerContribution | None]]:
         """(name, dockerfile, contribution) per image layer in chain order
         (`_ordered_groups`): professions, then layer-bearing specialties
-        (dood's `_dood` dir). The contribution supplies the layer's `[build]
-        arg_forward`. Run-only specialties (auto, firewall) don't appear: they
-        contribute container config, not image content. Empty for a bare agent
-        (base image only)."""
+        (dood's `_dood` dir), then — LAST — the harness's own layer, the CLI
+        the agent runs in (`Harness.dockerfile`). Last so the CLI's weekly
+        refresh rebuilds one layer and nothing beneath it; a harness without a
+        layer (none the launcher can run yet) adds no step. The contribution
+        supplies the layer's `[build] arg_forward`. Run-only specialties
+        (auto, firewall) don't appear: they contribute container config, not
+        image content. A bare agent builds base + its harness layer."""
         profs, specs = _ordered_groups(self.professions, self.specialties)
         out: list[tuple[str, Path, DockerContribution | None]] = [
             (p.name, p.path / "Dockerfile", p.docker) for p in profs
         ]
         out += [(s.name, s.layer.path / "Dockerfile", s.layer.docker)
                 for s in specs if s.layer]
+        if self.harness is not None and self.harness.dockerfile is not None:
+            out.append((self.harness.name, self.harness.dockerfile, self.harness.docker))
         return out
 
     @property

@@ -941,7 +941,10 @@ State these at the top of the eventual feature so nobody reads them as bugs:
    credential file is the source of N mounts (a source-keyed dict silently
    served only the last member; caught by its test). Members whose tags carry
    container-level docker features ({firewall}, {dood}) are REFUSED by name
-   rather than launched degraded. Cycling: tmux native (^b n/p, numbers, ^b w,
+   rather than launched degraded. [2026-09-16: from DATA now — `forbid_on` in
+   tag.info; and cluster-WIDE `{dood}` / `{ro}` are allowed and reach the one
+   container; `{firewall}` still forbids `cluster` until the entrypoint chain
+   wraps the cluster script.] Cycling: tmux native (^b n/p, numbers, ^b w,
    click the status-bar name), now listed in the help popup. Verified: full
    CLI dry-run end-to-end (base→code→muxer builds, the run command, the
    script's recipes) + 6 mutation-checked guards. NOT yet verified: a real

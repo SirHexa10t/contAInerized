@@ -98,6 +98,68 @@ class DockerContribution:
     mounts: tuple[tuple[Path, str], ...] = ()
     env_forward: tuple[str, ...] = ()
 
+    @property
+    def container_level(self) -> bool:
+        """Whether this contribution shapes the CONTAINER rather than the
+        image — a capability, a mount, an env forward, an entrypoint. One
+        container has one of each, so a tag carrying one is set once per
+        container: for a cluster, cluster-wide, never per member (the scan
+        insists the tag declares `forbid_on = ["member"]`)."""
+        return bool(self.cap_add or self.mounts or self.env_forward or self.entrypoint)
+
+
+# ============================================================
+# Scopes — where a build lives, and where a tag may not
+# ============================================================
+
+# A tag is picked into a BUILD, and a build lives in one of three places: a
+# SOLO instance (an agent's `.lego` is its defaults — "solo", not "instance":
+# a cluster member is an Instance too), a CLUSTER's shared set (every member
+# inherits it), or a MEMBER's own additions on top of that set. `forbid_on` in
+# tag.info names the scopes a tag cannot be picked into — the ONE fact the
+# form (greys the row), the launch (refuses, naming the fix), the creation
+# flows, the legend and the audit all read (operator request, 2026-09-16:
+# `{dood}` belongs to the whole cluster — one container has one docker socket
+# — so the rows must know what to grey out). It covers CONTAINER features
+# (tag.docker's capabilities, mounts, env forwards, entrypoints; the
+# read-only workspace mount), not image layers: a layer-claiming tag joins
+# the union image and is cluster-wide in EFFECT, but that is a cost, not an
+# impossibility.
+SCOPES = ("solo", "cluster", "member")
+
+
+def parse_forbid_on(info: dict[str, Any], tag_dir: Path) -> frozenset[str]:
+    """The optional `forbid_on = [...]` list as a frozenset of scopes; a
+    non-list, a non-string or an unknown scope word is a scan-time TagError —
+    a typo here would silently allow what the author meant to forbid."""
+    raw = info.get("forbid_on", [])
+    if not isinstance(raw, list) or not all(isinstance(s, str) for s in raw):
+        raise TagError(f"{tag_dir}/{INFO_FILE}: `forbid_on` must be a list of scope words ({', '.join(SCOPES)})")
+    unknown = sorted(set(raw) - set(SCOPES))
+    if unknown:
+        raise TagError(f"{tag_dir}/{INFO_FILE}: `forbid_on` names unknown scope(s) {unknown} — the scopes are {', '.join(SCOPES)}")
+    return frozenset(raw)
+
+
+def scope_note(tag: "Tag", scope: str) -> str:
+    """The one sentence for `tag` being forbidden on `scope`, pointing at
+    where it CAN go — the form's grey note, the launch refusal's hint and
+    the audit finding's message all say the same words."""
+    allowed = [s for s in SCOPES if s not in tag.forbid_on]
+    if scope == "member":
+        return "cluster-wide only: F2 on the cluster row" if "cluster" in allowed else "not in a cluster"
+    if scope == "cluster":
+        return "per member only: F2 on a member row" if "member" in allowed else "not on a cluster"
+    return "clusters only: cluster creation applies it" if allowed else "not launchable anywhere"
+
+
+def is_scope(scope: str) -> None:
+    """Raise unless `scope` is one of SCOPES — the guard every scope-taking
+    API shares, so a misspelt scope in code fails at once, not as a silently
+    empty check."""
+    if scope not in SCOPES:
+        raise ValueError(f"unknown scope {scope!r} — one of {', '.join(SCOPES)}")
+
 
 # ============================================================
 # Tag — the per-member record
@@ -144,7 +206,11 @@ class Tag:
                           and one file grantable by several tags — and the
                           registry validates every name resolves to a file.
       docker            — parsed tag.docker, or None when the tag makes no
-                          container contribution."""
+                          container contribution.
+      forbid_on         — the scopes (`SCOPES`: solo / cluster / member)
+                          this tag cannot be picked into — `forbid_on =
+                          [...]` in tag.info; the form greys the row, the
+                          launch refuses with `scope_note`."""
 
     parentheses: ClassVar[tuple[str, str]] = ("", "")
     root: ClassVar[str] = ""
@@ -161,6 +227,7 @@ class Tag:
     wants: tuple[tuple[str, str], ...] = ()
     commands: tuple[str, ...] = ()
     docker: DockerContribution | None = None
+    forbid_on: frozenset[str] = frozenset()
 
     @property
     def label(self) -> str:
@@ -369,5 +436,6 @@ def common_fields(tag_dir: Path) -> dict[str, Any]:
         "wants": parse_wants(info, tag_dir),
         "commands": parse_commands(info, tag_dir),
         "docker": parse_docker(tag_dir),
+        "forbid_on": parse_forbid_on(info, tag_dir),
         "_info": info,   # handed back so the kind can read its own keys without a re-read
     }

@@ -3,3 +3,8 @@ shortname         = "dood"
 short_description = "controls host docker"
 full_description  = "can run Docker. Danger: authority to do anything (effectively host-root)!"
 warn              = true
+# One container has one docker socket and one docker-group GID: the tag is a
+# CLUSTER-WIDE choice (the whole container gains the socket), never a member's
+# own addition — the form greys it on a member row and points at the cluster
+# row. Solo instances carry it as before.
+forbid_on         = ["member"]

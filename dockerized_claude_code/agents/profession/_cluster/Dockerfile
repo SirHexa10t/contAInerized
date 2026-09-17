@@ -4,25 +4,21 @@
 # mechanism as {muxer}/_muxer; specialty.scan matches `_<name>` layers). At
 # the profession ROOT deliberately: a cluster member needn't be [code].
 #
-# Two installs, and why each:
-#
-# - **python3** (the full package, ~30MB with its stdlib — python3-minimal
-#   ships a PARED stdlib and the protocol needs tomllib/argparse/fcntl):
-#   the work-protocol package (launch/cluster_work_protocol, RO-mounted at
-#   /opt/cluster_work_protocol by cluster launches) is python, and the BASE
-#   image carries no python at all.
-# - **the `cluster-chat` shim**: the one executable entry to that package —
-#   members speak the queue through it per the {clstr} addendum. It appends
-#   /opt to PYTHONPATH and module-runs the CLI, which is exactly the
-#   standalone-import contract the package's own tests pin.
+# One install, and why: **the `cluster-chat` shim** — the one executable entry
+# to the work-protocol package (launch/cluster_work_protocol, RO-mounted at
+# /opt/cluster_work_protocol by cluster launches). Members speak the queue
+# through it per the {clstr} addendum; it appends /opt to PYTHONPATH and
+# module-runs the CLI, which is exactly the standalone-import contract the
+# package's own tests pin. The interpreter it needs — the FULL python3 (the
+# protocol uses tomllib/argparse/fcntl; python3-minimal ships a pared stdlib)
+# — is the base image's (the root Dockerfile installs it for the tags-rewrite
+# code), so this layer touches no package repo at all: a network-free layer.
+# (Until 2026-09-16 it apt-installed python3 again, a no-op behind a full
+# `apt-get update`.)
 ARG PARENT_IMAGE=claude-agents:base
 FROM ${PARENT_IMAGE}
 
 USER root
-
-RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 \
- && rm -rf /var/lib/apt/lists/*
 
 RUN printf '%s\n' \
       '#!/bin/sh' \

@@ -36,16 +36,19 @@ audit, the tags package, user_additions, and run.py all import from here.
 import glob
 import json
 import os
+import re
 import shutil
 import time
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
-from typing import IO, Any
+from typing import Any, IO, Literal
 
+from .ai.adapter import Adapter, AuthFile
 from .paths import (
-    ACCOUNT_FILE, AGENTS_DIR,
-    CREDENTIALS_FILE, FIREWALL_WHITELIST_FILE,
+    credentials_dir,
+    AGENTS_DIR,
+    FIREWALL_WHITELIST_FILE,
     FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
     OPTIONAL_CREDS_TOKEN_ENV_VARS, optional_creds_service_path,
     optional_creds_token_path,
@@ -473,16 +476,117 @@ def agent_md_index() -> dict[str, Path]:
 # host before docker mounts them, or docker auto-creates them as root-owned
 # directories instead of writable files.
 
-def ensure_shared_oauth_files() -> None:
-    """Idempotently touch ACCOUNT_FILE + CREDENTIALS_FILE as empty JSON
-    objects so docker's bind-mount finds them as writable host files (and
-    doesn't auto-create them as root-owned dirs on first launch). No-op
-    when they already exist — their actual contents are managed by Claude
-    Code at runtime, not by the launcher."""
-    if not path_exists(ACCOUNT_FILE):
-        write_text(ACCOUNT_FILE, "{}")
-    if not path_exists(CREDENTIALS_FILE):
-        write_text(CREDENTIALS_FILE, "{}")
+def ensure_auth_files(adapter: Adapter) -> None:
+    """Idempotently create the harness's auth files under
+    `credentials/<harness>/` with the adapter's blank contents, so docker's
+    bind-mount finds writable host FILES (and doesn't auto-create root-owned
+    dirs on first launch). No-op when they exist — their contents are the
+    CLI's, written at login and refreshed by it, never by the launcher."""
+    for f in adapter.auth_files:
+        path = credentials_dir(adapter.key) / f.name
+        if not path_exists(path):
+            ensure_dir(path.parent)
+            write_text(path, f.blank)
+            make_private(path)   # the CLI fills it with tokens IN PLACE, so it keeps the mode it was born with — 0644 under a default umask would leave bearer tokens world-readable
+
+
+LoginState = Literal["absent", "none", "recorded", "unreadable"]
+
+
+def login_state(path: Path, auth_file: AuthFile) -> LoginState:
+    """What the harness's auth file at `path` holds — the one reading the
+    migration, the launch notice and the audit share:
+      absent      — no file, or the launcher's blank;
+      none        — a JSON object without the file's `login_key` (a CLI that
+                    was never logged in wrote its startup state into the blank
+                    — the 2026-09-15 incident); for a file without a
+                    `login_key`, never returned: anything but the blank counts;
+      recorded    — the `login_key` is there (or, without one, any content);
+      unreadable  — empty or not JSON. A CLI refreshing a token IN PLACE
+                    leaves the file empty or partial for an instant, so this
+                    is not "no login": nothing may replace such a file
+                    (bug-investigator, gate one-startup).
+    `login_key` names a PRIVATE shape of the CLI's (Claude Code documents
+    neither `claudeAiOauth` nor `oauthAccount`), so callers that destroy or
+    replace keep a `.bak` — a renamed key must cost a copy, not a login."""
+    if not path_exists(path):
+        return "absent"
+    text = read_text(path).strip()
+    if text == auth_file.blank.strip():
+        return "absent"
+    if not text:
+        return "unreadable"   # the launcher never writes an empty file; a CLI that truncates before it rewrites does
+    if auth_file.login_key is None:
+        return "recorded"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return "unreadable"
+    return "recorded" if isinstance(data, dict) and auth_file.login_key in data else "none"
+
+
+def login_recorded(path: Path, auth_file: AuthFile) -> bool:
+    """`login_state(path, auth_file) == "recorded"`."""
+    return login_state(path, auth_file) == "recorded"
+
+
+def make_private(path: Path | str) -> None:
+    """chmod 600 — a file that holds a secret (a key file, an OAuth blob)."""
+    os.chmod(path, 0o600)
+
+
+def file_mode(path: Path | str) -> int | None:
+    """The permission bits of `path` (e.g. 0o600), or None when it is missing."""
+    try:
+        return os.stat(path).st_mode & 0o777
+    except OSError:
+        return None
+
+
+_ENV_LINE = re.compile(r"[A-Z_][A-Z0-9_]*=\S+")
+
+
+def key_file_problems(path: Path, key_env: str) -> list[str]:
+    """What is wrong with a `credentials/keys/<ai>.env`, as messages that name
+    variables and line numbers but NEVER a value — the one place the launcher
+    reads a key file (the audit and the launch preflight both call it; docker
+    itself is what consumes the file). Docker's `--env-file` grammar, not
+    dotenv: a line is `NAME=value` taken VERBATIM (quotes stay in the value —
+    a quoted key fails authentication with a bare 401), `#` comments only at
+    the start of a line, no `export`, and a bare `NAME` line would import the
+    HOST's variable into the container. The file must define the vendor's
+    variable `key_env` and nothing else — every line lands in the container's
+    environment, so a stray one could override a launcher setting."""
+    problems: list[str] = []
+    names: list[str] = []
+    # Raw bytes, not `read_text`: universal newlines would hide the \r docker sees.
+    text = Path(path).read_bytes().decode("utf-8", errors="replace")
+    for number, raw in enumerate(text.split("\n"), start=1):
+        line = raw
+        if line.endswith("\r"):
+            problems.append(f"line {number}: Windows line ending — docker would keep the \\r in the value")
+            line = line.rstrip("\r")
+        if not line.strip() or line.startswith("#"):
+            continue
+        if _ENV_LINE.fullmatch(line):
+            name = line.partition("=")[0]
+            if name in names:
+                problems.append(f"{name} is defined twice")
+            names.append(name)
+            if name != key_env:
+                problems.append(f"{name} is not the vendor's key variable ({key_env}) — a key file defines only that")
+            if line.partition("=")[2][0] in "'\"":
+                problems.append(f"line {number}: {name} is quoted — docker keeps the quotes in the value")
+            continue
+        if line.startswith("export "):
+            problems.append(f"line {number}: `export` prefix — docker takes the line verbatim, write NAME=value")
+        elif "=" not in line:
+            problems.append(f"line {number}: a bare name imports the HOST's variable into the container — write NAME=value")
+        else:
+            problems.append(f"line {number}: not NAME=value (an upper-case name, no spaces)")
+    if key_env not in names:
+        problems.append(f"does not define {key_env}")
+    return problems
 
 
 # ============================================================

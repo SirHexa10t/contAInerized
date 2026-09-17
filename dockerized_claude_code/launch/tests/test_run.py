@@ -25,7 +25,9 @@ if str(_ROOT) not in sys.path:
 import run  # noqa: E402  — must come after the sys.path.insert above
 from launch.paths import AGENTS_DIR  # noqa: E402  — same reason
 from launch.ai import DEFAULT_HARNESS_KEY, active_harness_key, set_active_harness  # noqa: E402  — same reason
-from launch.tags import Instance, scan_all  # noqa: E402  — same reason
+from launch.tags import Instance, TagError, scan_all  # noqa: E402  — same reason
+from launch import paths  # noqa: E402  — same reason
+from launch.tests.fixtures import make_inst  # noqa: E402  — same reason
 
 REGISTRY = scan_all(AGENTS_DIR)
 
@@ -189,6 +191,15 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks = self._mock_pipeline(dry_run=False)
         run.launch()
         mocks["run_container"].assert_called_once()
+        mocks["ensure_image"].assert_called_once()
+        self.assertFalse(mocks["ensure_image"].call_args.kwargs["pull"])   # an ordinary launch must work offline
+
+    def test_refresh_installs_repulls_the_base_image(self):
+        mocks = self._mock_pipeline(dry_run=False)
+        opts = run.LaunchOptions(MagicMock(), [], False, True)
+        mocks["gather_input"].return_value = (opts, MagicMock())
+        run.launch()
+        self.assertTrue(mocks["ensure_image"].call_args.kwargs["pull"])
 
     def test_the_instances_harness_is_adopted_before_the_first_harness_word_is_read(self):
         # The settings install, banner and title all read active_adapter();
@@ -302,6 +313,59 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks["prompt_install_failures"].assert_called_once()
 
 
+class TestSetupState(unittest.TestCase):
+    """setup_state is the solo shape's staging — the one `staging.stage_instance`
+    every shape calls, then the container half + the instance half of the env,
+    the container's own mounts, the operator's extras. Driven for real over a
+    real Instance in a redirected state dir."""
+
+    def setUp(self):
+        from launch import docker_config
+        from launch.container_env import _container_env
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        snapshot = dict(_container_env)
+        _container_env.clear()
+        self.addCleanup(lambda: (_container_env.clear(), _container_env.update(snapshot)))
+        docker_config._docker_mounts.clear()
+        self.addCleanup(docker_config._docker_mounts.clear)
+        self.docker_config, self.env = docker_config, _container_env
+
+    @staticmethod
+    def _inst():
+        import dataclasses
+        inst = make_inst("poet", "s1")
+        return dataclasses.replace(inst, md_path=paths.AGENTS_DIR / "poet.md")   # the staging READS the persona
+
+    def test_stages_the_agent_then_the_container_then_the_operators_extras(self):
+        inst = self._inst()
+        with patch.object(run, "plant_user_extras") as plant, \
+             patch.object(run, "optional_creds_mounts", return_value=["gcloud"]) as creds, \
+             patch("builtins.print"):
+            cred_names = run.setup_state(inst, REGISTRY)
+        self.assertEqual(cred_names, ["gcloud"])
+        plant.assert_called_once_with(inst)
+        creds.assert_called_once()
+        state = inst.state_dir
+        self.assertTrue((state / "CLAUDE.md").is_file() and (state / "settings.json").is_file() and (state / "commands").is_dir())
+        staged = dict(self.docker_config.staged_mounts())
+        self.assertEqual(staged[str(state / "settings.json")], "/home/claude/.claude/settings.json:ro")
+        self.assertEqual(staged[str(state / "commands")], "/home/claude/.claude/commands:ro")
+        self.assertEqual(staged[str(state)], "/home/claude/.claude")
+        self.assertEqual(staged["/tmp"], "/workspace")
+        keys = {str(k) for k in self.env}
+        self.assertLessEqual({"BASH_ENV", "SOFTWARE_STACK_REFRESH", "AGENT_STATUS_LINE", "CLAUDE_AGENT_INSTANCE"}, keys)
+
+    def test_a_policy_conflict_is_a_clean_stop(self):
+        with patch("launch.staging.install_settings", side_effect=TagError("loose vs tight")), \
+             self.assertRaises(SystemExit) as caught:
+            run.setup_state(self._inst(), REGISTRY)
+        self.assertIn("loose vs tight", str(caught.exception))
+
+
 class TestStopRunning(unittest.TestCase):
     """stop_running — the `--stop` flow: whatever prompt_stop hands back gets
     one docker-stop call each, in order; a refused stop is reported, never
@@ -338,8 +402,11 @@ class TestGatherInput(unittest.TestCase):
 
     def _gather(self, parse_result, **stage_patches):
         patches = {
-            "scan_all":       patch.object(run, "scan_all", return_value=REGISTRY),
-            "ensure":         patch("launch.tags.migrations.ensure_migrated"),
+            # gather_input's first call is the shared startup (launch/startup):
+            # migrations, then the tree. Patched as run.py sees it, with the
+            # real registry; the migration test below patches the migration
+            # underneath instead and lets the real startup run.
+            "startup":        patch.object(run, "open_launcher", return_value=REGISTRY),
             "parse_cli":      patch.object(run, "parse_cli", return_value=parse_result),
             **stage_patches,
         }
@@ -426,7 +493,7 @@ class TestGatherInput(unittest.TestCase):
             require_docker=patch.object(run, "require_docker"),
             select_agent=patch.object(run, "select_agent"),
         )
-        with patch("launch.tags.migrations.ensure_migrated", side_effect=lambda: calls.append("migrate")), \
+        with patch.object(run, "open_launcher", side_effect=lambda: calls.append("migrate") or REGISTRY), \
              patch.object(run, "parse_cli", side_effect=lambda reg: calls.append("parse") or run.LaunchOptions(MagicMock(), [], False, False)):
             run.gather_input()
         self.assertEqual(calls, ["migrate", "parse"])

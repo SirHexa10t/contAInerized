@@ -6,7 +6,7 @@ promises (an extra shell, surviving a detach, one deliberate way out) are true.
 This module is the difference between the tag being installed and the tag being
 felt.
 
-**How the command gets replaced.** The base image's `ENTRYPOINT` is `claude`, so
+**How the command gets replaced.** The image's `ENTRYPOINT` is the agent CLI (the harness layer's), so
 everything after the image name is claude's own argv. To run something else the
 entrypoint has to be overridden — the mechanism `{firewall}` already uses. Rather
 than ship a static shell script that would have to re-implement the multiplexer

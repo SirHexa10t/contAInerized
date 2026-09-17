@@ -228,6 +228,42 @@ class TestMemberInstance(ClusterTmp):
         # The resolvable tags still resolved — the member renders, red chip and all.
         self.assertEqual([s.name for s in inst.specialties], ["muxer", "cluster"])
 
+    def test_a_cluster_wide_container_tag_is_inherited_unflagged_while_a_members_own_is_flagged(self):
+        # The two halves resolve in their own scopes (bug-investigator, gate
+        # tag-scopes): the union at scope member would flag a legal
+        # cluster-wide {dood} on every member.
+        member = Member.of("researcher", build=AgentBuild(professions=("code",)))
+        cluster = state.from_template("poc", Path("/tmp/p"), (member,),
+                                      tags=AgentBuild(professions=("code",), specialties=("muxer", "cluster", "dood")))
+        inst = cluster.member_instance(cluster.members[0], self.registry)
+        self.assertTrue(inst.is_startable)
+        self.assertIn("dood", [s.name for s in inst.specialties])
+        own = state.from_template("poc2", Path("/tmp/p"), (Member.of(
+            "researcher", build=AgentBuild(professions=("code",), specialties=("dood",))),))
+        inst = own.member_instance(own.members[0], self.registry)
+        (problem,) = inst.invalid_tags
+        self.assertEqual((problem.name, problem.reason), ("dood", "forbidden"))
+        self.assertEqual(problem.hint, "cluster-wide only: F2 on the cluster row")
+        self.assertNotIn("dood", [s.name for s in inst.specialties])
+        self.assertFalse(inst.is_startable)
+
+    def test_forbidden_tags_speaks_for_the_creation_flows(self):
+        # feature-identifier's .lego defaults carry {firewall}: it can be a
+        # solo instance and no cluster member, and the line says THAT.
+        from launch.cluster.legoset import assemble
+        from launch.paths import AGENTS_DIR
+        cluster = state.from_template("poc", Path("/tmp/p"), assemble([("feature-identifier", None)], AGENTS_DIR))
+        (line,) = state.forbidden_tags(cluster, self.registry)
+        self.assertIn("feature-identifier", line)
+        self.assertIn("{frwl}", line)
+        self.assertIn("not in a cluster", line)
+        self.assertNotIn(".lego", line)
+        self.assertEqual(state.forbidden_tags(self.a_cluster(), self.registry), [])
+        wide = state.from_template("poc3", Path("/tmp/p"), (Member.of("golem"),),
+                                   tags=AgentBuild(specialties=("muxer", "cluster", "firewall")))
+        (line,) = state.forbidden_tags(wide, self.registry)
+        self.assertIn("cluster-wide {frwl}: not on a cluster", line)
+
     def test_a_vanished_agent_is_none_not_a_raise(self):
         cluster = state.from_template("poc", Path("/tmp/p"), (Member.of("nobody"),))
         self.assertIsNone(cluster.member_instance(cluster.members[0], self.registry))

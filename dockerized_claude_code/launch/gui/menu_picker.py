@@ -97,7 +97,7 @@ from .forms import edit_profiles_menu, prompt_tags
 from .styles import (
     rich_style, STYLE_AGENT_NAME, STYLE_TAG_INVALID, tag_style,
 )
-from ..tags import Agent, Ai, Engine, Harness, Instance, Registry, resolve_build, Tag
+from ..tags import Agent, Ai, Engine, Harness, Instance, Registry, SCOPES, Tag, resolve_build
 from ..tags.ai import sorted_ais
 from ..tags.engine import sorted_engines, standard_rank
 from ..tags.harness import sorted_harnesses
@@ -349,7 +349,7 @@ def cluster_entries(registry: Registry, running: frozenset[str],
                  for entry in members]
         lines += [_member_line(member.id, None, None, None, [], [], "", missing_agent=member.agent)
                   for member in missing]
-        tags, problems = _resolve_tags(registry, cluster.tags)
+        tags, problems = _resolve_tags(registry, cluster.tags, scope="cluster")
         last_used = _last_used_display(cluster.last_used_mtime)
         out.append(ClusterEntry(
             cluster=cluster, members=tuple(members), missing=tuple(missing),
@@ -409,7 +409,7 @@ def _cluster_column(registry: Registry, entry: ClusterEntry,
     unresolvable name in the alert style), then the member count in the
     template rows' green. Sits where instance rows show their tags, so the
     two kinds line up."""
-    tags, problems = _resolve_tags(registry, entry.cluster.tags)
+    tags, problems = _resolve_tags(registry, entry.cluster.tags, scope="cluster")
     frags, width = _tags_column(tags, emphasize=frozenset({"cluster-cowork"}),
                                 problems=problems)
     count = f"({len(entry.cluster.members)} members)"
@@ -493,6 +493,8 @@ def _build_composition_legend(registry: Registry) -> str:
                      Text.assemble((t.fullname, "underline"), f": {t.short_description}")]
             if isinstance(t, Harness):
                 cells[1].append("  · runs " + " ".join(registry.ais[a].label for a in t.ais if a in registry.ais), style="dim")
+            if t.forbid_on:   # where a .lego author may not put it — the same fact the form greys out
+                cells[1].append(f"  · not on: {', '.join(s for s in SCOPES if s in t.forbid_on)}", style="dim")
             if isinstance(t, Engine):
                 default_ai = registry.default_ai
                 cells.append(Text(default_ai.tier(t.budget.standard).model if default_ai and t.budget.standard else "", style="dim"))   # "" for an engine with no standard
@@ -619,7 +621,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         # names resolve through the registry for warn-aware coloring); Cont
         # rows show the instance's actual resolved tag objects; cluster rows
         # the tags they force on every member plus their member count.
-        tag_by_agent = {a.name: _tags_column(_resolve_tags(registry, a.build)[0]) for a in agents}
+        tag_by_agent = {a.name: _tags_column(_resolve_tags(registry, a.build, scope="solo")[0]) for a in agents}
         tag_by_inst = {i.identity.instance: _cont_tags_column(i.identity) for i in instances}
         # The runtime column on Cont rows — the instance's resolved AI and
         # harness, padded per population. Agent (Create) rows carry none:
@@ -849,7 +851,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             # ONE form: workspace + name as text fields above the tags — the
             # same no-terminal-prompt shape cluster editing has.
             result = prompt_tags(
-                registry, old_inst.build, instance=old_inst.agent,
+                registry, old_inst.build, instance=old_inst.agent, scope="solo",
                 fields=instance_fields(old_inst.agent,
                                        workspace=old_inst.workspace,
                                        suffix=old_inst.session,

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..paths import COMMANDS_DIR_NAME
 from .addendums import KNOWN_PLACEHOLDERS, referenced_placeholders
-from .base import Tag, TagError
+from .base import Tag, TagError, is_scope, scope_note
 from .ai import Ai
 from .engine import Engine
 from .harness import Harness
@@ -29,22 +29,25 @@ __all__ = ["Registry", "TagProblem", "scan_all"]
 
 @dataclass(frozen=True)
 class TagProblem:
-    """A name in an `instances.toml` entry that doesn't resolve to a real tag
-    on its axis — `unknown` (typo, or a tag renamed/removed since the
-    instance was set up), `wrong_axis` (a real tag of another kind), or
-    `incompatible` (a real harness that cannot run the entry's AI). Carries
-    the display punctuation of the EXPECTED kind (so `{web}` renders in the
+    """A name in a stored build that cannot stand there — `unknown` (typo, or
+    a tag renamed/removed since the instance was set up), `wrong_axis` (a
+    real tag of another kind), `incompatible` (a real harness that cannot run
+    the entry's AI), or `forbidden` (a real tag whose `forbid_on` names the
+    scope the build lives in — `{dood}` as a member's own tag). Carries the
+    display punctuation of the EXPECTED kind (so `{web}` renders in the
     profession's brackets even though `web` no longer exists) and the sorted
     list of valid names of that kind — for `incompatible`, the harnesses that
-    CAN run the AI — for the "did you mean one of these" report. Produced by
-    `Registry.resolve_store_build`."""
+    CAN run the AI — for the "did you mean one of these" report; for
+    `forbidden`, `hint` says where the tag can go instead (`scope_note`).
+    Produced by `Registry.resolve_store_build`."""
     name: str
     axis: str                       # store key: professions / specialties / policies / engine / ai / harness
     kind: str                       # expected kind label (profession / specialty / policy / engine / ai / harness)
     parentheses: tuple[str, str]
-    reason: str                     # "unknown" | "wrong_axis" | "incompatible"
+    reason: str                     # "unknown" | "wrong_axis" | "incompatible" | "forbidden"
     actual_kind: str | None         # the kind it actually is, when reason == "wrong_axis"
     options: tuple[str, ...]        # valid names of the expected kind, sorted
+    hint: str = ""                  # for "forbidden": where the tag can go instead
 
     @property
     def label(self) -> str:
@@ -140,12 +143,31 @@ class Registry:
             return [build.engine] if build.engine else []
         return list(getattr(build, axis))
 
-    def validate_build(self, build: AgentBuild, source: Path | str) -> None:
+    def forbidden(self, build: AgentBuild, scope: str) -> list[Tag]:
+        """The tags among `build`'s three list axes that cannot be picked
+        into `scope` (their `forbid_on` names it), in axis order — the ONE
+        question the form, the launch, the creation flows and the audit ask.
+        Names that resolve to nothing are not this method's concern
+        (`resolve_store_build` reports those)."""
+        is_scope(scope)
+        out: list[Tag] = []
+        for names in (build.professions, build.specialties, build.policies):
+            for name in names:
+                tag = self.get(name)
+                if tag is not None and scope in tag.forbid_on:
+                    out.append(tag)
+        return out
+
+    def validate_build(self, build: AgentBuild, source: Path | str, *, scope: str | None) -> None:
         """Fail loud if a `.lego` names a tag that doesn't exist, or puts a
-        tag on the wrong axis (a profession listed under `specialties`, etc.).
-        `source` names the file in errors. Used for SHIPPED `.lego` files,
-        whose correctness is a repo invariant — a fault is a bug, so raising
-        is right. User-editable `instances.toml` entries go through
+        tag on the wrong axis (a profession listed under `specialties`, etc.),
+        or picks a tag its `forbid_on` keeps out of `scope` — the scope the
+        build is about to live in; `None` skips only that check (the audit
+        reports it as its own finding kind). Required, not defaulted: every
+        caller decides which scope it is validating for. `source` names the
+        file in errors. Used for SHIPPED `.lego` files, whose correctness is
+        a repo invariant — a fault is a bug, so raising is right.
+        User-editable `instances.toml` entries go through
         `resolve_store_build` instead, which reports rather than raises."""
         for axis, cls, _ in self._axis_specs():
             for name in self._axis_names(build, axis):
@@ -161,14 +183,28 @@ class Registry:
         if build.harness and ai is not None and harness is not None and not harness.runs(ai.name):
             raise TagError(f"{source}: harness '{harness.name}' cannot run the '{ai.name}' AI — "
                            f"it runs {', '.join(harness.ais)}; the harnesses that can: {', '.join(self.harnesses_running(ai.name)) or 'none'}")
+        if scope is not None:
+            for tag in self.forbidden(build, scope):
+                elsewhere = ", ".join(s for s in ("solo", "cluster", "member") if s not in tag.forbid_on)
+                raise TagError(f"{source}: {tag.label} cannot be a {scope} build's tag — {scope_note(tag, scope)} "
+                               f"(the build itself is fine {'for: ' + elsewhere if elsewhere else 'nowhere'})")
 
-    def resolve_store_build(self, build: AgentBuild) -> "tuple[AgentBuild, list[TagProblem]]":
+    def resolve_store_build(self, build: AgentBuild, *, scope: str | None) -> "tuple[AgentBuild, list[TagProblem]]":
         """Split a stored build (an `instances.toml` entry — user-editable, so
         possibly stale after a tag rename or a typo) into a CLEANED build
-        keeping only names that resolve to their axis's kind, plus a
-        `TagProblem` for every name dropped. Never raises: a bad stored tag
-        must surface as a blocked, flagged instance in the picker, not a
-        crash. (Shipped `.lego` files use the raising `validate_build`.)"""
+        keeping only names that resolve to their axis's kind and may stand in
+        `scope` — the scope the build lives in (`None` skips only that
+        check); required, not defaulted, because a member's stored build is
+        the UNION of the cluster's tags and its own, and resolving that union
+        at scope `member` would flag a legal cluster-wide `{dood}` on every
+        member (`Cluster.member_instance` resolves the two halves apart) —
+        plus a `TagProblem` for every name dropped: reason `forbidden` for a
+        real tag whose `forbid_on` names the scope, with `hint` saying where
+        it can go. Never raises: a bad stored tag must surface as a blocked,
+        flagged instance in the picker, not a crash. (Shipped `.lego` files
+        use the raising `validate_build`.)"""
+        if scope is not None:
+            is_scope(scope)
         kept: dict[str, list[str]] = {"professions": [], "specialties": [], "policies": []}
         kept_engine: str | None = None
         kept_ai: str | None = None
@@ -180,7 +216,12 @@ class Registry:
                 if actual == cls.root and getattr(self.get(name), "always_on", False):
                     continue   # static tag in an old/hand-edited entry — applied anyway; drop the mention silently
                 if actual == cls.root:
-                    if axis == "engine":
+                    tag = self.get(name)
+                    if scope is not None and tag is not None and scope in tag.forbid_on:
+                        problems.append(TagProblem(
+                            name=name, axis=axis, kind=cls.root, parentheses=cls.parentheses,
+                            reason="forbidden", actual_kind=None, options=(), hint=scope_note(tag, scope)))
+                    elif axis == "engine":
                         kept_engine = name
                     elif axis == "ai":
                         kept_ai = name
@@ -252,7 +293,9 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
       - every declared command name resolves to a `commands/<name>.md` file;
       - every engine's capability standard is one the AIs define;
       - every AI's default harness is a member that runs it, and every
-        harness runs only AI members."""
+        harness runs only AI members;
+      - a tag with a container-level mechanism (tag.docker's container
+        fields, `workspace_readonly`) forbids `member`."""
     # Every engine's standard is one the AIs answer (the shared file's
     # quarters plus the ends) — a budget naming a quarter no efforts.tiers has
     # a tier for would otherwise fail at render time, in a launch.
@@ -307,6 +350,28 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
             if req not in reg.professions and req not in reg.specialties:
                 raise TagError(f"{spec.path}: requires unknown tag '{req}' "
                                f"(not a profession or specialty)")
+
+    # A container-level mechanism is ONE setting for the one container a
+    # cluster is, so its tag can be the cluster's but never a member's own,
+    # and it must say so in data — the declaration is what the form greys out
+    # and the launch refuses; the rule keeps the physics and the declaration
+    # from drifting (2026-09-16). The mechanisms, exhaustively: a tag.docker
+    # contribution with cap_add / mounts / env_forward / entrypoint (the tag's
+    # own or its claimed layer's), and the specialty key `workspace_readonly`
+    # (one /workspace mount). NOT a mechanism: an image layer — a layer-
+    # claiming tag joins the union image, cluster-wide in effect but not
+    # impossible per member; nor a harness's Dockerfile ENTRYPOINT — an image
+    # fact of the tail layer (its tag.docker is [build]-only), and a harness
+    # is per member by design. A new tag.info key with container reach joins
+    # this list deliberately.
+    for tag in reg.get_all():
+        layer = getattr(tag, "layer", None)
+        contributions = [c for c in (tag.docker, layer.docker if layer else None) if c]
+        container_wide = any(c.container_level for c in contributions) or bool(getattr(tag, "workspace_readonly", False))
+        if container_wide and "member" not in tag.forbid_on:
+            raise TagError(f"{tag.path}/tag.info: this tag reaches the CONTAINER (cap_add / mounts / env_forward / "
+                           f"entrypoint in tag.docker, or workspace_readonly), which is set once per container, so it "
+                           f"must declare forbid_on = [\"member\"] — a cluster may carry it cluster-wide; a member alone cannot")
 
     # wants + combos reference any real tag.
     known = reg.all_names()

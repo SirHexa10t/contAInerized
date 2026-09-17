@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .ai import Ai
+from ..file_access import is_file
 from .base import Tag, TagError, common_fields, read_toml, walk_tag_tree
 from .budget import AMOUNTS, SWITCHES, Budget
 
@@ -81,6 +82,7 @@ class Harness(Tag):
     package: str = ""                # where it installs from — "npm @google/gemini-cli"
     knobs: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()   # purpose → native (key, template) pairs
     providers: tuple[tuple[str, str], ...] = ()                       # AI member → this CLI's provider slug ({provider})
+    dockerfile: Path | None = None   # the CLI's image layer (`<dir>/Dockerfile`), built LAST in every chain that runs it (Instance.build_steps); None for a harness the launcher cannot run yet
 
     def runs(self, ai_name: str) -> bool:
         """Whether this harness can run the AI member `ai_name`."""
@@ -144,7 +146,9 @@ class Harness(Tag):
             fields = common_fields(tag_dir)
             info = fields.pop("_info")
             knobs, providers = _knobs(tag_dir)
-            member = cls(**fields, **_own_fields(info, tag_dir), knobs=knobs, providers=providers)
+            dockerfile = tag_dir / "Dockerfile"
+            member = cls(**fields, **_own_fields(info, tag_dir), knobs=knobs, providers=providers,
+                         dockerfile=dockerfile if is_file(dockerfile) else None)
             for name in dict(providers):
                 if name not in member.ais:
                     raise TagError(f"{tag_dir}/{KNOBS_FILE}: [providers] names {name!r}, which this harness does not run (ais: {', '.join(member.ais)})")

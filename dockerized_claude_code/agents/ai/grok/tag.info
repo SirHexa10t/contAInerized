@@ -4,6 +4,7 @@ short_description = "candid and irreverent by design, wired to live news on X; p
 full_description  = "SpaceXAI (xAI)'s Grok line (Grok 4.6, 4.5, 4.3, 4.20). Trained for real-time knowledge through X and web search and a candid, irreverent voice; its reasoning models are pitched at mathematics and science problems."
 vendor            = "SpaceXAI (xAI)"
 harness           = "grok-build"       # its default harness — an agents/harness/ member
+key_env           = "XAI_API_KEY"           # the vendor's API-key variable: credentials/keys/grok.env defines it — Grok Build, OpenCode, Hermes, OpenClaw
 default           = false
 fg                = "#ffffff"          # the ⟪Grok⟫ tag: white on black
 bg                = "#000000"

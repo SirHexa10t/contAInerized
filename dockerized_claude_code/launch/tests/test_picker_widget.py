@@ -135,7 +135,7 @@ class TestContTagsColumn(unittest.TestCase):
     punctuation."""
 
     def _inst_with_invalid(self, build):
-        clean, problems = REGISTRY.resolve_store_build(build)
+        clean, problems = REGISTRY.resolve_store_build(build, scope="solo")
         return Instance(agent="refactorer", md_path=Path("/x.md"), session="s",
                         workspace="/tmp", is_brand_new=False, invalid_tags=tuple(problems),
                         **resolve_build(clean, "refactorer", REGISTRY))

@@ -9,7 +9,7 @@ own docs for the flags and files (`--continue`, `-p`, `--effort`,
 rows A–K for how each compares with the other harnesses.
 """
 
-from .adapter import Adapter
+from .adapter import Adapter, AuthFile
 
 CLAUDE_CODE = Adapter(
     key="claude-code",
@@ -25,8 +25,17 @@ CLAUDE_CODE = Adapter(
     skills_dirname="skills",
     history_filename="history.jsonl",
     transcripts_dirname="projects",
-    account_filename=".claude.json",
-    credentials_filename=".credentials.json",
+    # Both refreshed in place by the CLI (rw). `.credentials.json` sits in the
+    # config root; `.claude.json` — account identity plus trust decisions, MCP
+    # servers and UI state — beside the config root at HOME by default, INSIDE
+    # it once CLAUDE_CONFIG_DIR relocates the root (probed 2026-09-14 on Claude
+    # Code 2.1.266: harness behaviour, so the version is what makes a drift
+    # diagnosable).
+    # `login_key`: a not-logged-in Claude Code writes `.claude.json` (startup
+    # counters, theme …) into any blank it is given, so "non-blank" is not
+    # "logged in" — the account section and the token object are.
+    auth_files=(AuthFile(".credentials.json", role="credentials", anchor="config", login_key="claudeAiOauth"),
+                AuthFile(".claude.json", role="account", anchor="account", login_key="oauthAccount")),
     print_flag="-p",
     continue_flag="--continue",
     effort_flag="--effort",

@@ -20,6 +20,7 @@ from unittest.mock import patch
 from launch import tags
 from launch.paths import COMMANDS_DIR_NAME
 from launch import paths
+from launch.ai import CLAUDE_CODE
 from launch.tags import (
     addendums, AgentBuild, Budget, Engine, Harness, image_chain, Instance, is_standard, load_lego, merge_fragments, migrations, Policy, PolicyStance, Profession, rank_of, Registry, resolve_build, scan_all, sorted_engines, sorted_standards, Specialty, store, TagError, ToolkitEntry,
 )
@@ -106,6 +107,7 @@ def ai_member(name="claude", *, default=True, model="claude-test", fg="#ff8700",
         "ai/capability.standards": FIXTURE_STANDARDS_FILE,
         **harness_member(f"{name}-cli", ais=(name,), binary=name),        # its default harness rides along — the registry insists on one
         f"ai/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\nharness = "{name}-cli"\n'
+                                f'key_env = "{name.upper()}_API_KEY"\n'
                                 f'default = {str(default).lower()}\nfg = "{fg}"\nbg = "{bg}"\n'),
         f"ai/{name}/efforts.tiers": '[scale]\nefforts = ["low", "high"]\n' + tiers,
     }
@@ -224,6 +226,12 @@ class TestHarnessKind(TagTreeTestCase):
                          ("claude-cli", "⟦claude-cli⟧", "Vendor", ("claude",), "claude", "npm claude-cli"))
         self.assertTrue(cli.runs("claude"))
         self.assertFalse(cli.runs("gemini"))
+
+    def test_scan_reads_the_layer_when_the_dir_ships_one(self):
+        (bare,) = Harness.scan(self.tree(harness_member()))
+        self.assertIsNone(bare.dockerfile)                      # no layer: nothing to build (and nothing runnable)
+        (cli,) = Harness.scan(self.tree({**harness_member(), "harness/claude-cli/Dockerfile": 'FROM x\nENTRYPOINT ["claude"]\n'}))
+        self.assertEqual(cli.dockerfile, cli.path / "Dockerfile")
 
     def test_scan_reads_the_knobs(self):
         (cli,) = Harness.scan(self.tree(harness_member()))
@@ -368,6 +376,8 @@ class TestAiKind(TagTreeTestCase):
         faults = {
             "bad colour": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('#ff8700', 'orange')},
             "no harness": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('harness = "claude-cli"', 'harness = ""')},
+            "key_env not a variable name": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('key_env = "CLAUDE_API_KEY"', 'key_env = "claude key"')},
+            "no key_env": {"ai/claude/tag.info": base["ai/claude/tag.info"].replace('key_env = "CLAUDE_API_KEY"\n', "")},
             "missing standard": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"].replace("[2026Q1]", "[2026Q2]")},
             "undeclared standard": {"ai/claude/efforts.tiers": base["ai/claude/efforts.tiers"] + '[2027Q1]\nmodel = "x"\n'},
             "no standards file": {"ai/capability.standards": None},
@@ -558,12 +568,12 @@ class TestResolveStoreBuild(TagTreeTestCase):
 
     def test_all_valid_yields_no_problems(self):
         clean, problems = self.reg.resolve_store_build(
-            AgentBuild(engine="default", professions=("code", "web"), specialties=("auto",)))
+            AgentBuild(engine="default", professions=("code", "web"), specialties=("auto",)), scope="solo")
         self.assertEqual(problems, [])
         self.assertEqual(clean.professions, ("code", "web"))
 
     def test_unknown_name_is_dropped_and_reported(self):
-        clean, problems = self.reg.resolve_store_build(AgentBuild(professions=("code", "ghost")))
+        clean, problems = self.reg.resolve_store_build(AgentBuild(professions=("code", "ghost")), scope="solo")
         self.assertEqual(clean.professions, ("code",))              # good one kept
         (prob,) = problems
         self.assertEqual((prob.name, prob.axis, prob.kind, prob.reason), ("ghost", "professions", "profession", "unknown"))
@@ -571,7 +581,7 @@ class TestResolveStoreBuild(TagTreeTestCase):
         self.assertEqual(prob.options, ("code", "web"))             # only professions offered
 
     def test_wrong_axis_is_reported_with_actual_kind(self):
-        _, problems = self.reg.resolve_store_build(AgentBuild(specialties=("no-sudo",)))
+        _, problems = self.reg.resolve_store_build(AgentBuild(specialties=("no-sudo",)), scope="solo")
         (prob,) = problems
         self.assertEqual(prob.reason, "wrong_axis")
         self.assertEqual(prob.actual_kind, "policy")
@@ -579,26 +589,26 @@ class TestResolveStoreBuild(TagTreeTestCase):
 
     def test_unknown_ai_is_reported_on_its_own_axis(self):
         reg = scan_all(self.full_tree())
-        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="mistral", engine="default"))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="mistral", engine="default"), scope="solo")
         self.assertIsNone(cleaned.ai)
         self.assertEqual([(p.axis, p.name, p.reason) for p in problems], [("ai", "mistral", "unknown")])
         self.assertEqual(problems[0].options, ("claude",))
 
     def test_an_incompatible_harness_is_dropped_and_reported_with_the_ones_that_could_run(self):
         reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member("other", default=False)}))
-        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="claude", harness="other-cli", engine="default"))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="claude", harness="other-cli", engine="default"), scope="solo")
         self.assertIsNone(cleaned.harness)                    # the AI's own harness applies at resolve time
         self.assertEqual(cleaned.ai, "claude")
         (prob,) = problems
         self.assertEqual((prob.axis, prob.kind, prob.name, prob.reason, prob.label), ("harness", "harness", "other-cli", "incompatible", "⟦other-cli⟧"))
         self.assertEqual(prob.options, ("claude-cli",))
-        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="other", harness="other-cli"))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(ai="other", harness="other-cli"), scope="solo")
         self.assertEqual((cleaned.harness, problems), ("other-cli", []))
-        cleaned, problems = reg.resolve_store_build(AgentBuild(harness="ghost-cli"))
+        cleaned, problems = reg.resolve_store_build(AgentBuild(harness="ghost-cli"), scope="solo")
         self.assertEqual([(p.axis, p.reason) for p in problems], [("harness", "unknown")])
 
     def test_unknown_engine_reported_options_are_engines(self):
-        _, problems = self.reg.resolve_store_build(AgentBuild(engine="ghost"))
+        _, problems = self.reg.resolve_store_build(AgentBuild(engine="ghost"), scope="solo")
         (prob,) = problems
         self.assertEqual((prob.axis, prob.kind, prob.label), ("engine", "engine", "(ghost)"))
         self.assertEqual(prob.options, ("default",))
@@ -606,7 +616,7 @@ class TestResolveStoreBuild(TagTreeTestCase):
     def test_never_raises_on_bad_input(self):
         # The whole point vs validate_build: a stale store entry must not crash.
         clean, problems = self.reg.resolve_store_build(
-            AgentBuild(engine="x", professions=("y",), specialties=("z",), policies=("w",)))
+            AgentBuild(engine="x", professions=("y",), specialties=("z",), policies=("w",)), scope="solo")
         self.assertEqual(len(problems), 4)
         self.assertEqual((clean.professions, clean.specialties, clean.policies), ((), (), ()))
 
@@ -635,11 +645,11 @@ class TestAlwaysOnPolicy(TagTreeTestCase):
     def test_lego_listing_always_on_raises(self):
         reg = scan_all(self._tree_with_static())
         with self.assertRaisesRegex(TagError, "always-on"):
-            reg.validate_build(AgentBuild(policies=("no-sudo",)), Path("x.lego"))
+            reg.validate_build(AgentBuild(policies=("no-sudo",)), Path("x.lego"), scope="solo")
 
     def test_store_listing_always_on_dropped_silently(self):
         reg = scan_all(self._tree_with_static())
-        clean, problems = reg.resolve_store_build(AgentBuild(policies=("no-sudo", "open")))
+        clean, problems = reg.resolve_store_build(AgentBuild(policies=("no-sudo", "open")), scope="solo")
         self.assertEqual(problems, [])                    # not a fault — just stale
         self.assertEqual(clean.policies, ("open",))       # static name dropped, rest kept
 
@@ -856,28 +866,28 @@ class TestLego(TagTreeTestCase):
     def test_validate_build_unknown_tag(self):
         reg = scan_all(self.full_tree())
         with self.assertRaisesRegex(TagError, "unknown tag 'ghost'"):
-            reg.validate_build(AgentBuild(professions=("ghost",)), Path("x.lego"))
+            reg.validate_build(AgentBuild(professions=("ghost",)), Path("x.lego"), scope="solo")
 
     def test_validate_build_wrong_axis(self):
         reg = scan_all(self.full_tree())
         # 'auto' is a specialty; listing it under professions is a wrong-axis error.
         with self.assertRaisesRegex(TagError, "'auto' is a specialty, not a profession"):
-            reg.validate_build(AgentBuild(professions=("auto",)), Path("x.lego"))
+            reg.validate_build(AgentBuild(professions=("auto",)), Path("x.lego"), scope="solo")
 
     def test_validate_build_rejects_a_harness_that_cannot_run_the_ai(self):
         reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member("other", default=False)}))
         with self.assertRaisesRegex(TagError, "harness 'other-cli' cannot run the 'claude' AI"):
-            reg.validate_build(AgentBuild(ai="claude", harness="other-cli"), Path("x.lego"))
+            reg.validate_build(AgentBuild(ai="claude", harness="other-cli"), Path("x.lego"), scope="solo")
         with self.assertRaisesRegex(TagError, "cannot run the 'claude' AI"):          # the default AI, unnamed
-            reg.validate_build(AgentBuild(harness="other-cli"), Path("x.lego"))
-        reg.validate_build(AgentBuild(ai="other", harness="other-cli"), Path("x.lego"))   # a pair that works
-        reg.validate_build(AgentBuild(ai="other"), Path("x.lego"))                        # its default harness
+            reg.validate_build(AgentBuild(harness="other-cli"), Path("x.lego"), scope="solo")
+        reg.validate_build(AgentBuild(ai="other", harness="other-cli"), Path("x.lego"), scope="solo")   # a pair that works
+        reg.validate_build(AgentBuild(ai="other"), Path("x.lego"), scope="solo")                        # its default harness
 
     def test_validate_build_accepts_valid(self):
         reg = scan_all(self.full_tree())
         reg.validate_build(AgentBuild(engine="default", professions=("code", "web"),
                                       specialties=("auto", "firewall"), policies=("no-sudo",)),
-                           Path("ok.lego"))   # no raise
+                           Path("ok.lego"), scope="solo")   # no raise
 
 
 # ============================================================
@@ -1273,6 +1283,110 @@ class TestStateDirRelocation(unittest.TestCase):
         self.assertTrue((self.new / "instances").is_dir())
 
 
+class TestCredentialsRelocation(unittest.TestCase):
+    """relocate_credentials — the Claude Code login pair moves from the state
+    root under credentials/claude-code/, per file, private, never over a real
+    token, and over a blank the launcher itself left."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name) / ".ai-agents"
+        self.state.mkdir()
+        patcher = patch.object(paths, "AGENTS_STATE", self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.new_dir = paths.credentials_dir(CLAUDE_CODE.key)
+
+    def _run(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            migrations.relocate_credentials()
+        return buf.getvalue()
+
+    def test_both_files_move_and_become_private(self):
+        for f in CLAUDE_CODE.auth_files:
+            (self.state / f.name).write_text('{"token": "old"}')
+            (self.state / f.name).chmod(0o644)
+        out = self._run()
+        for f in CLAUDE_CODE.auth_files:
+            with self.subTest(file=f.name):
+                self.assertFalse((self.state / f.name).exists())
+                self.assertEqual((self.new_dir / f.name).read_text(), '{"token": "old"}')
+                self.assertEqual((self.new_dir / f.name).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(out.count("Moved"), 2)
+
+    def test_a_blank_at_the_new_place_is_replaced_not_a_conflict(self):
+        # An interrupted earlier launch touched the blank before this move ran.
+        creds = CLAUDE_CODE.auth_file("credentials")
+        (self.state / creds.name).write_text('{"token": "real"}')
+        self.new_dir.mkdir(parents=True)
+        (self.new_dir / creds.name).write_text(creds.blank)
+        self._run()
+        self.assertEqual((self.new_dir / creds.name).read_text(), '{"token": "real"}')
+        self.assertFalse((self.state / creds.name).exists())
+
+    def test_a_real_login_at_the_new_place_is_never_overwritten(self):
+        creds = CLAUDE_CODE.auth_file("credentials")
+        (self.state / creds.name).write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+        self.new_dir.mkdir(parents=True)
+        (self.new_dir / creds.name).write_text('{"claudeAiOauth": {"accessToken": "newer"}}')
+        out = self._run()
+        self.assertIn("newer", (self.new_dir / creds.name).read_text())
+        # The outranked old file is set aside — kept for the operator, and no
+        # longer where a later race could move it over the live token.
+        self.assertFalse((self.state / creds.name).exists())
+        self.assertIn("old", (self.state / f"{creds.name}{migrations.SUPERSEDED_SUFFIX}").read_text())
+        self.assertIn("kept aside", out)
+        self.assertEqual(self._run(), "")   # settled: nothing left to say on the next launch
+
+    def test_a_file_that_records_no_login_at_the_new_place_is_replaced(self):
+        # The 2026-09-15 incident: a cluster launched without the migration
+        # handed its members blanks, and their not-logged-in Claude Code wrote
+        # startup state into .claude.json — real JSON, no account. That must
+        # not block the real file's move.
+        account = CLAUDE_CODE.auth_file("account")
+        (self.state / account.name).write_text('{"oauthAccount": {"emailAddress": "who@example.test"}}')
+        self.new_dir.mkdir(parents=True)
+        (self.new_dir / account.name).write_text('{"numStartups": 1, "theme": "dark"}')
+        self._run()
+        self.assertIn("oauthAccount", (self.new_dir / account.name).read_text())
+        self.assertFalse((self.state / account.name).exists())
+        # `login_key` is the CLI's private shape: a replaced file costs a copy, never a login.
+        self.assertIn("numStartups", (self.new_dir / f"{account.name}{migrations.REPLACED_SUFFIX}").read_text())
+
+    def test_an_unreadable_file_at_the_new_place_is_a_hand_off(self):
+        # A CLI refreshes its token IN PLACE: for an instant the file is
+        # truncated or half-written. That is not "no login" — nothing moves
+        # over it, both files stay, and the next launch judges again.
+        creds = CLAUDE_CODE.auth_file("credentials")
+        (self.state / creds.name).write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+        self.new_dir.mkdir(parents=True)
+        for mid_write in ('{"claudeAiOauth": {"accessToken": "ne', ""):
+            (self.new_dir / creds.name).write_text(mid_write)
+            out = self._run()
+            self.assertEqual((self.new_dir / creds.name).read_text(), mid_write)
+            self.assertTrue((self.state / creds.name).exists())
+            self.assertIn("cannot be read", out)
+            self.assertFalse(any(p.name.endswith(".bak") for p in self.new_dir.iterdir()))
+        (self.new_dir / creds.name).write_text('{"claudeAiOauth": {"accessToken": "newer"}}')   # the write completed
+        self._run()
+        self.assertTrue((self.state / f"{creds.name}{migrations.SUPERSEDED_SUFFIX}").exists())
+
+    def test_per_file_a_half_done_move_completes(self):
+        creds, account = CLAUDE_CODE.auth_file("credentials"), CLAUDE_CODE.auth_file("account")
+        self.new_dir.mkdir(parents=True)
+        (self.new_dir / creds.name).write_text('{"token": "moved"}')   # moved by an earlier run
+        (self.state / account.name).write_text('{"account": 1}')        # not yet
+        self._run()
+        self.assertEqual((self.new_dir / account.name).read_text(), '{"account": 1}')
+        self.assertEqual((self.new_dir / creds.name).read_text(), '{"token": "moved"}')
+
+    def test_nothing_old_is_a_no_op(self):
+        self.assertEqual(self._run(), "")
+        self.assertFalse(self.new_dir.exists())
+
+
 class TestStore(TagTreeTestCase):
     def test_ai_is_a_scalar_field_omitted_when_unset(self):
         text = store.dumps({"x__s": store.build_entry(AgentBuild(ai="gemini", engine="quick"), "/w")})
@@ -1481,7 +1595,7 @@ class TestPolicyFragments(TagTreeTestCase):
 
     def test_specialty_claims_same_named_fragment(self):
         agents = self.tree({
-            "specialty/read-only/tag.info": 'full_description = "ro"\nworkspace_readonly = true\n',
+            "specialty/read-only/tag.info": 'full_description = "ro"\nworkspace_readonly = true\nforbid_on = ["member"]\n',
             "policy/_read-only/policy.json": '{"permissions": {"deny": ["Write", "Edit"]}}',
         })
         reg = scan_all(agents)
@@ -1563,3 +1677,70 @@ class TestLabelError(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestScopes(TagTreeTestCase):
+    """`forbid_on` — where a tag may NOT be picked (`SCOPES`: solo / cluster /
+    member), declared in tag.info and read by the form, the launch, the
+    creation flows and the audit; the scan insists a tag with container reach
+    (a tag.docker capability / mount / env forward / entrypoint, or
+    `workspace_readonly`) forbids `member`, so the physics and the
+    declaration cannot drift (gate tag-scopes, 2026-09-16)."""
+
+    def _spec(self, dood_info: str, **extra: str) -> dict[str, str]:
+        return {**self.full_tree_spec(), "specialty/dood/tag.info": dood_info, **extra}
+
+    def test_scan_reads_forbid_on_and_a_typo_or_a_non_list_raises(self):
+        reg = scan_all(self.tree(self._spec('full_description = "d"\nforbid_on = ["member"]\n')))
+        self.assertEqual(reg.specialties["dood"].forbid_on, frozenset({"member"}))
+        with self.assertRaisesRegex(TagError, "unknown scope.*members"):
+            scan_all(self.tree(self._spec('full_description = "d"\nforbid_on = ["members"]\n')))
+        with self.assertRaisesRegex(TagError, "list of scope words"):
+            scan_all(self.tree(self._spec('full_description = "d"\nforbid_on = "member"\n')))
+
+    def test_a_tag_with_container_reach_must_forbid_member(self):
+        sock = '[run]\nmounts = ["/var/run/docker.sock -> /var/run/docker.sock"]\n'
+        # its own tag.docker …
+        with self.assertRaisesRegex(TagError, r'must declare forbid_on = \["member"\]'):
+            scan_all(self.tree(self._spec('full_description = "d"\n', **{"specialty/dood/tag.docker": sock})))
+        # … its claimed layer's …
+        with self.assertRaisesRegex(TagError, r'must declare forbid_on = \["member"\]'):
+            scan_all(self.tree(self._spec('full_description = "d"\n', **{"profession/code/_dood/tag.docker": sock})))
+        # … or the read-only workspace mount (a tag.info key, not tag.docker)
+        with self.assertRaisesRegex(TagError, r'workspace_readonly.*must declare forbid_on'):
+            scan_all(self.tree(self._spec('full_description = "d"\nworkspace_readonly = true\n')))
+        # Declared, each scans; a [build]-only tag.docker reaches no container.
+        reg = scan_all(self.tree(self._spec('full_description = "d"\nforbid_on = ["member"]\n',
+                                            **{"profession/code/_dood/tag.docker": sock,
+                                               "profession/code/tag.docker": '[build]\narg_forward = ["INSTALL_*"]\n'})))
+        self.assertEqual(reg.specialties["dood"].forbid_on, frozenset({"member"}))
+        self.assertEqual(reg.professions["code"].forbid_on, frozenset())
+        self.assertFalse(reg.professions["code"].docker.container_level)
+
+    def test_validate_and_resolve_judge_a_build_by_its_scope(self):
+        reg = scan_all(self.tree(self._spec('full_description = "d"\nforbid_on = ["member"]\n')))
+        build = AgentBuild(professions=("code",), specialties=("dood",))
+        reg.validate_build(build, "x.lego", scope="solo")
+        reg.validate_build(build, "x", scope="cluster")
+        reg.validate_build(build, "x", scope=None)
+        with self.assertRaisesRegex(TagError, r"\{dood\} cannot be a member build's tag — cluster-wide only: F2 on the cluster row .*fine for: solo, cluster"):
+            reg.validate_build(build, "x", scope="member")
+        clean, problems = reg.resolve_store_build(build, scope="member")
+        (problem,) = problems
+        self.assertEqual((problem.name, problem.reason, problem.options, problem.hint),
+                         ("dood", "forbidden", (), "cluster-wide only: F2 on the cluster row"))
+        self.assertEqual(clean.specialties, ())                     # dropped, like a stale name
+        self.assertEqual(reg.resolve_store_build(build, scope="cluster")[1], [])
+        self.assertEqual(reg.resolve_store_build(build, scope=None)[1], [])
+        self.assertEqual([t.name for t in reg.forbidden(build, "member")], ["dood"])
+        with self.assertRaises(ValueError):
+            reg.forbidden(build, "instance")                          # the retired word — a member IS an Instance
+
+    def test_scope_notes_point_where_the_tag_can_go(self):
+        from launch.tags import Tag, scope_note
+        def tag(*forbid: str) -> Tag:
+            return Tag(name="t", path=Path("/t"), forbid_on=frozenset(forbid))
+        self.assertEqual(scope_note(tag("member"), "member"), "cluster-wide only: F2 on the cluster row")
+        self.assertEqual(scope_note(tag("member", "cluster"), "member"), "not in a cluster")
+        self.assertEqual(scope_note(tag("member", "cluster"), "cluster"), "not on a cluster")
+        self.assertEqual(scope_note(tag("cluster"), "cluster"), "per member only: F2 on a member row")
+        self.assertEqual(scope_note(tag("solo"), "solo"), "clusters only: cluster creation applies it")

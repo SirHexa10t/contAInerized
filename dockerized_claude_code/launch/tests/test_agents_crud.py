@@ -313,7 +313,7 @@ class TestInvalidTagsReport(unittest.TestCase):
         self.reg = scan_all(paths.AGENTS_DIR)
 
     def _instance(self, build: AgentBuild) -> Instance:
-        clean, problems = self.reg.resolve_store_build(build)
+        clean, problems = self.reg.resolve_store_build(build, scope="solo")
         return Instance(agent="refactorer", md_path=Path("/x.md"), session="s",
                         workspace="/tmp", is_brand_new=False, invalid_tags=tuple(problems),
                         **resolve_build(clean, "refactorer", self.reg))
@@ -321,6 +321,15 @@ class TestInvalidTagsReport(unittest.TestCase):
     def test_startable_flag_tracks_invalid_tags(self):
         self.assertTrue(self._instance(AgentBuild(professions=("code",))).is_startable)
         self.assertFalse(self._instance(AgentBuild(professions=("web",))).is_startable)
+
+    def test_report_says_where_a_forbidden_tag_goes_and_offers_no_alternatives(self):
+        # {clstr} is a real specialty a solo build cannot carry: the report
+        # points at clusters and does NOT offer the specialty list — which
+        # would offer the very tag back (bug-investigator, gate tag-scopes).
+        report = invalid_tags_report(self._instance(AgentBuild(specialties=("cluster",))))
+        self.assertIn("a solo instance cannot carry", report)
+        self.assertIn("clusters only: cluster creation applies it", report)
+        self.assertNotIn("replace it with", report)
 
     def test_report_lists_same_kind_alternatives_only(self):
         # A bad policy name lists policy tags — never professions/specialties.

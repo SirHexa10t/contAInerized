@@ -18,15 +18,17 @@
 #     the image, which no runtime mount shadows)
 #   - mypy → uv tool install, the same pattern as ruff in [code] and
 #     playwright in [webdev]
-# Unpinned deliberately: the gate should see what a fresh `pip install` sees,
-# and the weekly refresh below keeps "fresh" honest.
+# Unpinned deliberately: the gate should see what a fresh `pip install` sees;
+# --refresh-installs keeps "fresh" honest on demand.
 
 ARG PARENT_IMAGE=claude-agents:code
 FROM ${PARENT_IMAGE}
 
-# SOFTWARE_STACK_REFRESH busts the layer cache weekly so rebuilds pull current
-# versions — referenced in the no-op `:` so it keys the cache.
-ARG SOFTWARE_STACK_REFRESH=bootstrap
-RUN : "${SOFTWARE_STACK_REFRESH}" \
+# FORCE_INSTALLS_REFRESH (--refresh-installs) keys the cache — referenced in
+# the no-op `:`. Never the weekly SOFTWARE_STACK_REFRESH: that is the harness
+# layer's word (built last), and a weekly buster here cascaded into every
+# specialty layer above until 2026-09-16.
+ARG FORCE_INSTALLS_REFRESH=stable
+RUN : "${FORCE_INSTALLS_REFRESH}" \
  && pip3 install --user --break-system-packages prompt_toolkit rich \
  && uv tool install mypy

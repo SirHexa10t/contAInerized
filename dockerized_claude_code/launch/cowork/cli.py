@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import argparse
 
-from ..paths import AGENTS_DIR, cowork_inbox_path
-from ..tags import scan_all
+from ..paths import cowork_inbox_path
+from ..startup import open_launcher
+from ..tags import Registry, TagError
 from . import control, lifecycle, relay, roster, sync
 from .group import (
     GroupStatus, Session, create_session, discover_sessions, save_session,
@@ -84,14 +85,19 @@ def main(argv: list[str]) -> int:
     """Parse argv and dispatch. Returns an exit code rather than calling sys.exit,
     so the entry script owns the process and tests can call this directly."""
     args = build_parser().parse_args(argv)
+    try:
+        registry = open_launcher()   # the hub reads the state dir like every entry: migrate first, then the tree
+    except TagError as e:
+        print(f"  {e}")
+        return EXIT_REFUSED
     handlers = {"roster": _roster, "recruit": _recruit, "send": _send,
                 "status": _status, "serve": _serve, "close": _close}
-    return handlers[args.command](args)
+    return handlers[args.command](args, registry)
 
 
-def _roster(args: argparse.Namespace) -> int:
+def _roster(args: argparse.Namespace, registry: Registry) -> int:
     """Print who could be recruited."""
-    survey = roster.survey(args.asker, scan_all(AGENTS_DIR))
+    survey = roster.survey(args.asker, registry)
     if args.reachable:
         survey = roster.Roster(candidates=roster.reachable(survey),
                                needs_relaunch=survey.needs_relaunch,
@@ -100,7 +106,7 @@ def _roster(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _recruit(args: argparse.Namespace) -> int:
+def _recruit(args: argparse.Namespace, registry: Registry) -> int:
     """Create the group if new, then add each coworker.
 
     Idempotent throughout: `create_session` returns an existing group untouched
@@ -120,7 +126,7 @@ def _recruit(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _send(args: argparse.Namespace) -> int:
+def _send(args: argparse.Namespace, registry: Registry) -> int:
     """Deliver a message, optionally pushing files with it.
 
     Files first when asked, so the recipient's inbox is already in place when the
@@ -157,7 +163,7 @@ def _send(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _status(args: argparse.Namespace) -> int:
+def _status(args: argparse.Namespace, registry: Registry) -> int:
     """Report the hub, then each group. Prints the awkward states outright — no
     hub running, a group with no coworkers, material never taken up — since those
     are what a person runs `status` to find out."""
@@ -179,7 +185,7 @@ def _status(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _serve(args: argparse.Namespace) -> int:
+def _serve(args: argparse.Namespace, registry: Registry) -> int:
     """Run the hub loop under the singleton guard, polling both event sources:
     the outboxes (replies) and the control channel (managers' requests). The
     registry is scanned once — the control gate needs it on every pass, and the
@@ -200,7 +206,6 @@ def _serve(args: argparse.Namespace) -> int:
         print(f"  A hub is already running (pid {existing.pid if existing else '?'}). "
               f"Two would each drain half the captures, so this one is exiting.")
         return EXIT_REFUSED
-    registry = scan_all(AGENTS_DIR)
     watch = None if args.once else lifecycle.ManagerWatch(registry)
     print(f"  hub serving (pid {claimed.pid}); Ctrl-C to stop")
     try:
@@ -214,7 +219,7 @@ def _serve(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _close(args: argparse.Namespace) -> int:
+def _close(args: argparse.Namespace, registry: Registry) -> int:
     """End a group. Its directories and log stay on disk — the work and the
     discussion outlive the routing."""
     session = _resolve(args.group, require_active=False)

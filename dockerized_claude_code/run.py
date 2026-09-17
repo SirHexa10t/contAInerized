@@ -31,11 +31,10 @@ import sys
 from typing import NamedTuple
 
 from launch.agents_crud import (
-    compute_resume_flag, install_commands, install_latest_md, install_settings,
-    invalid_tags_report,
+    compute_resume_flag, invalid_tags_report,
     persist_instance, resolve_pick,
 )
-from launch.container_env import set_container_env
+from launch.container_env import REFRESH_INSTALLS_HELP, set_container_env, set_instance_env
 from launch.cowork.lifecycle import ensure_hub_running
 from launch.docker_config import (
     docker_stop_subprocess, ensure_image, prompt_install_failures,
@@ -43,24 +42,27 @@ from launch.docker_config import (
     running_instance_report, set_container_mounts, set_dry_run,
 )
 from launch.file_access import (
-    agent_md_index, ensure_shared_oauth_files, expand_user_path, is_dir,
+    agent_md_index, expand_user_path, is_dir,
 )
 from launch.claude_code_config import print_launch_banner
 from launch.gui import (
     ask_for_workspace, instance_fields, prompt_stop, prompt_tags, select_agent,
 )
 from launch.cluster.launching import launch as launch_cluster
+from launch.cluster.member import ClusterError
 from launch.cluster.state import Cluster
-from launch.paths import AGENTS_DIR, INSTANCES_FILE
+from launch.paths import AGENTS_DIR, CLAUDE_CONFIG_IN_CONTAINER, INSTANCES_FILE
+from launch.staging import stage_instance
 from launch.tag_handlers import apply_tags
 from launch.tags import (
-    Agent, Instance, Registry, TagError, effective_engine_name, migrations,
-    resolve_build, scan_all,
+    Agent, Instance, Registry, TagError, effective_engine_name, resolve_build,
 )
 from launch.user_additions import (
     optional_creds_mounts, plant_user_extras,
 )
-from launch.ai import adopt, refusal_for
+from launch.ai import active_adapter, adopt, refusal_for
+from launch.startup import open_launcher
+from launch.template_code.docker_prompts import RETRY_SOLO
 from launch.utils import call_or_exit, exit_if_missing
 
 
@@ -118,13 +120,7 @@ def parse_cli(registry: Registry) -> LaunchOptions:
         action="store_true",
         help="Run all state setup but skip the final docker run step.",
     )
-    parser.add_argument(
-        "--refresh-installs",
-        action="store_true",
-        help="Force-rebuild every optional CLI install in the [code] Dockerfile (busts the "
-             "FORCE_INSTALLS_REFRESH and SOFTWARE_STACK_REFRESH layer caches). Used "
-             "to retry installs that failed in a prior launch.",
-    )
+    parser.add_argument("--refresh-installs", action="store_true", help=REFRESH_INSTALLS_HELP)
     parser.add_argument(
         "--stop",
         action="store_true",
@@ -156,8 +152,7 @@ def gather_input() -> tuple[LaunchOptions, Registry]:
     before select_agent so the user isn't walked through the picker and
     prompts for a launch that was never going to happen. It fires in dry-run
     too — dry-run is a faithful projection of a real run."""
-    registry = call_or_exit(scan_all, AGENTS_DIR, exceptions=TagError)
-    migrations.ensure_migrated()
+    registry = call_or_exit(open_launcher, exceptions=TagError)   # migrations first, then the tree — the one startup every entry shares
     exit_if_missing(agent_md_index(), f"No agents found. Create an .md file in {AGENTS_DIR}/.")
     opts = parse_cli(registry)
     require_docker()
@@ -213,7 +208,7 @@ def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
     # agent-named → default), so the form shows what would actually run.
     engine = effective_engine_name(picked.build, picked.name, registry)
     result = prompt_tags(registry, dataclasses.replace(picked.build, engine=engine),
-                         instance=picked.name,
+                         instance=picked.name, scope="solo",
                          fields=instance_fields(picked.name))
     if result is None:
         sys.exit(0)
@@ -226,14 +221,13 @@ def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
 
 
 def setup_state(inst: Instance, registry: Registry, refresh_installs: bool = False) -> list[str]:
-    """Stage 6 — Setup. Install the agent's `.md` plus the active-chain
-    addendum section into its state dir as CLAUDE.md (a single overwrite —
-    install_latest_md keys off inst.chain for the addendums), ensure
-    shared OAuth state files exist so docker doesn't auto-create them as
-    root, populate the env vars the container build/run substitutes,
-    stage the per-launch bind-mounts (base set + per-instance workspace/
-    state — the bundled-skills mount rides along in DOCKER_BASE_MOUNTS),
-    and stage the optional-creds bind-mounts (with the auto-readme touch).
+    """Stage 6 — Setup. Stage the agent itself (`staging.stage_instance`:
+    CLAUDE.md, merged settings, assembled commands, the harness's login
+    files and the AI's key preflight, and the mounts for those), populate
+    the env vars the container build/run substitutes, stage the container's
+    bind-mounts (workspace/state, the agent's pairs, the base set — the
+    bundled-skills mount rides along in DOCKER_BASE_MOUNTS), and stage the
+    optional-creds bind-mounts (with the auto-readme touch).
     Per-workspace skills aren't mounted — Claude Code auto-discovers those
     from the workspace's `.claude/skills/` directory natively. Returns
     cred_names — mounts have all been staged via
@@ -243,12 +237,19 @@ def setup_state(inst: Instance, registry: Registry, refresh_installs: bool = Fal
     `refresh_installs` propagates to set_container_env, which busts both
     refresh-cache-buster ARGs so every optional CLI install retries on the
     upcoming build."""
-    install_latest_md(inst)
-    install_commands(inst)
-    # Policy-conflict TagError → clean exit naming both culprit policies.
-    call_or_exit(install_settings, inst, registry, exceptions=TagError)
-    ensure_shared_oauth_files()
-    set_container_env(inst, refresh_installs=refresh_installs)
+    # The agent's own staging — state dir installs, login files, key
+    # preflight, the mounts for them — is the ONE function every run shape
+    # calls (launch/staging.py); a solo instance keeps the default config
+    # root. A policy conflict (TagError, naming both culprits) or a key file
+    # docker would mis-read (RuntimeError) is a clean stop here, not a
+    # traceback or a bare 401 later.
+    staged = call_or_exit(stage_instance, inst, registry, harness=active_adapter(),
+                          config=str(CLAUDE_CONFIG_IN_CONTAINER), relocated=False,
+                          exceptions=(TagError, RuntimeError))
+    for notice in staged.notices:
+        print(notice)
+    set_container_env(inst.professions, refresh_installs=refresh_installs)   # the container's env — the same call a cluster makes over its union
+    set_instance_env(inst)                                                    # this one agent's identity — a shape with one agent only
     set_container_mounts(inst)
     plant_user_extras(inst)
     # optional_creds_mounts may raise RuntimeError on a clash from a contents-
@@ -282,7 +283,10 @@ def launch() -> None:
         # rationale: fresh probe, before anything is built.
         if (cluster_report := running_cluster_report(opts.picked.session)) is not None:
             sys.exit(cluster_report)
-        launch_cluster(opts.picked, registry)
+        # The same clean stop the cluster CLI gives a refused or mis-staged
+        # member (a container-level tag, a policy conflict, a lax key file).
+        call_or_exit(launch_cluster, opts.picked, registry, refresh_installs=opts.refresh_installs,
+                     exceptions=(ClusterError, TagError))
         return
     inst = resolve_target(opts.picked, registry)
     # Refuse a harness the launcher has no adapter for — before persist and
@@ -310,9 +314,9 @@ def launch() -> None:
     # Build the image stack here (not inside run_container) so the next
     # step can read the just-built image's failure log before Claude Code's
     # TUI takes over.
-    image = ensure_image(inst)
+    image = ensure_image(inst, pull=opts.refresh_installs)
     # Surfaces any failed-install names + retry hint before run_container execs into Claude Code's TUI.
-    prompt_install_failures(image, inst.instance)
+    prompt_install_failures(image, RETRY_SOLO.format(instance=inst.instance))
     # A {manager} needs the cowork hub serving, and this is the last moment to
     # ensure it: AFTER the build (so the hub's managerless grace only has to
     # cover the seconds until `docker run`, not a whole image build) and before

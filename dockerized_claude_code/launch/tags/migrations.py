@@ -13,6 +13,10 @@ present, the old one is renamed into place — one move, nothing copied, so a
 running container's bind mounts (which follow the directory, not its path)
 survive. Both present → neither is touched, and the launch says so.
 
+The Claude Code login pair's old HOME at the state root (until 2026-09-15):
+moved under `credentials/claude-code/`, file by file, when the new place is
+empty.
+
 And the pre-tags two-map format:
   agent_workspace_map.json   {instance_id: workspace_path_or_null}
   agent_modes_map.json       {instance_id: [mode, ...]}   modes ∈ web/auto/DooD
@@ -30,7 +34,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import paths
-from ..file_access import is_dir, move_path, path_exists, read_text
+from ..ai import CLAUDE_CODE
+from ..file_access import ensure_dir, is_dir, is_file, login_state, make_private, move_path, path_exists, read_text
 from ..paths import AGENTS_DIR, AGENTS_STATE, INSTANCES_FILE
 from . import store
 from .lego import load_lego
@@ -52,6 +57,8 @@ _MODE_TRANSLATION: dict[str, list[tuple[str, str]]] = {
 
 
 RETIRED_STATE_DIR_NAME = ".claude-agents"   # the state dir's name until 2026-09-14
+SUPERSEDED_SUFFIX = ".superseded.bak"       # an old-location login file outranked by a newer one at the new place
+REPLACED_SUFFIX = ".replaced.bak"           # a new-place file that recorded no login, set aside when the real one moved in
 
 
 def relocate_state_dir() -> None:
@@ -72,11 +79,60 @@ def relocate_state_dir() -> None:
     print(f"  Renamed {old} → {new} (the launcher's state dir since 2026-09-14)")
 
 
+def relocate_credentials() -> None:
+    """Move the Claude Code login files an older launcher kept at the state
+    root (`.claude.json`, `.credentials.json` — until 2026-09-15 the only
+    harness, so the only pair) under `credentials/claude-code/`, where every
+    harness's auth files live now (plans/credentials.md). Per file — a crash
+    between the two completes on the next run — over nothing, a blank, or a
+    file recording no login (kept as `.replaced.bak`); a file recording a
+    login is never overwritten (the old one is set aside as
+    `.superseded.bak`), and an unreadable one — a CLI mid-refresh — is never
+    touched. Runs first, before any blank is touched, on every entry path
+    (`startup.open_launcher`)."""
+    for f in CLAUDE_CODE.auth_files:
+        old, new = paths.AGENTS_STATE / f.name, paths.credentials_dir(CLAUDE_CODE.key) / f.name
+        if not is_file(old):
+            continue
+        state = login_state(new, f)
+        if state == "recorded":
+            # Both record a login: the newer one is at the new place — never
+            # overwrite a token with an older one. The old file is superseded:
+            # renamed aside (a standing old file is what a later race would
+            # move over a live one), kept as a .bak for the operator.
+            move_path(old, old.with_name(f"{old.name}{SUPERSEDED_SUFFIX}"))
+            print(f"  Note: {old.name} at the state root recorded an older login than "
+                  f"{new.relative_to(paths.AGENTS_STATE)} — kept aside as {old.name}{SUPERSEDED_SUFFIX}")
+            continue
+        if state == "unreadable":
+            # Not JSON — a CLI may be refreshing it in place this instant.
+            # Never move over it; say so, and leave both for the next launch.
+            print(f"  Note: {new.relative_to(paths.AGENTS_STATE)} cannot be read (a CLI may be writing it) — "
+                  f"{old.name} at the state root left in place for now; if it stays unreadable, remove it")
+            continue
+        # Nothing, a blank, or a file a never-logged-in CLI wrote into the
+        # blank (2026-09-15: a cluster launched without this migration handed
+        # its members blanks; their Claude Code filled `.claude.json` with
+        # startup state and no account). A `none` file is replaced, but kept:
+        # `login_key` is the CLI's private shape, so a misjudged file costs a
+        # copy, never a login.
+        ensure_dir(new.parent)
+        if state == "none":
+            move_path(new, new.with_name(f"{new.name}{REPLACED_SUFFIX}"))
+        try:
+            move_path(old, new)   # a rename: over a blank it replaces it atomically; a running container keeps the inode
+        except FileNotFoundError:
+            continue              # a concurrent launcher moved it first — done
+        make_private(new)
+        print(f"  Moved {old.name} → {new.relative_to(paths.AGENTS_STATE)} (credentials live per harness since 2026-09-15)")
+
+
 def ensure_migrated() -> None:
     """One-shot legacy migrations, called at launcher startup (before anything
     reads state): first the state dir's name, then the retired map format.
     reads the store). See the module docstring for the trigger conditions."""
     relocate_state_dir()
+    relocate_credentials()
     if path_exists(INSTANCES_FILE):
         return
     legacy = [p for p in (AGENT_WORKSPACE_MAP_FILE, AGENT_MODES_MAP_FILE) if path_exists(p)]

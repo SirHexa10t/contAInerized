@@ -15,7 +15,9 @@ The kind's root carries one shared file, and each member dir two:
                     implicit: each AI's own extremes (`tags/budget.py`).
   tag.info        — the kind's usual fields plus `vendor`, `harness` (the key
                     of its default `agents/harness/` member — the CLI that
-                    wraps it unless an instance picks another), `default`,
+                    wraps it unless an instance picks another), `key_env`
+                    (the vendor's API-key variable — the one every harness
+                    reads; `credentials/keys/<ai>.env` defines it), `default`,
                     and the tag's own colours `fg` / `bg` as hex (the first
                     kind coloured per MEMBER, after the logos).
   efforts.tiers   — this AI's TIER for every standard: the model id and effort
@@ -45,6 +47,7 @@ from .budget import BEST, CHEAPEST, is_standard, sorted_standards
 STANDARDS_FILE = "capability.standards"
 TIERS_FILE = "efforts.tiers"
 _HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}$")
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class Ai(Tag):
 
     vendor: str = ""
     harness: str = ""                 # the KEY of its default harness member (agents/harness/<key>; the registry checks it runs this AI)
+    key_env: str = ""                 # the vendor's API-key variable (ANTHROPIC_API_KEY …) — what credentials/keys/<ai>.env must define (plans/credentials.md)
     default: bool = False
     fg: str = ""
     bg: str = ""
@@ -133,6 +137,10 @@ def _own_fields(info: dict[str, Any], tag_dir: Path) -> dict[str, Any]:
             raise TagError(f"{tag_dir}/tag.info: {key} must be a non-empty string"
                            + (" — the key of its default agents/harness/ member" if key == "harness" else ""))
         own[key] = value.strip()
+    key_env = info.get("key_env", "")
+    if not isinstance(key_env, str) or not _ENV_NAME.match(key_env):
+        raise TagError(f"{tag_dir}/tag.info: key_env must be the vendor's API-key variable, like ANTHROPIC_API_KEY, got {key_env!r}")
+    own["key_env"] = key_env
     default = info.get("default", False)
     if not isinstance(default, bool):
         raise TagError(f"{tag_dir}/tag.info: default must be true or false")

@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 from launch import paths
 from launch.container_env import (
-    CONTAINER_ENV_FORWARDS, ContainerEnvKey, _container_env,
-    conf_env_args, container_env_args, stage_container_env,
-    install_creds_flags, staged_env, token_env_dict, toolkit_install_flags,
+    CONTAINER_ENV_FORWARDS, ContainerEnvKey, _container_env, conf_env_args, container_env_args, install_creds_flags, set_container_env, set_instance_env, stage_container_env, staged_env, token_env_dict, toolkit_install_flags,
 )
 from launch.tags import Profession
+
+from launch.tests.fixtures import REGISTRY, make_inst
 
 
 # ============================================================
@@ -105,6 +105,17 @@ class TestContainerEnvForwards(unittest.TestCase):
         # launch that happened to stage it.
         self.assertNotIn(ContainerEnvKey.WHITELIST_ADDRESSES, CONTAINER_ENV_FORWARDS)
 
+    def test_instance_scoped_keys_are_exactly_the_two_identity_keys(self):
+        # One agent's identity — staged by set_instance_env for a solo
+        # instance or a quickie, per pane for a cluster member, and refused
+        # container-wide by run_cluster_container. A new key here is a
+        # decision about every cluster launch.
+        self.assertEqual(set(ContainerEnvKey.instance_scoped_keys()),
+                         {ContainerEnvKey.AGENT_STATUS_LINE, ContainerEnvKey.CLAUDE_AGENT_INSTANCE})
+        for member in ContainerEnvKey:
+            with self.subTest(member=member.name):
+                self.assertEqual(member.instance_scoped, member in ContainerEnvKey.instance_scoped_keys())
+
     def test_container_emits_returns_only_flagged_members(self):
         for member in ContainerEnvKey.container_emits():
             with self.subTest(member=member.name):
@@ -113,6 +124,36 @@ class TestContainerEnvForwards(unittest.TestCase):
             if not member.container_emit:
                 with self.subTest(member=member.name):
                     self.assertNotIn(member, ContainerEnvKey.container_emits())
+
+
+class TestTheTwoHalves(ContainerEnvFixture):
+    """set_container_env stages what ONE CONTAINER gets (every shape calls
+    it — a cluster over its union's professions); set_instance_env adds one
+    agent's identity (the shapes with one agent only)."""
+
+    def test_the_container_half_stages_no_identity(self):
+        with TemporaryDirectory() as tmp, patch.object(paths, "AGENTS_STATE", Path(tmp)):
+            set_container_env(REGISTRY.professions.values())
+        staged = staged_env()
+        self.assertEqual(staged["BASH_ENV"], str(paths.BASHRC_IN_CONTAINER))
+        self.assertIn("SOFTWARE_STACK_REFRESH", staged)
+        self.assertEqual(staged["FORCE_INSTALLS_REFRESH"], "stable")
+        self.assertTrue(any(k.startswith("INSTALL_") for k in staged))
+        for key in ContainerEnvKey.instance_scoped_keys():
+            self.assertNotIn(str(key), staged)
+
+    def test_refresh_installs_busts_both_cache_busters(self):
+        with TemporaryDirectory() as tmp, patch.object(paths, "AGENTS_STATE", Path(tmp)):
+            set_container_env((), refresh_installs=True)
+        staged = staged_env()
+        self.assertTrue(staged["SOFTWARE_STACK_REFRESH"].startswith("forced-"))
+        self.assertEqual(staged["SOFTWARE_STACK_REFRESH"], staged["FORCE_INSTALLS_REFRESH"])
+
+    def test_the_instance_half_stages_exactly_the_identity(self):
+        inst = make_inst("poet", "s9")
+        set_instance_env(inst)
+        self.assertEqual(set(staged_env()), {"AGENT_STATUS_LINE", "CLAUDE_AGENT_INSTANCE"})
+        self.assertEqual(staged_env()["CLAUDE_AGENT_INSTANCE"], "poet__s9")
 
 
 class TestContainerEnvArgs(ContainerEnvFixture):

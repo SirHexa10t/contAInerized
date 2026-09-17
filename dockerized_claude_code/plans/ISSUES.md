@@ -622,7 +622,10 @@ everything it does not cover.
   better than the current "reinstall on demand", which is why it is documented
   rather than fixed.
 - **`docker build` runs per layer on every launch** — no image-exists
-  short-circuit, so each launch pays a few cache-hit seconds per layer.
+  short-circuit, so each launch pays a few cache-hit seconds per layer (one
+  more since 2026-09-16: the harness layer is its own step). Docker's own
+  cache IS the correctness key (the busters), so a short-circuit would have
+  to re-implement it; accepted.
 - **`install_latest_md` / `install_settings` overwrite their state-dir files
   every launch.** In-container edits to `CLAUDE.md` or `settings.json` are
   silently discarded. Intentional (the launcher owns those files), but it
@@ -711,27 +714,126 @@ Until then, re-verify by hand before relying on either file.
   but it reads as a task list, which misleads. Worth a header stating it is
   historical, or a prune.
 
-### One credentials pair for every AI — `~/.ai-agents/.claude.json` + `.credentials.json` are Claude Code's, mounted into every launch
+### Credentials: the residue after the two-axis layout (2026-09-15)
 
-The host state dir keeps ONE account file and ONE credentials file, named by
-the Claude Code adapter (`launch/ai/claude_code.py`: `account_filename`,
-`credentials_filename`) and bound into `paths.ACCOUNT_FILE` /
-`paths.CREDENTIALS_FILE` at import; `run_container` and the cluster launch
-mount that pair into every container whatever the instance's AI or harness.
-Nothing selects a credentials file by AI or harness, and a second harness
-would need its own files (OpenCode's `auth.json` holds many providers, Codex
-keeps `auth.json` under `CODEX_HOME`, Gemini CLI its own OAuth cache …).
+The layout landed (`plans/credentials.md`, "What landed"): API keys per AI
+as `--env-file`, login files per harness from the adapter's `auth_files`,
+private blanks, a per-file migration, a launch preflight and audit findings.
+What is still open, each with what closes it:
 
-Evidence: `paths.py` lines binding `_HARNESS.account_filename` /
-`_HARNESS.credentials_filename`; `launch/cluster/launching.py` mounts
-`harness.credentials_filename` from the same host pair for every member.
+- **Solo instances share one `.claude.json`** (status quo), and every cluster
+  member refreshes one read-write `.credentials.json` + `.claude.json` — the
+  refresh race the design forbids ACROSS harnesses exists WITHIN one. Closes
+  with `AuthFile.scope = "instance"` built out (`paths.auth_file_mounts`
+  refuses it today) after the probe: does a fresh `.claude.json` beside a
+  valid `.credentials.json` start logged in, or must the account section be
+  seeded?
+- **Key beside login is not enforced exclusive**: Claude Code reads the key
+  first (precedence 3 vs 7) and asks once, remembering in `.claude.json`. The
+  launcher prints `credentials_notice` and the README states it; closes with
+  a policy knob if that proves insufficient.
+- **Codex's key axis is a login**: `codex login --with-api-key` writes
+  `auth.json`; `CODEX_API_KEY` serves only non-interactive processes. Closes
+  with the Codex adapter (which also needs `cli_auth_credentials_store =
+  "file"` and a pre-created `CODEX_HOME`).
+- **Probes needing a binary in an image**: OpenCode `XDG_DATA_HOME` for its
+  `auth.json`; Grok Build's `auth.json` directory.
 
-What closes it: the design in `plans/credentials.md` (researched 2026-09-14,
-the report folded in the same day: per harness the auth files, relocation
-variables and refresh behaviour; a probe here showed Claude Code's
-`.claude.json` follows `CLAUDE_CONFIG_DIR`) once the operator decides its
-four open points — the keys-per-AI / OAuth-per-harness layout under
-`~/.ai-agents/credentials/`, `Adapter.auth_files` replacing the flat pair,
-`paths.py` no longer binding the pair at import, the audit checking each
-expected file. Opened 2026-09-14 (operator question: "do we have a system
-that determines which credentials file we'd use?" — not yet).
+### One launch core for solo and cluster (2026-09-15): accepted consequences, follow-ups
+
+`launch/staging.stage_instance`, one mount accumulator (`add_docker_mount`,
+pairs), the env halves (`set_container_env` / `set_instance_env`) and the
+cluster running `apply_tags`, `plant_user_extras` and `optional_creds_mounts`
+over its union probe closed the drift between `run.setup_state` and
+`cluster/launching.prepare` (gate `unify-launch-shapes`). Recorded so nobody
+reads these as bugs:
+
+- **N members refresh one read-write optional-creds dir** (accepted). gcloud
+  keeps its credential and access-token caches in sqlite files under its
+  config dir and guards the cache write — on `sqlite3.OperationalError` it
+  logs "Could not store access token in cache" and the request still
+  succeeds; members only refresh access tokens (nobody runs `gcloud auth
+  login` inside), so contention degrades to warning noise and redundant
+  refreshes. gh (`hosts.yml`), kube (kubeconfig rewritten by auth plugins)
+  and ssh (`known_hosts` appended) are last-writer-wins on small files —
+  the same a solo container sees from several concurrent CLI calls; one
+  kernel, one bind mount, POSIX locks hold. Read-only is ruled out by the
+  vendor (gcloud requires a writable config dir). Tidier if it ever bites:
+  a per-member copy of the sqlite-backed services via `CLOUDSDK_CONFIG`.
+- ~~**`cluster.py launch` has no `--refresh-installs`**~~ — DONE 2026-09-16:
+  the flag rides the verb (and run.py's cluster branch passes its own), and
+  the union build gets the failed-installs prompt with the cluster's retry
+  spelling (`docker_prompts.RETRY_CLUSTER`).
+- **A `{manager}` member gets no `ensure_hub_running`** — the solo path
+  ensures the cowork hub after the build; a cluster does not. Closes with the
+  same call in `launching.launch` once a member can carry `{manager}`.
+- **The accumulator is still module-global.** Both shapes now share it, but
+  a launch that staged twice in one process would see the first launch's
+  pairs; the endgame is a `LaunchAssembly` value threaded through
+  `apply_tags`, `optional_creds_mounts`, `set_container_mounts` and the two
+  `run_*_container`s. Not urgent: every entry launches once per process.
+
+### Build cache cadence (2026-09-16): what rebuilds when, and what was traded
+
+Until 2026-09-16 the root Dockerfile installed Claude Code, uv and rich-cli
+under the WEEKLY buster (`SOFTWARE_STACK_REFRESH`), so the base image's ID
+changed every week and docker invalidated every layer built on it — the whole
+stack ([code]'s toolchains, [webdev]'s libs, the multiplexers, {dood}'s
+docker CLI) re-downloaded weekly to refresh three user-space installs. By
+accident that cascade was also the only OS-patch cadence the images had (no
+layer ran `apt-get upgrade`, and `docker build` never `--pull`s).
+
+Now (gate `build-cache`): the harness's layer (`agents/harness/claude-code/
+Dockerfile`) is the LAST step of every chain and the ONLY Dockerfile that may
+reference the weekly buster — a test greps the tree. It reinstalls the CLI
+and runs `apt-get upgrade` for every package in the image, so a week
+boundary rebuilds one layer per chain and still patches the OS. Every other
+tool install (uv, rich-cli, rust, ruff, playwright, [self]'s deps, the gated
+CLIs) keys on `FORCE_INSTALLS_REFRESH` alone: `--refresh-installs` (now on
+`cluster.py launch` too) busts them all and adds `--pull` to the base build.
+
+Accepted, so nobody reads it as a bug:
+
+- **Developer toolchains refresh on demand, not weekly** — uv, rich-cli,
+  rust, ruff, playwright's CLI, mypy/prompt_toolkit stay at the version their
+  layer was built with until `--refresh-installs` or a Dockerfile edit. The
+  apt-installed ones (node, gh, gcloud, docker-ce-cli, tmux…) are still
+  patched weekly by the tail's upgrade.
+- **The first launch after landing rebuilds the stack once** — the base
+  Dockerfile changed. What to look for on the operator's machine (nothing
+  here could build — no docker in the dev container): that one full rebuild;
+  `claude` on PATH for user `claude` in the new tail image; a week boundary
+  then rebuilding exactly one `Building claude-code → …` step per chain.
+- **A failed weekly `apt-get upgrade` warns and continues** (a repo outage
+  must not block the CLI's install or the launch) — the cached packages
+  stand until the next week's rebuild.
+- **Not done**: BuildKit `--mount=type=cache` for apt/npm/cargo downloads
+  (needs the `# syntax` frontend and BuildKit as the default builder;
+  unverifiable here and marginal once the cascade is gone) and an
+  image-exists short-circuit (see the launcher item above).
+
+### Tag scopes (2026-09-16): what `forbid_on` covers, and what is still open
+
+`forbid_on` in tag.info (`solo` / `cluster` / `member`) is the one declaration
+the form, legend, launch, creation flows and audit read; the scan makes it
+mandatory for a tag with container reach (gate `tag-scopes`). Cluster-wide
+`{dood}` and `{ro}` now reach the one container. Open:
+
+- **Cluster-wide `{firewall}` is not built** — `{frwl}` forbids `cluster`.
+  Closing it needs: the entrypoint chain wrapping the generated cluster
+  script (`entrypoint_chain` + the script as `$@`), the phase-1 wait and the
+  updater thread lifted out of `run_container` into a helper both runs share,
+  and the resolve-status file the addendum points at placed per member config
+  dir (today `state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)`).
+  `refusal()` keeps a safety net for a wrapper entrypoint other than
+  `{muxer}`'s until then.
+- **`{cowork}` / `{manager}` on cluster members** are not declared. The plan
+  keeps the two substrates orthogonal (host hub vs in-container queue) and a
+  member `{manager}` would need `ensure_hub_running` in the cluster launch,
+  but neither is a physical impossibility — a candidate `forbid_on =
+  ["member", "cluster"]` for the operator to decide, not the launcher's.
+- **Image layers are outside `forbid_on`.** A layer-claiming tag on one
+  member ([webdev]) installs into the UNION image every member runs —
+  cluster-wide in effect. Accepted as a cost, documented, not forbidden.
+- **`options` is empty for a `forbidden` TagProblem** by design: the tag IS
+  a valid name of its kind; the useful fact is `hint`.

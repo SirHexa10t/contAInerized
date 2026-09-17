@@ -1,6 +1,23 @@
-# Base image — what every agent needs: bash/git/curl + ripgrep/fd/tree (search) +
-# jq/yq (data) + python3 + uv (Python) + rich-cli (used by /print) + Claude Code
-# itself. Tagged `claude-agents:base` by the launcher's `docker build`.
+# Base image — what every agent needs whatever CLI it runs in: bash/git/curl +
+# ripgrep/fd/tree (search) + jq/yq (data) + python3 + uv (Python) + rich-cli
+# (used by /print) + the {firewall} prerequisites. Tagged `claude-agents:base`
+# by the launcher's `docker build`.
+#
+# NOT here: the agent CLI. That is the HARNESS's layer
+# (agents/harness/<name>/Dockerfile — Claude Code's is
+# agents/harness/claude-code/), built LAST in every chain
+# (Instance.build_steps), so its weekly refresh rebuilds one layer instead of
+# invalidating every profession and specialty layer built on top of this one —
+# which is what happened every week until 2026-09-16, while the CLI lived here.
+#
+# Cache cadence, deliberately (plans/ISSUES.md, "Build cache cadence"): the
+# layers here are built once and reused — OS security patches for everything
+# they install arrive WEEKLY through the harness layer's `apt-get upgrade`
+# (the tail, so no cascade), and `--refresh-installs` (FORCE_INSTALLS_REFRESH,
+# with `--pull` on this build) rebuilds uv, rich-cli and the whole stack from
+# a fresh FROM image on demand. Nothing here keys on the weekly
+# SOFTWARE_STACK_REFRESH: that word belongs to the harness layer alone
+# (test_essential_files pins it tree-wide).
 #
 # Profession layers (agents/profession/**/Dockerfile) build on top via
 # `FROM ${PARENT_IMAGE}`; iptables + the scoped sudoers entry below serve the
@@ -60,23 +77,18 @@ RUN { \
 
 USER claude
 
-ARG SOFTWARE_STACK_REFRESH=bootstrap
+# `--refresh-installs` busts these two (FORCE_INSTALLS_REFRESH), and so every
+# layer built on them — the operator's explicit "retry everything".
+ARG FORCE_INSTALLS_REFRESH=stable
 
-RUN : "${SOFTWARE_STACK_REFRESH}" \
+RUN : "${FORCE_INSTALLS_REFRESH}" \
  && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ENV PATH="/home/claude/.local/bin:$PATH"
 
 # Pretty-printing CLI used by the `/print` skill (custom_skills/print/SKILL.md).
 # Installed via uv's tool system into ~/.local/bin/ so it's on PATH for every shell.
-RUN : "${SOFTWARE_STACK_REFRESH}" \
+RUN : "${FORCE_INSTALLS_REFRESH}" \
  && uv tool install rich-cli
 
-RUN : "${SOFTWARE_STACK_REFRESH}" \
- && curl -fsSL https://claude.ai/install.sh | bash
-ENV DISABLE_AUTOUPDATER=1
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-ENV USE_BUILTIN_RIPGREP=0
-
 WORKDIR /workspace
-ENTRYPOINT ["claude"]

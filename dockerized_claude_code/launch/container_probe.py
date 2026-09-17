@@ -113,7 +113,7 @@ def wait_for_firewall_applied(container_name: str, timeout_seconds: float = 90) 
 def container_tty_size(container: str) -> tuple[int, int] | None:
     """(rows, cols) of `container`'s OWN terminal, or None if unknowable.
 
-    pid 1 in the container is `claude` (the image's ENTRYPOINT), so its fd 0 is
+    pid 1 in the container is the agent CLI (the harness layer's ENTRYPOINT), so its fd 0 is
     the pty a client attaches to, and `stty size` reports that pty's winsize.
     Run without `-t` so the exec doesn't allocate a pty of its own — and
     without `--user root`, since reading a size needs no privilege.

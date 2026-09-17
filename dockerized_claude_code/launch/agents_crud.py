@@ -236,7 +236,10 @@ def instance_from_store(instance_id: str, registry: Registry) -> Instance | None
         return None
     entry = store.load().get(instance_id)
     build = store.entry_to_build(entry) if entry else agent.build
-    clean_build, problems = registry.resolve_store_build(build)
+    # A solo instance's build lives in the `solo` scope: a tag that cannot
+    # stand there ({clstr}, applied by cluster creation only) is flagged like
+    # a stale name — blocked, red in the picker, F2 drops it.
+    clean_build, problems = registry.resolve_store_build(build, scope="solo")
     return Instance(
         agent=agent_name,
         md_path=agent.md_path,
@@ -263,11 +266,13 @@ def invalid_tags_report(inst: Instance) -> str:
     for p in inst.invalid_tags:
         if p.reason == "wrong_axis":
             why = f"is a {p.actual_kind} tag, so it can't sit under {p.axis}"
+        elif p.reason == "forbidden":
+            why = f"is a real tag a solo instance cannot carry — {p.hint}"
         else:
             why = "isn't a known tag — a typo, or the toolset changed since this instance was set up"
-        options = ", ".join(p.options) or "(none defined)"
         lines.append(f"    {p.label}  (listed under {p.axis}) {why}.")
-        lines.append(f"        replace it with one of these {p.kind} tags: {options}")
+        if p.reason != "forbidden":   # a forbidden tag IS a valid name of its kind — offering the list would offer it back
+            lines.append(f"        replace it with one of these {p.kind} tags: {', '.join(p.options) or '(none defined)'}")
         lines.append("")
     lines.append(
         f"  Edit {home_relative(INSTANCES_FILE)} to swap each bad name for a valid one "

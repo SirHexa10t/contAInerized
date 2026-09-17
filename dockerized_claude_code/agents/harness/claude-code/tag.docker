@@ -1,0 +1,5 @@
+# The harness layer's one build-arg: the WEEKLY cache-buster, which no other
+# layer may reference (test_essential_files) — a week boundary rebuilds the CLI
+# and nothing beneath it.
+[build]
+arg_forward = ["SOFTWARE_STACK_REFRESH"]

@@ -20,7 +20,7 @@ Public surface:
 """
 
 from .ai import Ai, Standard, Tier, sorted_ais
-from .base import DockerContribution, Tag, TagError
+from .base import SCOPES, DockerContribution, Tag, TagError, is_scope, scope_note
 from .budget import BEST, CHEAPEST, Budget, is_standard, rank_of, sorted_standards
 from .engine import Engine, sorted_engines, standard_rank
 from .harness import Harness, Rendering, sorted_harnesses
@@ -36,7 +36,7 @@ from .specialty import Combo, Specialty, scan_combos
 from . import addendums, migrations, store, toolkit_profile
 
 __all__ = [
-    "Tag", "DockerContribution", "TagError",
+    "Tag", "DockerContribution", "TagError", "SCOPES", "is_scope", "scope_note",
     "Ai", "Tier", "Standard", "Rendering", "Budget", "BEST", "CHEAPEST", "is_standard", "rank_of",
     "sorted_standards", "sorted_ais", "sorted_engines", "standard_rank", "Harness", "sorted_harnesses",
     "Engine", "Profession", "Specialty", "Policy", "PolicyStance",

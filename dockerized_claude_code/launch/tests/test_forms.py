@@ -14,6 +14,7 @@ from launch.gui import forms
 from launch.gui.forms import (
     _form_requires, _harness_warnings, _tag_form_options, _tag_row, _toolkit_form_options, prompt_tags,
 )
+from launch.gui.form_core import active_warnings
 from launch.gui.styles import STYLE_UNDERLINE, _plain
 from launch.paths import AGENTS_DIR
 from launch.tags import AgentBuild, Budget, scan_all
@@ -29,20 +30,20 @@ class TestTagFormOptions(unittest.TestCase):
     the given build, with requires parentheticals and short descriptions."""
 
     def test_every_kind_member_appears_as_selectable_row(self):
-        keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild()) if not o.header}
+        keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if not o.header}
         expected = (set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines) | set(REGISTRY.professions)
                     | set(REGISTRY.specialties) | set(REGISTRY.policies))
         self.assertEqual(keys, expected)
 
     def test_one_header_per_kind_in_order(self):
-        headers = [o.key for o in _tag_form_options(REGISTRY, AgentBuild()) if o.header]
+        headers = [o.key for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.header]
         self.assertEqual(headers, ["#ai", "#harness", "#engine", "#profession", "#specialty", "#policy"])
 
     def test_the_ai_section_leads_the_form_then_the_harness_then_the_engines(self):
         # The AI decides what every engine standard below it means, so it is
         # asked first; the harness — the CLI around it — second; between the
         # headers sit exactly each kind's members.
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         self.assertEqual(rows[0].key, "#ai")
         self.assertTrue(rows[0].header)
         harness_header = next(i for i, o in enumerate(rows) if o.key == "#harness")
@@ -51,25 +52,25 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertEqual({o.key for o in rows[harness_header + 1:engine_header]}, set(REGISTRY.harnesses))
 
     def test_harnesses_form_a_radio_group_dotted_from_the_build(self):
-        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini", harness="gemini-cli"))
+        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini", harness="gemini-cli"), scope="solo")
         harness_rows = [o for o in rows if o.key in REGISTRY.harnesses]
         self.assertTrue(all(o.group == "harness" for o in harness_rows))
         self.assertEqual({o.key for o in harness_rows if o.checked}, {"gemini-cli"})
 
     def test_the_ais_default_harness_is_dotted_when_the_build_names_none(self):
         for build, expected in ((AgentBuild(), REGISTRY.default_ai.harness), (AgentBuild(ai="grok"), "grok-build")):
-            rows = _tag_form_options(REGISTRY, build)
+            rows = _tag_form_options(REGISTRY, build, scope="solo")
             self.assertEqual({o.key for o in rows if o.key in REGISTRY.harnesses and o.checked}, {expected})
 
     def test_harness_rows_say_which_ai_they_run(self):
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         for option in (o for o in rows if o.key in REGISTRY.harnesses):
             with self.subTest(harness=option.key):
                 note = "runs " + " ".join(REGISTRY.ais[a].label for a in REGISTRY.harnesses[option.key].ais)
                 self.assertIn(note, _plain(option.label))
 
     def test_ais_form_a_radio_group_dotted_from_the_build(self):
-        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini"))
+        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini"), scope="solo")
         ai_rows = [o for o in rows if o.key in REGISTRY.ais]
         self.assertTrue(all(o.group == "ai" for o in ai_rows))
         self.assertEqual({o.key for o in ai_rows if o.checked}, {"gemini"})
@@ -77,23 +78,23 @@ class TestTagFormOptions(unittest.TestCase):
     def test_the_default_ai_is_dotted_when_the_build_names_none(self):
         # `.lego` / instances.toml leave `ai` unset for "the default"; the form
         # shows what that resolves to rather than an undotted radio group.
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         self.assertEqual({o.key for o in rows if o.key in REGISTRY.ais and o.checked},
                          {REGISTRY.default_ai.name})
 
     def test_ai_rows_lead_with_the_default_then_go_by_name(self):
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         ai_keys = [o.key for o in rows if o.key in REGISTRY.ais]
         self.assertEqual(ai_keys[0], REGISTRY.default_ai.name)
         self.assertEqual(ai_keys[1:], sorted(ai_keys[1:]))
 
     def test_ai_rows_wear_their_own_logo_colours(self):
-        for option in (o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key in REGISTRY.ais):
+        for option in (o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key in REGISTRY.ais):
             with self.subTest(ai=option.key):
                 self.assertIn(REGISTRY.ais[option.key].style, [style for style, _ in option.label])
 
     def test_engines_form_a_radio_group(self):
-        rows = _tag_form_options(REGISTRY, AgentBuild(engine="poet"))
+        rows = _tag_form_options(REGISTRY, AgentBuild(engine="poet"), scope="solo")
         engine_rows = [o for o in rows if o.key in REGISTRY.engines]
         self.assertTrue(all(o.group == "engine" for o in engine_rows))
         self.assertEqual({o.key for o in engine_rows if o.checked}, {"poet"})
@@ -104,7 +105,7 @@ class TestTagFormOptions(unittest.TestCase):
         # max_output_tokens descending within a standard, then name. Derived so
         # that adding or deleting an engine — including a throwaway probe
         # tier — cannot break a test about ORDERING.
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         engine_keys = [o.key for o in rows if o.key in REGISTRY.engines]
         self.assertGreater(len(engine_keys), 1)          # the ordering must have something to order
 
@@ -128,7 +129,7 @@ class TestTagFormOptions(unittest.TestCase):
         # The tier's words live in tag.info and name no model; the model shown
         # beside them is the build's AI's tier for the engine's standard, so a
         # different AI changes the label without a tag.info edit.
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         ai = REGISTRY.default_ai
         for option in (o for o in rows if o.key in REGISTRY.engines):
             with self.subTest(engine=option.key):
@@ -146,7 +147,7 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertEqual(label.rstrip(), f"{bare.label} {bare.short_description}")
 
     def test_non_radio_rows_are_not_grouped(self):
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         radios = set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines)
         self.assertTrue(all(o.group is None for o in rows if not o.header and o.key not in radios))
 
@@ -155,25 +156,28 @@ class TestTagFormOptions(unittest.TestCase):
         # the AI and harness radios always show one dot each (here the
         # default AI's and its harness's).
         build = AgentBuild(professions=("code",), specialties=("auto",))
-        checked = {o.key for o in _tag_form_options(REGISTRY, build) if o.checked and not o.locked}
+        checked = {o.key for o in _tag_form_options(REGISTRY, build, scope="solo") if o.checked and not o.locked}
         self.assertEqual(checked, {"code", "auto", REGISTRY.default_ai.name, REGISTRY.default_ai.harness})
 
     def test_nothing_prechecked_for_empty_build(self):
         # ...except the locked always-on rows, which are always checked, and
         # the AI and harness radios, which always have a dot (tested above).
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        # Locked but UNCHECKED: the tags a solo build cannot carry ({clstr},
+        # {cc} — cluster creation applies them), greyed with their note.
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         radios = set(REGISTRY.ais) | set(REGISTRY.harnesses)
         self.assertFalse(any(o.checked for o in rows if not o.locked and o.key not in radios))
-        self.assertEqual({o.key for o in rows if o.locked}, {"no-sudo"})
+        self.assertEqual({o.key for o in rows if o.locked}, {"no-sudo", "cluster", "cluster-cowork"})
+        self.assertEqual({o.key for o in rows if o.locked and o.checked}, {"no-sudo"})
 
     def test_always_on_policy_row_is_locked_checked_and_marked(self):
-        no_sudo = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "no-sudo")
+        no_sudo = next(o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key == "no-sudo")
         self.assertTrue(no_sudo.locked)
         self.assertTrue(no_sudo.checked)
         self.assertIn("(always-on)", _plain(no_sudo.label))
 
     def test_labels_show_short_description(self):
-        fw = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "firewall")
+        fw = next(o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key == "firewall")
         self.assertIn("outbound whitelist", _plain(fw.label))
         self.assertIn("<frwl>".replace("<", "{").replace(">", "}"), _plain(fw.label))
         # ...and the full description only in the focused-row body panel.
@@ -183,10 +187,10 @@ class TestTagFormOptions(unittest.TestCase):
     def test_body_leads_with_the_underlined_fullname(self):
         # The label shows an abbreviation ({frwl}, {dood}, (🧠)); focusing the
         # row must spell out what it stands for — underlined, then ": ".
-        fw = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "firewall")
+        fw = next(o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key == "firewall")
         self.assertEqual(fw.body[0], (STYLE_UNDERLINE, "firewall"))
         self.assertTrue(fw.body[1][1].startswith(": "))
-        dood = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "dood")
+        dood = next(o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key == "dood")
         self.assertEqual(dood.body[0], (STYLE_UNDERLINE, "Docker-outside-of-Docker"))
 
     def test_policies_grouped_by_shortname_symbol(self):
@@ -194,7 +198,7 @@ class TestTagFormOptions(unittest.TestCase):
         # boundaries are derived rather than hardcoded so adding a policy to a
         # group cannot break the test while the GROUPING (the actual invariant)
         # still holds.
-        rows = _tag_form_options(REGISTRY, AgentBuild())
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
         policy_keys = [o.key for o in rows if o.key in REGISTRY.policies]
         shortnames = [REGISTRY.policies[k].shortname for k in policy_keys]
         self.assertEqual(shortnames, sorted(shortnames))
@@ -205,15 +209,15 @@ class TestTagFormOptions(unittest.TestCase):
     def test_requires_parenthetical_present(self):
         # webdev's tree position (profession/code/webdev) makes code a prerequisite;
         # the label must say so.
-        webdev = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "webdev")
+        webdev = next(o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key == "webdev")
         self.assertIn("(requires: code)", _plain(webdev.label))
 
     def test_no_parenthetical_without_requires(self):
-        code = next(o for o in _tag_form_options(REGISTRY, AgentBuild()) if o.key == "code")
+        code = next(o for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.key == "code")
         self.assertNotIn("requires", _plain(code.label))
 
     def test_labels_carry_kind_punctuation(self):
-        labels = {o.key: _plain(o.label) for o in _tag_form_options(REGISTRY, AgentBuild())}
+        labels = {o.key: _plain(o.label) for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo")}
         self.assertIn("[code]", labels["code"])
         self.assertIn("{auto}", labels["auto"])
         self.assertIn("<+qry>", labels["web-research"])   # policies render their shortname
@@ -227,7 +231,7 @@ class TestPromptTags(unittest.TestCase):
     def _run(self, form_result, current=AgentBuild(engine="poet")):
         with patch.object(forms, "checkbox_form", return_value=form_result) as self.form:
             return prompt_tags(REGISTRY, current,
-                               instance="poet__verse", workspace="/tmp/ws")
+                               instance="poet__verse", workspace="/tmp/ws", scope="solo")
 
     def test_cancel_propagates_none(self):
         self.assertIsNone(self._run(None))
@@ -489,3 +493,57 @@ class TestClusterTagForm(unittest.TestCase):
         build, _ = self._captured(result=None)
         self.assertIsNone(build)
 
+class TestScopedRows(unittest.TestCase):
+    """The form reads `forbid_on` (gate tag-scopes): a tag the build's scope
+    cannot carry renders locked, UNCHECKED and grey with its scope note; a
+    tag the CLUSTER gave a member renders locked, CHECKED, `(from the
+    cluster)` — two states kept apart so an inherited {dood} still completes
+    the dood+auto combo warning on a member's form."""
+
+    def _rows(self, build, scope, locked=frozenset()):
+        return {o.key: o for o in _tag_form_options(REGISTRY, build, scope=scope, locked=locked)}
+
+    def test_a_tag_forbidden_as_the_builds_own_is_locked_unchecked_with_the_note(self):
+        dood = self._rows(AgentBuild(specialties=("dood",)), "member")["dood"]   # even when the stored build names it
+        self.assertTrue(dood.locked)
+        self.assertFalse(dood.checked)
+        self.assertIn("(cluster-wide only: F2 on the cluster row)", _plain(dood.label))
+        frwl = self._rows(AgentBuild(), "cluster")["firewall"]
+        self.assertTrue(frwl.locked and not frwl.checked)
+        self.assertIn("(not on a cluster)", _plain(frwl.label))
+        clstr = self._rows(AgentBuild(), "solo")["cluster"]
+        self.assertTrue(clstr.locked and not clstr.checked)
+        self.assertIn("(clusters only: cluster creation applies it)", _plain(clstr.label))
+
+    def test_where_a_tag_is_allowed_its_row_is_an_ordinary_checkbox(self):
+        self.assertFalse(self._rows(AgentBuild(), "solo")["dood"].locked)
+        self.assertFalse(self._rows(AgentBuild(), "cluster")["dood"].locked)
+        self.assertFalse(self._rows(AgentBuild(), "solo")["firewall"].locked)
+
+    def test_an_inherited_tag_stays_checked_so_the_combo_warning_it_completes_fires(self):
+        # strict-reviewer (gate tag-scopes): cluster-wide {dood} + this member's own {auto}.
+        rows = self._rows(AgentBuild(professions=("code",), specialties=("muxer", "cluster", "dood", "auto")),
+                          "member", locked=frozenset({"muxer", "cluster", "dood"}))
+        self.assertTrue(rows["dood"].locked and rows["dood"].checked)
+        self.assertIn("(from the cluster)", _plain(rows["dood"].label))
+        self.assertNotIn("cluster-wide only", _plain(rows["dood"].label))
+        checked = {o.key for o in rows.values() if o.checked}
+        fired = active_warnings(checked, forms._combo_warnings(REGISTRY))
+        self.assertTrue(any("{dood}" in " ".join([header, *body]) for header, body in fired))
+
+    def test_the_cluster_form_judges_combos_with_the_members_own_tags(self):
+        warnings = {frozenset({"dood", "auto"}): ("h", ["b"]), frozenset({"x", "y"}): ("h2", ["b2"]),
+                    frozenset({"p", "q"}): ("h3", ["b3"])}
+        self.assertEqual(forms._warnings_given(warnings, frozenset({"auto", "x", "y"})),
+                         {frozenset({"dood"}): ("h", ["b"]),        # ticking {dood} completes what a member started
+                          frozenset({"p", "q"}): ("h3", ["b3"])})  # untouched combos stay; x+y is the members' alone
+        captured = {}
+
+        def fake_form(title, options, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        with patch("launch.gui.forms.checkbox_form", side_effect=fake_form):
+            forms.prompt_cluster_tags(REGISTRY, AgentBuild(specialties=("muxer", "cluster")), session="team",
+                                      locked=frozenset({"muxer", "cluster"}), member_tags=frozenset({"auto"}))
+        self.assertIn(frozenset({"dood"}), captured["warnings"])

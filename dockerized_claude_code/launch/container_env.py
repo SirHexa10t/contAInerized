@@ -26,9 +26,11 @@ Also owns the related formatters that shape user-side data into env dicts:
   - `conf_env_args` — flattens an engine conf dict into `-e KEY=VALUE`
     flags for the final `docker run`.
 
-`set_container_env` is the per-launch orchestrator that bulk-stages
-everything in one update — status line, cache-busters, toolkit-flag fan-out,
-token forwards, and the in-container BASH_ENV literal.
+`set_container_env` bulk-stages the CONTAINER's env in one update —
+cache-busters, toolkit-flag fan-out, token forwards, and the in-container
+BASH_ENV literal — for every launch shape (a cluster passes its union
+probe's professions); `set_instance_env` adds ONE agent's identity (status
+line, instance name) for the shapes that host one agent.
 
 tag_handlers / docker_config / run.py all import from here.
 """
@@ -84,16 +86,16 @@ class ContainerEnvKey(str, Enum):
         return name
 
     # Build args (pulled by each layer's `[build] arg_forward`)
-    SOFTWARE_STACK_REFRESH   = (auto(), False)   # weekly cache-buster for curl-piped Dockerfile installs (uv, rich-cli, Claude Code, rustup, playwright); --refresh-installs overrides with a per-launch timestamp
-    FORCE_INSTALLS_REFRESH   = (auto(), False)   # cache-buster for every INSTALL_<TOOL> RUN in the [code] Dockerfile; defaults to "stable" so cred-gated installs hit cache on normal launches; --refresh-installs sets a per-launch timestamp so failed/stale installs get retried
+    SOFTWARE_STACK_REFRESH   = (auto(), False)   # WEEKLY cache-buster (%Y-W%W) for the harness's layer — the LAST layer of every chain (agents/harness/<name>/Dockerfile): the OS security upgrade for everything beneath it and the CLI's reinstall, so the week boundary rebuilds that one layer and nothing under it; no other Dockerfile may reference it (test_essential_files); --refresh-installs overrides with a per-launch timestamp
+    FORCE_INSTALLS_REFRESH   = (auto(), False)   # cache-buster for every tool install layer (base's uv and rich-cli, every INSTALL_<TOOL> RUN and ruff in [code], playwright, [self]'s dev deps); defaults to "stable" so they hit cache on normal launches; --refresh-installs sets a per-launch timestamp so failed/stale installs get retried
     DOCKER_GID               = (auto(), False)   # {dood} host docker group GID — `_dood` Dockerfile build-arg for /var/run/docker.sock access
     # Tag-conditional run env (pulled by the owning tag's `[run] env_forward`)
     WHITELIST_ADDRESSES      = (auto(), False)   # {firewall} pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens, space-separated — read by init-firewall.sh; forwarded only when {firewall} is active
     FIREWALL_SELFTEST_ADDR   = (auto(), False)   # {firewall} launcher-resolved api.anthropic.com IP — the entrypoint hands it to init-firewall.sh as $1 so the positive self-test probes via `curl --resolve` (no container-DNS dependency)
     # Always-on run env (emitted as `-e KEY=VALUE` flags by container_env_args)
-    AGENT_STATUS_LINE        = (auto(), True)    # pre-styled ANSI status line at the bottom of Claude Code
+    AGENT_STATUS_LINE        = (auto(), True, True)   # pre-styled ANSI status line at the bottom of Claude Code — INSTANCE-SCOPED: one agent's; a cluster member gets its own per pane
     BASH_ENV                 = (auto(), True)    # path to the bashrc that non-interactive bash sources at startup
-    CLAUDE_AGENT_INSTANCE    = (auto(), True)    # this instance's id (`<agent>__<session>`) — the container's own name for itself, which nothing else carried: ~/.claude is the same path in every instance and the hostname is a docker id. Read by bashrc helpers that name their output files after the instance (dump_last_msg)
+    CLAUDE_AGENT_INSTANCE    = (auto(), True, True)   # this instance's id (`<agent>__<session>`) — the container's own name for itself, which nothing else carried: ~/.claude is the same path in every instance and the hostname is a docker id. Read by bashrc helpers that name their output files after the instance (dump_last_msg)
 
     # Custom __new__ + __init__ so the str-mixin and the extra `container_emit`
     # attribute can coexist:
@@ -102,13 +104,14 @@ class ContainerEnvKey(str, Enum):
     #   __init__ — sets the per-member `container_emit` (visible to mypy as a
     #              regular instance attribute, unlike attrs set inside __new__).
 
-    def __new__(cls, value: str, container_emit: bool) -> "ContainerEnvKey":
+    def __new__(cls, value: str, container_emit: bool, instance_scoped: bool = False) -> "ContainerEnvKey":
         obj = str.__new__(cls, value)
         obj._value_ = value
         return obj
 
-    def __init__(self, value: str, container_emit: bool) -> None:
+    def __init__(self, value: str, container_emit: bool, instance_scoped: bool = False) -> None:
         self.container_emit = container_emit
+        self.instance_scoped = instance_scoped
 
     def __str__(self) -> str:                          # `f"{key}"` → "DOCKER_GID", not "ContainerEnvKey.DOCKER_GID"
         return self.name
@@ -120,6 +123,16 @@ class ContainerEnvKey(str, Enum):
         container_env_args emits as `-e KEY=VALUE` flags. Cached: enum
         membership is fixed at import time."""
         return tuple(m for m in cls if m.container_emit)
+
+    @classmethod
+    @cache
+    def instance_scoped_keys(cls) -> tuple["ContainerEnvKey", ...]:
+        """Members flagged `instance_scoped=True` — ONE agent's identity,
+        staged by `set_instance_env` for a solo instance or a quickie and by
+        nothing for a cluster (each member carries them in its own pane's
+        env). `run_cluster_container` refuses a launch that staged one:
+        container-wide it would be one member's name in every tab."""
+        return tuple(m for m in cls if m.instance_scoped)
 
 
 # ============================================================
@@ -245,28 +258,56 @@ def container_env_args() -> list[str]:
 # Per-launch orchestration
 # ============================================================
 
-def set_container_env(inst: Instance, refresh_installs: bool = False) -> None:
-    """Stage per-launch env vars in one bulk dict-update — called by run.py
-    before docker build/run. Sister to docker_config's set_container_mounts
-    (env vars vs bind-mounts); both run sequentially in setup_state.
+REFRESH_INSTALLS_HELP = ("Rebuild the image stack: re-pull the Debian base and bust both cache-busters "
+                         "(FORCE_INSTALLS_REFRESH, SOFTWARE_STACK_REFRESH) so every tool install and the agent "
+                         "CLI reinstall. Used to retry installs that failed in a prior launch.")   # `--refresh-installs`, the same words on run.py and cluster.py
 
-    `refresh_installs` (driven by run.py's `--refresh-installs` CLI flag):
-    when True, both refresh-cache-buster ARGs (SOFTWARE_STACK_REFRESH and
-    FORCE_INSTALLS_REFRESH) get a fresh per-launch timestamp, forcing
-    every install layer in the [code] Dockerfile to rebuild. Used to retry
-    installs that failed in a prior launch (transient network issues,
-    GitHub API rate limits, etc.) without manual `--no-cache` invocations.
-    Default False — keeps SOFTWARE_STACK_REFRESH on its weekly rotation
-    and FORCE_INSTALLS_REFRESH at "stable" so the cache hits."""
+
+def set_container_env(professions: Iterable[Profession], *, refresh_installs: bool = False) -> None:
+    """Stage the CONTAINER's env in one bulk dict-update — what one container
+    gets whoever runs in it: the build cache-busters, BASH_ENV, the toolchain
+    INSTALL flags for `professions` (a solo instance's own; a cluster's UNION,
+    since one container has one image), the creds-driven CLI INSTALL flags
+    and the service tokens. Called once per launch by every shape — run.py,
+    the quickie, and `cluster/launching.prepare` over the union probe (until
+    2026-09-15 the cluster skipped it, so its image was built from the
+    Dockerfile's ARG defaults, blind to the operator's toolkit profile, and
+    its shells had no BASH_ENV). Sister to docker_config's
+    set_container_mounts (env vars vs bind-mounts).
+
+    NOT here, by design: one agent's identity (`set_instance_env` — a cluster
+    hosts N), and the tag-driven keys (DOCKER_GID, WHITELIST_ADDRESSES,
+    FIREWALL_SELFTEST_ADDR), which their tag handlers stage and which never
+    reach a cluster because `launching.refusal` keeps those tags out — so a
+    tag key must never be added to this half, or it would bypass that refusal.
+
+    `refresh_installs` (`--refresh-installs` on run.py and cluster.py): when
+    True, both cache-buster ARGs (SOFTWARE_STACK_REFRESH and
+    FORCE_INSTALLS_REFRESH) get one fresh per-launch timestamp, rebuilding
+    every tool layer and the harness layer — the operator's explicit "retry
+    everything" (`ensure_image` also re-pulls the FROM image then, so the
+    stack rebuilds from a fresh Debian). Default False — the weekly rotation
+    for the harness layer (OS patches + the CLI) and "stable" for every tool
+    install, so an ordinary launch hits the cache everywhere else."""
     refresh_value = f"forced-{int(time.time())}" if refresh_installs else None
     _container_env.update({
         ContainerEnvKey.SOFTWARE_STACK_REFRESH:  refresh_value or date.today().strftime("%Y-W%W"),
         ContainerEnvKey.FORCE_INSTALLS_REFRESH:  refresh_value or "stable",
-        ContainerEnvKey.AGENT_STATUS_LINE:       build_status_line(inst),
         ContainerEnvKey.BASH_ENV:                BASHRC_IN_CONTAINER,
-        ContainerEnvKey.CLAUDE_AGENT_INSTANCE:   inst.instance,
         # Dynamic-key updates from toolkit profiles + optional_creds/
-        **toolkit_install_flags(inst.professions),                  # INSTALL_<TOOL> for language toolchains (profile-driven)
+        **toolkit_install_flags(professions),                       # INSTALL_<TOOL> for language toolchains (profile-driven)
         **install_creds_flags(present_optional_cred_services()),    # INSTALL_<TOOL> for service CLIs (creds-presence-driven)
         **token_env_dict(optional_cred_tokens()),                   # per-service tokens (e.g. JIRA_API_TOKEN)
+    })
+
+
+def set_instance_env(inst: Instance) -> None:
+    """Stage ONE agent's identity container-wide: its status line and its own
+    name (`ContainerEnvKey.instance_scoped_keys`). A solo instance and a
+    quickie call this after `set_container_env`; a cluster never does — each
+    member carries the same two in its own pane's env (`launching.prepare`),
+    and `run_cluster_container` refuses a launch that staged them."""
+    _container_env.update({
+        ContainerEnvKey.AGENT_STATUS_LINE:       build_status_line(inst),
+        ContainerEnvKey.CLAUDE_AGENT_INSTANCE:   inst.instance,
     })

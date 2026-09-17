@@ -1,5 +1,9 @@
 shortname         = "mux"
 short_description = "extra shells, survives detach"
+# Its entrypoint contribution (the solo startup script) is container-wide, so
+# the scan rule applies; in a cluster the tag is the CLUSTER's locked one
+# (state.LOCKED_SPECIALTIES), never a member's own addition.
+forbid_on         = ["member"]
 full_description  = "Runs a terminal multiplexer inside the container, so one window holds several. Gives you an extra shell alongside the agent — log into a CLI, tune bashrc, tail a log, check the network, run a server next to the work — and swap between them with a keystroke. The session is sticky: detach and everything keeps running, reattach later from anywhere, which also makes this the tag for running the launcher on a server. It visualizes what is running, organizes and remembers the layout, shares one view between several attachers, and provides one deliberate way to close the whole thing at once. Grants no new authority — it changes what YOU can do in the container, not what the agent may do. {cluster} builds on it: a cluster is a special case of multiplexing."
 
 # No `warn`: unlike {dood} (host-root authority) or {auto} (bypasses the

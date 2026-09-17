@@ -7,12 +7,15 @@ test_container_env.py alongside the accumulator they feed."""
 
 import contextlib
 import io
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from launch import docker_config, paths
+from launch.paths import AGENTS_DIR
+from launch.tags import scan_all
 from launch.container_env import ContainerEnvKey, _container_env, stage_container_env
 from launch.docker_config import (
     build_arg_flags, effort_args, entrypoint_chain, env_forward_flags,
@@ -29,6 +32,9 @@ def _run_inst(**over):
                     instance="poet__x", is_muxer=False, ai=None)
     defaults.update(over)
     return SimpleNamespace(**defaults)
+
+
+REGISTRY = scan_all(AGENTS_DIR)
 
 
 class TestRunContainerMuxer(unittest.TestCase):
@@ -111,6 +117,77 @@ class TestRunContainerMuxer(unittest.TestCase):
                                         ["--extra"], ["--continue"])
         self.assertIn("--continue", recorded[0])
         self.assertNotIn("--entrypoint", recorded[0])
+
+
+class TestKeyEnvFiles(unittest.TestCase):
+    """key_env_file_args / preflight_key_file — the AI's API key reaches the
+    container as `--env-file`, never as `-e KEY=value` on the command line;
+    a file docker would mis-read stops the launch with names, not values."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_no_key_file_means_no_flag(self):
+        self.assertEqual(docker_config.key_env_file_args(["claude", "gemini"]), [])
+
+    def test_a_key_file_becomes_an_env_file_flag_once(self):
+        path = paths.key_file("claude")
+        path.parent.mkdir(parents=True)
+        path.write_text("ANTHROPIC_API_KEY=sk-test\n")
+        self.assertEqual(docker_config.key_env_file_args(["claude", "claude", "gemini"]), ["--env-file", str(path)])
+
+    def test_the_preflight_fixes_the_mode_and_refuses_a_lax_file_naming_no_value(self):
+        ai = REGISTRY.ais["claude"]
+        docker_config.preflight_key_file(ai)                           # no file: nothing to do
+        path = paths.key_file("claude")
+        path.parent.mkdir(parents=True)
+        path.write_text("ANTHROPIC_API_KEY=sk-test\n")
+        path.chmod(0o644)
+        docker_config.preflight_key_file(ai)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        path.write_text("export ANTHROPIC_API_KEY=sk-test\n")
+        with self.assertRaises(RuntimeError) as caught:
+            docker_config.preflight_key_file(ai)
+        self.assertIn("export", str(caught.exception))
+        self.assertNotIn("sk-test", str(caught.exception))
+
+    def test_stage_credentials_is_the_one_staging_for_every_launch_shape(self):
+        # Blanks appear (private), the key preflight runs, the notices come back.
+        from launch.ai import CLAUDE_CODE
+        ai = REGISTRY.ais["claude"]
+        notices = docker_config.stage_credentials(CLAUDE_CODE, [ai])
+        for f in CLAUDE_CODE.auth_files:
+            path = paths.credentials_dir(CLAUDE_CODE.key) / f.name
+            self.assertEqual((path.read_text(), path.stat().st_mode & 0o777), (f.blank, 0o600))
+        (notice,) = notices
+        self.assertIn("no API key file", notice)                        # nothing to log in with yet
+        key = paths.key_file("claude")
+        key.parent.mkdir(parents=True)
+        key.write_text("ANTHROPIC_API_KEY=sk-test\n")
+        self.assertEqual(docker_config.stage_credentials(CLAUDE_CODE, [ai]), [])   # a key, no login: nothing to say
+        key.write_text("export ANTHROPIC_API_KEY=sk-test\n")
+        with self.assertRaises(RuntimeError):
+            docker_config.stage_credentials(CLAUDE_CODE, [ai])
+
+    def test_run_container_passes_the_env_file(self):
+        path = paths.key_file("claude")
+        path.parent.mkdir(parents=True)
+        path.write_text("ANTHROPIC_API_KEY=sk-test\n")
+        recorded = []
+        with patch.object(docker_config, "_interactive_docker_run", side_effect=lambda a: recorded.append(a)), \
+             patch.object(docker_config, "start_firewall_updater"), \
+             patch.object(docker_config, "set_terminal_title"), \
+             patch.object(docker_config, "is_critical_pending", return_value=False), \
+             patch.object(docker_config, "wait_for_critical_addresses", return_value=None):
+            docker_config.run_container(_run_inst(ai=SimpleNamespace(name="claude")), "claude-agents:base", [], [])
+        argv = recorded[0]
+        self.assertIn("--env-file", argv)
+        self.assertEqual(argv[argv.index("--env-file") + 1], str(path))
+        self.assertFalse(any("sk-test" in a for a in argv))          # the key never appears on the command line
 
 
 class TestRunContainerModes(unittest.TestCase):
@@ -398,14 +475,12 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         workspace_pair = next(p for p in mounts if p[1] == "/workspace")
         self.assertEqual(workspace_pair[0], str(paths.DEFAULT_WORKSPACE))
 
-    def test_generated_settings_mounted_read_only(self):
-        # The launcher-generated settings file shadows the state-dir's rw
-        # view of ~/.claude/settings.json — the leash the agent can't undo.
-        inst_id = self._inst()
-        mounts = self._capture_mounts(inst_id)
-        settings_pair = next(p for p in mounts if "settings.json" in p[1])
-        self.assertEqual(settings_pair[0], "/tmp/state/settings.json")
-        self.assertTrue(settings_pair[1].endswith(":ro"))
+    def test_the_agents_own_files_are_not_this_functions_business(self):
+        # The settings/commands shadows and the login files are staged by
+        # staging.stage_instance for EVERY shape (test_staging pins them);
+        # this function stages what only a solo container has.
+        mounts = self._capture_mounts(self._inst())
+        self.assertFalse(any("settings.json" in t or "commands" in t or "credentials" in t for _, t in mounts))
 
     def test_readonly_specialty_mounts_workspace_ro(self):
         # A workspace_readonly specialty ({ro}) makes the /workspace mount
@@ -544,11 +619,14 @@ class TestCoworkMountRealInstance(unittest.TestCase):
 
 
 class TestAddDockerMountCollisions(unittest.TestCase):
-    """add_docker_mount rejects conflicting duplicates at staging time. Two
-    `-v` flags for one target make docker error out at run time with a
-    message that names neither culprit; the source-keyed accumulator would
-    silently *drop* a mount on same-source/new-target. Both now fail fast
-    with a message naming the paths. Identical re-stages stay no-ops."""
+    """add_docker_mount is the ONE place either launch shape stages a mount,
+    with the one collision rule: two `-v` flags for one container path make
+    docker error out at run time with a message that names neither culprit,
+    so a second source (or mode) at a staged target fails fast, naming both.
+    Identical re-stages are no-ops. The same SOURCE at a new target is LEGAL:
+    a cluster mounts one shared login file into every member's config dir —
+    the source-keyed dict that held the mounts until 2026-09-15 silently kept
+    only the last of those."""
 
     def setUp(self):
         docker_config._docker_mounts.clear()
@@ -559,7 +637,7 @@ class TestAddDockerMountCollisions(unittest.TestCase):
     def test_identical_restage_is_idempotent(self):
         docker_config.add_docker_mount("/src", "/tgt")
         docker_config.add_docker_mount("/src", "/tgt")
-        self.assertEqual(docker_config._docker_mounts, {"/src": "/tgt"})
+        self.assertEqual(docker_config.staged_mounts(), (("/src", "/tgt"),))
 
     def test_same_target_from_different_source_raises(self):
         docker_config.add_docker_mount("/src1", "/tgt")
@@ -574,13 +652,18 @@ class TestAddDockerMountCollisions(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             docker_config.add_docker_mount("/src2", "/tgt")
 
-    def test_same_source_at_new_target_raises(self):
-        # The dict is keyed by source — a second target for the same source
-        # used to silently REPLACE the first mount. Now it's an error.
+    def test_same_source_at_a_new_target_accumulates(self):
+        # One host file, N container paths: the cluster's shared login file
+        # mounts into every member's config dir. Docker repeats a source
+        # legally; the launcher keeps every pair, in staging order.
         docker_config.add_docker_mount("/src", "/tgt1")
+        docker_config.add_docker_mount("/src", "/tgt2")
+        self.assertEqual(docker_config.staged_mounts(), (("/src", "/tgt1"), ("/src", "/tgt2")))
+
+    def test_the_same_path_in_another_mode_is_still_one_target(self):
+        docker_config.add_docker_mount("/src", "/tgt:ro")
         with self.assertRaises(RuntimeError):
-            docker_config.add_docker_mount("/src", "/tgt2")
-        self.assertEqual(docker_config._docker_mounts, {"/src": "/tgt1"})   # original intact
+            docker_config.add_docker_mount("/src", "/tgt")
 
     def test_distinct_mounts_accumulate(self):
         docker_config.add_docker_mount("/a", "/x")
@@ -607,14 +690,29 @@ class TestPromptInstallFailuresDryRun(unittest.TestCase):
     def test_dry_run_skips_the_docker_read(self):
         docker_config.set_dry_run(True)
         with patch("launch.docker_config.shell_capture") as mock_capture:
-            docker_config.prompt_install_failures("claude-agents:code", "poet__x")
+            docker_config.prompt_install_failures("claude-agents:code", "python3 run.py poet__x --refresh-installs")
         mock_capture.assert_not_called()
 
     def test_real_run_reads_the_image_log(self):
         completed = SimpleNamespace(returncode=1, stdout="")   # rc!=0 → no log in image → silent return
         with patch("launch.docker_config.shell_capture", return_value=completed) as mock_capture:
-            docker_config.prompt_install_failures("claude-agents:code", "poet__x")
+            docker_config.prompt_install_failures("claude-agents:code", "python3 run.py poet__x --refresh-installs")
         mock_capture.assert_called_once()
+
+    def test_the_prompt_names_the_callers_retry_command(self):
+        # The caller knows its entry (run.py per instance, cluster.py per
+        # session); the prompt only renders what it is handed.
+        from launch.template_code.docker_prompts import RETRY_CLUSTER, RETRY_SOLO
+        completed = SimpleNamespace(returncode=0, stdout="jira\nvercel\n")
+        for retry in (RETRY_SOLO.format(instance="poet__x"), RETRY_CLUSTER.format(session="team")):
+            with self.subTest(retry=retry), \
+                 patch("launch.docker_config.shell_capture", return_value=completed), \
+                 patch("launch.docker_config.prompt_keypress") as keypress:
+                docker_config.prompt_install_failures("claude-agents:code", retry)
+            kwargs = keypress.call_args.kwargs
+            self.assertIn("jira, vercel", kwargs["header"])
+            self.assertIn(f"  {retry}", kwargs["body"])
+        self.assertEqual(RETRY_CLUSTER.format(session="team"), "python3 cluster.py launch team --refresh-installs")
 
 
 class TestMountTargetIsStaged(unittest.TestCase):
@@ -747,6 +845,45 @@ class TestEnsureImage(unittest.TestCase):
         args_dood = mock_run.call_args_list[2].args[0]
         self.assertIn("PARENT_IMAGE=claude-agents:base", args_code)
         self.assertIn("PARENT_IMAGE=claude-agents:code", args_dood)
+
+    def test_pull_refreshes_the_base_image_only_on_request(self):
+        with patch("launch.docker_config.docker_subprocess") as mock_run, patch("builtins.print"):
+            docker_config.ensure_image(self._inst([("code", None)]))
+            docker_config.ensure_image(self._inst([("code", None)]), pull=True)
+        plain_base, plain_code, pulled_base, pulled_code = (c.args[0] for c in mock_run.call_args_list)
+        self.assertNotIn("--pull", plain_base)
+        self.assertIn("--pull", pulled_base)          # --refresh-installs: the FROM image itself moves
+        self.assertNotIn("--pull", pulled_code)       # a child's FROM is the parent just built — nothing to pull
+
+    def test_the_base_build_forwards_the_refresh_buster_never_the_weekly_one(self):
+        from launch.container_env import _container_env
+        snapshot = dict(_container_env)
+        _container_env.clear()
+        _container_env.update({"FORCE_INSTALLS_REFRESH": "stable", "SOFTWARE_STACK_REFRESH": "2026-W37"})
+        try:
+            with patch("launch.docker_config.docker_subprocess") as mock_run, patch("builtins.print"):
+                docker_config.ensure_image(self._inst([]))
+            base_args = mock_run.call_args_list[0].args[0]
+            self.assertIn("FORCE_INSTALLS_REFRESH=stable", base_args)
+            self.assertFalse(any("SOFTWARE_STACK_REFRESH" in a for a in base_args))
+        finally:
+            _container_env.clear()
+            _container_env.update(snapshot)
+
+    def test_a_real_instance_ends_with_its_harness_layer(self):
+        # The CLI layer is the tail of EVERY chain — a bare agent's too
+        # (quickie's research build runs on base + harness): base alone is an
+        # image that starts nothing.
+        from launch.tests.fixtures import make_inst
+        for inst, expected in ((make_inst("poet"), "claude-agents:claude-code"),
+                               (make_inst("poet", professions=["code"]), "claude-agents:code.claude-code"),
+                               (make_inst("poet", professions=["code"], specialties=["muxer"]), "claude-agents:code.muxer.claude-code")):
+            with self.subTest(expected=expected), \
+                 patch("launch.docker_config.docker_subprocess") as mock_run, patch("builtins.print"):
+                self.assertEqual(inst.build_steps[-1][0], "claude-code")
+                self.assertEqual(docker_config.ensure_image(inst), expected)
+                last = mock_run.call_args_list[-1].args[0]
+                self.assertEqual(last[last.index("-f") + 1], str(inst.harness.dockerfile))
 
     def test_step_forwards_its_own_build_args(self):
         from launch.container_env import _container_env

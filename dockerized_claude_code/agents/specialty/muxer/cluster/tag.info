@@ -1,5 +1,9 @@
 shortname         = "clstr"
 short_description = "communicates with cohabitating cluster-members"
+# Cluster creation applies it (state.LOCKED_SPECIALTIES); a hand-tagged SOLO
+# instance would get the layer but not the mounts and cluster-chat would
+# refuse — so the instance form greys it out.
+forbid_on         = ["solo"]
 full_description  = "Marks this agent as a MEMBER of a cluster: several agents living in ONE container, working the same project, each in its own multiplexer window and its own clone of the repository. The topology is flat — no manager, no recruiter, no round budget; members are peers distinguished only by their role and persona. Nested inside {muxer} because a cluster IS multiplexing, so ticking this brings the multiplexer with it. Worth knowing rather than fearing: members share a filesystem as the same user, so a sibling can reach anything you can — the same exposure any single agent already has to its own workspace and state, multiplied by the number of members rather than different in kind. What that buys is directness: siblings see the same project and can reach each other without a host-side hub relaying copies, which is what {cowork} does for agents that are genuinely isolated."
 
 # NO `warn`: an earlier draft set it, on the grounds that cohabitation punctures

@@ -22,12 +22,29 @@ are baked in here:
   rides each window's env, so `ListAgents` shows `researcher__primary`, not
   `workspace-e4`.
 
-**What a member may NOT bring (yet): container-level docker contributions.**
-One container means one set of capabilities, mounts, and entrypoints, and this
-integration makes no attempt to merge them — a member carrying `{firewall}` or
-`{dood}` is refused with the tag named, rather than silently launched without
-its protection (the worse failure). `{muxer}`'s own entrypoint contribution is
-exempt: the cluster script IS that entrypoint's cluster-shaped sibling.
+**One launch core, two shapes (2026-09-15).** Each member is staged by the
+same `staging.stage_instance` a solo instance runs (state dir installs, login
+files, key preflight, the read-only settings and commands shadows), and the
+container is staged by the same core calls over the UNION probe —
+`apply_tags` (caches), `set_container_env` (busters, BASH_ENV, the union's
+toolkit and creds INSTALL flags, tokens), `plant_user_extras`,
+`optional_creds_mounts` — with every mount going through
+`docker_config.add_docker_mount`, the one accumulator and collision rule.
+What stays cluster-shaped: a member's identity (status line, config dir,
+session name) rides its own pane's env, never the container's.
+
+**Container-level tags are the CLUSTER's, never a member's own (2026-09-16).**
+One container means one set of capabilities, mounts, env forwards and one
+workspace mount, so `{dood}` and `{ro}` are picked cluster-wide (every member
+inherits them) and the union probe carries them into the one container —
+`apply_tags` stages the socket mount and the GID, `run_cluster_container`
+adds the capabilities and env forwards, the workspace mount goes `:ro`. A
+member adding one itself is refused with the fix named, from data: the tag's
+`forbid_on = ["member"]` in tag.info (the scan insists every container-level
+tag declares it), judged by `Cluster.member_instance` per scope. What is still
+mechanism: wrapping the cluster's generated entrypoint with another tag's
+chain is not built, so `{firewall}` forbids `cluster` too and `refusal` keeps
+a safety net for a wrapper entrypoint other than `{muxer}`'s solo script.
 """
 
 from __future__ import annotations
@@ -36,27 +53,28 @@ import dataclasses
 from pathlib import Path
 
 from ..ai import DEFAULT_HARNESS_KEY, adapter_for, refusal_for
-from ..agents_crud import (
-    compute_resume_flag, install_commands, install_latest_md, install_settings,
-)
-from ..claude_code_config import build_cluster_status_line
+from ..agents_crud import compute_resume_flag
+from ..claude_code_config import build_cluster_status_line, optional_creds_line
+from ..container_env import ContainerEnvKey, set_container_env
 from ..cluster_work_protocol import (
     CONFIG_IN_CONTAINER as PROTOCOL_CONF_TARGET,
     PACKAGE_IN_CONTAINER as PROTOCOL_PACKAGE_TARGET,
     PROTOCOL_DIR_IN_CONTAINER,
 )
 from ..cluster_work_protocol.queue import CURSORS_DIRNAME
-from ..container_env import ContainerEnvKey
-from ..docker_config import effort_args, ensure_image, run_cluster_container
-from ..file_access import ensure_dir, write_text
+from ..docker_config import add_docker_mount, effort_args, ensure_image, prompt_install_failures, run_cluster_container, staged_mounts
+from ..file_access import is_file, write_text
 from ..paths import (
-    ACCOUNT_FILE, CACHE_MOUNTS, CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
-    CLUSTER_WORK_PROTOCOL_DIR, CREDENTIALS_FILE, CLAUDE_CONFIG_IN_CONTAINER,
-    DOCKER_BASE_MOUNTS, RO_MOUNT_OPTION, TMUX_CONF_IN_CONTAINER,
-    cluster_banner_path, cluster_member_dir, cluster_path,
-    state_settings_path,
+    CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
+    CLUSTER_WORK_PROTOCOL_DIR, CLAUDE_CONFIG_IN_CONTAINER,
+    RO_MOUNT_OPTION, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
+    auth_file_mounts, base_mounts, cluster_banner_path, cluster_member_dir, cluster_path, key_file,
 )
-from ..tags import Instance, Registry, resolve_build
+from ..staging import stage_instance
+from ..tag_handlers import apply_tags
+from ..template_code.docker_prompts import RETRY_CLUSTER
+from ..tags import DockerContribution, Instance, Registry, TagError, resolve_build
+from ..user_additions import optional_creds_mounts, plant_user_extras
 from . import backend, herdr, launch_plan, tmux
 from .member import ClusterError, Member
 from .state import Cluster, picker_order
@@ -104,46 +122,49 @@ def member_instances(cluster: Cluster,
             raise ClusterError(
                 f"member {member.id!r}: no agent {member.agent!r} in agents/")
         if not inst.is_startable:
-            names = ", ".join(problem.label for problem in inst.invalid_tags)
+            # Per problem, its own words: a tag that is not one at all, and a
+            # real one the member cannot carry as its own (`forbidden`, with
+            # the scope note saying where it goes — cluster-wide, for {dood}).
+            details = "; ".join(
+                f"{p.label} ({p.hint})" if p.reason == "forbidden" else f"{p.label} (unknown tag)"
+                for p in inst.invalid_tags)
             raise ClusterError(
-                f"member {member.id!r} references unknown tag(s) {names} — "
+                f"member {member.id!r} carries tag(s) it cannot: {details} — "
                 f"edit its tags from the picker (F2)")
         pairs.append((member, inst))
     return pairs
 
 
 def refusal(pairs: list[tuple[Member, Instance]]) -> str | None:
-    """Why this cluster cannot launch, or None.
+    """Why this cluster cannot launch, or None — the two checks that are
+    MECHANISM, not data. Everything about WHERE a tag may go is data now
+    (`forbid_on` in tag.info, judged by `Cluster.member_instance` per scope
+    and surfaced by `member_instances` before this runs): a cluster-wide
+    `{dood}` is fine and its socket, GID and mounts reach the one container
+    through `apply_tags` over the union probe; a member's own `{dood}` is a
+    `forbidden` TagProblem naming the fix.
 
-    One container, one set of container-level docker features — so a member
-    whose tags contribute capabilities, mounts, env forwards, or a foreign
-    entrypoint is refused BY NAME rather than launched without them. `{muxer}`'s
-    entrypoint (the solo startup script) is the one exemption: this launch
-    replaces it with the cluster-shaped script."""
+    What stays here: a member in a harness without an adapter cannot run
+    (same rule and message as a solo instance, named per member); and a
+    wrapper ENTRYPOINT at any level other than `{muxer}`'s solo startup
+    script, because wrapping the cluster's generated entrypoint with another
+    tag's chain is not built (plans/ISSUES.md) — `{firewall}` declares
+    forbid_on cluster for that reason, so today this is the safety net for a
+    wrapper tag that does not."""
     from . import solo
-    # A member in a harness without an adapter cannot run — same rule and
-    # message as a solo instance, named per member.
     for member, inst in pairs:
         if inst.harness is not None and (refused := refusal_for(inst.harness.name, inst.harness.label)) is not None:
             return f"member {member.id!r}:\n{refused}"
-    offending: list[str] = []
     for member, inst in pairs:
         for contribution in inst.docker_contributions:
             # muxer's tag.docker declares the CONTAINER path of the solo
             # startup script — compare against that exact spelling
             # (solo.CONTAINER_SCRIPT), which a test pins to the tag file.
-            foreign_entry = (contribution.entrypoint is not None
-                             and contribution.entrypoint != solo.CONTAINER_SCRIPT)
-            if (contribution.cap_add or contribution.mounts
-                    or contribution.env_forward or foreign_entry):
-                offending.append(member.id)
-                break
-    if not offending:
-        return None
-    return ("these members carry tags with container-level docker features "
-            "(capabilities / mounts / entrypoints), which a shared container "
-            f"cannot honour per-member yet: {', '.join(offending)} — remove "
-            "those tags (picker F2) or launch them as solo instances")
+            if contribution.entrypoint is not None and contribution.entrypoint != solo.CONTAINER_SCRIPT:
+                return (f"member {member.id!r} carries a tag with a wrapper entrypoint "
+                        f"({contribution.entrypoint}) — wrapping a cluster's entrypoint script is not "
+                        f"built yet; launch that agent as a solo instance")
+    return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,17 +173,22 @@ class PreparedLaunch:
     a value so the CLI can show it (--dry-run) and tests can assert on it
     without docker existing.
 
-    `mounts` is (host source, container target[:ro]) PAIRS, not a dict keyed
-    either way: the shared credentials file is the SOURCE of one mount per
-    member (docker happily repeats a source), so source keys collide — a
-    source-keyed dict silently left only the LAST member with credentials,
-    caught while writing the test that now pins this shape."""
+    `mounts` is (host source, container target[:ro]) PAIRS — a snapshot of
+    docker_config's accumulator, which since 2026-09-15 holds pairs for the
+    same reason this record always did: the shared credentials file is the
+    SOURCE of one mount per member (docker happily repeats a source), and the
+    source-keyed dict it used to be silently left only the LAST member with
+    credentials, caught while writing the test that now pins this shape."""
     cluster: Cluster
     image_probe: Instance                 # the union build ensure_image consumes
     plan: launch_plan.LaunchPlan
     script_host: Path
     script_container: str
     mounts: tuple[tuple[str, str], ...]
+    env_files: tuple[str, ...] = ()       # `--env-file`s: the members' AIs' key files that exist (credentials/keys/<ai>.env)
+    notices: tuple[str, ...] = ()         # what stage_credentials had to say, printed by launch() before docker runs
+    cred_names: tuple[str, ...] = ()      # the operator's optional-creds services mounted (user_extras/optional_creds/), named in the banner like a solo launch's
+    contributions: tuple[DockerContribution, ...] = ()   # the union's tag.docker records — cluster-wide capabilities and env forwards for run_cluster_container (never entrypoints)
 
 
 def _union_probe(cluster: Cluster, pairs: list[tuple[Member, Instance]],
@@ -219,7 +245,7 @@ def _setup_commands(cluster: Cluster) -> tuple[str, ...]:
     return tuple(lines)
 
 
-def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
+def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = False) -> PreparedLaunch:
     """Assemble the launch: refuse what can't be honoured, install every
     member's state, resolve per-member env and argv, write the banner and the
     entrypoint script, and collect the mount set. Everything on disk after
@@ -233,20 +259,44 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
     if (reason := refusal(pairs)) is not None:
         raise ClusterError(reason)
 
+    probe = _union_probe(cluster, pairs, registry)
+    # CONTAINER-LEVEL staging, the same core calls a solo launch makes, over
+    # the union probe — one container has one image, one env, one set of
+    # mounts, and N members share them: the tags' contributions and handlers
+    # ([code]'s caches, pruned; container-level tags never reach here —
+    # refusal() kept them out), the container's env (busters, BASH_ENV, the
+    # UNION's toolkit and creds INSTALL flags, service tokens — never a
+    # member's identity, which rides its pane), the operator's first-launch
+    # files. Until 2026-09-15 the cluster skipped all three: its image was
+    # built from the Dockerfile's ARG defaults and its shells had no BASH_ENV.
+    try:
+        apply_tags(probe)
+    except (ValueError, RuntimeError) as e:
+        raise ClusterError(str(e)) from None
+    set_container_env(probe.professions, refresh_installs=refresh_installs)   # `cluster.py launch --refresh-installs`, or run.py's flag through its cluster branch
+    plant_user_extras(probe)
+
     env_for: dict[str, dict[str, str]] = {}
     command_for: dict[str, tuple[str, ...]] = {}
-    mounts: list[tuple[str, str]] = []
-    needs_caches = False
+    notices: list[str] = []
     for member, inst in pairs:
-        ensure_dir(inst.state_dir)
-        install_latest_md(inst)
-        install_settings(inst, registry)
-        install_commands(inst)
         config = container_member_dir(cluster.session, member.id)
-        # The engine conf rides the WINDOW env — the per-pane `-e` property
-        # that chose tmux — so two members genuinely run different models. The
-        # adapter is the MEMBER's harness's (refusal() has made sure it has one).
+        # The adapter is the MEMBER's harness's (refusal() has made sure it
+        # has one). The member's own staging is the ONE function every run
+        # shape calls (launch/staging.py) — state dir installs, login files,
+        # key preflight, and the mounts for them INTO the member's config dir
+        # (the relocation variable points there, so even the file that sits
+        # at HOME by default lives inside it; the settings and commands are
+        # read-only over their rw view through the /cluster mount — the solo
+        # shadowing, from the one definition). A stop names the member.
         harness = adapter_for(inst.harness.name if inst.harness else DEFAULT_HARNESS_KEY)
+        try:
+            staged = stage_instance(inst, registry, harness=harness, config=str(config), relocated=True)
+        except (TagError, RuntimeError) as e:
+            raise ClusterError(f"member {member.id!r}: {e}") from None
+        notices.extend(n for n in staged.notices if n not in notices)
+        # The engine conf rides the WINDOW env — the per-pane `-e` property
+        # that chose tmux — so two members genuinely run different models.
         env_for[member.id] = {
             **inst.conf,
             harness.config_dir_env: str(config),
@@ -265,33 +315,27 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
             *compute_resume_flag(inst),
             *inst.claude_args,
         )
-        # Per-member credential/account file mounts INTO the member's config
-        # dir (CLAUDE_CONFIG_DIR relocates where claude looks for both). The
-        # launcher places credentials host-side — the same trust shape as solo
-        # instances, and the reason no agent ever needs to copy a credential.
-        member_dir = cluster_member_dir(cluster.session, member.id)
-        mounts.append((str(CREDENTIALS_FILE), f"{config}/{harness.credentials_filename}"))
-        mounts.append((str(ACCOUNT_FILE), f"{config}/{harness.account_filename}"))
-        # The merged settings mount READ-ONLY over their rw view through the
-        # /cluster mount — same shadowing trick as solo, same reason: a member
-        # must not be able to relax its own policies.
-        mounts.append((str(state_settings_path(member_dir)),
-                       f"{config}/{harness.settings_filename}:{RO_MOUNT_OPTION}"))
-        needs_caches = needs_caches or any(
-            p.name == "code" for p in inst.professions)
 
     plan = launch_plan.build(cluster, env_for=env_for, command_for=command_for,
                              personal_workspaces=False)
+    # Every mount goes through docker_config.add_docker_mount — the ONE
+    # accumulator and the ONE collision rule a solo launch has (a shadowing
+    # target is refused here, cleanly, not by docker at run time). Sources
+    # repeat legally: the shared login file mounts once per member.
     for host, target in plan.mounts().items():
-        mounts.append((str(host), target))
+        # A cluster-wide `{ro}` (workspace_readonly — forbid_on member, so
+        # only the shared set can carry it) makes the ONE workspace mount
+        # read-only, exactly as set_container_mounts does for a solo
+        # instance; until 2026-09-16 the cluster ignored the key.
+        if probe.workspace_readonly and target == str(WORKSPACE_IN_CONTAINER):
+            target = f"{target}:{RO_MOUNT_OPTION}"
+        add_docker_mount(host, target)
     # The work-protocol rides every cluster launch: the package (RO, whole —
     # the `_cluster` layer's cluster-chat shim module-runs it off /opt) and
     # its tunables file. Both /opt-rooted so no mountpoint parent lands
     # inside member-writable trees.
-    mounts.append((str(CLUSTER_WORK_PROTOCOL_DIR),
-                   f"{PROTOCOL_PACKAGE_TARGET}:{RO_MOUNT_OPTION}"))
-    mounts.append((str(CLUSTER_PROTOCOL_CONF),
-                   f"{PROTOCOL_CONF_TARGET}:{RO_MOUNT_OPTION}"))
+    add_docker_mount(CLUSTER_WORK_PROTOCOL_DIR, f"{PROTOCOL_PACKAGE_TARGET}:{RO_MOUNT_OPTION}")
+    add_docker_mount(CLUSTER_PROTOCOL_CONF, f"{PROTOCOL_CONF_TARGET}:{RO_MOUNT_OPTION}")
     # The always-on base set, exactly as every solo launch mounts it. Nothing
     # here is optional for a cluster: the entrypoint SOURCES tmux.conf (its
     # `-q` means a missing mount silently boots a session with no quit/help/
@@ -299,14 +343,8 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
     # bashrc, member settings reference the statusline script, and the
     # per-member skills/keybindings symlinks point INTO these mounts. Found
     # missing by an operator question, not a boot — recorded so it stays pinned.
-    for host, target in DOCKER_BASE_MOUNTS.items():
-        mounts.append((str(host), str(target)))
-    if needs_caches:
-        # The toolchain caches [code] members share with every other [code]
-        # container — same host dirs, so a warm cache warms the cluster too.
-        for cache_host, cache_target in CACHE_MOUNTS.items():
-            ensure_dir(cache_host)
-            mounts.append((str(cache_host), str(cache_target)))
+    for source, target in base_mounts():
+        add_docker_mount(source, target)
 
     script_host = cluster_path(cluster.session) / SCRIPT_NAME
     if backend() == "herdr":
@@ -333,22 +371,43 @@ def prepare(cluster: Cluster, registry: Registry) -> PreparedLaunch:
             user_conf=TMUX_CONF_IN_CONTAINER)
     write_text(script_host, text)
     script_host.chmod(0o755)
+    # The free shell pane keeps the default harness's login at the DEFAULT
+    # location too (HOME / the default config root), for a human running the
+    # CLI by hand there — not for any member, whose files sit in its own dir.
+    for source, target in auth_file_mounts(adapter_for(DEFAULT_HARNESS_KEY),
+                                           config=str(CLAUDE_CONFIG_IN_CONTAINER), relocated=False):
+        add_docker_mount(source, target)
+    # The operator's optional credentials (user_extras/optional_creds/), as
+    # every solo instance mounts them: presence on the host is the opt-in,
+    # and one shared container cannot hold them per member — N members share
+    # them exactly as N solo instances would (plans/ISSUES.md records the
+    # concurrent-refresh consequence). Last, so a `home/` entry that would
+    # shadow a launcher mount is refused with the friendlier message.
+    try:
+        cred_names = optional_creds_mounts()
+    except RuntimeError as e:
+        raise ClusterError(str(e)) from None
+    ai_names = sorted({inst.ai.name for _, inst in pairs if inst.ai})
+    env_files = tuple(str(key_file(name)) for name in ai_names if is_file(key_file(name)))
     return PreparedLaunch(
-        cluster=cluster, image_probe=_union_probe(cluster, pairs, registry),
+        cluster=cluster, image_probe=probe,
         plan=plan, script_host=script_host,
         script_container=str(CLUSTER_IN_CONTAINER / SCRIPT_NAME),
-        mounts=tuple(mounts))
+        mounts=staged_mounts(), env_files=env_files, notices=tuple(notices),
+        cred_names=tuple(cred_names), contributions=tuple(probe.docker_contributions))
 
 
-def launch(cluster: Cluster, registry: Registry) -> None:
-    """The whole thing: prepare, build the union image, hand the terminal to
-    the container. Blocks until the cluster session ends (detaching keeps it
-    running — the muxer contract).
+def launch(cluster: Cluster, registry: Registry, *, refresh_installs: bool = False) -> None:
+    """The whole thing: prepare, build the union image, surface its failed
+    optional installs with the cluster's own retry command, hand the terminal
+    to the container. Blocks until the cluster session ends (detaching keeps
+    it running — the muxer contract). `refresh_installs` is the CLI flag,
+    busting every tool layer of the union build as run.py's does for a solo.
 
     Announces the messaging trade before the terminal changes hands: enabling
     sibling messaging re-admits Statsig traffic for THIS container (the plan's
     recorded, accepted cost) — stated per launch so it is never a surprise."""
-    prepared = prepare(cluster, registry)
+    prepared = prepare(cluster, registry, refresh_installs=refresh_installs)
     print(f"  Cluster '{cluster.session}' — {len(cluster.members)} member(s), "
           f"project {cluster.project}")
     for member in prepared.cluster.members:   # picker order — window order
@@ -365,6 +424,14 @@ def launch(cluster: Cluster, registry: Registry) -> None:
     else:
         print("  Cycle members: ^b n / ^b p, ^b <number>, or click a name in the\n"
               "  status bar. ^b d detaches; everything keeps running.")
-    image = ensure_image(prepared.image_probe)
+    if (creds_line := optional_creds_line(prepared.cred_names)) is not None:
+        print(creds_line)
+    for notice in prepared.notices:
+        print(notice)
+    image = ensure_image(prepared.image_probe, pull=refresh_installs)
+    # The same failed-installs gate a solo launch has, before the terminal
+    # changes hands — with this shape's retry spelling.
+    prompt_install_failures(image, RETRY_CLUSTER.format(session=cluster.session))
     run_cluster_container(cluster.session, image, prepared.mounts,
-                          prepared.script_container)
+                          prepared.script_container, env_files=prepared.env_files,
+                          contributions=prepared.contributions)

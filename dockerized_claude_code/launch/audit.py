@@ -19,6 +19,9 @@ Reports:
     the two kinds existed (2026-09-13 / 14) is most likely meant for `claude`
     in `claude-code`, the only option then: F2 dots them for an instance, a
     line in the .lego for an agent)
+  - forbidden_tag (a build carries a real tag at a scope its tag.info's
+    `forbid_on` refuses — {dood} as a member's own tag, {clstr} in a solo
+    store entry; the message says where the tag can go)
   - bad_lego (an agent's .lego fails to parse)
   - bad_name (an instance's session, or a cluster's directory name, that the
     launcher's label rule refuses — `tags.identity.label_error`, applied to
@@ -32,7 +35,15 @@ Reports:
     skips silently)
   - store issues (instances.toml not valid TOML; a MISSING file is fine —
     instances then run on their agents' `.lego` defaults)
-  - oauth issues (.claude.json / .credentials.json missing, empty, or not valid JSON)
+  - unmigrated (a login file still at the state root, or the retired
+    ~/.claude-agents dir beside the state dir — the audit is READ-ONLY and
+    never migrates; any launcher entry (run.py, q, cluster.py) does, once)
+  - oauth issues (a harness's auth file under credentials/<harness>/ — the
+    files its adapter names — missing, empty, not valid JSON, recording no
+    login, or readable by others)
+  - key_file issues (credentials/keys/<ai>.env readable by others, a line
+    docker would mis-read — quoted value, `export`, a bare name — or a
+    variable other than the one the AI's tag.info names as key_env)
   - cowork state under ~/.ai-agents/group_hosting/:
       orphan_group — a participant dir whose instance was deleted (the work
                      inside may still be wanted, so nothing auto-cleans it)
@@ -59,15 +70,16 @@ from .cluster import state as cluster_state
 from .cluster.member import ClusterError
 from .cowork import control, group as grp, lifecycle, mailbox
 from .file_access import (
-    agent_md_index, is_dir, is_file, iter_files, iter_subdirs, path_exists,
+    agent_md_index, file_mode, is_dir, is_file, iter_files, iter_subdirs, key_file_problems, login_state, path_exists,
     read_text,
 )
+from .ai import ADAPTERS, CLAUDE_CODE
 from .paths import (
-    ACCOUNT_FILE, AGENTS_DIR, AGENTS_STATE, CREDENTIALS_FILE, INSTANCES_FILE,
+    AGENTS_DIR, AGENTS_STATE, INSTANCES_FILE,
     cluster_state_path, clusters_dir, cowork_outbox_path, group_hosting_dir,
-    hub_pid_path, instance_state_dir_path, state_history_path,
+    credentials_dir, hub_pid_path, instance_state_dir_path, key_file, state_history_path,
 )
-from .tags import AgentBuild, Registry, TagError, scan_all
+from .tags import AgentBuild, Registry, TagError, scan_all, scope_note
 from .tags.identity import SESSION_SEP, label_error
 from .tags.lego import load_lego
 from .tags.store import entry_to_build
@@ -139,6 +151,18 @@ def _implicit_axes(build: AgentBuild, target: str, registry: Registry | None) ->
     return out
 
 
+def _scope_issues(build: AgentBuild, target: str, registry: Registry | None, scope: str) -> list[Issue]:
+    """The `forbidden_tag` findings for one build living in `scope` (`solo`
+    for a store entry or a .lego, `cluster` for a cluster's shared set,
+    `member` for a member's own additions): a real tag whose `forbid_on`
+    names the scope — `{dood}` as a member's own tag, `{clstr}` in a solo
+    entry — in the words the form and the launch use (`scope_note`)."""
+    if registry is None:
+        return []
+    return [("forbidden_tag", target, f"{tag.label} cannot be a {scope} build's tag — {scope_note(tag, scope)}")
+            for tag in registry.forbidden(build, scope)]
+
+
 def _lego_issues(legos: Iterable[tuple[str, Path]], registry: Registry | None) -> list[Issue]:
     """Findings for the agents' .lego files: `bad_lego` (fails to parse) and
     the implicit-axis findings (`_implicit_axes`) — a shipped agent that names
@@ -151,6 +175,67 @@ def _lego_issues(legos: Iterable[tuple[str, Path]], registry: Registry | None) -
             out.append(("bad_lego", path.name, str(e)))
             continue
         out.extend(_implicit_axes(build, path.name, registry))
+        out.extend(_scope_issues(build, path.name, registry, "solo"))
+    return out
+
+
+def _unmigrated_issues(state_root: Path) -> list[Issue]:
+    """`unmigrated` findings: state an older launcher left where the current
+    one no longer looks — a Claude Code login file at the state root (the
+    credentials moved under credentials/claude-code/ on 2026-09-15) or the
+    retired `~/.claude-agents` dir beside the state dir (renamed 2026-09-14).
+    The audit never migrates (it is read-only); every launcher entry does, as
+    its first step — so the fix is one launch. Without this finding the audit
+    said "clean" on exactly the state that produced the 2026-09-15 incident."""
+    out: list[Issue] = []
+    from .tags.migrations import RETIRED_STATE_DIR_NAME
+    for f in CLAUDE_CODE.auth_files:
+        if is_file(state_root / f.name):
+            out.append(("unmigrated", f.name, "a login file at the state root — the launcher reads "
+                        f"credentials/{CLAUDE_CODE.key}/ now; run any launcher entry once to move it"))
+    retired = state_root.parent / RETIRED_STATE_DIR_NAME
+    if is_dir(retired):
+        out.append(("unmigrated", RETIRED_STATE_DIR_NAME, f"the retired state dir beside {state_root.name} — "
+                    "the launcher renames it into place when the current dir is absent, else leaves both; merge or remove it"))
+    return out
+
+
+def _auth_file_issues() -> list[Issue]:
+    """`oauth` findings: for every harness the launcher can run (an adapter
+    exists), each auth file its adapter names under credentials/<harness>/
+    that is missing, empty or not valid JSON — populated by a login inside a
+    container, never by the launcher. Only JSON-shaped files are parsed; an
+    env-shaped one is checked for presence."""
+    out: list[Issue] = []
+    for key, adapter in sorted(ADAPTERS.items()):
+        for f in adapter.auth_files:
+            path = credentials_dir(key) / f.name
+            msg = _check_json_file(path) if f.blank == "{}" else (None if path_exists(path) else "file is missing")
+            if msg is None and f.login_key and login_state(path, f) == "none":
+                msg = f"records no login (no {f.login_key}) — log in inside a container once"
+            if msg is not None:
+                out.append(("oauth", f"credentials/{key}/{f.name}", msg))
+            mode = file_mode(path)
+            if mode is not None and mode & 0o077:
+                out.append(("oauth", f"credentials/{key}/{f.name}", f"mode {mode:o} — holds tokens; chmod 600"))
+    return out
+
+
+def _key_file_issues(registry: Registry | None) -> list[Issue]:
+    """`key_file` findings for credentials/keys/<ai>.env: a file readable by
+    anyone but its owner (an API key — 0600 expected), or one docker would
+    mis-read or that defines anything but the AI's `key_env`
+    (`file_access.key_file_problems` — names and lines, never a value). A
+    missing key file is not a finding: the harness's login is the other way in."""
+    out: list[Issue] = []
+    for ai in (registry.ais.values() if registry else ()):
+        path = key_file(ai.name)
+        if not is_file(path):
+            continue
+        mode = file_mode(path)
+        if mode is not None and mode & 0o077:
+            out.append(("key_file", f"credentials/keys/{path.name}", f"mode {mode:o} — an API key; chmod 600"))
+        out.extend(("key_file", f"credentials/keys/{path.name}", problem) for problem in key_file_problems(path, ai.key_env))
     return out
 
 
@@ -177,10 +262,11 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
         build = entry_to_build(entry)
         if registry is not None:
             try:
-                registry.validate_build(build, f"instances.toml[{instance_id}]")
+                registry.validate_build(build, f"instances.toml[{instance_id}]", scope=None)   # scope: `_scope_issues` reports it as its own kind
             except TagError as e:
                 out.append(("bad_tags", instance_id, str(e)))
         out.extend(_implicit_axes(build, instance_id, registry))
+        out.extend(_scope_issues(build, instance_id, registry, "solo"))
     return out
 
 
@@ -223,8 +309,11 @@ def _cluster_issues(registry: Registry | None = None) -> list[Issue]:
             out.append(("bad_cluster", directory.name,
                         f"cluster.toml fails to load — discovery skips it: {e}"))
             continue
+        if cluster:
+            out.extend(_scope_issues(cluster.tags, directory.name, registry, "cluster"))
         for member in (cluster.members if cluster else ()):
             out.extend(_implicit_axes(member.build, f"{directory.name}[{member.id}]", registry))
+            out.extend(_scope_issues(member.build, f"{directory.name}[{member.id}]", registry, "member"))
     return out
 
 
@@ -281,7 +370,7 @@ def main() -> None:
     # the same root cause).
     registry: Registry | None
     try:
-        registry = scan_all(AGENTS_DIR)
+        registry = scan_all(AGENTS_DIR)   # NOT startup.open_launcher: the audit is read-only and must never migrate — `_unmigrated_issues` reports what a launch would move
     except TagError as e:
         registry = None
         issues.append(("tags", AGENTS_DIR.name, str(e)))
@@ -289,11 +378,9 @@ def main() -> None:
     entries, store_issues = _load_store(INSTANCES_FILE)
     issues.extend(store_issues)
 
-    # Shared OAuth files — these must be populated after login.
-    for path in (ACCOUNT_FILE, CREDENTIALS_FILE):
-        msg = _check_json_file(path)
-        if msg is not None:
-            issues.append(("oauth", path.name.lstrip("."), msg))
+    issues.extend(_unmigrated_issues(AGENTS_STATE))
+    issues.extend(_auth_file_issues())
+    issues.extend(_key_file_issues(registry))
 
     issues.extend(_stray_root_instances(AGENTS_STATE))
 

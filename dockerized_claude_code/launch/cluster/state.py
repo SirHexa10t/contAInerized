@@ -67,7 +67,7 @@ from ..paths import (
     cluster_member_dir, cluster_path, cluster_state_path, cluster_worktree_path,
     cluster_worktrees_dir, clusters_dir,
 )
-from ..tags import Instance, Registry, resolve_build
+from ..tags import Instance, Registry, resolve_build, scope_note
 from ..tags.lego import AgentBuild
 from ..tags.store import build_entry, entry_to_build
 from ..transcripts import last_history_mtime
@@ -203,15 +203,14 @@ class Cluster:
         own, order-preserving and deduped, its own engine kept (the cluster
         has none). One definition, so the launcher, the picker's previews and
         the member form cannot disagree about a member's real build."""
-        def union(shared: tuple[str, ...], own: tuple[str, ...]) -> tuple[str, ...]:
-            return tuple(shared) + tuple(n for n in own if n not in shared)
-        return AgentBuild(
-            ai=member.build.ai,
-            harness=member.build.harness,
-            engine=member.build.engine,
-            professions=union(self.tags.professions, member.build.professions),
-            specialties=union(self.tags.specialties, member.build.specialties),
-            policies=union(self.tags.policies, member.build.policies))
+        return _union(self.tags, member.build)
+
+    def members_own_tags(self) -> frozenset[str]:
+        """Every tag name any member carries as its OWN — what the cluster
+        form judges its combo warnings against, so ticking `{dood}`
+        cluster-wide warns when a member already carries `{auto}`."""
+        return frozenset(n for m in self.members
+                         for n in (*m.build.professions, *m.build.specialties, *m.build.policies))
 
     def member_instance(self, member: Member, registry: Registry) -> Instance | None:
         """`member` as the ordinary `Instance` it launches as — persona,
@@ -234,13 +233,19 @@ class Cluster:
         md_path = agent_md_index().get(member.agent)
         if md_path is None:
             return None
-        clean, problems = registry.resolve_store_build(self.member_build(member))
+        # The two halves resolve APART, each in its own scope: the cluster's
+        # shared set as a `cluster` build, the member's own additions as a
+        # `member` build — so a legal cluster-wide `{dood}` is never flagged
+        # on the member that inherits it, while `{dood}` a member added
+        # itself is (reason `forbidden`, with the hint). Then the union.
+        shared, shared_problems = registry.resolve_store_build(self.tags, scope="cluster")
+        own, own_problems = registry.resolve_store_build(member.build, scope="member")
         return Instance(
             agent=member.agent, md_path=md_path, session=self.session,
             workspace=str(self.project), is_brand_new=False,
-            invalid_tags=tuple(problems),
+            invalid_tags=(*shared_problems, *own_problems),
             state_dir_override=cluster_member_dir(self.session, member.id),
-            **resolve_build(clean, member.agent, registry))
+            **resolve_build(_union(shared, own), member.agent, registry))
 
     @property
     def last_used_mtime(self) -> float | None:
@@ -442,6 +447,39 @@ def destroy(cluster: Cluster) -> None:
                 shell_returncode(*worktree.remove_argv(cluster.project, tree))
         shell_returncode(*worktree.prune_argv(cluster.project))
     force_remove(cluster_path(cluster.session))
+
+
+def _union(shared: AgentBuild, own: AgentBuild) -> AgentBuild:
+    """The cluster's shared tags plus a member's own, order-preserving and
+    deduped, the member's AI / harness / engine kept (the cluster has none)
+    — the one definition behind `member_build` and `member_instance`."""
+    def join(a: tuple[str, ...], b: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(a) + tuple(n for n in b if n not in a)
+    return AgentBuild(
+        ai=own.ai, harness=own.harness, engine=own.engine,
+        professions=join(shared.professions, own.professions),
+        specialties=join(shared.specialties, own.specialties),
+        policies=join(shared.policies, own.policies))
+
+
+def forbidden_tags(cluster: Cluster, registry: Registry) -> list[str]:
+    """One line per tag this cluster carries at a scope the tag forbids — the
+    cluster-wide set judged as a `cluster` build, each member's own additions
+    as a `member` build — in the words `scope_note` gives every surface
+    (`{frwl}` cluster-wide: "not on a cluster"; `{dood}` as a member's own:
+    "cluster-wide only: F2 on the cluster row"). Empty when the cluster can
+    launch. For the moments that have a registry but no Instances yet — the
+    creation flows (`cluster create`, the picker's create/edit), the audit —
+    while a launch meets the same facts as TagProblems on each member. A
+    line says what the CLUSTER cannot carry, never that a `.lego` is wrong:
+    an agent whose defaults include `{frwl}` is a fine solo instance and no
+    cluster member (agent-writer, gate tag-scopes)."""
+    out = [f"cluster-wide {tag.label}: {scope_note(tag, 'cluster')}"
+           for tag in registry.forbidden(cluster.tags, "cluster")]
+    for member in cluster.members:
+        out += [f"member {member.id!r} cannot carry {tag.label} as its own tag: {scope_note(tag, 'member')}"
+                for tag in registry.forbidden(member.build, "member")]
+    return out
 
 
 def from_template(session: str, project: Path, members: tuple[Member, ...],

@@ -31,12 +31,16 @@
 # default-on layers above it — and the creds-gated CLIs come last.
 #
 # Each install block follows the same resilient pattern:
-#   - Reference this tool's own INSTALL_<TOOL> and FORCE_INSTALLS_REFRESH
-#     (rust also references the weekly SOFTWARE_STACK_REFRESH rotation) in
-#     the leading `:` no-op, so docker's layer cache key includes all of
-#     them. Changing any value (toggling the toolkit profile, opting in a
-#     new cred, or launching with --refresh-installs) busts the layer and
-#     the install retries.
+#   - Reference this tool's own INSTALL_<TOOL> and FORCE_INSTALLS_REFRESH in
+#     the leading `:` no-op, so docker's layer cache key includes both.
+#     Changing either value (toggling the toolkit profile, opting in a new
+#     cred, or launching with --refresh-installs) busts the layer and the
+#     install retries. NEVER the weekly SOFTWARE_STACK_REFRESH: that word is
+#     the harness layer's alone (agents/harness/<name>/Dockerfile, built last)
+#     — a weekly buster here cascaded through every layer above it until
+#     2026-09-16. The apt-installed tools here (node, gh, gcloud, …) are still
+#     patched weekly: the harness layer's `apt-get upgrade` covers every
+#     package in the image; the curl-installed ones refresh on demand.
 #   - Strip this tool's own name from /var/log/claude-agents/install_failures.log at the
 #     start, so a previously-failed install that succeeds on retry clears
 #     its own warning.
@@ -71,7 +75,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN install -d -o claude -g claude /var/log/claude-agents \
  && install -o claude -g claude -m 644 /dev/null /var/log/claude-agents/install_failures.log
 
-ARG SOFTWARE_STACK_REFRESH=bootstrap
 ARG FORCE_INSTALLS_REFRESH=stable
 
 ARG INSTALL_CMAKE=1
@@ -99,7 +102,7 @@ RUN : "${INSTALL_NODE}" "${FORCE_INSTALLS_REFRESH}" \
 USER claude
 
 ARG INSTALL_RUST=1
-RUN : "${INSTALL_RUST}" "${SOFTWARE_STACK_REFRESH}" "${FORCE_INSTALLS_REFRESH}" \
+RUN : "${INSTALL_RUST}" "${FORCE_INSTALLS_REFRESH}" \
  && sed -i '/^rust$/d' /var/log/claude-agents/install_failures.log \
  && if [ "$INSTALL_RUST" = "1" ]; then \
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
@@ -233,8 +236,10 @@ USER claude
 # not found` to be the one remaining blocker after permissions were sorted,
 # and every instance re-installing it per container is waste. Still wrapped in
 # the failure-log shape so a transient network fault degrades to a banner
-# warning rather than aborting the build.
-RUN sed -i '/^ruff$/d' /var/log/claude-agents/install_failures.log \
+# warning rather than aborting the build. Keyed on FORCE_INSTALLS_REFRESH like
+# every other install, so --refresh-installs reinstalls it too.
+RUN : "${FORCE_INSTALLS_REFRESH}" \
+ && sed -i '/^ruff$/d' /var/log/claude-agents/install_failures.log \
  && { uv tool install ruff; } \
     || { echo "ruff" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ ruff install failed; continuing" >&2; }
 

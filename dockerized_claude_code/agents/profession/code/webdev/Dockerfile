@@ -65,8 +65,13 @@ USER claude
 # location (which is the bind-mounted [code] cache, so cross-instance
 # sharing is automatic).
 #
-# SOFTWARE_STACK_REFRESH busts the layer cache weekly so subsequent rebuilds
-# pull the latest playwright — same pattern Rust/uv/rich-cli/Claude Code use.
-ARG SOFTWARE_STACK_REFRESH=bootstrap
-RUN : "${SOFTWARE_STACK_REFRESH}" \
+# Keyed on FORCE_INSTALLS_REFRESH (--refresh-installs) like every tool
+# install — the playwright CLI refreshes on demand; the apt libs above are
+# patched weekly by the harness layer's `apt-get upgrade`, and the browser
+# binaries live in the host cache mount, refreshed by `playwright install`
+# at run time. Never the weekly SOFTWARE_STACK_REFRESH — that is the harness
+# layer's word, and a weekly buster here cascaded into every specialty layer
+# above until 2026-09-16.
+ARG FORCE_INSTALLS_REFRESH=stable
+RUN : "${FORCE_INSTALLS_REFRESH}" \
  && uv tool install playwright

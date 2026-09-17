@@ -4,6 +4,7 @@ short_description = "careful, human-like reasoning and writing; strong at coding
 full_description  = "Anthropic's Claude line (Fable, Opus, Sonnet, Haiku). Known for careful, nuanced reasoning in a natural, human-like voice, for coding and multi-step agent work, and for holding long documents in context; built with safety as a design goal."
 vendor            = "Anthropic"
 harness           = "claude-code"      # its default harness — an agents/harness/ member (launch/ai/claude_code.py is that one's adapter)
+key_env           = "ANTHROPIC_API_KEY"     # the vendor's API-key variable: credentials/keys/claude.env defines it — Claude Code, OpenCode, Hermes, OpenClaw read it; Claude Code also takes ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN
 default           = true               # the AI an instance runs when its build names none (exactly one member may say so)
 fg                = "#ff8700"          # the ⟪Claude⟫ tag: orange on near-black gray, after the logo (darkened from #3a3a3a, operator 2026-09-14)
 bg                = "#262626"

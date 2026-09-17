@@ -1,5 +1,11 @@
 shortname         = "frwl"
 short_description = "outbound whitelist"
+# iptables, NET_ADMIN and the wrapper entrypoint are container-wide, so per
+# member is impossible; cluster-wide is NOT BUILT yet — the cluster's generated
+# entrypoint script is not wrapped by the firewall chain, the resolve-status
+# file the addendum points at is per config dir, and the phase-1 wait plus the
+# updater thread live in the solo run (plans/ISSUES.md). Solo instances only.
+forbid_on         = ["member", "cluster"]
 full_description  = """Outbound network locked to a whitelist. An iptables deny-all firewall is applied at container start; only launcher-resolved addresses (Anthropic endpoints + user_extras/firewall_whitelist.txt) are reachable."""
 
 [addendum]

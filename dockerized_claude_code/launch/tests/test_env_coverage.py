@@ -31,17 +31,19 @@ from launch.tags import scan_all
 
 REGISTRY = scan_all(paths.AGENTS_DIR)
 
-# Build layers: (tag name, dockerfile path, contribution) — professions from
-# their own dirs, dood from its claimed `_dood` layer. The base Dockerfile is
-# checked too but has no tag.docker (its one build-arg is threaded directly
-# by docker_config.ensure_image).
-_dood_layer = REGISTRY.specialties["dood"].layer
-assert _dood_layer is not None   # the shipped tree claims profession/code/_dood
-BUILD_LAYERS = [
-    ("code", REGISTRY.professions["code"].path / "Dockerfile", REGISTRY.professions["code"].docker),
-    ("webdev", REGISTRY.professions["webdev"].path / "Dockerfile", REGISTRY.professions["webdev"].docker),
-    ("dood", _dood_layer.path / "Dockerfile", _dood_layer.docker),
-]
+# Build layers: (tag name, dockerfile path, contribution) — EVERY layer the
+# registry knows, derived rather than listed so a new profession, a new
+# specialty-claimed layer or a new harness's Dockerfile is covered the day it
+# lands: professions from their own dirs, specialties from their claimed
+# `_<name>` layers, harnesses from theirs (the CLI layer, built last). The
+# base Dockerfile is checked too but has no tag.docker (its one build-arg is
+# threaded directly by docker_config.ensure_image).
+BUILD_LAYERS = (
+    [(p.name, p.path / "Dockerfile", p.docker) for p in REGISTRY.professions.values()]
+    + [(s.name, s.layer.path / "Dockerfile", s.layer.docker) for s in REGISTRY.specialties.values() if s.layer]
+    + [(h.name, h.dockerfile, h.docker) for h in REGISTRY.harnesses.values() if h.dockerfile]
+)
+assert {name for name, _, _ in BUILD_LAYERS} >= {"code", "webdev", "dood", "muxer", "cluster", "claude-code"}
 
 
 # Allowlist for vars referenced in Dockerfiles but NOT staged by the
@@ -58,7 +60,11 @@ BUILD_LAYERS = [
 #                  Not Docker ARGs — they live entirely within one RUN.
 #   GO_VER /
 #   KOTLIN_VER   — same pattern for the go / kotlin install RUN blocks.
-_ALLOWLIST = {"HOST_UID", "PARENT_IMAGE", "VERSION", "ARCH_SUFFIX", "GO_VER", "KOTLIN_VER"}
+#   HERDR_VERSION /
+#   HERDR_SHA256 — the _muxer layer's pinned herdr release and its checksum:
+#                  build-time ARGs with defaults, deliberately not launcher-
+#                  staged (an upgrade is an edit to the pin, not a launch flag).
+_ALLOWLIST = {"HOST_UID", "PARENT_IMAGE", "VERSION", "ARCH_SUFFIX", "GO_VER", "KOTLIN_VER", "HERDR_VERSION", "HERDR_SHA256"}
 
 
 def _staged_env_vars():
@@ -202,10 +208,13 @@ class TestArgForwardsMatchDockerfiles(unittest.TestCase):
                     f"[build] arg_forward.",
                 )
 
-    def test_base_dockerfile_consumes_the_refresh_arg(self):
-        # The base build's one launcher-staged arg is threaded directly by
-        # ensure_image (no tag.docker for base) — guard the pairing.
-        self.assertIn("SOFTWARE_STACK_REFRESH", _arg_decls_in(paths.BASE_DOCKERFILE))
+    def test_base_dockerfile_consumes_exactly_the_arg_ensure_image_threads(self):
+        # The base build has no tag.docker: ensure_image threads its one
+        # launcher-staged arg directly — guard the pairing in both directions
+        # (a staged ARG it declared but was never handed would silently keep
+        # its default; the weekly buster is the harness layer's, never base's).
+        staged_in_base = _arg_decls_in(paths.BASE_DOCKERFILE) & _staged_env_vars()
+        self.assertEqual(staged_in_base, {"FORCE_INSTALLS_REFRESH"})
 
 
 # ============================================================

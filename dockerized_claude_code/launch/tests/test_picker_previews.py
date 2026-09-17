@@ -283,6 +283,23 @@ class TestClusterAndMemberPreviews(unittest.TestCase):
         self.assertIn("Last used:", full)
         self.assertNotIn("(never)", full.split("Tags:")[0])
 
+    def test_a_cluster_wide_container_tag_paints_no_red_chip_on_its_members(self):
+        # bug-investigator (gate tag-scopes): a member preview resolving the
+        # UNION at scope member would flag a legal cluster-wide {dood}.
+        self.state.save(dataclasses.replace(self.cluster, tags=AgentBuild(
+            professions=("code",), specialties=("muxer", "cluster", "dood"))))
+        golem = next(m for m in self._entry().members if m.member.id == "golem")
+        self.assertTrue(golem.identity.is_startable)
+        text = _plain_text(golem.preview_quick)
+        self.assertIn("{dood}", text)
+        self.assertNotIn("cluster-wide only", text)
+
+    def test_a_members_own_container_tag_is_flagged_with_the_fix(self):
+        self.state.save(self.cluster.with_build("golem", AgentBuild(professions=("code",), specialties=("dood",))))
+        golem = next(m for m in self._entry().members if m.member.id == "golem")
+        self.assertFalse(golem.identity.is_startable)
+        self.assertIn("cluster-wide only: F2 on the cluster row", _plain_text(golem.preview_quick))
+
     def test_a_member_pane_marks_the_tags_it_inherits_from_the_cluster(self):
         golem = next(m for m in self._entry().members if m.member.id == "golem")
         text = _plain_text(golem.preview_quick)

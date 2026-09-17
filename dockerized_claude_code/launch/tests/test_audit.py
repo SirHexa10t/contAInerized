@@ -13,6 +13,7 @@ same registry the launcher itself uses."""
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,13 +22,12 @@ from unittest.mock import patch
 
 from launch import paths
 from launch.audit import (
-    _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names, _implicit_axes,
-    _lego_issues, _load_store, _store_entry_issues, _stray_root_instances, build_parser,
+    _auth_file_issues, _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names, _implicit_axes, _key_file_issues, _lego_issues, _load_store, _scope_issues, _store_entry_issues, _stray_root_instances, _unmigrated_issues, build_parser, main as audit_main,
 )
 from launch.tags import AgentBuild
 from launch.cowork import control, mailbox
 from launch.paths import AGENTS_DIR
-from launch.tags import scan_all
+from launch.tags import migrations, scan_all
 
 REGISTRY = scan_all(AGENTS_DIR)
 
@@ -223,6 +223,93 @@ class TestImplicitAxes(unittest.TestCase):
         # audit is clean out of the box.
         from launch.file_access import agent_md_index
         self.assertEqual(_lego_issues(((n, AGENTS_DIR / f"{n}.lego") for n in agent_md_index()), REGISTRY), [])
+
+
+class TestUnmigrated(unittest.TestCase):
+    """_unmigrated_issues — state an older launcher left where the current one
+    no longer looks. The audit only REPORTS it: it is the read-only exception
+    to `startup.open_launcher` and never migrates; any launcher entry does."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / ".ai-agents"
+        self.state.mkdir()
+        patcher = patch.object(paths, "AGENTS_STATE", self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_clean_when_nothing_is_left_behind(self):
+        self.assertEqual(_unmigrated_issues(self.state), [])
+
+    def test_a_login_file_at_the_state_root_names_the_fix(self):
+        (self.state / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+        (issue,) = _unmigrated_issues(self.state)
+        self.assertEqual(issue[:2], ("unmigrated", ".credentials.json"))
+        self.assertIn("run any launcher entry once", issue[2])
+
+    def test_the_retired_state_dir_beside_the_current_one_is_reported(self):
+        (self.state.parent / ".claude-agents").mkdir()
+        (issue,) = _unmigrated_issues(self.state)
+        self.assertEqual(issue[:2], ("unmigrated", ".claude-agents"))
+
+    def test_the_audit_never_migrates(self):
+        # The state the finding reports must still be there after the audit
+        # ran — the audit reads, a launch moves.
+        (self.state / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+        with patch.object(migrations, "ensure_migrated", side_effect=AssertionError("the audit migrated")), \
+             patch.object(sys, "argv", ["audit"]), contextlib.suppress(SystemExit), \
+             contextlib.redirect_stdout(io.StringIO()):
+            audit_main()
+        self.assertTrue((self.state / ".credentials.json").exists())
+
+
+class TestCredentialFiles(unittest.TestCase):
+    """`oauth` findings per adapted harness file and `key_file` findings per
+    AI key file, in a redirected AGENTS_STATE."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_missing_auth_files_are_reported_per_harness_file(self):
+        from launch.ai import ADAPTERS
+        issues = _auth_file_issues()
+        self.assertEqual({t for _, t, _ in issues},
+                         {f"credentials/{k}/{f.name}" for k, a in ADAPTERS.items() for f in a.auth_files})
+        self.assertTrue(all(k == "oauth" and m == "file is missing" for k, _, m in issues))
+
+    def test_a_filled_private_auth_file_is_clean_and_a_lax_one_is_not(self):
+        path = paths.credentials_dir("claude-code") / ".credentials.json"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"claudeAiOauth": {"accessToken": "x"}}')
+        path.chmod(0o600)
+        self.assertFalse(any(t.endswith(".credentials.json") for _, t, _ in _auth_file_issues()))
+        path.chmod(0o644)
+        (issue,) = [i for i in _auth_file_issues() if i[1].endswith(".credentials.json")]
+        self.assertIn("chmod 600", issue[2])
+        path.write_text('{"numStartups": 1}')
+        path.chmod(0o600)
+        (issue,) = [i for i in _auth_file_issues() if i[1].endswith(".credentials.json")]
+        self.assertIn("records no login (no claudeAiOauth)", issue[2])
+
+    def test_key_files_are_checked_for_mode_and_grammar_and_a_missing_one_is_fine(self):
+        self.assertEqual(_key_file_issues(REGISTRY), [])
+        self.assertEqual(_key_file_issues(None), [])                  # no registry: nothing to check against
+        path = paths.key_file("claude")
+        path.parent.mkdir(parents=True)
+        path.write_text('ANTHROPIC_API_KEY="sk-quoted"\nGEMINI_API_KEY=other\n')
+        path.chmod(0o644)
+        issues = _key_file_issues(REGISTRY)
+        self.assertTrue(all(k == "key_file" and t == "credentials/keys/claude.env" for k, t, _ in issues))
+        messages = " | ".join(m for _, _, m in issues)
+        self.assertIn("chmod 600", messages)
+        self.assertIn("is quoted", messages)
+        self.assertIn("GEMINI_API_KEY is not the vendor's key variable", messages)
+        self.assertNotIn("sk-quoted", messages)
 
 
 class TestStrayRootInstances(unittest.TestCase):
@@ -484,3 +571,17 @@ class TestAuditCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScopeIssues(unittest.TestCase):
+    """forbidden_tag — a build carrying a real tag at a scope its `forbid_on`
+    refuses, in the words the form and the launch use."""
+
+    def test_a_tag_at_a_scope_it_forbids_is_a_finding_with_the_note(self):
+        (issue,) = _scope_issues(AgentBuild(specialties=("dood",)), "team[golem]", REGISTRY, "member")
+        self.assertEqual(issue[:2], ("forbidden_tag", "team[golem]"))
+        self.assertIn("cluster-wide only: F2 on the cluster row", issue[2])
+        self.assertEqual(_scope_issues(AgentBuild(specialties=("dood",)), "team", REGISTRY, "cluster"), [])
+        (issue,) = _scope_issues(AgentBuild(specialties=("cluster",)), "poet__x", REGISTRY, "solo")
+        self.assertIn("clusters only", issue[2])
+        self.assertEqual(_scope_issues(AgentBuild(specialties=("dood",)), "x", None, "member"), [])

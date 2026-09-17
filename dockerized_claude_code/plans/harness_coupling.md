@@ -37,6 +37,13 @@ Severity tiers used below:
 
 ### 1. The image and the entrypoint — HARD (small)
 
+> **DONE 2026-09-16.** The CLI install, the three env switches and the
+> `ENTRYPOINT` live in `agents/harness/claude-code/Dockerfile`, the LAST layer
+> of every chain (`Instance.build_steps` appends `Harness.dockerfile`); the
+> base image is CLI-less. Another harness lands its own layer in its own dir
+> (its `tag.docker` forwards `SOFTWARE_STACK_REFRESH`; its `Adapter.binary`
+> is the ENTRYPOINT). The paragraphs below describe the state before.
+
 - `Dockerfile` (root): `curl -fsSL https://claude.ai/install.sh | bash`,
   `ENTRYPOINT ["claude"]`, and three Claude Code env switches baked as image
   defaults — `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,

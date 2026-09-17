@@ -56,6 +56,11 @@ class TestAiMembers(unittest.TestCase):
         for ai in REGISTRY.ais.values():
             self.assertEqual(ai.label, f"⟪{ai.shortname}⟫")
 
+    def test_every_member_names_its_vendors_key_variable(self):
+        # The variable every harness reads for that AI — what credentials/keys/<ai>.env must define.
+        expected = {"claude": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY", "chatgpt": "OPENAI_API_KEY", "grok": "XAI_API_KEY"}
+        self.assertEqual({ai.name: ai.key_env for ai in REGISTRY.ais.values()}, expected)
+
     def test_every_member_answers_every_standard_cheapest_first(self):
         # The shared file's quarters between the two ends, in rising order —
         # the same tuple for every member.
@@ -253,6 +258,17 @@ class TestAdapterRecord(unittest.TestCase):
                 adapter_for(name)
 
 
+class TestLoginKeys(unittest.TestCase):
+    def test_the_login_keys_are_claude_codes_private_shape(self):
+        # The CLI documents neither: `.credentials.json` carries the OAuth
+        # tokens under `claudeAiOauth`, `.claude.json` the account under
+        # `oauthAccount` (probed on Claude Code 2.1.266). Every fixture in the
+        # suite writes these, and the migration, the launch notice and the
+        # audit key on them — so a rename here is a decision, not a drift.
+        self.assertEqual({f.role: f.login_key for f in CLAUDE_CODE.auth_files},
+                         {"credentials": "claudeAiOauth", "account": "oauthAccount"})
+
+
 class TestRefusal(unittest.TestCase):
     """refusal_for — the one message for an instance (run.py, the quickie) or
     a cluster member (launching.refusal) whose harness has no adapter: it
@@ -331,11 +347,25 @@ class TestConsumersReadTheAdapter(unittest.TestCase):
         self.assertEqual(resolver._critical_hosts(), active_adapter().critical_hosts)
 
     def test_paths_carry_the_harnesss_filenames(self):
+        # The login files come from the adapter's auth_files, mounted per
+        # launch shape: a solo instance keeps the default config root, so the
+        # `config`-anchored file goes there and the `account`-anchored one to
+        # HOME; a cluster member's relocated root takes both.
+        solo = dict(paths.auth_file_mounts(CLAUDE_CODE, config="/home/claude/.claude", relocated=False))
+        member = dict(paths.auth_file_mounts(CLAUDE_CODE, config="/cluster/members/x", relocated=True))
+        names = {f.name for f in CLAUDE_CODE.auth_files}
+        self.assertEqual({Path(s).name for s in solo}, names)
+        self.assertTrue(all(Path(s).parent == paths.credentials_dir(CLAUDE_CODE.key) for s in solo))
+        creds, account = CLAUDE_CODE.auth_file("credentials"), CLAUDE_CODE.auth_file("account")
+        self.assertEqual(solo[str(paths.credentials_dir(CLAUDE_CODE.key) / creds.name)], f"/home/claude/.claude/{creds.name}")
+        self.assertEqual(solo[str(paths.credentials_dir(CLAUDE_CODE.key) / account.name)], f"/home/claude/{account.name}")
+        self.assertEqual(member[str(paths.credentials_dir(CLAUDE_CODE.key) / account.name)], f"/cluster/members/x/{account.name}")
+        self.assertTrue(all(f.mode == "rw" for f in CLAUDE_CODE.auth_files), "the CLI refreshes both in place")
+        self.assertEqual(paths.auth_file_path(CLAUDE_CODE, "account"), paths.credentials_dir(CLAUDE_CODE.key) / account.name)
+        self.assertIsNone(paths.auth_file_path(CLAUDE_CODE, "env"))
         self.assertEqual(paths.CLAUDE_CONFIG_IN_CONTAINER.name, CLAUDE_CODE.config_dir_name)
         self.assertEqual(paths.state_md_path(Path("/s")).name, CLAUDE_CODE.persona_filename)
         self.assertEqual(paths.state_history_path(Path("/s")).name, CLAUDE_CODE.history_filename)
-        self.assertEqual(paths.ACCOUNT_FILE.name, CLAUDE_CODE.account_filename)
-        self.assertEqual(paths.CREDENTIALS_FILE.name, CLAUDE_CODE.credentials_filename)
 
 
 if __name__ == "__main__":

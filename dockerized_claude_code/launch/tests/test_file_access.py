@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from launch import paths
+from launch.ai import CLAUDE_CODE
 from launch import file_access
 
 
@@ -294,72 +296,110 @@ class TestIsFileRecent(unittest.TestCase):
 
 
 # ============================================================
-# ensure_shared_oauth_files — idempotent touch of shared OAuth state files
+# ensure_auth_files — the harness's login files exist, private, before docker binds them
 # ============================================================
 
 
-class TestEnsureSharedOauthFiles(unittest.TestCase):
-    """Each test patches launch.file_access.ACCOUNT_FILE / CREDENTIALS_FILE to
-    a temp path so the real launcher state under AGENTS_STATE isn't touched."""
+class TestEnsureAuthFiles(unittest.TestCase):
+    """Each test redirects paths.AGENTS_STATE to a temp dir so the real
+    launcher state is never touched; the adapter is the real Claude Code one
+    (two JSON auth files)."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.account_path = Path(self.tmpdir.name) / "account.json"
-        self.creds_path = Path(self.tmpdir.name) / "creds.json"
-        self.patches = [
-            patch.object(file_access, "ACCOUNT_FILE", self.account_path),
-            patch.object(file_access, "CREDENTIALS_FILE", self.creds_path),
-        ]
-        for p in self.patches:
-            p.start()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.files = [paths.credentials_dir(CLAUDE_CODE.key) / f.name for f in CLAUDE_CODE.auth_files]
 
-    def tearDown(self):
-        for p in self.patches:
-            p.stop()
-        self.tmpdir.cleanup()
+    def test_creates_every_auth_file_as_a_private_blank(self):
+        file_access.ensure_auth_files(CLAUDE_CODE)
+        for path, spec in zip(self.files, CLAUDE_CODE.auth_files):
+            with self.subTest(file=spec.name):
+                self.assertEqual(path.read_text(), spec.blank)
+                self.assertEqual(file_access.file_mode(path), 0o600)   # tokens land in place — the mode is for life
 
-    def test_creates_both_files_when_absent(self):
-        self.assertFalse(self.account_path.exists())
-        self.assertFalse(self.creds_path.exists())
-        file_access.ensure_shared_oauth_files()
-        self.assertTrue(self.account_path.is_file())
-        self.assertTrue(self.creds_path.is_file())
-
-    def test_initial_contents_are_empty_json_object(self):
-        file_access.ensure_shared_oauth_files()
-        self.assertEqual(self.account_path.read_text(), "{}")
-        self.assertEqual(self.creds_path.read_text(), "{}")
-
-    def test_existing_account_file_left_alone(self):
-        # Pre-existing OAuth state must NOT be clobbered — Claude Code's
-        # actual tokens live in these files.
-        self.account_path.write_text('{"real": "data"}')
-        file_access.ensure_shared_oauth_files()
-        self.assertEqual(self.account_path.read_text(), '{"real": "data"}')
-
-    def test_existing_creds_file_left_alone(self):
-        self.creds_path.write_text('{"token": "abc"}')
-        file_access.ensure_shared_oauth_files()
-        self.assertEqual(self.creds_path.read_text(), '{"token": "abc"}')
-
-    def test_creates_only_missing_file_when_other_exists(self):
-        # Mixed state: one file exists, the other doesn't. Existing one stays
-        # untouched; missing one gets created.
-        self.account_path.write_text('{"existing": true}')
-        file_access.ensure_shared_oauth_files()
-        self.assertEqual(self.account_path.read_text(), '{"existing": true}')
-        self.assertEqual(self.creds_path.read_text(), "{}")
+    def test_existing_files_are_left_alone(self):
+        # Pre-existing login state must NOT be clobbered — the CLI's tokens live here.
+        self.files[0].parent.mkdir(parents=True)
+        self.files[0].write_text('{"real": "data"}')
+        file_access.ensure_auth_files(CLAUDE_CODE)
+        self.assertEqual(self.files[0].read_text(), '{"real": "data"}')
+        self.assertEqual(self.files[1].read_text(), CLAUDE_CODE.auth_files[1].blank)   # the missing one is created
 
     def test_idempotent_across_repeated_calls(self):
-        file_access.ensure_shared_oauth_files()
-        first_mtime = self.account_path.stat().st_mtime
-        # Repeated call — must not rewrite the file (mtime stable).
-        import time
-        time.sleep(0.01)
-        file_access.ensure_shared_oauth_files()
-        self.assertEqual(self.account_path.stat().st_mtime, first_mtime)
+        file_access.ensure_auth_files(CLAUDE_CODE)
+        first = self.files[0].stat().st_mtime_ns
+        file_access.ensure_auth_files(CLAUDE_CODE)
+        self.assertEqual(self.files[0].stat().st_mtime_ns, first)
 
 
+class TestKeyFileProblems(unittest.TestCase):
+    """key_file_problems — docker's --env-file grammar, not dotenv; messages
+    name variables and lines, never a value."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.path = Path(self.tmpdir.name) / "claude.env"
+
+    def problems(self, text):
+        self.path.write_text(text)
+        return file_access.key_file_problems(self.path, "ANTHROPIC_API_KEY")
+
+    def test_a_clean_file_has_none(self):
+        self.assertEqual(self.problems("# the key\nANTHROPIC_API_KEY=sk-ant-secret-123\n"), [])
+
+    def test_the_vendors_variable_must_be_defined(self):
+        self.assertEqual(self.problems("# nothing\n"), ["does not define ANTHROPIC_API_KEY"])
+
+    def test_quotes_export_bare_names_and_other_variables_are_named_without_values(self):
+        text = 'export ANTHROPIC_API_KEY=sk-1\nANTHROPIC_API_KEY="sk-2"\nGEMINI_API_KEY=x\nJUST_A_NAME\nlower=case\n'
+        problems = self.problems(text)
+        joined = "\n".join(problems)
+        self.assertIn("line 1: `export` prefix", joined)
+        self.assertIn("line 2: ANTHROPIC_API_KEY is quoted", joined)
+        self.assertIn("GEMINI_API_KEY is not the vendor's key variable (ANTHROPIC_API_KEY)", joined)
+        self.assertIn("line 4: a bare name imports the HOST's variable", joined)
+        self.assertIn("line 5: not NAME=value", joined)
+        for secret in ("sk-1", "sk-2"):
+            self.assertNotIn(secret, joined)                      # never a value
+
+    def test_duplicates_and_windows_line_endings_are_reported(self):
+        problems = self.problems("ANTHROPIC_API_KEY=a\r\nANTHROPIC_API_KEY=b\n")
+        self.assertTrue(any("Windows line ending" in p for p in problems))
+        self.assertIn("ANTHROPIC_API_KEY is defined twice", problems)
+
+    def test_login_state_is_the_one_reading_of_a_login_file(self):
+        creds = CLAUDE_CODE.auth_file("credentials")
+        path = self.path.with_name(creds.name)
+        self.assertEqual(file_access.login_state(path, creds), "absent")                # missing
+        path.write_text(creds.blank)
+        self.assertEqual(file_access.login_state(path, creds), "absent")                # the launcher's blank
+        path.write_text('{"numStartups": 3}')
+        self.assertEqual(file_access.login_state(path, creds), "none")                  # a CLI wrote, nobody logged in
+        path.write_text('{"claudeAiOauth": {"accessToken": "x"}}')
+        self.assertEqual(file_access.login_state(path, creds), "recorded")
+        self.assertTrue(file_access.login_recorded(path, creds))
+        path.write_text('{"claudeAiOauth": {"accessToken": "x')                         # a refresh in place, caught mid-write
+        self.assertEqual(file_access.login_state(path, creds), "unreadable")
+        path.write_text("")                                                              # truncated, not yet rewritten — not the blank
+        self.assertEqual(file_access.login_state(path, creds), "unreadable")
+        self.assertFalse(file_access.login_recorded(path, creds))
+        from launch.ai import AuthFile
+        env = AuthFile(".env", role="env", blank="")
+        path.write_text("KEY=v\n")
+        self.assertEqual(file_access.login_state(path, env), "recorded")                # no login key: anything but blank
+        path.write_text("")
+        self.assertEqual(file_access.login_state(path, env), "absent")                  # ... and here the blank IS empty
+
+    def test_make_private_and_file_mode(self):
+        self.path.write_text("x")
+        self.path.chmod(0o644)
+        file_access.make_private(self.path)
+        self.assertEqual(file_access.file_mode(self.path), 0o600)
+        self.assertIsNone(file_access.file_mode(self.path.with_name("missing")))
 # ============================================================
 # enforce_ssh_dir_perms
 # ============================================================
