@@ -1,6 +1,6 @@
 # Dependable max-effort tier on a different model than the top tier's — the
 # latest standard below the frontier's own (2026Q2: on Claude, Opus 5 at max),
 # same output budget as thinker.
-standard          = "2026Q2"
+effort_tier       = "2026Q2"
 thinking          = true
 max_output_tokens = 36000

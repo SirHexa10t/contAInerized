@@ -338,13 +338,13 @@ class Instance:
     @property
     def model(self) -> str:
         """The model id the instance's AI runs for its engine's standard, or ""."""
-        return self.ai.tier(self.engine.budget.standard).model if self.engine and self.ai and self.engine.budget.standard else ""
+        return self.ai.tier(self.engine.budget.effort_tier).model if self.engine and self.ai and self.engine.budget.effort_tier else ""
 
     @property
     def effort(self) -> str | None:
         """The effort word the instance's AI uses for its engine's standard (the
         `--effort` flag's value on Claude Code), or None."""
-        return self.ai.tier(self.engine.budget.standard).effort if self.engine and self.ai and self.engine.budget.standard else None
+        return self.ai.tier(self.engine.budget.effort_tier).effort if self.engine and self.ai and self.engine.budget.effort_tier else None
 
     @property
     def is_muxer(self) -> bool:

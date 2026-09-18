@@ -86,7 +86,7 @@ from .picker_flows import (
 from .picker_widget import (
     ContEntry, MemberEntry, PickerAction, PickerCwdHint, PickerEntry,
     PickerRowMarker, WorkspaceView, _cont_tags_column, _deferred_preview,
-    _tags_column, pick_with_preview,
+    _tags_column, break_row, pick_with_preview,
 )
 from .picker_prompts import (
     _agent_description, confirm_dialog,
@@ -99,7 +99,7 @@ from .styles import (
 )
 from ..tags import Agent, Ai, Engine, Harness, Instance, Registry, SCOPES, Tag, resolve_build
 from ..tags.ai import sorted_ais
-from ..tags.engine import sorted_engines, standard_rank
+from ..tags.engine import sorted_engines, effort_tier_rank
 from ..tags.harness import sorted_harnesses
 from ..utils import ordering_index_or_end, relative_time
 
@@ -285,7 +285,7 @@ def continuable_instances(registry: Registry,
         return (
             tuple(sorted(ordering_index_or_end(s.name, spec_order) for s in i.specialties)),
             tuple(sorted(ordering_index_or_end(p.name, prof_order) for p in i.professions)),
-            -standard_rank(i.engine),
+            -effort_tier_rank(i.engine),
             i.agent,
             i.session,
         )
@@ -497,7 +497,7 @@ def _build_composition_legend(registry: Registry) -> str:
                 cells[1].append(f"  · not on: {', '.join(s for s in SCOPES if s in t.forbid_on)}", style="dim")
             if isinstance(t, Engine):
                 default_ai = registry.default_ai
-                cells.append(Text(default_ai.tier(t.budget.standard).model if default_ai and t.budget.standard else "", style="dim"))   # "" for an engine with no standard
+                cells.append(Text(default_ai.tier(t.budget.effort_tier).model if default_ai and t.budget.effort_tier else "", style="dim"))   # "" for an engine with no standard
             table.add_row(*cells)
         parts += [Markdown(f"# {title}\n\n{nutshell}"), Text(), table]
 
@@ -731,7 +731,17 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         # up with everything else's. Enter on the cluster row launches it,
         # Del destroys it; a member row is the editing unit: F2 re-tags, Del
         # removes.
-        for cluster_entry in clusters:
+        # One cluster's rows (its own, then its members) form a BLOCK, and a
+        # rule separates consecutive blocks — spanning the columns the rows
+        # align in, never the variable workspace tail. Filtering keeps the
+        # rules (`_visible_indices`), which is what they are for: two members
+        # matching one typed word stay visibly apart when they belong to
+        # different clusters (operator, 2026-09-17).
+        block_break = break_row(PickerRowMarker.CLSTR.width("  ")
+                                + cluster_col_width + cluster_name_width)
+        for position, cluster_entry in enumerate(clusters):
+            if position:
+                entries.append(block_break)
             cluster = cluster_entry.cluster
             # The same information-only rule running instances get: the live
             # container owns the name (Enter → docker name conflict) and has

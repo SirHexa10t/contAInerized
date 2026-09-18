@@ -17,6 +17,7 @@ from rich.text import Text
 
 from ..file_access import iter_subdirs
 from ..transcripts import last_answer_in_state, last_prompt_in_state
+from .render import print_markdown
 from ..paths import quickie_communal_workspace, quickie_dir, quickie_state_dir_path
 
 PROMPT_MAX = 180   # question chars shown before the listing cuts it with an ellipsis
@@ -68,13 +69,29 @@ def print_history() -> None:
         console.print(line)
 
 
-def print_answer(session_id: str) -> None:
+def latest_thread() -> str | None:
+    """The id of the most recently answered-or-asked thread, or None when
+    there are none — `collect_history` is ascending, so it is the last."""
+    history = collect_history()
+    return history[-1][1] if history else None
+
+
+def print_answer(session_id: str | None = None) -> None:
     """Print the saved answer for a past thread (`q --answer <id>`), or exit with
-    a friendly note if the thread or its answer isn't found."""
+    a friendly note if the thread or its answer isn't found. Without an id the
+    LATEST thread is meant: the answer to the question just asked is the one
+    a reader wants nine times in ten, and typing a gibberish id to get it was
+    the friction (operator, 2026-09-18). Rendered as markdown on a terminal
+    and emitted as its source anywhere else — the same rule the live answer
+    follows, so a reprint looks like the answer did."""
+    if not session_id:
+        session_id = latest_thread()
+        if session_id is None:
+            sys.exit('No quickie threads yet.  Ask one:  q "your question here"')
     state = quickie_state_dir_path(session_id)
     if not state.is_dir():
         sys.exit(f"No quickie thread '{session_id}'.  Run  q --history  to list them.")
     found = last_answer_in_state(state)
     if found is None:
         sys.exit(f"No saved answer for thread '{session_id}' yet.")
-    print(found[0])
+    print_markdown(found[0])

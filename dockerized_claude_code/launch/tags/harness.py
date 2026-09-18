@@ -105,9 +105,9 @@ class Harness(Tag):
         `effort` knobs, then every switch and amount the budget sets through
         its purpose's knob. Order is the budget's field order, so two
         renderings of one budget compare byte for byte."""
-        if budget.standard is None:
-            raise TagError(f"engine budget sets no standard — {self.name} cannot render it for {ai.name}")
-        tier = ai.tier(budget.standard)
+        if budget.effort_tier is None:
+            raise TagError(f"engine budget sets no effort_tier — {self.name} cannot render it for {ai.name}")
+        tier = ai.tier(budget.effort_tier)
         provider = dict(self.providers).get(ai.name)
         settings: list[tuple[str, str]] = []
         unmapped: list[str] = []

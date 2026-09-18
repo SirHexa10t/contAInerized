@@ -22,7 +22,15 @@ isolated Docker container with persistent per-instance state.
   direct question without the picker or tag form:
   `q "why do elephants have big ears?"` (quote the whole question). It runs a
   hidden, fixed-build agent in print mode (`claude -p`): a live `⋯ thinking…`
-  timer runs while it reasons, then the answer streams in as it's generated.
+  timer runs while it reasons, then the answer streams in as it's generated,
+  rendered as markdown — headings, bold, lists, highlighted code — while it
+  arrives. Redirected or piped it stays the raw source instead, so
+  `q "…" > notes.md` is valid markdown and a script never meets an escape
+  code; `q --answer` reprints by the same rule. A run that ends without an
+  answer says so on stderr in the CLI's own words — including a plain-text
+  refusal printed outside the event stream, which used to be discarded as
+  noise — and a "not logged in" adds what the launcher mounted, so the next
+  report says which credential state caused it.
   (The model's own reasoning *text* isn't shown — current models redact it in
   headless mode — so the timer is the progress signal during long thinks.) The
   default uses the `quick` engine; **`--explain`** answers with a `trivia`
@@ -37,8 +45,8 @@ isolated Docker container with persistent per-instance state.
   stderr, with how to log in (once, through a normal launch). Each question's thread is saved under
   `~/.ai-agents/quickie/`, sharing one `communal/` workspace you can drop
   files into. **`q --history`** lists past threads (grey timestamp, id, last
-  question; oldest first); **`q --answer <id>`** reprints a thread's saved
-  answer; **`q --resume <id> "follow-up"`** continues one; **`q -h`** prints
+  question; oldest first); **`q --answer`** reprints the LATEST thread's saved
+  answer, or a named one with `q --answer <id>`; **`q --resume <id> "follow-up"`** continues one; **`q -h`** prints
   the tool's own help (a real arg-parser, so flags don't reach `claude`).
 - **Multi-agent group hosting (`{cowork}` / `{manager}`)** — running
   instances can work together, coordinated by a host-side hub. Tag instances
@@ -81,13 +89,27 @@ isolated Docker container with persistent per-instance state.
     words in that CLI's settings (`knobs.mapping`); an instance runs in its
     AI's default harness unless it picks another that runs that AI. Only `⟦ClaudeCode⟧` has
     an adapter in the launcher today, so instances in the other harnesses can
-    be described and stored, not yet launched.
+    be described and stored, not yet launched. Picking a harness the AI's
+    vendor does not let its SUBSCRIPTION into warns in the form: the price per
+    token is the same everywhere (no vendor prices by client), but a plan's
+    quota is spendable only in the clients that vendor allows, so elsewhere
+    the same work runs on an API key at metered rates. Vendors differ —
+    Anthropic offers Pro/Max in Claude Code alone, while OpenAI and xAI let
+    their sign-ins into some third-party harnesses — so the permitted set is
+    per-AI data (`plan_harnesses` in `agents/ai/<name>/tag.info`), and
+    `plans/credentials.md` carries the evidence for maintainers. For
+    `⟪Claude⟫` the warning LEADS with a field report of far higher token use
+    outside `⟦ClaudeCode⟧`, quoted as the tree states it, hedged and dated;
+    the second line names the one published mechanism that could explain a
+    gap that size, a harness that does not reuse the prompt cache, so the
+    harness can be checked before the model is blamed.
   - `(engine)` — how hard it thinks: a `tag.budget` in the launcher's OWN
     words (a step such as `high`, switches such as `memory = false`, amounts
     such as `max_output_tokens = 36000`) — no AI's key names; the instance's
     AI translates it.
   - `[profession]` — tools it can use: a Dockerfile image layer (`[code]`
-    adds Rust + Node + uv; `[webdev]` adds the playwright CLI).
+    adds Rust + Node + uv; `[webdev]` adds the playwright CLI and the site
+    toolbox — `dig`, `whois`, `openssl`).
   - `{specialty}` — exceptional access or running conditions: `{auto}` skips
     permission prompts, `{firewall}` applies an iptables outbound whitelist,
     `{dood}` bind-mounts the host's Docker socket, `{ro}` mounts the
@@ -215,7 +237,8 @@ layers. The root `Dockerfile` (the **base** stage) installs `uv` + ripgrep +
 python3 + iptables — what every agent needs whatever CLI it runs in. On top
 of that, each image-bearing tag supplies its own Dockerfile from the agents/
 tree (`agents/profession/code/Dockerfile` adds `build-essential`, Rust, Node;
-`agents/profession/code/webdev/Dockerfile` adds the playwright CLI;
+`agents/profession/code/webdev/Dockerfile` adds the playwright CLI plus
+`dig` / `whois` / `openssl`;
 `agents/profession/code/_dood/Dockerfile` is `{dood}`'s layer), plus an
 optional `tag.docker` declaring its build-args, mounts, capabilities, and
 entrypoint. Run-only specialties (`{auto}`, `{firewall}`) contribute
@@ -316,7 +339,7 @@ q --explain "how do rainbows form?"   # answer + connections & related tidbits (
 q --research "latest on <topic>?"     # deeper, source-checked (research agent)
 q --ai gemini "how old is the moon?"  # ask another AI (q -h lists them; today only claude's CLI can answer)
 q --history                           # list past question threads (grey timestamp, id, question)
-q --answer <id>                       # reprint a past thread's answer
+q --answer                            # reprint the last answer (add an id for an older thread)
 q --resume <id> "and their trunks?"   # continue a thread (id from --history)
 ```
 
@@ -412,11 +435,12 @@ red under the banner.
 | Key | Action |
 |-----|--------|
 | ↑ / ↓ | Move between rows |
-| (any printable character) | Filter rows by substring |
+| (any printable character) | Filter rows by substring. The rules between clusters stay put, so members of two clusters that match the same word never read as one roster |
 | Backspace | Edit the filter |
 | Enter | Select — launch the highlighted instance or cluster, or create from an agent / cluster template. Inert on a cluster member: members launch with their cluster |
 | Del | Delete the highlighted row (with confirmation): an instance and its state dir, a cluster and its members, or one member out of its cluster |
 | F2 | Redefine the highlighted row in one form: an instance's project path, name and tags; a cluster's tags, then its name, project and membership; a member's own tags (the cluster's show locked and marked `(from the cluster)`; a tag the row's scope cannot carry — `{dood}` per member, `{clstr}` on a solo instance — is greyed with the reason, e.g. `cluster-wide only: F2 on the cluster row`) |
+| F12 | Hide / show the preview pane. While it is hidden the list takes the full width and nothing is computed for the pane — no transcript is read for the highlighted row |
 | F8 | Toggle the composition legend — overlays one table per kind (AIs / harnesses / engines / professions / specialties / policies) in the preview pane, explaining each tag. Esc closes it without leaving the picker. |
 | Esc / Ctrl-C | Cancel and exit |
 
@@ -472,12 +496,12 @@ wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
    in `instances.toml`.
 3. (Optional) Give the agent its own engine: `agents/engine/<name>/` with a
    `tag.info` (description) and a `tag.budget` in the launcher's own words —
-   `standard` (`cheapest`, `best`, or a dated quarter from
+   `effort_tier` (`cheapest`, `best`, or a dated quarter from
    `agents/ai/capability.standards` — the frontier's level then, e.g. `2025Q4`),
    switches (`thinking`, `memory`, `background_agents`, `telemetry`,
    `tool_search`) and amounts (`max_output_tokens`, `tool_output_tokens`,
    `compact_at_percent`). Every `agents/ai/*/efforts.tiers` says which model
-   and effort meet the standard on that AI, and the harness's `knobs.mapping`
+   and effort meet that tier on that AI, and the harness's `knobs.mapping`
    translates the rest into that CLI's settings. Nested
    engine folders overlay their parent's budget key-by-key.
 4. Re-run `python3 run.py` — the new agent appears in the picker, grouped by
@@ -510,8 +534,10 @@ launcher code:
   an adapter in `launch/ai/`, keyed by the member's name.
 - **Engine**: `agents/engine/<name>/{tag.info, tag.budget}` — the budget in the
   launcher's own words (above). The descriptions name the TIER (cheap,
-  everyday, dependable), never a model: the picker renders the model the AI
-  runs for the engine's step beside them.
+  everyday, dependable), never a model: the tag form shows the engine's own
+  capability standard beside them (`2026Q2`, `cheapest`, `best`), and the F8
+  legend, the preview pane and the launch banner show the model the AI runs
+  for it.
 - **Profession**: `agents/profession/<name>/{tag.info, Dockerfile}` (+
   optional `tag.docker` naming the build-args its Dockerfile consumes).
   Nest it under another profession to declare a requirement
@@ -777,7 +803,7 @@ agents/                              # agent definitions + the tag tree
   ai/capability.standards            #   the dated CAPABILITY STANDARDS every AI answers — a quarter whose frontier model raised the record, its index, its setter; the ends cheapest / best are each AI's own
   ai/<name>/                         #   ⟪AI⟫ members — tag.info (vendor, default harness, default, fg/bg) + efforts.tiers (this AI's tier — model + effort — per standard)
   harness/<name>/                    #   ⟦Harness⟧ members — tag.info (vendor, the AIs it runs, binary, package) + knobs.mapping (budget words → this CLI's native settings; {provider} slugs for a multi-model CLI); an adapter in launch/ai/ keyed by the member's name makes it launchable
-  engine/<name>/                     #   (engine) members — tag.info + tag.budget (standard + switches + amounts, AI-neutral; nested folders overlay the parent's)
+  engine/<name>/                     #   (engine) members — tag.info + tag.budget (effort_tier + switches + amounts, AI-neutral; nested folders overlay the parent's)
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
   specialty/cowork/manager/          #   {manager} nests inside {cowork} — nesting IS the requires mechanism, so ticking the inner tag brings the outer one

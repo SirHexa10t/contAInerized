@@ -88,7 +88,7 @@ class TestAiMembers(unittest.TestCase):
     def test_every_engine_names_a_standard_the_ais_answer(self):
         for engine in REGISTRY.engines.values():
             with self.subTest(engine=engine.name):
-                self.assertIn(engine.budget.standard, REGISTRY.default_ai.standards)
+                self.assertIn(engine.budget.effort_tier, REGISTRY.default_ai.standards)
 
 
 class TestAiOrder(unittest.TestCase):
@@ -109,7 +109,7 @@ class TestRendering(unittest.TestCase):
                     with self.subTest(engine=engine.name, ai=ai.name, harness=name):
                         rendering = REGISTRY.harnesses[name].render(engine.budget, ai)
                         self.assertTrue(rendering.settings)
-                        model = ai.tier(engine.budget.standard).model
+                        model = ai.tier(engine.budget.effort_tier).model
                         self.assertTrue(any(model in value for value in rendering.map.values()), rendering.map)
 
     def test_claude_renders_the_budgets_as_the_former_env_files_did(self):
@@ -161,9 +161,9 @@ class TestEngineOrder(unittest.TestCase):
                 self.assertGreaterEqual(o1, o2)
                 if o1 == o2:
                     self.assertLess(n1, n2)
-        self.assertEqual(ordered[0].budget.standard, "best")
+        self.assertEqual(ordered[0].budget.effort_tier, "best")
         self.assertEqual(ordered[-1].name, "golem")
-        self.assertEqual(engine_module.standard_rank(None), -1)
+        self.assertEqual(engine_module.effort_tier_rank(None), -1)
 
 
 class TestHarnessMembers(unittest.TestCase):
@@ -200,6 +200,49 @@ class TestHarnessMembers(unittest.TestCase):
                     self.assertIn(ai, REGISTRY.ais)
                 company = harness.vendor.split(" ")[0].lower()
                 self.assertIn(company, harness.full_description.lower())    # searchable by company, like the AIs
+
+    def test_each_ai_declares_where_its_plan_may_be_spent(self):
+        # Vendors differ, so this is per-AI data: Anthropic gates Pro/Max to
+        # Claude Code while OpenAI and xAI let their sign-ins into harnesses
+        # they did not write (plans/credentials.md carries the sources). Every
+        # named harness must run that AI, and its own CLI is always among them.
+        self.assertEqual(REGISTRY.ais["claude"].plan_harnesses, ("claude-code",))
+        self.assertLess(len(REGISTRY.ais["claude"].plan_harnesses), len(REGISTRY.ais["grok"].plan_harnesses))
+        for ai in REGISTRY.ais.values():
+            with self.subTest(ai=ai.name):
+                self.assertIn(ai.harness, ai.plan_harnesses)
+                for name in ai.plan_harnesses:
+                    self.assertTrue(REGISTRY.harnesses[name].runs(ai.name))
+
+    def test_the_published_fallback_floors_are_declared_and_the_others_left_empty(self):
+        # Where a vendor publishes what an API key alone gets, the AI carries
+        # its words; where none does, the field stays empty rather than
+        # guessing (checked 2026-09-17 — plans/credentials.md has the four
+        # rows, including the two negatives and why they are negative).
+        self.assertIn("no free tier", REGISTRY.ais["claude"].key_free_tier)
+        self.assertIn("250 req/day", REGISTRY.ais["gemini"].key_free_tier)
+        for ai in REGISTRY.ais.values():   # phrase-sized: the form quotes them inline
+            self.assertLess(len(ai.key_free_tier), 60, ai.name)
+        self.assertEqual(REGISTRY.ais["chatgpt"].key_free_tier, "")
+        self.assertEqual(REGISTRY.ais["grok"].key_free_tier, "")
+        for ai in REGISTRY.ais.values():
+            with self.subTest(ai=ai.name):
+                self.assertNotRegex(ai.key_free_tier, r"orders of magnitude")   # no folklore in the tree
+
+    def test_only_claude_carries_a_field_report_and_it_names_its_provenance(self):
+        # The one line in the AI shelf that is field evidence rather than a
+        # vendor's published term (operator, 2026-09-17: two first-hand
+        # accounts). It must say who saw it and when, so the tree never holds
+        # a bare number — and no other AI has one to declare.
+        report = REGISTRY.ais["claude"].foreign_harness_report
+        self.assertIn("~50x", report)
+        # It is quoted VERBATIM as the warning's first line, so the sentence
+        # must hedge and date itself — the scan refuses one that does not.
+        self.assertRegex(report, r"report|alleg|observ|unverified|anecdot")
+        self.assertRegex(report, r"20\d\d")
+        self.assertLess(len(report), 130)
+        for name in ("gemini", "chatgpt", "grok"):
+            self.assertEqual(REGISTRY.ais[name].foreign_harness_report, "", name)
 
     def test_every_ais_default_harness_is_its_vendors_cli(self):
         # The vendor's own CLI is the default; the open harnesses are choices.

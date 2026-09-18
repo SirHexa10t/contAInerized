@@ -12,12 +12,13 @@ from unittest.mock import patch
 
 from launch.gui import forms
 from launch.gui.forms import (
-    _form_requires, _harness_warnings, _tag_form_options, _tag_row, _toolkit_form_options, prompt_tags,
+    _form_requires, _harness_warnings, _pairing_warnings, _tag_form_options, _tag_row,
+    _toolkit_form_options, prompt_tags,
 )
 from launch.gui.form_core import active_warnings
 from launch.gui.styles import STYLE_UNDERLINE, _plain
 from launch.paths import AGENTS_DIR
-from launch.tags import AgentBuild, Budget, scan_all
+from launch.tags import AgentBuild, Budget, is_standard, scan_all
 from launch.tags.profession import ToolkitEntry
 
 REGISTRY = scan_all(AGENTS_DIR)
@@ -125,25 +126,42 @@ class TestTagFormOptions(unittest.TestCase):
                 if budget(earlier) == budget(later):
                     self.assertLess(earlier, later, "equal budgets tiebreak by name")
 
-    def test_engine_rows_show_the_model_the_ai_runs_for_their_standard(self):
-        # The tier's words live in tag.info and name no model; the model shown
-        # beside them is the build's AI's tier for the engine's standard, so a
-        # different AI changes the label without a tag.info edit.
+    def test_engine_rows_show_their_effort_tier(self):
+        # The tier's words live in tag.info and name neither model nor tier;
+        # the effort_tier shown beside them is the engine's own budget value —
+        # a dated quarter, or one of the two ends.
         rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
-        ai = REGISTRY.default_ai
         for option in (o for o in rows if o.key in REGISTRY.engines):
             with self.subTest(engine=option.key):
+                effort_tier = REGISTRY.engines[option.key].budget.effort_tier
                 label = "".join(text for _, text in option.label)
-                self.assertIn(ai.tier(REGISTRY.engines[option.key].budget.standard).model, label)
-        non_engine = next(o for o in rows if o.key in REGISTRY.professions)
-        self.assertNotIn("claude-", "".join(text for _, text in non_engine.label))
+                self.assertTrue(is_standard(effort_tier))    # a quarter, `cheapest`, or `best`
+                self.assertTrue(label.rstrip().endswith(f" {effort_tier}"), label)
 
-    def test_an_engine_without_a_standard_shows_no_model(self):
+    def test_the_form_names_no_model_and_no_effort(self):
+        # THE point of the change (operator, 2026-09-17): the form chooses an
+        # engine, so it shows the engine's own word. Which model answers that
+        # standard, and at what effort, is the AI's business — the F8 legend,
+        # the preview and the banner are where the model belongs, and they
+        # still show it.
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
+        labels = " ".join(text for o in rows for _, text in o.label)
+        for ai in REGISTRY.ais.values():
+            for standard, tier in ai.tiers:
+                with self.subTest(ai=ai.name, standard=standard):
+                    self.assertNotIn(tier.model, labels)
+        # "effort: <word>" was the shape this rendered for one day; the word
+        # itself is legal prose in an engine's own description (the default
+        # engine's reads "baseline max-effort"), so the pin is the shape.
+        engine_labels = " ".join(text for o in rows if o.key in REGISTRY.engines for _, text in o.label)
+        self.assertNotIn("effort: ", engine_labels)
+
+    def test_an_engine_without_a_standard_shows_nothing_extra(self):
         # A nesting-only engine inherits its parent's standard at scan time; one
         # whose effective budget still has none must render nothing after its
         # description — not "None", not an empty parenthesis.
         bare = dataclasses.replace(REGISTRY.engines["quick"], budget=Budget())
-        label = "".join(text for _, text in _tag_row(bare, checked=False, group="engine", ai=REGISTRY.default_ai).label)
+        label = "".join(text for _, text in _tag_row(bare, checked=False, group="engine").label)
         self.assertEqual(label.rstrip(), f"{bare.label} {bare.short_description}")
 
     def test_non_radio_rows_are_not_grouped(self):
@@ -263,6 +281,10 @@ class TestPromptTags(unittest.TestCase):
         self.assertIsNone(self._run(["claude", "gemini-cli"]).harness)
         self.assertIsNone(self._run(["gemini-cli"]).harness)                 # the default AI cannot run in it either
         self.assertEqual(self._run(["gemini", "gemini-cli"], current=AgentBuild(engine="poet", harness="claude-code")).harness, "gemini-cli")
+
+    def test_the_form_is_given_the_pairing_warnings_too(self):
+        self._run([])
+        self.assertIn(frozenset({"claude", "opencode"}), self.form.call_args.kwargs["warnings"])
 
     def test_harness_warnings_name_every_pair_that_cannot_run_and_no_pair_that_can(self):
         warnings = _harness_warnings(REGISTRY)
@@ -547,3 +569,113 @@ class TestScopedRows(unittest.TestCase):
             forms.prompt_cluster_tags(REGISTRY, AgentBuild(specialties=("muxer", "cluster")), session="team",
                                       locked=frozenset({"muxer", "cluster"}), member_tags=frozenset({"auto"}))
         self.assertIn(frozenset({"dood"}), captured["warnings"])
+
+
+class TestPlanWarnings(unittest.TestCase):
+    """_plan_warnings — the pairing is legal and the model is the same, but
+    the BILL changes: a vendor's subscription is spendable only in the clients
+    that vendor allows, and anywhere else the same work goes through an API
+    key, metered per token (operator, 2026-09-17). Per-AI data, because the
+    vendors genuinely differ."""
+
+    def test_it_covers_exactly_the_pairs_with_something_to_say(self):
+        warnings = _pairing_warnings(REGISTRY)
+        for ai in REGISTRY.ais.values():
+            for harness in REGISTRY.harnesses.values():
+                outside_plan = (bool(ai.plan_harnesses) and harness.runs(ai.name)
+                                and harness.name not in ai.plan_harnesses)
+                reported = (bool(ai.foreign_harness_report) and harness.runs(ai.name)
+                            and harness.name != ai.harness)
+                with self.subTest(ai=ai.name, harness=harness.name):
+                    self.assertEqual(frozenset({ai.name, harness.name}) in warnings,
+                                     outside_plan or reported)
+
+    def test_claude_elsewhere_leads_with_the_report_and_labels_it(self):
+        # The operator's own reason for this warning: two first-hand accounts
+        # of Claude burning vastly more tokens outside Claude Code. It LEADS
+        # (the header is the line that always reads first) and it is labelled
+        # as what it is — field evidence, unreproduced here — so it can never
+        # be mistaken for something a vendor published.
+        first, rest = _pairing_warnings(REGISTRY)[frozenset({"claude", "opencode"})]
+        self.assertIn("⟦OpenCode⟧", first)
+        self.assertIn("⟪Claude⟫", first)
+        self.assertIn(REGISTRY.ais["claude"].foreign_harness_report, first)   # quoted as written
+        self.assertIn("~50x", first)
+        body = " ".join(rest)
+        self.assertIn("⟦ClaudeCode⟧", body)                      # where the plan CAN be spent
+        self.assertLessEqual(len(rest), 2)                       # a header and two short lines, no more
+        self.assertIn("ANTHROPIC_API_KEY", body)      # what it costs you instead
+        # No pointer into plans/ — that tree is the maintainers' record, not
+        # documentation for whoever is picking tags (operator, 2026-09-17).
+        self.assertNotIn("plans/", " ".join([first, body]))
+        # THE anti-folklore clause, in four words: no vendor prices by client
+        # (checked across all four, 2026-09-17), so the header's number cannot
+        # be read as a surcharge.
+        self.assertIn("per token at the usual rate", body)
+
+    def test_a_multiplier_may_appear_only_inside_a_declared_report(self):
+        # The anti-folklore invariant: a number lives ONLY inside a sentence
+        # the tree declares as a report (and the scan makes every such
+        # sentence hedge itself), never in the explanatory body, which speaks
+        # for verified facts.
+        import re
+        for pair, (header, rest) in _pairing_warnings(REGISTRY).items():
+            with self.subTest(pair=sorted(pair)):
+                self.assertNotRegex(" ".join(rest), r"\d+x")
+                if re.search(r"\d+x", header):
+                    (ai,) = [name for name in pair if name in REGISTRY.ais]
+                    report = REGISTRY.ais[ai].foreign_harness_report
+                    self.assertTrue(report)
+                    self.assertIn(report, header)
+
+    def test_the_warning_names_the_floor_where_a_vendor_publishes_one(self):
+        # The fact a reader decides on: an unpaid Gemini key keeps a recurring
+        # free tier, an Anthropic one does not. This is how the AIs differ —
+        # by published fact, not by a severity dial (researcher, 2026-09-17).
+        warnings = _pairing_warnings(REGISTRY)
+        claude = " ".join(warnings[frozenset({"claude", "opencode"})][1])
+        gemini = " ".join(warnings[frozenset({"gemini", "hermes"})][1])
+        self.assertIn("no free tier", claude)
+        self.assertIn("250 req/day", gemini)
+
+    def test_an_unestablished_floor_is_simply_not_mentioned(self):
+        # chatgpt and grok have no vendor page establishing one, so the
+        # warning guesses nothing — silence is the honest default here too.
+        body = " ".join(_pairing_warnings(REGISTRY)[frozenset({"grok", "openclaw"})][1])
+        self.assertNotIn("free tier", body)
+        self.assertNotIn("(", body.split("XAI_API_KEY")[1])   # no floor parenthetical where none is known
+        self.assertEqual("", REGISTRY.ais["grok"].key_free_tier)
+        self.assertEqual("", REGISTRY.ais["chatgpt"].key_free_tier)
+
+    def test_a_vendor_that_permits_the_harness_is_not_warned_about(self):
+        # The answer to "do the others do the same?": no. OpenAI's ChatGPT
+        # sign-in reaches OpenCode and xAI's SuperGrok login reaches three
+        # harnesses, so those pairings are silent — which is why the permitted
+        # set is per-AI data rather than "the AI's own CLI".
+        warnings = _pairing_warnings(REGISTRY)
+        self.assertNotIn(frozenset({"chatgpt", "opencode"}), warnings)
+        self.assertNotIn(frozenset({"grok", "hermes"}), warnings)
+        self.assertIn(frozenset({"claude", "opencode"}), warnings)
+
+    def test_an_ai_with_nothing_known_warns_about_nothing(self):
+        # Silence is the honest default: no gating known AND nothing reported
+        # means nothing to say. Both must be cleared — they are independent
+        # claims, and claude carries one of each.
+        quiet = dataclasses.replace(REGISTRY.ais["claude"], plan_harnesses=(), foreign_harness_report="")
+        registry = dataclasses.replace(REGISTRY, ais={**REGISTRY.ais, "claude": quiet})
+        self.assertFalse([pair for pair in _pairing_warnings(registry) if "claude" in pair])
+
+    def test_every_warning_is_short_enough_to_read(self):
+        # A warning nobody finishes reading warns nobody (operator,
+        # 2026-09-17). The long version lives one pointer away.
+        for pair, (header, body) in _pairing_warnings(REGISTRY).items():
+            with self.subTest(pair=sorted(pair)):
+                self.assertLessEqual(len(body), 2)
+                for line in (header, *body):
+                    self.assertLess(len(line), 160)
+
+    def test_the_two_warning_maps_never_collide(self):
+        # Both are merged into one dict for the form; a shared key would drop
+        # one message silently. Disjoint by construction — one covers pairs
+        # that cannot run at all, the other pairs that can.
+        self.assertEqual(set(_pairing_warnings(REGISTRY)) & set(_harness_warnings(REGISTRY)), set())

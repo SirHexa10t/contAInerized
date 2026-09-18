@@ -292,8 +292,9 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
       - `wants` and combo references resolve to real tags (any kind);
       - every declared command name resolves to a `commands/<name>.md` file;
       - every engine's capability standard is one the AIs define;
-      - every AI's default harness is a member that runs it, and every
-        harness runs only AI members;
+      - every AI's default harness is a member that runs it, every harness
+        runs only AI members, and every `plan_harnesses` name is a harness
+        that runs that AI;
       - a tag with a container-level mechanism (tag.docker's container
         fields, `workspace_readonly`) forbids `member`."""
     # Every engine's standard is one the AIs answer (the shared file's
@@ -302,8 +303,8 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
     if reg.ais:
         defined = next(iter(reg.ais.values())).standards
         for engine in reg.engines.values():
-            if engine.budget.standard is not None and engine.budget.standard not in defined:
-                raise TagError(f"{engine.path}: standard {engine.budget.standard!r} is not one the AIs define "
+            if engine.budget.effort_tier is not None and engine.budget.effort_tier not in defined:
+                raise TagError(f"{engine.path}: effort_tier {engine.budget.effort_tier!r} is not one the AIs define "
                                f"({', '.join(defined)} — agents/ai/capability.standards)")
 
     # AI ↔ harness: an AI's default harness exists and lists the AI; a
@@ -320,6 +321,18 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
         for name in harness.ais:
             if name not in reg.ais:
                 raise TagError(f"{harness.path}: ais names unknown AI {name!r} (members: {', '.join(sorted(reg.ais)) or 'none'})")
+    # An AI's plan_harnesses must be harnesses that can actually run it — a
+    # name that cannot is a claim about a pairing that does not exist, and the
+    # picker's billing warning would then be derived from nonsense.
+    for ai in reg.ais.values():
+        for name in ai.plan_harnesses:
+            harness = reg.harnesses.get(name)
+            if harness is None:
+                raise TagError(f"{ai.path}: plan_harnesses names {name!r}, which is not a member of agents/harness/ "
+                               f"(members: {', '.join(sorted(reg.harnesses)) or 'none'})")
+            if not harness.runs(ai.name):
+                raise TagError(f"{ai.path}: plan_harnesses names {name!r}, which does not run {ai.name!r} "
+                               f"(it runs {', '.join(harness.ais)})")
 
     # Global name uniqueness across kinds.
     seen: dict[str, str] = {}

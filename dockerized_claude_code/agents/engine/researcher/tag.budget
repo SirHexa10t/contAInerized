@@ -1,6 +1,6 @@
 # Reiterated, tool-heavy max-effort tier: long multi-step research across many
 # tool calls, large reads, verbose tool output, earlier compaction.
-standard           = "best"
+effort_tier        = "best"
 thinking           = true
 max_output_tokens  = 40000     # raise this if you have issues
 tool_output_tokens = 100000    # full reads of large files; verbose MCP / library output (was 60000 for MCP alone on Claude)

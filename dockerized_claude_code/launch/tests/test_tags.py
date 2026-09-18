@@ -137,7 +137,7 @@ class TagTreeTestCase(unittest.TestCase):
         return {
             **ai_member(),
             "engine/default/tag.info": 'full_description = "baseline"\n',
-            "engine/default/tag.budget": 'standard = "best"\nthinking = true\n',
+            "engine/default/tag.budget": 'effort_tier = "best"\nthinking = true\n',
             "profession/code/tag.info": 'full_description = "coding toolchains"\n',
             "profession/code/Dockerfile": "FROM base\n",
             "profession/code/web/tag.info": 'full_description = "browser"\n',
@@ -164,24 +164,24 @@ class TestEngine(TagTreeTestCase):
     def test_flat_engine_budget(self):
         root = self.tree({
             "engine/golem/tag.info": 'full_description = "cheap"\n',
-            "engine/golem/tag.budget": 'standard = "cheapest"\nthinking = false\nmemory = false\n',
+            "engine/golem/tag.budget": 'effort_tier = "cheapest"\nthinking = false\nmemory = false\n',
         })
         (golem,) = Engine.scan(root)
         self.assertEqual(golem.name, "golem")
         self.assertEqual(golem.label, "(golem)")
-        self.assertEqual(golem.budget, Budget(standard="cheapest", thinking=False, memory=False))
+        self.assertEqual(golem.budget, Budget(effort_tier="cheapest", thinking=False, memory=False))
         self.assertEqual(golem.budget.rank, 0)
 
     def test_nested_engine_inherits_and_overrides(self):
         root = self.tree({
             "engine/thinker/tag.info": 'full_description = "t"\n',
-            "engine/thinker/tag.budget": 'standard = "2026Q1"\nmax_output_tokens = 30000\n',
+            "engine/thinker/tag.budget": 'effort_tier = "2026Q1"\nmax_output_tokens = 30000\n',
             "engine/thinker/breakthrough/tag.info": 'full_description = "b"\n',
             "engine/thinker/breakthrough/tag.budget": 'max_output_tokens = 40000\n',
         })
         by_name = {e.name: e for e in Engine.scan(root)}
         # child inherits parent's standard, overrides the output budget
-        self.assertEqual(by_name["breakthrough"].budget, Budget(standard="2026Q1", max_output_tokens=40000))
+        self.assertEqual(by_name["breakthrough"].budget, Budget(effort_tier="2026Q1", max_output_tokens=40000))
         # parent untouched
         self.assertEqual(by_name["thinker"].budget.max_output_tokens, 30000)
 
@@ -192,7 +192,7 @@ class TestEngine(TagTreeTestCase):
         self.assertEqual(bare.budget.rank, -1)
 
     def test_budget_typos_fail_loudly(self):
-        for body in ('standardd = "best"\n', 'standard = "ultra"\n', 'standard = "2025Q5"\n', 'thinking = "yes"\n',
+        for body in ('effort_tierr = "best"\n', 'effort_tier = "ultra"\n', 'effort_tier = "2025Q5"\n', 'thinking = "yes"\n',
                      'max_output_tokens = -1\n', 'compact_at_percent = 150\n'):
             with self.subTest(body=body), self.assertRaises(TagError):
                 Engine.scan(self.tree({"engine/x/tag.info": 'full_description = "x"\n',
@@ -200,10 +200,10 @@ class TestEngine(TagTreeTestCase):
 
     def test_sorted_engines_rank_by_standard_then_output_then_name(self):
         root = self.tree({
-            "engine/a/tag.info": 'full_description = "a"\n', "engine/a/tag.budget": 'standard = "2025Q4"\nmax_output_tokens = 1000\n',
-            "engine/b/tag.info": 'full_description = "b"\n', "engine/b/tag.budget": 'standard = "best"\n',
-            "engine/c/tag.info": 'full_description = "c"\n', "engine/c/tag.budget": 'standard = "2025Q4"\nmax_output_tokens = 2000\n',
-            "engine/d/tag.info": 'full_description = "d"\n', "engine/d/tag.budget": 'standard = "2025Q4"\nmax_output_tokens = 1000\n',
+            "engine/a/tag.info": 'full_description = "a"\n', "engine/a/tag.budget": 'effort_tier = "2025Q4"\nmax_output_tokens = 1000\n',
+            "engine/b/tag.info": 'full_description = "b"\n', "engine/b/tag.budget": 'effort_tier = "best"\n',
+            "engine/c/tag.info": 'full_description = "c"\n', "engine/c/tag.budget": 'effort_tier = "2025Q4"\nmax_output_tokens = 2000\n',
+            "engine/d/tag.info": 'full_description = "d"\n', "engine/d/tag.budget": 'effort_tier = "2025Q4"\nmax_output_tokens = 1000\n',
         })
         self.assertEqual([e.name for e in sorted_engines(Engine.scan(root))], ["b", "c", "a", "d"])
 
@@ -248,7 +248,7 @@ class TestHarnessKind(TagTreeTestCase):
 
     def test_render_fills_templates_and_converts_units(self):
         claude, harnesses = self._pair()
-        rendering = harnesses["claude-cli"].render(Budget(standard="best", thinking=True, max_output_tokens=1000,
+        rendering = harnesses["claude-cli"].render(Budget(effort_tier="best", thinking=True, max_output_tokens=1000,
                                                           compact_at_percent=60, tool_output_tokens=100), claude)
         self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1",
                                          "OUT": "1000", "CHARS": "400", "PCT": "0.6"})
@@ -256,7 +256,7 @@ class TestHarnessKind(TagTreeTestCase):
 
     def test_render_reports_what_the_cli_cannot_say(self):
         claude, harnesses = self._pair()
-        rendering = harnesses["claude-cli"].render(Budget(standard="2025Q1", memory=False, telemetry=False), claude)
+        rendering = harnesses["claude-cli"].render(Budget(effort_tier="2025Q1", memory=False, telemetry=False), claude)
         self.assertEqual(rendering.unmapped, ("memory.off", "telemetry.off"))
         self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high"})
 
@@ -274,7 +274,7 @@ class TestHarnessKind(TagTreeTestCase):
         claude, harnesses = self._pair(harness_member("multi-cli", ais=("claude",), binary="multi", knobs=knobs))
         multi = harnesses["multi-cli"]
         self.assertTrue(multi.needs_providers)
-        rendering = multi.render(Budget(standard="best", max_output_tokens=500), claude)
+        rendering = multi.render(Budget(effort_tier="best", max_output_tokens=500), claude)
         self.assertEqual(rendering.map, {"model": "anthropic/claude-test", "models.anthropic.maxTokens": "500"})
 
     def test_knob_faults_fail_loudly(self):
@@ -349,8 +349,8 @@ class TestStandardVocabulary(unittest.TestCase):
 
     def test_budget_rank_follows(self):
         self.assertEqual(Budget().rank, -1)
-        self.assertEqual(Budget(standard="cheapest").rank, 0)
-        self.assertGreater(Budget(standard="best").rank, Budget(standard="2026Q3").rank)
+        self.assertEqual(Budget(effort_tier="cheapest").rank, 0)
+        self.assertGreater(Budget(effort_tier="best").rank, Budget(effort_tier="2026Q3").rank)
 
 
 class TestAiKind(TagTreeTestCase):
@@ -980,6 +980,29 @@ class TestRegistryValidation(TagTreeTestCase):
         two_ais = {**base, **ai_member("other", default=False), **harness_member("claude-cli", ais=("other",))}
         with self.assertRaisesRegex(TagError, "does not list 'claude'"):
             scan_all(self.tree(two_ais))
+
+    def test_a_field_report_must_hedge_and_date_itself(self):
+        # It is shown WORD FOR WORD as the picker's first line, so a bare
+        # number with no provenance must not be storable (operator, 2026-09-17).
+        base = self.full_tree_spec()
+        with_report = lambda text: {**base, "ai/claude/tag.info": base["ai/claude/tag.info"] + f'foreign_harness_report = "{text}"\n'}
+        ok = scan_all(self.tree(with_report("reportedly (mid-2026) ~50x the tokens elsewhere")))
+        self.assertIn("~50x", ok.ais["claude"].foreign_harness_report)
+        with self.assertRaisesRegex(TagError, "must carry its own hedge"):
+            scan_all(self.tree(with_report("50x the tokens elsewhere")))
+
+    def test_plan_harnesses_must_name_harnesses_that_run_this_ai(self):
+        base = self.full_tree_spec()
+        spec = {**base, **ai_member("other", default=False)}
+        with_plan = lambda value: {**spec, "ai/claude/tag.info": base["ai/claude/tag.info"] + f"plan_harnesses = {value}\n"}
+        self.assertEqual(scan_all(self.tree(with_plan('["claude-cli"]'))).ais["claude"].plan_harnesses, ("claude-cli",))
+        self.assertEqual(scan_all(self.tree(spec)).ais["claude"].plan_harnesses, ())          # absent: no known gating
+        with self.assertRaisesRegex(TagError, "plan_harnesses names 'nope'"):
+            scan_all(self.tree(with_plan('["nope"]')))
+        with self.assertRaisesRegex(TagError, "does not run 'claude'"):
+            scan_all(self.tree(with_plan('["other-cli"]')))                                    # a real harness, for another AI
+        with self.assertRaisesRegex(TagError, "plan_harnesses must be a list"):
+            scan_all(self.tree(with_plan('"claude-cli"')))
 
     def test_a_harness_may_run_several_ais(self):
         spec = {**self.full_tree_spec(), **ai_member("other", default=False),

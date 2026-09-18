@@ -13,7 +13,7 @@ Sections:
     used by run.py's CLI parsing
   - creatable_agents / instance_from_store — picker-entry factories
   - _agent_sort_key — Create-row ordering (profession group, then the
-    engine's capability standard via tags.engine.standard_rank, then name)
+    engine's capability standard via tags.engine.effort_tier_rank, then name)
 
 Identity types (Agent / Instance) and the store primitives live in the tags
 package; this module wires them to the filesystem lifecycle. menu_picker and
@@ -36,7 +36,7 @@ from .tags import (
     Agent, Instance, Registry, TagError, addendums, load_agent, resolve_build,
     store,
 )
-from .tags.engine import standard_rank
+from .tags.engine import effort_tier_rank
 from .tags.identity import SESSION_SEP
 from .tags.policy import merge_fragments
 from .utils import ordering_index_or_end, plural, prompt_keypress
@@ -212,7 +212,7 @@ def _agent_sort_key(agent: Agent, registry: Registry) -> tuple[tuple[int, ...], 
     prof_order = list(registry.professions)
     prof_key = tuple(sorted(ordering_index_or_end(p, prof_order) for p in agent.build.professions))
     engine = registry.engines.get(agent.build.engine or agent.name) or registry.engines.get("default")
-    return (prof_key, -standard_rank(engine), agent.name)
+    return (prof_key, -effort_tier_rank(engine), agent.name)
 
 
 # ============================================================

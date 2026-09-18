@@ -20,6 +20,33 @@ The kind's root carries one shared file, and each member dir two:
                     reads; `credentials/keys/<ai>.env` defines it), `default`,
                     and the tag's own colours `fg` / `bg` as hex (the first
                     kind coloured per MEMBER, after the logos).
+  plan_harnesses  — (tag.info) the harnesses this vendor's SUBSCRIPTION may
+                    run in. Vendors differ, so it is per-AI data rather than
+                    "its own CLI": Anthropic gates Pro/Max to Claude Code,
+                    while OpenAI also permits its ChatGPT sign-in in OpenCode
+                    and xAI its SuperGrok login in three harnesses
+                    (plans/credentials.md records who permits what, with its
+                    sources). The picker warns when a build pairs an AI with a
+                    harness outside its list: that pairing is billed per token
+                    through an API key, not by the plan.
+  foreign_harness_report
+                  — (tag.info) what running this AI outside its own CLI has
+                    been OBSERVED to cost. The one field here carrying FIELD
+                    EVIDENCE rather than a vendor's published terms, and the
+                    picker quotes it VERBATIM as the warning's first line — so
+                    the sentence must hedge and date itself (the scan
+                    refuses one that does not). A launcher that hid a cost its
+                    operators keep hitting would be no more honest than one
+                    that invented a number. Empty where nothing is reported.
+  key_free_tier   — (tag.info) what an API key ALONE gets on this vendor: the
+                    floor a pairing outside `plan_harnesses` actually lands
+                    on, which differs sharply and is published for some
+                    vendors and not others (Google keeps a recurring free
+                    tier on an unpaid key; Anthropic gives new API users a
+                    one-time credit and meters from the first token after
+                    it). Left EMPTY where no vendor page establishes it —
+                    the warning then says nothing rather than guessing, and
+                    no AI is ranked against another.
   efforts.tiers   — this AI's TIER for every standard: the model id and effort
                     word that meet it (cheapest of the configurations that do;
                     the AI's best, when none does); a `[scale]` table lists
@@ -47,6 +74,8 @@ from .budget import BEST, CHEAPEST, is_standard, sorted_standards
 STANDARDS_FILE = "capability.standards"
 TIERS_FILE = "efforts.tiers"
 _HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}$")
+# A report is shown WORD FOR WORD, so the sentence itself must say it is one.
+_HEDGED = re.compile(r"report|alleg|observ|unverified|anecdot", re.IGNORECASE)
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -90,6 +119,9 @@ class Ai(Tag):
     fg: str = ""
     bg: str = ""
     scale: tuple[str, ...] = ()       # this AI's effort words, weakest first (may be empty: no effort setting)
+    plan_harnesses: tuple[str, ...] = ()   # the harness members this vendor lets its SUBSCRIPTION run in; every other harness needs an API key (metered). Empty = the launcher knows of no such gating for this AI, and warns about none
+    key_free_tier: str = ""           # what an API key ALONE gets on this vendor — the floor a plan-less pairing lands on, in the vendor's published terms. Empty = not established, and the warning says nothing rather than guessing
+    foreign_harness_report: str = ""  # what running this AI OUTSIDE its own CLI has been observed to cost — FIELD EVIDENCE, not vendor policy; the picker leads its warning with it, labelled REPORTED. Empty = nothing reported
     tiers: tuple[tuple[str, Tier], ...] = ()                            # standard → tier, cheapest first
 
     @property
@@ -137,6 +169,25 @@ def _own_fields(info: dict[str, Any], tag_dir: Path) -> dict[str, Any]:
             raise TagError(f"{tag_dir}/tag.info: {key} must be a non-empty string"
                            + (" — the key of its default agents/harness/ member" if key == "harness" else ""))
         own[key] = value.strip()
+    report = str(info.get("foreign_harness_report", "")).strip() if info.get("foreign_harness_report") is not None else ""
+    if not isinstance(info.get("foreign_harness_report", ""), str):
+        raise TagError(f"{tag_dir}/tag.info: foreign_harness_report must be a string — what running this AI outside "
+                       f"its own CLI has been OBSERVED to cost (omit it when nothing is)")
+    if report and not _HEDGED.search(report):
+        raise TagError(f"{tag_dir}/tag.info: foreign_harness_report is quoted VERBATIM in the picker, so it must carry "
+                       f"its own hedge — one of report / alleged / observed / unverified — and when it was seen. "
+                       f"Field evidence must never read like a vendor's published term: {report!r}")
+    own["foreign_harness_report"] = report
+    floor = info.get("key_free_tier", "")
+    if not isinstance(floor, str):
+        raise TagError(f"{tag_dir}/tag.info: key_free_tier must be a string — what an API key alone gets on this "
+                       f"vendor, in its published terms (omit it when that is not established)")
+    own["key_free_tier"] = floor.strip()
+    plan = info.get("plan_harnesses", [])
+    if not isinstance(plan, list) or not all(isinstance(h, str) and h.strip() for h in plan):
+        raise TagError(f"{tag_dir}/tag.info: plan_harnesses must be a list of harness member names — "
+                       f"the ones this vendor lets its subscription run in (empty or absent: no known gating)")
+    own["plan_harnesses"] = tuple(h.strip() for h in plan)
     key_env = info.get("key_env", "")
     if not isinstance(key_env, str) or not _ENV_NAME.match(key_env):
         raise TagError(f"{tag_dir}/tag.info: key_env must be the vendor's API-key variable, like ANTHROPIC_API_KEY, got {key_env!r}")

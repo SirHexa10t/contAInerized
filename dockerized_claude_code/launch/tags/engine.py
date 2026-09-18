@@ -66,7 +66,7 @@ class Engine(Tag):
         return out
 
 
-def standard_rank(engine: Engine | None) -> int:
+def effort_tier_rank(engine: Engine | None) -> int:
     """The engine's place on the capability scale (`budget.rank_of`: cheapest
     0, quarters by date, best on top); -1 for no engine or no standard. The
     picker's sorts and the form's radio order rank by it — the same number
@@ -79,4 +79,4 @@ def sorted_engines(engines: Iterable[Engine]) -> list[Engine]:
     descending (a bigger `max_output_tokens` ranks higher among engines on the
     same standard), then name as a stable final tiebreak. The form's radio
     group and the F8 legend both display in this order."""
-    return sorted(engines, key=lambda e: (-standard_rank(e), -(e.budget.max_output_tokens or 0), e.name))
+    return sorted(engines, key=lambda e: (-effort_tier_rank(e), -(e.budget.max_output_tokens or 0), e.name))

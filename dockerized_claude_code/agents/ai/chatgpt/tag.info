@@ -5,6 +5,10 @@ full_description  = "OpenAI's GPT line (GPT-6 Astra; the GPT-5.6 family Sol, Ter
 vendor            = "OpenAI"
 harness           = "codex-cli"        # its default harness — an agents/harness/ member
 key_env           = "OPENAI_API_KEY"        # the vendor's API-key variable: credentials/keys/chatgpt.env defines it — OpenCode, Hermes, OpenClaw read it; Codex CLI takes a key through `codex login --with-api-key` (which writes auth.json) or CODEX_API_KEY for a non-interactive process — its adapter's job, not this file's
+# OpenAI's ChatGPT sign-in reaches further than Anthropic's plan does: its own
+# CLI and OpenCode both take it (plans/credentials.md, 2026-09-15), so neither
+# pairing is warned about — the other harnesses need OPENAI_API_KEY.
+plan_harnesses    = ["codex-cli", "opencode"]
 default           = false
 fg                = "#ffffff"          # the ⟪ChatGPT⟫ tag: white on OpenAI green
 bg                = "#10a37f"

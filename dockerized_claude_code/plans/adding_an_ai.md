@@ -87,15 +87,15 @@ model; Claude renders byte-for-byte what its former env files said);
 ### 2. Engines never learn the AI
 
 An engine is `agents/engine/<tag>/{tag.info, tag.budget}` — the budget in the
-launcher's own words (`standard`, switches, amounts; `tags/budget.py`), overlaid
+launcher's own words (`effort_tier`, switches, amounts; `tags/budget.py`), overlaid
 key-by-key by nested dirs. Adding an AI touches no engine: the AI's two files
 translate every engine. What the current engines mean, in standards: `golem` →
 `cheapest`, `poet` → `2025Q3`, `quick` → `2025Q4`, `reliable` → `2026Q2`,
 `default` / `thinker` / `researcher` / `breakthrough` → `best` (on Claude the
 same models and efforts the eight named steps gave until 2026-09-14). `tag.info`
 describes the TIER, never a model (a test forbids model and vendor words
-there); the picker renders the model the AI runs for the step beside the
-words.
+there); the tag form renders the engine's own standard beside the words, and
+the legend / preview / banner render the model the AI runs for it.
 
 ### 3. Give it a harness adapter (the code half)
 

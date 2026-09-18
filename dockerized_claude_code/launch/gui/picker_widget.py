@@ -46,7 +46,8 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
@@ -77,11 +78,16 @@ PREVIEW_POSITION       = "\x1b[2m   line {} / {}\x1b[0m"
 PREVIEW_POSITION_FLOOR = 40
 HINT_LEGEND_SUFFIX   = "  •  F8 legend"
 HINT_LEGEND_OPEN     = "F8 / Esc close legend"
+HINT_PREVIEW_SUFFIX  = "  •  F12 hide preview"
+HINT_PREVIEW_HIDDEN  = "  •  F12 show preview"
 FILTER_LABEL         = "filter: "
 EMPTY_FILTER_MESSAGE = "(no matches)"
 PREVIEW_LOADING_TEXT = "… loading preview (keep browsing)"
 LAST_PROMPT_LOADING  = "[loading…]"   # stands in for the Last prompt value while transcripts are read
 DIVIDER_CHAR         = "│"
+# The BREAK row's rule — the same box-drawing family as the divider above, so
+# it is drawn by the terminal itself (see TAB_TIP for why that matters).
+BREAK_CHAR           = "─"
 LIST_WEIGHT    = 2
 PREVIEW_WEIGHT = 3
 DIVIDER_WIDTH  = 1
@@ -95,8 +101,11 @@ STYLE_TAB            = "bg:ansigreen fg:black bold"         # the tab body behin
 STYLE_TAB_TIP        = "fg:ansigreen"                       # its fading end: foreground == tab background, so the shade ramp reads as the tab dissolving, not as characters
 STYLE_NEST_MARK      = "fg:ansibrightblack"                 # instance rows: dim marker, indented under the agent's tab
 # The cluster-template rows wear the same tab shape in CYAN — a third kind
-# beside create-green and continue-yellow, same colour its preview accent shows.
-# An existing cluster is a TOP-LEVEL row in the CONT shape (also cyan), listed
+# beside create-green and continue-yellow, same colour its preview accent
+# shows, and (since 2026-09-17) the only row whose accent is cyan: creating a
+# cluster is what that colour marks.
+# An existing cluster is a TOP-LEVEL row in the CONT shape (cyan LEAD, yellow
+# accent — it exists, like an instance), listed
 # after every template row rather than indented under its own: a cluster is
 # not an instance OF a template the way an instance is of its agent — nothing
 # is shared after creation (no common CLAUDE.md), so nesting would claim a
@@ -122,6 +131,16 @@ TAB_TIP = "▓▒░"
 BLOCK_ELEMENTS = range(0x2580, 0x25A0)
 TAG_EMPHASIS         = "bold underline"   # style SUFFIX for tags an emphasize set names (see _tags_column) — on top of the tag's own color, so the color language survives the shout
 STYLE_WORKSPACE_HINT = "italic fg:ansibrightblack"   # the workspace path at a row's tail
+# The preview's edge bar (see PickerRowMarker.accent) speaks ONE language: what
+# kind of thing the highlighted row is. Creating something is a colour per
+# thing created; everything that already EXISTS — an instance, a cluster, a
+# member — shares the continue colour, because that is the distinction the bar
+# is read for (operator, 2026-09-17: "blue should be reserved for new
+# clusters"). Named, so the next row kind picks from this list instead of
+# inventing a fourth colour.
+ACCENT_CREATE_AGENT   = "fg:ansigreen"    # + Agent  — matches the green tab (STYLE_TAB)
+ACCENT_CREATE_CLUSTER = "fg:ansicyan"     # + Cluster — matches the cyan tab (STYLE_CLUSTER_TAB); this colour is the creation tab's alone
+ACCENT_EXISTING       = "fg:ansiyellow"   # an instance, a cluster, or a member that is already on disk
 
 
 class PickerAction(Enum):
@@ -154,6 +173,11 @@ class PickerRowMarker(Enum):
     bar) with black text; the nest marker stays dim grey — so colour, shape,
     and depth all separate the two kinds the same way.
 
+    `.accent` is the narrower question — does this row EXIST or would picking
+    it create something — so the three constants above are its whole
+    vocabulary: green creates an agent instance, cyan creates a cluster, and
+    yellow marks everything already on disk (instances, clusters, members).
+
     Members expose:
       .lead        — tuple of (style, text) fragments that start the row
       .accent      — preview accent-bar style while the row is selected
@@ -163,16 +187,20 @@ class PickerRowMarker(Enum):
     # Both creation tabs lead with `+` — the creation intent in one glyph, and
     # the two tab NAMES then say what gets created (an agent instance; a
     # cluster) instead of one saying the verb and the other the noun.
-    NEW     = (((STYLE_TAB, " + Agent "), (STYLE_TAB_TIP, TAB_TIP)), "fg:ansigreen")
-    CONT    = (((STYLE_NEST_MARK, "   ▸ Cont."),),              "fg:ansiyellow")
+    NEW     = (((STYLE_TAB, " + Agent "), (STYLE_TAB_TIP, TAB_TIP)), ACCENT_CREATE_AGENT)
+    CONT    = (((STYLE_NEST_MARK, "   ▸ Cont."),),              ACCENT_EXISTING)
     CLUSTER = (((STYLE_CLUSTER_TAB, " + Cluster "), (STYLE_CLUSTER_TAB_TIP, TAB_TIP)),
-               "fg:ansicyan")
+               ACCENT_CREATE_CLUSTER)
     # "Cont.", the same word instance rows use — an existing cluster IS a
-    # continuation; the cyan is what says "cluster" (kind = colour, verb = word).
-    # No indent: a cluster is a top-level row, not a child of its template
-    # (see the STYLE_CLUSTER_* comment); its members take the indent instead.
-    CLSTR   = (((STYLE_CLUSTER_NEST, "▸ Cont."),),              "fg:ansicyan")
-    MEMBER  = (((STYLE_NEST_MARK, "   · "),),                   "fg:ansicyan")
+    # continuation, so its ACCENT is the continue yellow every existing thing
+    # shows; the cyan stays in the row's own LEAD, where it says "cluster"
+    # (kind = lead colour, state = accent colour). No indent: a cluster is a
+    # top-level row, not a child of its template (see the STYLE_CLUSTER_*
+    # comment); its members take the indent instead.
+    CLSTR   = (((STYLE_CLUSTER_NEST, "▸ Cont."),),              ACCENT_EXISTING)
+    # A member exists too — and it is an instance in all but placement, so it
+    # reads like one on the bar; its cluster is named in the pane beside it.
+    MEMBER  = (((STYLE_NEST_MARK, "   · "),),                   ACCENT_EXISTING)
     TOOLS  = ((("fg:ansicyan", "🧰 Toolkits"),),               "")
     DELMNU = ((("fg:ansired", "⚠️ DELETE‼️"),),                "")
     DLET   = ((("fg:ansired", "🗑 DELETE"),),                  "")
@@ -327,6 +355,13 @@ class PickerEntry:
     so every time). `selectable=False` makes the row INFORMATION-ONLY:
     still rendered, but the cursor never lands on it, so no key can target
     it (a running instance — see RUNNING_HINT).
+
+    `separator=True` marks a BREAK row (`break_row`): a rule between two
+    blocks of rows, never selectable and never filtered OUT — typing a word
+    that no break contains must not weld one cluster's members onto the
+    next's (operator, 2026-09-17). `_visible_indices` keeps them and collapses
+    them, so a boundary never outlives what it separates.
+
     `display` defaults to a fresh empty list per instance to keep the
     dataclass safe — never shared across rows."""
     display: list[tuple[str, str]] = field(default_factory=list)
@@ -338,6 +373,7 @@ class PickerEntry:
     modifiable: bool = True
     pickable: bool = True
     selectable: bool = True
+    separator: bool = False
 
     @property
     def preview_ready(self) -> bool:
@@ -491,10 +527,58 @@ def _cont_tags_column(inst: Instance,
     `invalid_tags` — `_tags_column` fed from the one identity record."""
     return _tags_column(inst.active_tags, emphasize, problems=inst.invalid_tags)
 
+def break_row(width: int) -> PickerEntry:
+    """A BREAK row `width` cells wide: a dim rule that separates two blocks of
+    rows. Information only — the cursor never lands on it, so no key can
+    target it — and the filter keeps it (`_visible_indices`), which is the
+    point: filtered rows from two different clusters stay visibly apart."""
+    return PickerEntry(display=[(UiClass.DIVIDER.css, BREAK_CHAR * width)],
+                       selectable=False, pickable=False, deletable=False,
+                       modifiable=False, separator=True)
+
+
+def _visible_indices(entries: list[PickerEntry], query: str) -> list[int]:
+    """The row indices the list shows for `query`: every row whose text
+    contains it, plus every BREAK row — a break is a boundary, not content, so
+    it is never filtered out by a word it does not contain.
+
+    Collapsed, so a kept boundary always separates something: none leads the
+    list, none trails it, and two that meet become one. Pure, so the rule is
+    testable without driving a live prompt_toolkit Application."""
+    q = query.lower()
+    matched = [i for i in range(len(entries))
+               if entries[i].separator or q in _plain(entries[i].display).lower()]
+    out: list[int] = []
+    for i in matched:
+        if entries[i].separator and (not out or entries[out[-1]].separator):
+            continue                      # nothing above it yet, or a break already sits there
+        out.append(i)
+    while out and entries[out[-1]].separator:
+        out.pop()                         # nothing below it any more
+    return out
+
+
+# What the side pane is showing — the ONE answer both the layout (is the pane
+# there at all) and the content function (what to compute) read, so they can
+# never disagree about whether a preview is wanted.
+PANE_HIDDEN, PANE_LEGEND, PANE_PREVIEW = "hidden", "legend", "preview"
+
+
+def _pane_view(*, hidden: bool, legend_open: bool, has_legend: bool) -> str:
+    """Which of the three the pane shows. F12 hides it outright; F8's legend
+    wins over a preview while it is open (the pane is the legend's only home,
+    so asking for the legend is asking for the pane — the F12 handler
+    un-hides for it). A legend that no caller supplied is never open."""
+    if hidden:
+        return PANE_HIDDEN
+    return PANE_LEGEND if (legend_open and has_legend) else PANE_PREVIEW
+
+
 def _focusable_indices(entries: list[PickerEntry], shown: list[int]) -> list[int]:
     """Row indices the cursor may land on: visible after filtering AND
-    selectable. Information-only rows (a running instance) are rendered but
-    never focusable, which is what blocks Enter / Del / F2 on them."""
+    selectable. Information-only rows (a running instance, a break) are
+    rendered but never focusable, which is what blocks Enter / Del / F2 on
+    them."""
     return [i for i in shown if entries[i].selectable]
 
 def _cursor_step(entries: list[PickerEntry], shown: list[int], cursor: int, delta: int) -> int:
@@ -565,6 +649,10 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         "shown": list(range(len(entries))),
         "result": (None, None),
         "legend_open": False,
+        # F12: the pane is gone and NOTHING is computed for it — the list gets
+        # the full width. Modelled on the legend, which already spares the
+        # transcript reads by never asking the loader while it is open.
+        "preview_hidden": False,
         # Lines the preview is scrolled down by. Reset whenever the preview's
         # CONTENT changes (a new row, or the legend opening), because a leftover
         # offset would open the next preview part-way down for no reason.
@@ -575,9 +663,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         return _focusable_indices(entries, state["shown"])
 
     def refilter() -> None:
-        q = state["filter"].lower()
-        state["shown"] = [i for i in range(len(entries))
-                          if q in _plain(entries[i].display).lower()]
+        state["shown"] = _visible_indices(entries, state["filter"])
         if state["cursor"] in state["shown"] and entries[state["cursor"]].selectable:
             return                                    # current row survived the filter
         landable = focusable()
@@ -620,10 +706,21 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             out.pop()
         return out
 
+    def pane_view() -> str:
+        return _pane_view(hidden=state["preview_hidden"],
+                          legend_open=state["legend_open"],
+                          has_legend=legend_text is not None)
+
     def _preview_source() -> str:
-        """The preview's full text, before scrolling."""
-        if state["legend_open"] and legend_text is not None:
-            return legend_text
+        """The pane's full text, before scrolling — and the one place a
+        preview is ever ASKED FOR. A hidden pane returns before
+        `loader.text`, so no transcript is read and no worker is scheduled
+        for a row nobody is looking at; the legend takes the same shortcut."""
+        view = pane_view()
+        if view == PANE_HIDDEN:
+            return ""
+        if view == PANE_LEGEND:
+            return legend_text or ""
         if not state["shown"]:
             return ""
         return loader.text(state["cursor"], entries[state["cursor"]])
@@ -662,7 +759,7 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         return [(UiClass.TITLE.css, title)]
 
     def status_fragments() -> list[tuple[str, str]]:
-        if state["legend_open"]:
+        if pane_view() == PANE_LEGEND:
             hint = HINT_LEGEND_OPEN
         else:
             hint = HINT_BASE_TEXT
@@ -672,6 +769,8 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
                 hint += HINT_MODIFY_SUFFIX
             if legend_text is not None:
                 hint += HINT_LEGEND_SUFFIX
+            # Says which way the key goes, so a hidden pane is never a mystery.
+            hint += HINT_PREVIEW_HIDDEN if state["preview_hidden"] else HINT_PREVIEW_SUFFIX
         out = [(UiClass.STATUS.css, hint), ("", "\n")]
         if state["filter"]:
             out.append((UiClass.FILTER.css, FILTER_LABEL))
@@ -748,7 +847,20 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
     def _(event: KeyPressEvent) -> None:
         if legend_text is not None:
             state["legend_open"] = not state["legend_open"]
+            # The pane is the legend's only home: asking for it brings the
+            # pane back if F12 had hidden it.
+            if state["legend_open"]:
+                state["preview_hidden"] = False
             state["preview_scroll"] = 0   # legend and preview scroll independently
+
+    @kb.add("f12")
+    def _(event: KeyPressEvent) -> None:
+        # Hiding takes the legend with it — it lives in the pane — so the next
+        # F12 brings back a preview, which is what "show the preview" means.
+        state["preview_hidden"] = not state["preview_hidden"]
+        if state["preview_hidden"]:
+            state["legend_open"] = False
+        state["preview_scroll"] = 0
 
     @kb.add("backspace")
     def _(event: KeyPressEvent) -> None:
@@ -800,22 +912,30 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
                 wrap_lines=False,
                 width=D(weight=LIST_WEIGHT),
             ),
-            Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=UiClass.DIVIDER.css),
-            Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
-            Window(
-                _ScrollingControl(preview_text, on_scroll=scroll_preview),
-                wrap_lines=True,
-                width=D(weight=PREVIEW_WEIGHT),
-                style=UiClass.PREVIEW.css,
-                # NO ScrollbarMargin. It renders the WINDOW's own scroll state,
-                # while the scrolling here is done by slicing the text before the
-                # window ever sees it — so the bar described a viewport that does
-                # not exist: it sat at the bottom while the text was at the top,
-                # then shrank away as the sliced content got shorter. A correct bar
-                # would mean scrolling the window instead of the text (and
-                # ScrollbarMargin cannot be dragged either — it has no mouse
-                # handler). The position indicator below is honest about what it
-                # knows; see `preview_text`.
+            # The whole side — divider, accent bar, pane — behind ONE
+            # condition: F12 takes all three away and the list widens into the
+            # space, rather than leaving a rule against a blank column.
+            ConditionalContainer(
+                VSplit([
+                    Window(width=DIVIDER_WIDTH, char=DIVIDER_CHAR, style=UiClass.DIVIDER.css),
+                    Window(width=1, char="▌", style=accent_style),   # preview-side accent bar; colour reflects selected row's kind
+                    Window(
+                        _ScrollingControl(preview_text, on_scroll=scroll_preview),
+                        wrap_lines=True,
+                        width=D(weight=PREVIEW_WEIGHT),
+                        style=UiClass.PREVIEW.css,
+                        # NO ScrollbarMargin. It renders the WINDOW's own scroll state,
+                        # while the scrolling here is done by slicing the text before the
+                        # window ever sees it — so the bar described a viewport that does
+                        # not exist: it sat at the bottom while the text was at the top,
+                        # then shrank away as the sliced content got shorter. A correct bar
+                        # would mean scrolling the window instead of the text (and
+                        # ScrollbarMargin cannot be dragged either — it has no mouse
+                        # handler). The position indicator below is honest about what it
+                        # knows; see `preview_text`.
+                    ),
+                ]),
+                filter=Condition(lambda: pane_view() != PANE_HIDDEN),
             ),
         ]),
         Window(FormattedTextControl(_fragment_source(status_fragments)), height=STATUS_HEIGHT),

@@ -1,13 +1,17 @@
 """The engine BUDGET — an engine's demands in the launcher's OWN words, read
 from `agents/engine/<tag>/tag.budget` (TOML). No AI's key names appear here:
-`standard` names one of the launcher's CAPABILITY STANDARDS, which every
-`agents/ai/<key>/efforts.tiers` spells out in that AI's model + effort, and
+`effort_tier` names one of the launcher's CAPABILITY STANDARDS — the tier of
+effort the engine asks for, which is exactly a row every
+`agents/ai/<key>/efforts.tiers` answers in that AI's model + effort (the field
+was called `standard` until 2026-09-17; the VALUE SPACE keeps that name, since
+a dated key is the standard the frontier set — `agents/ai/capability.standards`
+— while the field says what an engine picks from it), and
 the other keys are PURPOSES each harness's `knobs.mapping` translates into
 its native settings (`tags/harness.py`, `Harness.render`). So an engine author never learns
 an AI's vocabulary, and adding an AI never touches an engine (decision
 2026-09-13, plans/adding_an_ai.md).
 
-A standard is either end of the scale — `cheapest`, `best`: each AI's own
+An effort tier is either end of the scale — `cheapest`, `best`: each AI's own
 extremes — or a DATED one, `YYYYQn`: the capability the frontier reached in
 that quarter, set by the model released then that raised the record
 (operator, 2026-09-14). Standards only rise with time, so their order is in
@@ -63,7 +67,7 @@ def sorted_standards(keys: Iterable[str]) -> list[str]:
     return sorted(keys, key=rank_of)
 
 
-# The purposes an engine may state beside its standard: switches (a boolean → the
+# The purposes an engine may state beside its effort tier: switches (a boolean → the
 # `<purpose>.on` / `.off` table of a harness's knobs.mapping) and amounts (a positive
 # integer → the `<purpose>` table, `{value}` filled in).
 SWITCHES = ("thinking", "memory", "background_agents", "telemetry", "tool_search")
@@ -74,9 +78,9 @@ AMOUNTS = ("max_output_tokens", "tool_output_tokens", "compact_at_percent")
 class Budget:
     """One engine's budget. Every field optional: an unset purpose renders
     nothing (the AI's defaults stand), and a nested engine's file overlays only
-    what it sets (`overlay`). `standard` is required only once an engine is
+    what it sets (`overlay`). `effort_tier` is required only once an engine is
     rendered — `default/tag.budget` sets it, and nesting inherits it."""
-    standard: str | None = None
+    effort_tier: str | None = None
     thinking: bool | None = None
     memory: bool | None = None
     background_agents: bool | None = None
@@ -95,24 +99,25 @@ class Budget:
 
     @property
     def rank(self) -> int:
-        """The standard's place on the scale (`rank_of`); -1 for no standard."""
-        return rank_of(self.standard)
+        """The tier's place on the scale (`rank_of`); -1 for no effort tier."""
+        return rank_of(self.effort_tier)
 
 
 def parse_budget(data: dict[str, Any], path: Path) -> Budget:
-    """A `tag.budget` mapping → `Budget`, type-checked key by key: `standard`
-    spelled like one (an end or a quarter — whether the AIs define it is the
-    registry's check), switches booleans, amounts positive integers
+    """A `tag.budget` mapping → `Budget`, type-checked key by key:
+    `effort_tier` spelled like a capability standard (an end or a quarter —
+    whether the AIs define it is the registry's check), switches booleans,
+    amounts positive integers
     (`compact_at_percent` at most 100); an unknown key is a `TagError`, so a
     typo cannot silently render nothing."""
-    known = {"standard", *SWITCHES, *AMOUNTS}
+    known = {"effort_tier", *SWITCHES, *AMOUNTS}
     for key in data:
         if key not in known:
             raise TagError(f"{path}: unknown budget key {key!r} — the words are: {', '.join(sorted(known))}")
-    standard = data.get("standard")
-    if standard is not None and not is_standard(standard):
-        raise TagError(f"{path}: standard must be {CHEAPEST}, {BEST} or a quarter like 2025Q4, got {standard!r}")
-    values: dict[str, Any] = {"standard": standard}
+    effort_tier = data.get("effort_tier")
+    if effort_tier is not None and not is_standard(effort_tier):
+        raise TagError(f"{path}: effort_tier must be {CHEAPEST}, {BEST} or a quarter like 2025Q4, got {effort_tier!r}")
+    values: dict[str, Any] = {"effort_tier": effort_tier}
     for key in SWITCHES:
         if key in data and not isinstance(data[key], bool):
             raise TagError(f"{path}: {key} must be true or false, got {data[key]!r}")

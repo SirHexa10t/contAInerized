@@ -20,18 +20,20 @@ import uuid
 from pathlib import Path
 from typing import NamedTuple
 
+import functools
+
 from ..agents_crud import compute_resume_flag
 from ..ai import active_adapter, adopt, refusal_for
 from ..container_env import set_container_env, set_instance_env
 from ..docker_config import ensure_image, require_docker, run_container, set_container_mounts
-from ..file_access import ensure_dir
-from ..paths import CLAUDE_CONFIG_IN_CONTAINER, quickie_communal_workspace, quickie_state_dir_path
+from ..file_access import ensure_dir, is_file, login_state
+from ..paths import CLAUDE_CONFIG_IN_CONTAINER, auth_file_path, key_file, quickie_communal_workspace, quickie_state_dir_path
 from ..paths import AGENTS_DIR
 from ..staging import stage_instance
 from ..tag_handlers import apply_tags
 from ..tags import Instance, Registry, TagError, load_lego, resolve_build
 from ..utils import call_or_exit
-from .render import render_stream
+from .render import LOGIN_HINT, render_stream
 
 class QuickieAgent(NamedTuple):
     """A quickie persona + build: the `.md` installed as the thread's CLAUDE.md,
@@ -80,6 +82,23 @@ def build_quickie_instance(registry: Registry, session: str, *,
         state_dir_override=quickie_state_dir_path(session),
         **resolve_build(build, agent.label, registry),
     )
+
+
+def _mounted_credentials(inst: Instance) -> str:
+    """One line naming what this run actually hands the CLI: each of the
+    harness's login files by `login_state` (absent / none / recorded /
+    unreadable), and whether the AI's key file is there. Printed ONLY when the
+    CLI reports it is not logged in — which is the one moment the difference
+    between "a file exists" and "it holds a login" decides what to do next
+    (operator, 2026-09-18: a quickie said `Not logged in` while the same
+    credentials ran instances fine, and the mounts are identical — verified)."""
+    adapter = active_adapter()
+    files = ", ".join(f"{f.name} {login_state(path, f)}"
+                      for f in adapter.auth_files
+                      if (path := auth_file_path(adapter, f.role)) is not None)
+    key = key_file(inst.ai.name) if inst.ai else None
+    key_state = "present" if key is not None and is_file(key) else "none"
+    return f"mounted for this run: {files}; API key file: {key_state}"
 
 
 def ask(question: str, registry: Registry, *, resume_session: str | None = None,
@@ -132,5 +151,9 @@ def ask(question: str, registry: Registry, *, resume_session: str | None = None,
     image = ensure_image(inst)
     # The harness's flags for a progress-showing one-shot event stream (the
     # adapter says which; render_stream turns it into a ticker + streamed answer).
+    # The renderer prints the login hint; the hint carries what THIS launcher
+    # mounted, because only the launcher knows that and only the CLI knows it
+    # was refused.
+    renderer = functools.partial(render_stream, login_hint=f"{LOGIN_HINT}\n[quickie] {_mounted_credentials(inst)}")
     run_container(inst, image, list(active_adapter().stream_args), resume_flag, interactive=False,
-                  print_prompt=question, stream_renderer=render_stream)
+                  print_prompt=question, stream_renderer=renderer)

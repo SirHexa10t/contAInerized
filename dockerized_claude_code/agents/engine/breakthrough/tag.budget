@@ -1,6 +1,6 @@
 # Most-resourced tier — long reasoning chains, large reads, specialized tool
 # discovery (algorithm invention, NP-hard attack, novel-approach problem-solving).
-standard           = "best"
+effort_tier        = "best"
 thinking           = true
 max_output_tokens  = 40000     # room for long derivations and worked examples
 tool_output_tokens = 100000    # full reads of large source / data / paper files; don't truncate verbose tool output

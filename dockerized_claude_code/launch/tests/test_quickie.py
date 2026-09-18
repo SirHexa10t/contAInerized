@@ -327,10 +327,13 @@ class TestRenderStream(unittest.TestCase):
     """render_stream turns Claude Code stream-json into stdout answer text +
     stderr progress. tick=False disables the timer thread for determinism."""
 
-    def _render(self, lines, tick=False):
+    def _render(self, lines, tick=False, markdown=False):
+        # markdown=False by default: these tests pin the SOURCE the model
+        # wrote, which is what a pipe or a redirect receives. The rendered
+        # path has its own class below.
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            render_stream(iter(lines), tick=tick)
+            render_stream(iter(lines), tick=tick, markdown=markdown)
         return out.getvalue(), err.getvalue()
 
     def test_streams_answer_text_deltas_to_stdout(self):
@@ -465,3 +468,183 @@ class TestPrintAnswer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _plain(text: str) -> str:
+    """ANSI escapes stripped — the rendered answer's SHAPE without asserting
+    on colour, which varies with the terminal rich detects."""
+    import re
+    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+
+
+class TestMarkdownAnswer(unittest.TestCase):
+    """A terminal gets the answer RENDERED — headings, bold, lists, code — and
+    a pipe gets the source, because `q … > notes.md` must stay valid markdown
+    and a script parsing the answer must not meet ANSI escapes."""
+
+    SOURCE = "# Title\n\nSome **bold** and `code`.\n\n- first\n- second\n"
+
+    def _render(self, lines, markdown):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            render_stream(iter(lines), tick=False, markdown=markdown)
+        return _plain(out.getvalue()), err.getvalue()
+
+    def _answer_lines(self):
+        return [_text_delta(self.SOURCE), _result()]
+
+    def test_a_terminal_gets_it_rendered(self):
+        out, _ = self._render(self._answer_lines(), markdown=True)
+        self.assertIn("Title", out)
+        self.assertNotIn("# Title", out)        # the hash is a heading, not text
+        self.assertNotIn("**bold**", out)       # the asterisks are emphasis, not text
+        self.assertIn("bold", out)
+        self.assertIn("•", out)                 # the dashes are a list
+
+    def test_a_pipe_gets_exactly_what_the_model_wrote(self):
+        out, _ = self._render(self._answer_lines(), markdown=False)
+        self.assertEqual(out, self.SOURCE + "\n")
+
+    def test_an_answer_that_never_streamed_is_rendered_too(self):
+        # A harness that sends no deltas delivers one assistant event; the
+        # reader should not be able to tell which arrived.
+        out, _ = self._render([_assistant(self.SOURCE), _result("success")], markdown=True)
+        self.assertIn("Title", out)
+        self.assertNotIn("# Title", out)
+
+    def test_a_failed_run_renders_nothing_on_stdout_either_way(self):
+        # The Live must never open for an answer that does not come: the
+        # error report owns the terminal then.
+        for markdown in (True, False):
+            with self.subTest(markdown=markdown):
+                out, err = self._render([_result("success", is_error=True, result="Not logged in")], markdown=markdown)
+                self.assertEqual(out, "")
+                self.assertIn("Not logged in", err)
+
+    def test_the_rule_is_stdout_being_a_terminal(self):
+        from launch.quickie import render
+        self.assertTrue(render._wants_markdown(True))
+        self.assertFalse(render._wants_markdown(False))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(render._wants_markdown())          # a StringIO is not a terminal
+        with patch.object(render.sys, "stdout", object()):      # nor is a stdout with no isatty
+            self.assertFalse(render._wants_markdown())
+
+    def test_the_saved_answer_reprints_the_way_it_was_shown(self):
+        from launch.quickie import history, render
+        state = tempfile.mkdtemp()
+        with patch.object(history, "quickie_state_dir_path", return_value=Path(state)), \
+             patch.object(history, "last_answer_in_state", return_value=(self.SOURCE, 0.0)), \
+             patch.object(render, "_wants_markdown", return_value=True), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            history.print_answer("t1")
+        self.assertNotIn("# Title", _plain(out.getvalue()))
+        self.assertIn("Title", _plain(out.getvalue()))
+
+
+class TestTheCliSaysWhatHappened(unittest.TestCase):
+    """A run that produced no answer must SAY so when it happens, whatever
+    shape the refusal took — the 2026-09-18 report: a `Not logged in` quickie
+    printed nothing after the docker output and the message could only be read
+    back with `q --answer`."""
+
+    def _render(self, lines, login_hint="HINT"):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            render_stream(iter(lines), tick=False, markdown=False, login_hint=login_hint)
+        return out.getvalue(), err.getvalue()
+
+    def test_a_plain_text_refusal_on_stdout_is_reported_not_swallowed(self):
+        # THE bug: a CLI that refuses before opening the event stream prints
+        # plain text, and every non-JSON line used to be dropped as noise.
+        out, err = self._render(["Not logged in · Please run /login"])
+        self.assertEqual(out, "")                       # not an answer
+        self.assertIn("Not logged in", err)             # but not lost either
+        self.assertIn("HINT", err)                      # with the caller's login hint
+
+    def test_a_json_error_result_is_reported_with_its_words(self):
+        out, err = self._render([_result("success", is_error=True, result="Not logged in · Please run /login")])
+        self.assertEqual(out, "")
+        self.assertIn("Not logged in", err)
+        self.assertIn("HINT", err)
+
+    def test_stray_output_is_tailed_not_dumped(self):
+        noisy = [f"line {i}" for i in range(40)]
+        _, err = self._render(noisy)
+        self.assertIn("line 39", err)
+        self.assertNotIn("line 0 ", err)                # capped at the last few
+        self.assertLess(len(err), 400)
+
+    def test_a_successful_answer_is_unaffected_by_stray_lines(self):
+        out, err = self._render(["a warm-up line the CLI printed", _text_delta("the answer"), _result()])
+        self.assertEqual(out, "the answer\n")
+        self.assertEqual(err, "")
+
+    def test_the_hint_names_what_the_launcher_mounted(self):
+        # So the NEXT report says which credential state produced the refusal.
+        # `launch.quickie.ask` is the FUNCTION (the package re-exports it), so
+        # the module is imported by path.
+        from launch.quickie.ask import _mounted_credentials
+        inst = build_quickie_instance(REGISTRY, "abc123")
+        with patch.object(paths, "AGENTS_STATE", Path(tempfile.mkdtemp())):
+            line = _mounted_credentials(inst)
+        self.assertIn(".credentials.json", line)
+        self.assertIn(".claude.json", line)
+        self.assertIn("API key file", line)
+
+
+class TestAnswerDefaultsToTheLatest(unittest.TestCase):
+    """`q --answer` with no id prints the answer to the last question —
+    typing a gibberish id to read what you just asked was the friction."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _thread(self, session, prompt, answer, when):
+        import json as _json
+        state = quickie_state_dir_path(session)
+        transcript = state / "projects" / "-workspace" / "s.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(
+            _json.dumps({"type": "user", "timestamp": when, "message": {"role": "user", "content": prompt}}) + "\n"
+            + _json.dumps({"type": "assistant", "timestamp": when, "message": {"role": "assistant", "content": [{"type": "text", "text": answer}]}}) + "\n")
+
+    def test_no_id_prints_the_newest_threads_answer(self):
+        from launch.quickie import history
+        self._thread("older", "first?", "the older answer", "2026-09-01T10:00:00Z")
+        self._thread("newer", "second?", "the newer answer", "2026-09-18T10:00:00Z")
+        self.assertEqual(history.latest_thread(), "newer")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            history.print_answer()
+        self.assertIn("the newer answer", out.getvalue())
+
+    def test_an_id_still_wins(self):
+        from launch.quickie import history
+        self._thread("older", "first?", "the older answer", "2026-09-01T10:00:00Z")
+        self._thread("newer", "second?", "the newer answer", "2026-09-18T10:00:00Z")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            history.print_answer("older")
+        self.assertIn("the older answer", out.getvalue())
+
+    def test_no_threads_at_all_says_how_to_make_one(self):
+        from launch.quickie import history
+        with self.assertRaises(SystemExit) as caught:
+            history.print_answer()
+        self.assertIn("No quickie threads yet", str(caught.exception))
+
+    def test_the_flag_takes_an_optional_id_and_routes_both_ways(self):
+        with patch.object(cli, "open_launcher", return_value=REGISTRY), \
+             patch.object(cli, "print_answer") as answer, patch.object(cli, "ask") as ask_mock:
+            cli.main(["--answer"])
+            cli.main(["--answer", "abc123"])
+        self.assertEqual([c.args[0] for c in answer.call_args_list], ["", "abc123"])
+        ask_mock.assert_not_called()
+
+    def test_it_still_refuses_to_be_combined_with_a_question(self):
+        with patch.object(cli, "open_launcher", return_value=REGISTRY), \
+             self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["--answer", "--history"])

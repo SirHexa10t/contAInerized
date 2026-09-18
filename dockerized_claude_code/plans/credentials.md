@@ -116,11 +116,83 @@ import; every launch mounted that pair whatever the instance's AI or harness.
 | OpenClaw | `openclaw onboard` (`--auth-choice apiKey` non-interactive); provider OAuth (SuperGrok, ChatGPT) or keys | **SQLite**: `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite` — no credential JSON; `auth.profiles` in config is routing metadata only; legacy JSON files import only via `openclaw doctor --fix`, the runtime fails closed | n/a (database) | `OPENCLAW_STATE_DIR` (whole root incl. the DB), `OPENCLAW_CONFIG_PATH`; `--profile <name>` → `~/.openclaw-<name>` | Mountable path: `~/.openclaw/.env` (how its daemon gets provider keys). Its own container tests mount `~/.codex/auth.json`, `~/.codex/config.toml`, `.claude.json`, `~/.claude/.credentials.json`, `settings.json`, `settings.local.json` — independent corroboration of the Claude Code and Codex rows. Warns: two harnesses refreshing one OAuth grant fight; the loser is logged out. |
 | Hermes Agent | `hermes setup` (wizard / `--portal`), `hermes config set`; provider keys; xAI Grok OAuth (SuperGrok / Premium+) | **`$HERMES_HOME/.env` for secrets (one var per provider — many AIs in one file), `config.yaml` for settings**; `auth.json` for platform OAuth (Discord …), rewritten → read-write | `.env` no; `auth.json` yes | `HERMES_HOME`, `HERMES_PROFILE` (`hermes -p <name>`), `HERMES_CONFIG`, `HERMES_ENV` | Vendor's own recipe: `docker run -v ~/.hermes:/opt/data -e ANTHROPIC_API_KEY=…`; a `-e` flag overrides `.env`. `providers.<id>.key_cmd` = an `apiKeyHelper`. |
 
-Subscription use is vendor-gated: OpenAI permits ChatGPT sign-in in Codex and
-OpenCode; xAI permits SuperGrok OAuth in Grok Build, OpenCode and Hermes;
-Anthropic permits Claude Pro/Max only in Claude Code (OpenCode's
-characterisation, acted on by unbundling — no first-party page says it in
-those words; the consumer terms forbid sharing credentials generally).
+## Which harness may spend a subscription (read 2026-09-17)
+
+Subscription use is vendor-gated, and the gate is ELIGIBILITY, not price. This
+is `Ai.plan_harnesses` in the tree and the picker's warning when a build pairs
+an AI with a harness outside its list.
+
+**No vendor prices by client.** All four pricing pages are indexed by model and
+token type only — there is no harness or client dimension in any of them
+(Anthropic, OpenAI, Google, xAI; checked 2026-09-17). The "orders of magnitude
+more tokens for a foreign harness" story that prompted this section is NOT
+supported by any published price, and the warning says so outright, so the
+folklore does not regrow.
+
+| Vendor | Plan spendable in | Evidence |
+|---|---|---|
+| Anthropic | Claude Code only | Subscription OAuth is Claude Code's `/login`; `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) "requires a Pro, Max, Team, or Enterprise plan" (`docs.claude.com/en/docs/claude-code/iam`). No Anthropic page FORBIDS a third-party client — the AUP and consumer terms were read for one and carry none; the prohibition is OpenCode's second-party account ("Anthropic explicitly prohibits this"), acted on by unbundling its Claude plugins in 1.3.0 (`opencode.ai/docs/providers`). |
+| OpenAI | Codex CLI, OpenCode | The mechanism in the vendor's own words: "When you sign in with an API key, Codex uses standard API pricing instead of included ChatGPT plan credits" (`learn.chatgpt.com/docs/auth`); ChatGPT Plus is listed among the subscriptions OpenCode takes (`opencode.ai/docs/providers`). |
+| Google | Gemini CLI | The sharpest published entitlement gap: the CLI's Google login allows 1,000 requests/day (Code Assist), 1,500 (AI Pro), 2,000 (AI Ultra); an unpaid Gemini API key gets 250/day, Flash only (the CLI's `docs/resources/quota-and-pricing.md`). Same tokens, 4-8x the requests, plus a model restriction. |
+| xAI | Grok Build, OpenCode, Hermes | SuperGrok / X Premium OAuth is documented in all three; pricing is model × token type with cached input ≈0.1-0.25x (`docs.x.ai/developers/pricing`). |
+
+**REPORTED, not verified: Claude outside Claude Code (operator, 2026-09-17).**
+Operators have measured Claude consuming vastly more tokens for the same work
+in another harness — **up to ~50x, two first-hand accounts**. This is the one
+claim in this document that is FIELD EVIDENCE rather than a vendor's published
+term, and the tree treats it as such: it lives in
+`agents/ai/claude/tag.info` as `foreign_harness_report`, the picker LEADS its
+warning with it, and every rendering labels it REPORTED, not vendor-published,
+and not reproduced by this launcher. Nothing was found to corroborate a figure
+of that size — no vendor prices by client (above) — and nothing was found to
+refute it either; it is carried because the cost lands on whoever picks the
+pairing, and a launcher that hid it would be no more honest than one that
+invented it.
+
+The one PUBLISHED mechanism that could produce a gap of that order is prompt
+caching (below): a harness that re-sends an uncached context every turn pays
+the full input rate on the repeated prefix where a caching one pays 0.1x, and
+an agent loop repeats most of its context every turn. That is a property of
+the harness's implementation, not of Anthropic's pricing, and it is the first
+thing to check before concluding the model is at fault. **What would settle
+it**: the same task run twice with token counts recorded, once in Claude Code
+and once in the other harness, with each harness's cache-hit counters read.
+
+**Where the fallback LANDS differs, and that is the honest differentiation
+between AIs — not a severity dial.** "Falls back to an API key" means
+something materially different per vendor, so `Ai.key_free_tier` carries the
+vendor's own words and the picker shows them; where no vendor page
+establishes a floor the field is empty and the warning says nothing.
+
+| Vendor | An API key alone | Evidence |
+|---|---|---|
+| Anthropic | A small one-time credit for new API users, then metered from the first token. No recurring free tier | "New users receive a small amount of free credits to test the API" (`docs.claude.com/en/docs/about-claude/pricing`) |
+| Google | A recurring free tier: 250 requests/day, Flash only | The CLI's `docs/resources/quota-and-pricing.md`, against 1,000-2,000/day on the Google login |
+| OpenAI | NOT ESTABLISHED — left unstated | The rate-limit page lists a "Free" usage tier, but that table governs RATE LIMITS and says nothing about tokens being free (`platform.openai.com/docs/guides/rate-limits`) |
+| xAI | NOT ESTABLISHED — left unstated | `docs.x.ai/developers/pricing` mentions no free tier, credit or trial; a scoped negative for that page, not for xAI |
+
+A severity axis was considered and REJECTED (researcher, 2026-09-17): "claude
+is worse than gemini here" is a judgement with no published basis, and a level
+or a colour would be the first field in this tree holding an opinion — with
+somewhere for the folklore to regrow that the no-multiplier test cannot see.
+The floors above give the same differentiation out of facts.
+
+**The one real token-count mechanism is prompt caching, and it is not a vendor
+penalty.** Anthropic bills a cache read at 0.1x base input (0.025x on Fable 5.1
+and Mythos 5.1), a 5-minute cache write at 1.25x and a 1-hour write at 2x
+(`docs.claude.com/en/docs/about-claude/pricing`); xAI's cached input runs
+≈0.1-0.25x. So a harness that re-sends an uncached context every turn pays up
+to ~10x on the repeated prefix versus one that caches it — but caching is a
+standard API feature available to any client
+(`docs.claude.com/en/docs/build-with-claude/prompt-caching`), so that gap
+belongs to the harness's implementation quality, not to who wrote it. Nobody
+publishes what share of an agent turn is cacheable, so this cannot be turned
+into a bill multiplier and the launcher does not quote one.
+
+**If this section reads stale, re-check these two first**: the Codex pages
+already migrated once (`developers.openai.com/codex/*` → `learn.chatgpt.com/docs/*`,
+308s), and the gemini-cli quota doc lives at a repo path that has moved before
+(`docs/cli/configuration.md` → `docs/reference/configuration.md`).
 
 ## The two axes (the rule that falls out)
 

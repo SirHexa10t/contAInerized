@@ -65,8 +65,9 @@ def build_parser(registry: Registry) -> argparse.ArgumentParser:
         help="List past question threads (timestamp, id, last question; oldest first) and exit.",
     )
     parser.add_argument(
-        "--answer", metavar="ID",
-        help="Print the saved answer for a past thread (an id from --history) and exit.",
+        "--answer", metavar="ID", nargs="?", const="",
+        help="Print a thread's saved answer and exit — the LATEST thread with no id, "
+             "or the one named (an id from --history).",
     )
     parser.add_argument(
         "--resume", metavar="ID",
@@ -82,15 +83,19 @@ def build_parser(registry: Registry) -> argparse.ArgumentParser:
 def main(argv: list[str]) -> None:
     """Open the launcher (migrations, then the tree — the one startup), parse
     argv against that tree, and dispatch. `--history` / `--answer` are
-    standalone display modes (reject any other argument); otherwise ask the
+    standalone display modes (reject any other argument; `--answer` with no id
+    means the latest thread); otherwise ask the
     question with the selected agent (default QUICK; `--explain`→TRIVIA,
     `--research`→RESEARCH) on the lego's AI or the `--ai` one, optionally
     continuing the `--resume` thread."""
     registry = call_or_exit(open_launcher, exceptions=TagError)
     parser = build_parser(registry)
     args = parser.parse_args(argv)
-    if args.history or args.answer:
-        if (args.history and args.answer) or _has_ask_args(args):
+    # `is not None`, not truthiness: `--answer` with no id is the LATEST
+    # thread and arrives as "", which is a request, not an absence.
+    answering = args.answer is not None
+    if args.history or answering:
+        if (args.history and answering) or _has_ask_args(args):
             parser.error("--history / --answer take no other arguments")
         print_history() if args.history else print_answer(args.answer)
         return

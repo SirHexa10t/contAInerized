@@ -22,7 +22,7 @@ Public surface:
 from .ai import Ai, Standard, Tier, sorted_ais
 from .base import SCOPES, DockerContribution, Tag, TagError, is_scope, scope_note
 from .budget import BEST, CHEAPEST, Budget, is_standard, rank_of, sorted_standards
-from .engine import Engine, sorted_engines, standard_rank
+from .engine import Engine, sorted_engines, effort_tier_rank
 from .harness import Harness, Rendering, sorted_harnesses
 from .identity import (
     Agent, Instance, agent_md_path, effective_engine_name, image_chain,
@@ -38,7 +38,7 @@ from . import addendums, migrations, store, toolkit_profile
 __all__ = [
     "Tag", "DockerContribution", "TagError", "SCOPES", "is_scope", "scope_note",
     "Ai", "Tier", "Standard", "Rendering", "Budget", "BEST", "CHEAPEST", "is_standard", "rank_of",
-    "sorted_standards", "sorted_ais", "sorted_engines", "standard_rank", "Harness", "sorted_harnesses",
+    "sorted_standards", "sorted_ais", "sorted_engines", "effort_tier_rank", "Harness", "sorted_harnesses",
     "Engine", "Profession", "Specialty", "Policy", "PolicyStance",
     "Layer", "Combo", "scan_combos", "merge_fragments", "ToolkitEntry",
     "AgentBuild", "load_lego",

@@ -505,6 +505,53 @@ class TestClusterRows(unittest.TestCase):
         return [e for e in self.entries(**kw)
                 if isinstance(e.value, menu_picker._ClusterRow)]
 
+    def test_a_break_row_sits_between_cluster_blocks_and_nowhere_else(self):
+        # One rule per boundary: two clusters means one rule, and it sits
+        # between the last row of the first block and the first row of the
+        # second — never before the first block or after the last.
+        self.save("aa", (self.Member.of("golem"),))
+        self.save("bb", (self.Member.of("poet"),))
+        entries = self.entries()
+        breaks = [i for i, e in enumerate(entries) if e.separator]
+        rows_of = lambda session: [i for i, e in enumerate(entries)
+                                   if isinstance(e.value, (menu_picker._ClusterRow, menu_picker._MemberRow))
+                                   and e.value.session == session]
+        (rule,) = breaks
+        self.assertEqual(max(rows_of("aa")) + 1, rule)
+        self.assertEqual(min(rows_of("bb")), rule + 1)
+
+    def test_the_break_is_a_rule_no_wider_than_the_rows_it_separates(self):
+        self.save("aa", (self.Member.of("golem"),))
+        self.save("bb", (self.Member.of("poet"),))
+        entries = self.entries()
+        rule = next(e for e in entries if e.separator)
+        text = self.text(rule)
+        self.assertEqual(set(text), {picker_widget.BREAK_CHAR})
+        widest_cluster_row = max(len(self.text(r)) for r in self.cluster_rows())
+        self.assertLessEqual(len(text), widest_cluster_row)
+        self.assertFalse(rule.selectable or rule.pickable)
+
+    def test_one_cluster_gets_no_break_at_all(self):
+        self.save("solo", (self.Member.of("golem"),))
+        self.assertEqual([e for e in self.entries() if e.separator], [])
+
+    def test_filtering_a_word_two_clusters_share_keeps_the_break_between_them(self):
+        # The reason the rules exist: both members match "researcher", and
+        # without the kept rule they would read as one cluster's roster.
+        self.save("aa", (self.Member.of("researcher", "primary"),))
+        self.save("bb", (self.Member.of("researcher", "other"),))
+        entries = self.entries()
+        shown = picker_widget._visible_indices(entries, "researcher__")
+        kinds = [entries[i] for i in shown]
+        # The member rows carry their AI and harness after the name, so match
+        # on the id rather than the whole row.
+        names = [self.text(e) for e in kinds if not e.separator]
+        self.assertEqual(len(names), 2)
+        self.assertIn("researcher__primary", names[0])
+        self.assertIn("researcher__other", names[1])
+        self.assertTrue(kinds[1].separator)           # exactly one rule, between the two
+        self.assertEqual(sum(e.separator for e in kinds), 1)
+
     def test_project_paths_line_up_across_cluster_rows(self):
         # Different name lengths AND different tag sets — the two things the
         # column pads — must still land the path at one index (the same

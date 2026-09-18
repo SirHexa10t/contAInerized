@@ -34,7 +34,7 @@ from .form_core import (
 )
 from .styles import STYLE_UNDERLINE, UiClass, tag_style
 
-def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None = None, note: str = "",
+def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, note: str = "",
              inherited: bool = False, forbidden: str | None = None) -> FormOption:
     """One selectable form row: colored kind-punctuated label + the tag's
     short description, a dim `(requires: …)` parenthetical when it has
@@ -42,6 +42,9 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None
     the tag's underlined FULLNAME, so the abbreviation in the label is never
     a puzzle (`{dood}` focuses to `Docker-outside-of-Docker: can run …`).
     Keys are the tags' full names (what `.lego` / instances.toml store).
+
+    An ENGINE row carries its capability standard — the engine's own budget
+    value, in the launcher's vocabulary rather than any AI's.
 
     An always-on tag (a static policy like `<-su>`) renders locked: grayed,
     checked, inert to Space, with an `(always-on)` marker — the user sees
@@ -59,8 +62,18 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, ai: Ai | None
     always_on = getattr(tag, "always_on", False)
     label: list[tuple[str, str]] = [(tag_style(tag), tag.label), ("", " ")]
     label.append(("", tag.short_description))
-    if isinstance(tag, Engine) and ai is not None and tag.budget.standard:
-        label.append((UiClass.STATUS.css, f"  {ai.tier(tag.budget.standard).model}"))   # the engine's words in tag.info; the model is the AI's tier for its standard
+    if isinstance(tag, Engine) and tag.budget.effort_tier:
+        # The engine's words come from tag.info; beside them sits its
+        # CAPABILITY STANDARD — the quarter whose frontier it asks for
+        # (`2026Q2`), or one of the two ends (`cheapest` / `best`). That is
+        # the engine's own budget value, the same word its tag.budget names,
+        # so the row says what was chosen rather than how some AI answers it
+        # (operator, 2026-09-17). Which model and effort answer the standard
+        # is the AI's business, and shows where that is the point: the F8
+        # legend's "Pinned model" column, the preview's Engine fact, the
+        # launch banner. An engine whose effective budget names no standard
+        # adds nothing here.
+        label.append((UiClass.STATUS.css, f"  {tag.budget.effort_tier}"))
     if note:
         label.append((UiClass.STATUS.css, f"  {note}"))
     if always_on:
@@ -139,7 +152,7 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *, scope: str,
                              note="runs " + " ".join(registry.ais[a].label for a in tag.ais if a in registry.ais))
                     for tag in sorted_harnesses(registry.harnesses.values(), default_ai.name if default_ai else None)]
         out.append(header(Engine))
-        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine", ai=effective_ai)
+        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
                 for tag in sorted_engines(registry.engines.values())]
     for kind_cls, members in ((Profession, list(registry.professions.values())),
                               (Specialty, list(registry.specialties.values())),
@@ -242,6 +255,74 @@ def _harness_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, lis
     return out
 
 
+def _pairing_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, list[str]]]:
+    """A warning for every AI × harness pair the harness CAN run but that
+    carries something a user should know before picking it. ONE entry per
+    pair — the form's warning map is keyed by the pair, so a second entry
+    would silently replace the first — carrying whichever of two independent
+    claims apply:
+
+    - a REPORT (`Ai.foreign_harness_report`): what running this AI outside its
+      own CLI has been observed to cost, QUOTED AS WRITTEN. It LEADS, because
+      a number an operator has been burned by is the loudest thing that can be
+      said at pick time, and the tree's own sentence carries the hedge and the
+      date that keep field evidence from reading like a vendor's published
+      term (the scan refuses an unhedged one).
+    - ELIGIBILITY (`Ai.plan_harnesses`): the vendor's plan is spendable only
+      in the clients it allows; anywhere else the pairing runs on an API key.
+
+    A header and at most two short lines, because a warning nobody finishes
+    reading warns nobody (operator, 2026-09-17), and every line stands on its
+    own: the header names the pair and leads with whichever claim applies,
+    each body line states one fact, and nothing is reordered or cross-
+    referenced. The four words "at the usual rate" carry what a paragraph used
+    to — no vendor prices by client, so a header's number is not a surcharge.
+
+    NO pointer to a plans/ file: that tree is the maintainers' record, not
+    documentation for whoever is picking tags (operator, 2026-09-17). The
+    warning carries its own provenance instead — who observed it and when —
+    and README's harness section is where a user reads more. Both claim sets
+    are per-AI data, because vendors and reports differ per vendor; an AI with
+    neither warns about nothing, and silence is the honest default.
+
+    Deliberately NOT conditional on the credentials on this host: an operator
+    may hold both a plan and a key, the form is a pure function of the
+    registry, and the sentences are phrased so they are true either way."""
+    out: dict[frozenset[str], tuple[str, list[str]]] = {}
+    for ai in registry.ais.values():
+        allowed = " ".join(registry.harnesses[name].label for name in ai.plan_harnesses
+                           if name in registry.harnesses)
+        own = registry.harnesses.get(ai.harness)
+        for harness in registry.harnesses.values():
+            if not harness.runs(ai.name):
+                continue
+            reported = ai.foreign_harness_report if (own is not None and harness.name != own.name) else ""
+            outside_plan = bool(allowed) and harness.name not in ai.plan_harnesses
+            if not reported and not outside_plan:
+                continue
+            # The header names the pair and leads with whichever claim is
+            # loudest; each body line then stands alone, so no line depends on
+            # another having been shown and none needs reordering.
+            # The report is quoted as written: it carries its own hedge and
+            # date (the scan insists), so wrapping it in a second "REPORTED /
+            # Unverified" only said the same thing twice.
+            header = f"{harness.label} + {ai.label} — " + (f"{reported}." if reported
+                                                           else f"outside {ai.vendor}'s plan.")
+            body: list[str] = []
+            if reported:
+                body.append("Suspect the harness's prompt-cache reuse, not the model.")
+            if outside_plan:
+                # "at the usual rate" is the anti-folklore clause in four
+                # words: no vendor prices by client (checked across all four,
+                # 2026-09-17), so a header's number cannot read as a
+                # surcharge. The floor rides as a parenthetical, not a line.
+                floor = f" ({ai.key_free_tier})" if ai.key_free_tier else ""
+                body.append(f"{ai.vendor}'s plan runs only in {allowed}; here it's "
+                            f"{ai.key_env}, per token at the usual rate{floor}.")
+            out[frozenset({ai.name, harness.name})] = (header, body)
+    return out
+
+
 def _form_requires(registry: Registry) -> dict[str, frozenset[str]]:
     """{tag name: prerequisite tag names} across the three form kinds — the
     shape checkbox_form's check-cascade consumes. Tags without prerequisites
@@ -307,7 +388,8 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
                 else [f"# instance:  {instance}",
                       f"# workspace: {workspace}"])
     result = checkbox_form(TITLE_TAGS_FORM, options,
-                           warnings={**_combo_warnings(registry), **_harness_warnings(registry)},
+                           warnings={**_combo_warnings(registry), **_harness_warnings(registry),
+                                     **_pairing_warnings(registry)},
                            requires=_form_requires(registry),
                            wants=_form_wants(registry),
                            labels=_form_labels(registry),

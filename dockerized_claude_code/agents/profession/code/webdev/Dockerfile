@@ -54,6 +54,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
+# The site toolbox — a SEPARATE layer from the browser libs above, so neither
+# list's cache turns on the other's, and the provenance comment there keeps
+# covering exactly playwright's set. Three tools, each answering a question a
+# web agent otherwise cannot ask from inside the container (operator request,
+# 2026-09-17: "notably dig"):
+#
+# - **bind9-dnsutils** → `dig` (plus `nslookup`): what a name actually
+#   resolves to, and which records exist — the A/AAAA/CNAME/MX/TXT check
+#   behind "the site is up for me but not for them", a DNS cutover, a domain
+#   verification TXT record. `bind9-dnsutils` is the package's real name since
+#   bullseye; `dnsutils` is only a transitional stub and is gone in trixie.
+# - **whois**: who holds the domain, when it expires, which nameservers it
+#   delegates to — registration facts no HTTP request reveals.
+# - **openssl**: `openssl s_client -connect host:443` for the certificate
+#   chain and its expiry, the other half of "why does this site warn". Named
+#   explicitly rather than leaned on: ca-certificates has pulled the CLI in on
+#   past Debian releases, which is a transitive dependency, not a promise.
+#
+# Deliberately NOT here: anything needing a browser at BUILD time (lighthouse
+# and friends) — browser binaries live in the runtime cache mount, so a
+# build-time install of one would be the layer's only heavy, and the only part
+# that could not work offline.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bind9-dnsutils \
+    whois \
+    openssl \
+ && rm -rf /var/lib/apt/lists/*
+
 USER claude
 
 # Install just the playwright CLI (and Python package), not any browser

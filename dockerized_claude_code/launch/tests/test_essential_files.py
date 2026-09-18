@@ -189,14 +189,14 @@ class TestUserExtrasTemplates(unittest.TestCase):
 
 
 class TestDefaultAgentConf(unittest.TestCase):
-    def test_default_engine_ships_a_budget_with_a_standard(self):
+    def test_default_engine_ships_a_budget_with_an_effort_tier(self):
         # The fallback engine (`default`) must state a capability standard: every
         # nested engine inherits from it, and an engine without one cannot
         # be rendered for any AI.
         from launch.tags.budget import BUDGET_FILE
         from launch.tags import scan_all
         self.assertTrue((paths.ENGINE_DIR / "default" / BUDGET_FILE).is_file())
-        self.assertIsNotNone(scan_all(paths.AGENTS_DIR).engines["default"].budget.standard)
+        self.assertIsNotNone(scan_all(paths.AGENTS_DIR).engines["default"].budget.effort_tier)
 
 
 class TestQualityGate(unittest.TestCase):
@@ -293,7 +293,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
 
     def test_engine_budgets_render_to_the_expected_claude_rungs(self):
         claude = self.reg.default_ai
-        model = lambda name: claude.tier(self.reg.engines[name].budget.standard).model
+        model = lambda name: claude.tier(self.reg.engines[name].budget.effort_tier).model
         self.assertIn("haiku", model("golem"))
         self.assertIn("opus", model("reliable"))
         self.assertIn("sonnet", model("quick"))
@@ -865,7 +865,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         plain = re.sub(r"\x1b\[[0-9;]*m", "", _build_composition_legend(self.reg))
         for eng in self.reg.engines.values():
             with self.subTest(engine=eng.name):
-                self.assertIn(self.reg.default_ai.tier(eng.budget.standard).model, plain)
+                self.assertIn(self.reg.default_ai.tier(eng.budget.effort_tier).model, plain)
 
     def test_engine_descriptions_name_the_tier_not_a_model(self):
         # tag.info describes what a tier MEANS (cheap, everyday, dependable);
@@ -914,6 +914,31 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertIn("uv tool install ruff", text)
         self.assertNotIn("ARG INSTALL_RUFF", text)     # unconditional by design
         self.assertNotIn("ruff", self.reg.professions["code"].load_toolkit())
+
+    # package in the [web] layer → the command an agent is told it has. The
+    # pairing is the contract: a persona that promises a tool the image lacks
+    # is a falsehood the agent acts on (the lesson {ro} taught on gate
+    # tag-scopes), and a tool installed but never mentioned is dead weight.
+    WEB_TOOLBOX = {"bind9-dnsutils": "dig", "whois": "whois", "openssl": "openssl"}
+
+    def test_the_web_layer_installs_the_site_toolbox_it_promises(self):
+        dockerfile = (self.reg.professions["webdev"].path / "Dockerfile").read_text()
+        title, body = self.reg.professions["webdev"].addendum
+        for package, command in self.WEB_TOOLBOX.items():
+            with self.subTest(tool=command):
+                self.assertIn(f"\n    {package} \\", dockerfile)   # an apt list entry, not a word in a comment
+                self.assertIn(f"`{command}", body)
+        self.assertIn("playwright", dockerfile)
+        self.assertIn("playwright", body)
+        self.assertIn("browser", title.lower())
+
+    def test_the_web_layer_needs_no_browser_at_build_time(self):
+        # Browser binaries live in the runtime cache mount; a build-time
+        # install would be this layer's only heavy step and its only one that
+        # cannot work offline.
+        dockerfile = (self.reg.professions["webdev"].path / "Dockerfile").read_text()
+        instructions = "\n".join(line for line in dockerfile.splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotIn("playwright install", instructions)
 
     def test_professions_have_dockerfile(self):
         for name in ("code", "webdev"):

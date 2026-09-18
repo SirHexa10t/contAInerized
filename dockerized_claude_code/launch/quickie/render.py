@@ -2,6 +2,15 @@
 live `⋯ thinking… (Ns)` note on stderr while the model reasons, then the answer
 streamed to stdout as `text_delta` events arrive.
 
+**A terminal gets MARKDOWN; a pipe gets the source.** Models answer in
+markdown, so on a TTY the answer is rendered as it arrives — headings, bold,
+lists, syntax-highlighted code — by a rich `Live` that re-renders the growing
+document (verified 2026-09-18: a document taller than the screen still prints
+each line exactly once, so nothing duplicates in the scrollback). Redirected
+or piped, the raw text streams exactly as the model wrote it: `q … > notes.md`
+must stay valid markdown, and a script parsing the answer must not meet ANSI
+escapes. One rule, `_wants_markdown`, decides.
+
 Current models redact extended-thinking text in headless mode (`display:
 omitted` — thinking blocks stream a signature but no readable text), so the
 reasoning CONTENT can't be shown; the ticker just signals that thinking is
@@ -30,26 +39,121 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
+from rich.console import Console                                          # dep — declared in pyproject.toml [project]
+from rich.live import Live
+from rich.markdown import Markdown
+
+# How often the growing answer is re-rendered. Fast enough to read as
+# streaming, slow enough that a long answer is not re-laid-out per token.
+REFRESH_PER_SECOND = 8
+
 
 LOGIN_HINT = ("log in once through a normal launch (`ai <agent>`, then /login inside the container) — "
               "the quickie reuses that login")
 
 
-def render_stream(lines: Iterable[str], *, tick: bool = True) -> None:
+def _wants_markdown(markdown: bool | None = None) -> bool:
+    """Whether to RENDER the answer rather than emit its source: only when
+    stdout is a terminal, because a redirect or a pipe must receive exactly
+    what the model wrote. `markdown` overrides the detection (the tests pin
+    both paths without a pty)."""
+    if markdown is not None:
+        return markdown
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError):   # a closed or exotic stdout is not a terminal
+        return False
+
+
+def print_markdown(text: str) -> None:
+    """Print `text` to stdout as rendered markdown on a terminal, or as its
+    own source anywhere else — the one spelling the streamed answer and
+    `q --answer` share, so a reprint looks like the answer did."""
+    if _wants_markdown():
+        Console().print(Markdown(text))
+    else:
+        print(text)
+
+
+class _RawAnswer:
+    """The answer as the model wrote it, streamed straight to stdout — what a
+    redirect or a pipe receives."""
+
+    def __init__(self) -> None:
+        self.started = False
+
+    def write(self, text: str) -> None:
+        self.started = True
+        print(text, end="", flush=True)
+
+    def close(self) -> None:
+        if self.started:
+            print()   # close the streamed answer with a newline
+
+    def whole(self, text: str) -> None:
+        """A complete answer that never streamed (a harness that sends no
+        deltas) — the same channel, one write."""
+        self.write(text)
+
+
+class _PrettyAnswer:
+    """The answer RENDERED as markdown while it arrives: a rich `Live` that
+    re-renders the growing document, so the reader sees it build and ends
+    with headings, lists and highlighted code rather than raw asterisks.
+
+    The Live opens on the first text, never before — an answer that never
+    comes must leave the terminal untouched for the error report."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self._text = ""
+        self._live: Live | None = None
+
+    def write(self, text: str) -> None:
+        self.started = True
+        self._text += text
+        if self._live is None:
+            self._live = Live(console=Console(), refresh_per_second=REFRESH_PER_SECOND,
+                              vertical_overflow="visible")
+            self._live.start()
+        self._live.update(Markdown(self._text))
+
+    def close(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    def whole(self, text: str) -> None:
+        """A complete answer that never streamed — rendered in one pass, with
+        no Live at all: there is nothing to watch grow."""
+        self.started = True
+        Console().print(Markdown(text))
+
+
+def render_stream(lines: Iterable[str], *, tick: bool = True, markdown: bool | None = None,
+                  login_hint: str = LOGIN_HINT) -> None:
     """Consume Claude Code stream-json lines: start the thinking ticker when a
-    thinking block opens, stop it and stream the answer once `text_delta`s
+    thinking block opens, stop it and show the answer once `text_delta`s
     arrive, hold an `assistant` event's text for a run that streams nothing,
     and report an error `result` — or a run that ended without any answer —
-    on stderr in the CLI's own words. `tick=False` disables the background
-    ticker for deterministic tests (answer rendering is unaffected)."""
+    on stderr in the CLI's own words. The answer is rendered as markdown on a
+    terminal and emitted as its source anywhere else (`markdown` overrides).
+    `tick=False` disables the background ticker for deterministic tests
+    (answer rendering is unaffected). `login_hint` is what to print when the
+    CLI says it is not logged in — the caller supplies it because only the
+    caller knows which credentials it mounted."""
+    answer: _PrettyAnswer | _RawAnswer = _PrettyAnswer() if _wants_markdown(markdown) else _RawAnswer()
     ticker = _Ticker() if tick else None
     answer_started = False
     held: list[str] = []          # an assistant event's text, printed only if the run succeeds without streaming
+    stray: list[str] = []         # stdout lines that are not stream-json at all — a CLI refusing BEFORE it starts the stream prints plain text, and dropping it is how a run went silent
     concluded = False             # a `result` event arrived and was reported
     try:
         for raw in lines:
             event = _parse(raw)
             if event is None:
+                if raw.strip():
+                    stray.append(raw.strip())
                 continue
             if event.get("type") == "assistant" and not answer_started:
                 text = _message_text(event)
@@ -67,8 +171,8 @@ def render_stream(lines: Iterable[str], *, tick: bool = True) -> None:
                         if not answer_started:
                             answer_started = True
                             if ticker:
-                                ticker.stop()
-                        print(delta["text"], end="", flush=True)
+                                ticker.stop()   # the ticker owns the line until the answer takes it
+                        answer.write(delta["text"])
             elif event.get("type") == "result":
                 concluded = True
                 if ticker:
@@ -76,30 +180,47 @@ def render_stream(lines: Iterable[str], *, tick: bool = True) -> None:
                 failed = bool(event.get("is_error")) or event.get("subtype") != "success"
                 said = event.get("result") if isinstance(event.get("result"), str) else ""
                 if failed:
-                    _report_failure(event.get("subtype") or "error", said or " ".join(held))
+                    _report_failure(event.get("subtype") or "error", said or " ".join(held) or _tail(stray), login_hint)
                 elif not answer_started and held:
-                    print("\n".join(held), end="", flush=True)   # a success that never streamed: the message is the answer; the closing newline follows below
+                    answer.whole("\n".join(held))   # a success that never streamed: the message is the answer
                     answer_started = True
     finally:
         if ticker:
             ticker.stop()
-    if answer_started:
-        print()   # close the streamed answer with a newline
-    elif not concluded:
+        answer.close()      # a Live must be stopped even if the stream raised
+    if not answer_started and not concluded:
         # No answer and no verdict: the stream ended early (the container died,
-        # the CLI crashed before its result). Never silent.
-        print("\n[quickie] claude ended without an answer" + (f": {' '.join(held)}" if held else "."),
+        # the CLI refused before opening the stream). Never silent, and never
+        # without what it said — a plain-text refusal on stdout is not noise
+        # when nothing else arrived (operator, 2026-09-18: a "Not logged in"
+        # run printed nothing and could only be read back with `q --answer`).
+        said = " ".join(held) or _tail(stray)
+        print("\n[quickie] claude ended without an answer" + (f": {said}" if said else "."),
               file=sys.stderr, flush=True)
+        if said:
+            _login_hint_if_needed(said, login_hint)
 
 
-def _report_failure(subtype: str, said: str) -> None:
+def _report_failure(subtype: str, said: str, login_hint: str = LOGIN_HINT) -> None:
     """The stderr report for a run that did not answer: the CLI's own words
     (`Not logged in · Please run /login`) and, for a login failure, how the
     quickie gets one — it never asks itself, being a headless `-p` run."""
     detail = f": {said}" if said else "."
     print(f"\n[quickie] claude ended without an answer ({subtype}){detail}", file=sys.stderr, flush=True)
+    _login_hint_if_needed(said, login_hint)
+
+
+def _login_hint_if_needed(said: str, login_hint: str = LOGIN_HINT) -> None:
+    """The one hint a headless run cannot act on for itself."""
     if "not logged in" in said.lower() or "/login" in said:
-        print(f"[quickie] {LOGIN_HINT}", file=sys.stderr, flush=True)
+        print(f"[quickie] {login_hint}", file=sys.stderr, flush=True)
+
+
+def _tail(lines: list[str], keep: int = 5) -> str:
+    """The last few non-JSON stdout lines, joined — what the CLI said when it
+    said it outside the event stream. Capped: a crash can spill a lot, and the
+    point is the message, not the dump."""
+    return " ".join(lines[-keep:])
 
 
 def _message_text(event: dict[str, Any]) -> str:

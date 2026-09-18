@@ -1,4 +1,4 @@
 # High-investment thinking tier: the baseline plus a bigger output cap.
-standard          = "best"
+effort_tier       = "best"
 thinking          = true
 max_output_tokens = 36000

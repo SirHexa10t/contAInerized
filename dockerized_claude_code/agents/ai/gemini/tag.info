@@ -5,6 +5,18 @@ full_description  = "Google's Gemini line (Pro, Flash, Flash-Lite). Built multim
 vendor            = "Google"
 harness           = "gemini-cli"       # its default harness — an agents/harness/ member
 key_env           = "GEMINI_API_KEY"        # the vendor's API-key variable: credentials/keys/gemini.env defines it — Gemini CLI (also via .gemini/.env), OpenCode, Hermes, OpenClaw; GOOGLE_API_KEY is the older alias
+# Google's OAuth sign-in is Gemini CLI's own; the other harnesses reach Gemini
+# with GEMINI_API_KEY / GOOGLE_API_KEY, and the CLI's credential file is
+# hostname-bound anyway, so it cannot be carried to another harness even by
+# hand. The sharpest PUBLISHED case of the entitlement gap this warning is
+# about: the CLI's Google login allows 1,000-2,000 requests/day (Code Assist /
+# AI Pro / AI Ultra) where an unpaid API key gets 250/day, Flash only — same
+# tokens, different entitlement (the CLI's own quota-and-pricing doc, read
+# 2026-09-17; plans/credentials.md).
+plan_harnesses    = ["gemini-cli"]
+# The floor an unpaid key keeps — the other half of the entitlement gap above,
+# and the reason a Gemini fallback feels different from a Claude one.
+key_free_tier     = "free tier: 250 req/day, Flash only"
 default           = false
 fg                = "#ffffff"          # the ⟪Gemini⟫ tag: white on Google blue
 bg                = "#4285f4"

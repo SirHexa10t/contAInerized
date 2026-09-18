@@ -6,5 +6,37 @@ vendor            = "Anthropic"
 harness           = "claude-code"      # its default harness — an agents/harness/ member (launch/ai/claude_code.py is that one's adapter)
 key_env           = "ANTHROPIC_API_KEY"     # the vendor's API-key variable: credentials/keys/claude.env defines it — Claude Code, OpenCode, Hermes, OpenClaw read it; Claude Code also takes ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN
 default           = true               # the AI an instance runs when its build names none (exactly one member may say so)
+# Where a Claude PLAN (Pro / Max) may be spent — the picker warns when a build
+# pairs ⟪Claude⟫ with any other harness, because that pairing bills per token
+# through ANTHROPIC_API_KEY instead. Stated as what Anthropic OFFERS, not as a
+# prohibition: subscription OAuth is Claude Code's own `/login`, and the token
+# `claude setup-token` mints "requires a Pro, Max, Team, or Enterprise plan"
+# (docs.claude.com/en/docs/claude-code/iam) — no Anthropic page forbids a
+# third-party client, and its AUP and consumer terms were read for one
+# (2026-09-17) and carry none. That other harnesses cannot use the plan is
+# OpenCode's second-party account, acted on by unbundling its Claude plugins in
+# 1.3.0. Sources in plans/credentials.md.
+plan_harnesses    = ["claude-code"]
+# What an ANTHROPIC_API_KEY alone gets, so the warning can say where the
+# fallback lands: "New users receive a small amount of free credits to test the
+# API" (docs.claude.com/en/docs/about-claude/pricing, read 2026-09-17) — a
+# one-time trial, no recurring free tier. Stated as the vendor states it; it is
+# not a ranking against another AI, which is why no severity dial exists.
+key_free_tier     = "no free tier"
+# FIELD EVIDENCE, and the one line in this tree that is not a vendor's own
+# published term: operators have measured Claude burning vastly more tokens for
+# the same work outside Claude Code. Two first-hand accounts, 2026-09-17. No
+# vendor publishes such a figure — Anthropic's pricing has no client dimension
+# at all (read 2026-09-17) — and this launcher has not reproduced it, so the
+# picker quotes it VERBATIM as the warning's first line — which is why the
+# sentence itself must hedge and date (the scan refuses one that does not). It
+# is carried, not buried:
+# the cost lands on whoever picks the pairing. The one published mechanism that
+# could produce a gap this size is a harness that does not reuse the prompt
+# cache (a hit bills at 0.1x fresh input), which the warning names so a reader
+# can check the harness rather than blame the model. plans/credentials.md holds
+# the sourcing on both sides — for maintainers; the picker points at no plans
+# file, since that tree is not documentation for whoever is picking tags.
+foreign_harness_report = "reportedly (mid-2026) Claude consumes ~50x the tokens on anything other than Claude-Code"
 fg                = "#ff8700"          # the ⟪Claude⟫ tag: orange on near-black gray, after the logo (darkened from #3a3a3a, operator 2026-09-14)
 bg                = "#262626"

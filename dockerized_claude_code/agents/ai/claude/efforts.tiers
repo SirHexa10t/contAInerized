@@ -2,7 +2,7 @@
 # says what the dated standards are and how a tier is chosen: the cheapest
 # live, rated configuration that MEETS the standard — AA blended 3:1 price,
 # then the lowest index that meets — else the AI's best, flagged). An engine's
-# tag.budget names a standard and never a model or an effort of any AI.
+# tag.budget names an effort_tier and never a model or an effort of any AI.
 # Inline: the Artificial Analysis Intelligence Index v4.3 (est. = AA's
 # estimate) and the price in USD per 1M tokens, input / output. Read
 # 2026-09-14 from the records embedded in an AA model page.

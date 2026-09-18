@@ -5,6 +5,10 @@ full_description  = "SpaceXAI (xAI)'s Grok line (Grok 4.6, 4.5, 4.3, 4.20). Trai
 vendor            = "SpaceXAI (xAI)"
 harness           = "grok-build"       # its default harness — an agents/harness/ member
 key_env           = "XAI_API_KEY"           # the vendor's API-key variable: credentials/keys/grok.env defines it — Grok Build, OpenCode, Hermes, OpenClaw
+# xAI's SuperGrok login is accepted by three of the harnesses we ship
+# (plans/credentials.md, 2026-09-15) — the widest plan reach of the four
+# vendors; elsewhere Grok runs on XAI_API_KEY.
+plan_harnesses    = ["grok-build", "opencode", "hermes"]
 default           = false
 fg                = "#ffffff"          # the ⟪Grok⟫ tag: white on black
 bg                = "#000000"

@@ -1,5 +1,5 @@
 # The launcher's CAPABILITY STANDARDS — the dated ones. An engine's tag.budget
-# names a standard (`standard = "2025Q4"`), and every agents/ai/*/efforts.tiers
+# names one (`effort_tier = "2025Q4"`), and every agents/ai/*/efforts.tiers
 # answers each with that AI's TIER (a model and an effort). The two ends are
 # not written here: `cheapest` and `best` are each AI's own extremes.
 #

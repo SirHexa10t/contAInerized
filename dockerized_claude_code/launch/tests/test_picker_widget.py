@@ -16,9 +16,10 @@ from pathlib import Path
 
 from launch.gui import picker_widget
 from launch.gui.picker_widget import (
-    STYLE_WORKSPACE_HINT, PickerCwdHint, PickerEntry, PickerRowMarker,
-    WorkspaceView, _accent_style, _cont_tags_column, _cursor_step,
-    _focusable_indices, _tags_column,
+    BREAK_CHAR, PANE_HIDDEN, PANE_LEGEND, PANE_PREVIEW, STYLE_WORKSPACE_HINT,
+    PickerCwdHint, PickerEntry, PickerRowMarker, WorkspaceView, _accent_style,
+    _cont_tags_column, _cursor_step, _focusable_indices, _pane_view, _tags_column,
+    _visible_indices, break_row,
 )
 from launch.gui.styles import STYLE_TAG_INVALID, STYLE_TAG_SAFE, STYLE_TAG_WARN, UiClass
 from launch.tags import AgentBuild, Instance, resolve_build
@@ -360,13 +361,43 @@ class TestRowMarkers(unittest.TestCase):
                          list(picker_widget.PickerRowMarker.NEW.lead))
 
     def test_the_kind_colours_agree_between_tab_and_accent_bar(self):
-        # The tab wears Create's kind colour (green, iterated from an all-grey
-        # first pass) and the preview's edge bar shows the same one — two
-        # different greens would read as two different meanings. Cont keeps
-        # its yellow on the accent bar only; its dim lead carries no colour.
+        # Each creation tab wears its kind colour (Create's green, iterated
+        # from an all-grey first pass; the cluster tab's cyan) and the
+        # preview's edge bar shows the same one — two different greens would
+        # read as two different meanings. Cont keeps its yellow on the accent
+        # bar only; its dim lead carries no colour.
+        marker = picker_widget.PickerRowMarker
         tab_bg = picker_widget.STYLE_TAB.split("bg:", 1)[1].split()[0]
-        self.assertEqual(picker_widget.PickerRowMarker.NEW.accent, f"fg:{tab_bg}")
-        self.assertEqual(picker_widget.PickerRowMarker.CONT.accent, "fg:ansiyellow")
+        cluster_tab_bg = picker_widget.STYLE_CLUSTER_TAB.split("bg:", 1)[1].split()[0]
+        self.assertEqual(marker.NEW.accent, f"fg:{tab_bg}")
+        self.assertEqual(marker.CLUSTER.accent, f"fg:{cluster_tab_bg}")
+        self.assertEqual(marker.CONT.accent, "fg:ansiyellow")
+
+    def test_everything_that_exists_shares_one_accent_and_cyan_is_the_new_clusters_alone(self):
+        # The bar answers "does this row exist, or would picking it create
+        # something": an existing cluster and its members read like an
+        # instance (operator, 2026-09-17 — they were cyan, which said
+        # "cluster" twice and "existing" never), and cyan is left to the
+        # + Cluster tab.
+        marker = picker_widget.PickerRowMarker
+        existing = (marker.CONT, marker.CLSTR, marker.MEMBER)
+        self.assertEqual({m.accent for m in existing}, {picker_widget.ACCENT_EXISTING})
+        self.assertEqual([m.name for m in marker if m.accent == picker_widget.ACCENT_CREATE_CLUSTER],
+                         ["CLUSTER"])
+        # The lead still says "cluster" in cyan — the two colours answer
+        # different questions, so a cluster row is never mistaken for an
+        # instance row in the list itself.
+        self.assertIn(picker_widget.STYLE_CLUSTER_NEST, [style for style, _ in marker.CLSTR.lead])
+        self.assertEqual(picker_widget.STYLE_CLUSTER_NEST, "fg:ansicyan")
+
+    def test_every_accent_comes_from_the_named_vocabulary(self):
+        # A new row kind picks from the three named constants (or declares no
+        # accent, like the menu openers) rather than inventing a colour.
+        known = {"", picker_widget.ACCENT_CREATE_AGENT, picker_widget.ACCENT_CREATE_CLUSTER,
+                 picker_widget.ACCENT_EXISTING}
+        for row_marker in picker_widget.PickerRowMarker:
+            with self.subTest(marker=row_marker.name):
+                self.assertIn(row_marker.accent, known)
 
 
 class TestEnterGate(unittest.TestCase):
@@ -414,14 +445,16 @@ class TestEnterGate(unittest.TestCase):
 class TestAccentStyle(unittest.TestCase):
     """The preview's accent bar reads the highlighted row's KIND off its
     marker — the widget no longer needs to know what an Instance or Agent is
-    to colour it, and the cyan the cluster markers always declared finally
-    shows (it was dead: the old isinstance dispatch never returned it)."""
+    to colour it (the old isinstance dispatch could not reach the cluster
+    rows at all)."""
 
     def test_the_marker_decides_the_colour_not_the_value(self):
         cont = PickerEntry(value=make_inst(), marker=PickerRowMarker.CONT)
         self.assertEqual(_accent_style(cont), PickerRowMarker.CONT.accent)
         cluster = PickerEntry(value="an opaque cluster row", marker=PickerRowMarker.CLSTR)
-        self.assertEqual(_accent_style(cluster), "fg:ansicyan")
+        self.assertEqual(_accent_style(cluster), "fg:ansiyellow")   # it exists — the same bar an instance shows
+        template = PickerEntry(value="a template row", marker=PickerRowMarker.CLUSTER)
+        self.assertEqual(_accent_style(template), "fg:ansicyan")    # creating one — the reserved colour
 
     def test_no_row_no_marker_or_no_accent_falls_back_to_the_divider(self):
         self.assertEqual(_accent_style(None), UiClass.DIVIDER.css)
@@ -469,3 +502,174 @@ class TestTagsColumnProblems(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBreakRows(unittest.TestCase):
+    """A BREAK row separates two blocks of rows (one cluster's from the
+    next's). Two properties make it work: the cursor never lands on it, and
+    the typed-word filter never drops it — a break is a boundary, not content,
+    so two clusters' members matching one word stay visibly apart (operator,
+    2026-09-17). Kept honest by collapsing: a boundary that separates nothing
+    is not shown."""
+
+    @staticmethod
+    def _rows(*texts):
+        """A row per text; `None` makes a break."""
+        return [break_row(3) if text is None else PickerEntry(display=[("", text)], value=text)
+                for text in texts]
+
+    def test_a_break_is_information_only_and_wears_the_rule(self):
+        row = break_row(7)
+        self.assertEqual("".join(t for _, t in row.display), BREAK_CHAR * 7)
+        self.assertTrue(row.separator)
+        self.assertFalse(row.selectable or row.pickable or row.deletable or row.modifiable)
+
+    def test_the_cursor_steps_over_a_break(self):
+        rows = self._rows("golem", None, "poet")
+        shown = list(range(3))
+        self.assertEqual(_focusable_indices(rows, shown), [0, 2])
+        self.assertEqual(_cursor_step(rows, shown, 0, 1), 2)      # never lands on index 1
+        self.assertEqual(_cursor_step(rows, shown, 2, 1), 0)      # and wraps past it
+
+    def test_a_filter_keeps_the_break_between_what_survives(self):
+        # THE point: "researcher" matches a member in each cluster, and the
+        # break between them says they are not neighbours.
+        rows = self._rows("team-a", "researcher__primary", None, "team-b", "researcher__other")
+        self.assertEqual(_visible_indices(rows, "researcher"), [1, 2, 4])
+
+    def test_a_break_that_separates_nothing_is_dropped(self):
+        rows = self._rows("team-a", "golem", None, "team-b", "poet")
+        self.assertEqual(_visible_indices(rows, "golem"), [1])        # nothing below it — no trailing rule
+        self.assertEqual(_visible_indices(rows, "poet"), [4])         # nothing above it — no leading rule
+        self.assertEqual(_visible_indices(rows, "team"), [0, 2, 3])   # a real boundary survives
+
+    def test_consecutive_breaks_collapse_to_one(self):
+        rows = self._rows("a", None, "b", None, "c")
+        self.assertEqual(_visible_indices(rows, "b"), [2])            # both boundaries lose their sides
+        self.assertEqual(_visible_indices(rows, ""), [0, 1, 2, 3, 4])
+        self.assertEqual(_visible_indices(rows, "zzz"), [])           # no rows, so no rules
+
+    def test_an_unmatched_row_still_goes_while_its_break_may_stay(self):
+        rows = self._rows("alpha", None, "beta", "alpha-two")
+        self.assertEqual(_visible_indices(rows, "alpha"), [0, 1, 3])
+
+
+class TestPaneView(unittest.TestCase):
+    """`_pane_view` — the one answer the layout (is the pane there) and the
+    content function (what to compute) both read, so they cannot disagree."""
+
+    def test_the_three_states(self):
+        self.assertEqual(_pane_view(hidden=False, legend_open=False, has_legend=True), PANE_PREVIEW)
+        self.assertEqual(_pane_view(hidden=False, legend_open=True, has_legend=True), PANE_LEGEND)
+        self.assertEqual(_pane_view(hidden=True, legend_open=False, has_legend=True), PANE_HIDDEN)
+
+    def test_hidden_wins_over_an_open_legend(self):
+        # F12 closes the legend on its way out, but the table must not depend
+        # on that housekeeping having happened.
+        self.assertEqual(_pane_view(hidden=True, legend_open=True, has_legend=True), PANE_HIDDEN)
+
+    def test_a_legend_no_caller_supplied_is_never_shown(self):
+        self.assertEqual(_pane_view(hidden=False, legend_open=True, has_legend=False), PANE_PREVIEW)
+
+
+class TestPreviewPaneToggle(unittest.TestCase):
+    """F12 hides the side pane, and while it is hidden NOTHING is computed for
+    it — the rule the legend already followed: it never asks the loader, so no
+    transcript is read for a row nobody is looking at (operator, 2026-09-17).
+    Driven through the real key bindings and the real layout, with the
+    Application faked, because "the pane is gone" and "the loader was not
+    asked" are properties of those two objects."""
+
+    def _picker(self, legend_text="LEGEND", preview="THE PREVIEW"):
+        from unittest.mock import patch
+        captured: dict = {}
+
+        class FakeApp:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            def invalidate(self) -> None: ...
+
+            def run(self) -> None: ...
+
+        entries = [PickerEntry(display=[("", "row")], value="v", preview=preview)]
+        with patch.object(picker_widget, "Application", FakeApp):
+            picker_widget.pick_with_preview("t", entries, legend_text=legend_text)
+        return captured
+
+    @staticmethod
+    def _press(captured, key):
+        from unittest.mock import MagicMock
+        binding = next(b for b in captured["key_bindings"].bindings if tuple(b.keys) == (key,))
+        binding.handler(MagicMock())
+
+    @staticmethod
+    def _windows(container):
+        from prompt_toolkit.layout import Window, walk
+        return [w for w in walk(container) if isinstance(w, Window)
+                and callable(getattr(w.content, "text", None))]
+
+    @classmethod
+    def _pane(cls, captured):
+        from prompt_toolkit.layout import ConditionalContainer, walk
+        (pane,) = [c for c in walk(captured["layout"].container)
+                   if isinstance(c, ConditionalContainer)]
+        return pane
+
+    @classmethod
+    def _pane_text(cls, captured):
+        (window,) = cls._windows(cls._pane(captured))
+        return str(window.content.text())
+
+    @classmethod
+    def _hint(cls, captured):
+        *_, status = cls._windows(captured["layout"].container)
+        return "".join(text for _, text in status.content.text())
+
+    def test_f12_takes_the_pane_away_and_brings_it_back(self):
+        from prompt_toolkit.keys import Keys
+        captured = self._picker()
+        pane = self._pane(captured)
+        self.assertTrue(pane.filter())
+        self._press(captured, Keys.F12)
+        self.assertFalse(pane.filter())      # divider, accent bar and preview go together
+        self._press(captured, Keys.F12)
+        self.assertTrue(pane.filter())
+
+    def test_a_hidden_pane_asks_the_loader_for_nothing(self):
+        # THE point: no transcript read, no worker scheduled, for a pane
+        # nobody can see.
+        from unittest.mock import patch
+        from prompt_toolkit.keys import Keys
+        captured = self._picker()
+        with patch.object(picker_widget._PreviewLoader, "text", return_value="RESOLVED") as asked:
+            self.assertIn("RESOLVED", self._pane_text(captured))
+            self.assertTrue(asked.called)
+            asked.reset_mock()
+            self._press(captured, Keys.F12)
+            self.assertEqual(self._pane_text(captured), "")
+            asked.assert_not_called()
+            self._press(captured, Keys.F12)
+            self.assertIn("RESOLVED", self._pane_text(captured))
+
+    def test_the_legend_brings_the_pane_back_and_f12_takes_the_legend_with_it(self):
+        from prompt_toolkit.keys import Keys
+        captured = self._picker()
+        pane = self._pane(captured)
+        self._press(captured, Keys.F12)
+        self.assertFalse(pane.filter())
+        self._press(captured, Keys.F8)                     # the pane is the legend's only home
+        self.assertTrue(pane.filter())
+        self.assertIn("LEGEND", self._pane_text(captured))
+        self._press(captured, Keys.F12)                    # hiding closes the legend with it
+        self.assertFalse(pane.filter())
+        self._press(captured, Keys.F12)
+        self.assertIn("THE PREVIEW", self._pane_text(captured))
+
+    def test_the_hint_says_which_way_the_key_goes(self):
+        from prompt_toolkit.keys import Keys
+        captured = self._picker()
+        self.assertIn(picker_widget.HINT_PREVIEW_SUFFIX.strip(), self._hint(captured))
+        self._press(captured, Keys.F12)
+        self.assertIn(picker_widget.HINT_PREVIEW_HIDDEN.strip(), self._hint(captured))
+        self.assertNotIn("hide preview", self._hint(captured))
