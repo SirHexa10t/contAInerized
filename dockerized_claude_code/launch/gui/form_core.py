@@ -79,6 +79,35 @@ TOOLKIT_SIZE_NOTE   = "# sizes are approximate — amd64, mid-July 2026"
 # Checkbox form (multi-select) — generic primitive behind prompt_tags
 # ============================================================
 
+@dataclass(frozen=True)
+class FormResult:
+    """What a CONFIRMED `checkbox_form` hands back: the keys of the checked
+    options in display order, and the text fields' values (an empty dict for
+    a form that carried no fields). Cancel is None, and nothing else.
+
+    One record instead of the `list[str] | tuple[dict[str, str], list[str]]`
+    union this returned until 2026-09-18 — which is a correctness fix, not
+    tidiness. Each of the four call sites narrowed that union its own way,
+    and two of them narrowed SILENTLY WRONG the day their form gains a
+    field: `edit_profiles_form`'s bare `set(result)` would iterate the
+    2-tuple and raise on the unhashable dict, and `--stop`'s
+    `isinstance(result, list)` would simply go False and stop NOTHING, with
+    no error and no message (bug-investigator, strict-reviewer; gate
+    stop-form-reuse). A field is one keyword argument away at every call
+    site, so the union made that a permanent possibility.
+
+    Deliberately NOT iterable, sized or truthy: `__iter__`, `__len__` or
+    `__bool__` here would re-create the very "what shape is it?" guessing
+    one layer down. Read `.checked` or `.field_values` by name.
+
+    `field_values` rather than `values`, `checked` rather than `keys`: the
+    dict spellings read as bound methods at a glance on a record four call
+    sites share, and `.fields` would read as the TextField objects instead
+    of the text typed into them."""
+    checked: list[str]
+    field_values: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class FormOption:
     """One row in `checkbox_form`. `key` is the canonical string the form
@@ -656,7 +685,7 @@ def checkbox_form(title: str, options: list[FormOption],
                   labels: dict[str, str] | None = None,
                   preamble: list[str] | None = None,
                   fields: list[TextField] | None = None,
-                  ) -> "list[str] | tuple[dict[str, str], list[str]] | None":
+                  ) -> FormResult | None:
     """The multi-select form on `run_form`'s scaffold (keys, fields, confirm
     rules and layout are all documented there). What this form adds: Space
     toggles the focused checkbox, with the requires-cascade; the focused
@@ -684,8 +713,8 @@ def checkbox_form(title: str, options: list[FormOption],
     ignore Space (see FormOption). `fields` (TextField rows) render ABOVE the
     options.
 
-    Returns the checked options' keys in display order — as
-    `(field values, keys)` when `fields` were given — or None on cancel."""
+    Returns a `FormResult` (the checked keys in display order, plus any
+    field values), or None on cancel."""
     if not options:
         raise ValueError("options must be non-empty")
     rows = ordered_form_options(options)
@@ -769,5 +798,5 @@ def checkbox_form(title: str, options: list[FormOption],
     ))
     if values is None:
         return None
-    keys = [o.key for o in rows if o.checked]
-    return keys if fields is None else (values, keys)
+    return FormResult(checked=[o.key for o in rows if o.checked],
+                      field_values=values)

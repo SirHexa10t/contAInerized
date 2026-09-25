@@ -80,6 +80,10 @@ HINT_LEGEND_SUFFIX   = "  •  F8 legend"
 HINT_LEGEND_OPEN     = "F8 / Esc close legend"
 HINT_PREVIEW_SUFFIX  = "  •  F12 hide preview"
 HINT_PREVIEW_HIDDEN  = "  •  F12 show preview"
+HINT_FIND_SUFFIX     = "  •  alt+f find"
+
+# See the assignment in `pick_with_preview` for why this is not the default.
+ESCAPE_FLUSH_SECONDS = 0.05
 FILTER_LABEL         = "filter: "
 EMPTY_FILTER_MESSAGE = "(no matches)"
 PREVIEW_LOADING_TEXT = "… loading preview (keep browsing)"
@@ -150,6 +154,7 @@ class PickerAction(Enum):
     SELECT = "select"     # Enter — user picked a row
     DELETE = "delete"     # Del   — user pressed delete on a row (only fires for deletable rows)
     MODIFY = "modify"     # F2    — user pressed modify on a row (only fires for modifiable rows)
+    FIND   = "find"       # alt+f — user asked to search past conversations (no row involved)
 
 class PickerRowMarker(Enum):
     """Row lead-in — the fragments that prefix a row, bundled with the accent
@@ -632,12 +637,17 @@ class _ScrollingControl(FormattedTextControl):
             return None
         return super().mouse_handler(mouse_event)
 
-def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
+def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: bool = False, allow_modify: bool = False, allow_find: bool = False, legend_text: str | None = None) -> tuple[PickerAction | None, Any]:
     """Render a full-screen picker; block until the user picks or cancels.
 
     legend_text — optional ANSI string. When provided, F8 toggles it as an overlay
     over the preview pane (Esc closes it). The agent picker passes LEGEND_TEXT so
-    users can recall what each tag's kind punctuation means."""
+    users can recall what each tag's kind punctuation means.
+
+    allow_find — offer alt+f. It returns `(FIND, None)`: the picker knows the
+    key, not what a search IS. Rows have nothing to do with it, so unlike Del
+    and F2 it fires with no row involved, and the caller decides what to
+    search and what to do with the answer."""
     if not entries:
         raise ValueError("entries must be non-empty")
 
@@ -767,6 +777,8 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
                 hint += HINT_DELETE_SUFFIX
             if allow_modify:
                 hint += HINT_MODIFY_SUFFIX
+            if allow_find:
+                hint += HINT_FIND_SUFFIX
             if legend_text is not None:
                 hint += HINT_LEGEND_SUFFIX
             # Says which way the key goes, so a hidden pane is never a mystery.
@@ -886,6 +898,14 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
             state["result"] = (PickerAction.DELETE, entry.value)
             event.app.exit()
 
+    if allow_find:
+        @kb.add("escape", "f")
+        def _on_find_key(event: KeyPressEvent) -> None:
+            # alt+f arrives as ESC then f. Binding it makes "escape" a PREFIX,
+            # which is why the Application sets ttimeoutlen — see there.
+            state["result"] = (PickerAction.FIND, None)
+            event.app.exit()
+
     if allow_modify:
         @kb.add("f2")
         def _on_modify_key(event: KeyPressEvent) -> None:
@@ -956,6 +976,17 @@ def pick_with_preview(title: str, entries: list[PickerEntry], *, allow_delete: b
         # picker closes. Holding Shift bypasses it in most terminals.
         mouse_support=True,
     )
+    # How long Esc waits to see whether it is the start of alt+f, which
+    # terminals send as ESC then f. An ATTRIBUTE, not a constructor argument
+    # — prompt_toolkit sets it in `Application.__init__`'s body, and passing
+    # it as a keyword raises TypeError before the picker can open (shipped
+    # 2026-09-19, caught by the operator, whose launcher would not start).
+    #
+    # The default half-second is wrong here because Esc is this picker's
+    # CANCEL key, and half a second of nothing after pressing it reads as a
+    # hang. A real alt+f arrives as one burst with no gap, so 50 ms is
+    # generous; the same trick as vim's ttimeoutlen.
+    app.ttimeoutlen = ESCAPE_FLUSH_SECONDS
     # Created here, after `app` exists, because the worker needs its
     # (thread-safe) invalidate; preview_text above reaches `loader` through the
     # closure, which resolves by the time the first render calls it.

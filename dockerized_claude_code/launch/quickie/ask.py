@@ -33,6 +33,7 @@ from ..staging import stage_instance
 from ..tag_handlers import apply_tags
 from ..tags import Instance, Registry, TagError, load_lego, resolve_build
 from ..utils import call_or_exit
+from .history import latest_thread
 from .render import LOGIN_HINT, render_stream
 
 class QuickieAgent(NamedTuple):
@@ -105,7 +106,9 @@ def ask(question: str, registry: Registry, *, resume_session: str | None = None,
         agent: QuickieAgent = QUICK, ai: str | None = None) -> None:
     """Answer one question one-shot with `agent` (QUICK default; TRIVIA for
     `--explain`, RESEARCH for `--research`), on the lego's AI or the `--ai`
-    one. `registry` is the tree the CLI's one startup opened
+    one. `resume_session=""` means the LATEST thread — `--resume` with no id,
+    the same default `--answer` takes, since the thread you want to continue
+    is nearly always the one you just used. `registry` is the tree the CLI's one startup opened
     (`startup.open_launcher`, before parsing — the same first step every
     entry takes). With `resume_session` (an id from `q --history`) the
     question continues that existing thread via `--continue`; otherwise it
@@ -115,14 +118,17 @@ def ask(question: str, registry: Registry, *, resume_session: str | None = None,
     `quickie/` for later resume."""
     question = question.strip()
     if not question:
-        sys.exit(
-            f'Ask a follow-up:  q --resume {resume_session} "your question"   (quote it).'
-            if resume_session else
-            'Ask a question:  q "your question here"   (quote the whole question).'
-        )
+        if resume_session is None:
+            sys.exit('Ask a question:  q "your question here"   (quote the whole question).')
+        named = f" {resume_session}" if resume_session else ""   # `--resume` with no id names no thread
+        sys.exit(f'Ask a follow-up:  q --resume{named} "your question"   (quote it).')
     require_docker()
     ensure_dir(quickie_communal_workspace())   # the /workspace mount source must exist, else docker root-creates it
     if resume_session is not None:
+        if not resume_session:          # `--resume` with no id: the thread just used
+            resume_session = latest_thread()
+            if resume_session is None:
+                sys.exit('No quickie threads yet.  Ask one:  q "your question here"')
         if not quickie_state_dir_path(resume_session).is_dir():
             sys.exit(f"No quickie thread '{resume_session}'.  Run  q --history  to list them.")
         session, is_brand_new = resume_session, False

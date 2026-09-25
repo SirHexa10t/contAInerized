@@ -485,6 +485,23 @@ everything it does not cover.
   Launcher-side mitigation BUILT 2026-08-29 (operator's nod):
   `compute_resume_flag` warns past `RESUME_SIZE_WARN_BYTES` (50 MB) while
   still resuming — the surprise is at least a stated one now.
+- **A mounted in-container helper hardcoded a path the adapter owns, and read
+  the wrong dir for every cluster member — FIXED 2026-09-19, kept as a
+  class.** `settings/_dump_last_msg.py` opened `Path.home()/".claude"/
+  "projects"`. That is right for a solo instance and wrong for every member
+  of a cluster, whose transcripts live under its OWN config dir
+  (`/cluster/members/<id>/`, via `CLAUDE_CONFIG_DIR`) — so `dump_last_msg`
+  in a member's shell pane read another container's dir or nothing at all.
+  It also hardcoded BOTH names the harness adapter now owns
+  (`config_dir_name`, `transcripts_dirname`) at the moment the tree is
+  de-Claude-ing, so a second AI would have inherited two files to edit.
+  Fixed by staging `AGENT_TRANSCRIPTS_DIR` per instance — instance-scoped
+  like the status line, because a container-wide value could only ever name
+  one member's dir — and having both container readers follow it. The class
+  to remember: a file mounted into the container cannot import `launch/`,
+  which makes hardcoding feel like the only option; the launcher's answer is
+  to stage the value as env from the adapter, or to mount the module itself
+  (`transcript_format.py`) rather than let a copy of it grow in `settings/`.
 - **herdr 0.8.2 as a daily driver: three operator-reported "crashes" in one
   day, zero server-side evidence — UNRESOLVED; the operator dropped `{muxer}`
   from the instance.** What IS known: in both containers whose logs were
@@ -694,6 +711,40 @@ Until then, re-verify by hand before relying on either file.
   keeps — that one never did, and its premise was wrong on inspection (both
   forms already branched field-vs-row identically; only the row action
   differed).
+- **A fake that accepts `**kwargs` will swear a wrong argument is fine —
+  shipped a launcher that could not open its picker, 2026-09-19.** The
+  picker's `Application` is faked in every test (running a real one needs a
+  terminal), and the fake took `**kw` and recorded it. A new
+  `ttimeoutlen=0.05` keyword went in, the test asserted
+  `captured["ttimeoutlen"] <= 0.1`, the suite was green — and prompt_toolkit
+  has no such CONSTRUCTOR argument (it is an attribute set inside
+  `Application.__init__`), so the first real launch died with a TypeError
+  before the picker drew anything. Operator-reported, from a traceback.
+  Closed two ways: the value is now assigned to the attribute after
+  construction, and `TestApplicationConstruction` (a) binds the captured
+  call against `inspect.signature(Application.__init__)`, which covers
+  arguments nobody has added yet, and (b) constructs the REAL Application
+  once, intercepting only `run()`. The lesson beyond this bug: when a fake
+  stands in for a third-party object, something in the suite must still
+  meet the real one — a fake can only check the arguments you remembered to
+  get right, never the ones the library actually takes.
+- **A union return type is a defect the suite cannot fail on — it ships green
+  and breaks the day someone adds an argument.** `form_core.checkbox_form`
+  returned `list[str] | tuple[dict[str, str], list[str]] | None` (the tuple
+  only when the caller passed `fields=`), so each of its four call sites
+  narrowed by hand: three `cast`s, one bare `set(result)`, one
+  `isinstance(result, list)`. Every one was correct on the day it was
+  written, and two were one keyword argument from silent breakage —
+  `edit_profiles_form`'s `set()` would raise on the unhashable dict, and
+  `--stop`'s isinstance would go False and stop NOTHING with no error and no
+  message (gate stop-form-reuse, 2026-09-18: bug-investigator and
+  strict-reviewer both found it independently). No test could fail while the
+  forms kept their current arguments, which is what makes this worth
+  recording: the review caught it, the suite structurally could not. Closed
+  by returning one record (`FormResult`) with the fields named — deliberately
+  not iterable, sized or truthy, so the guessing cannot reappear one layer
+  down. The lesson generalises: when a function's return SHAPE depends on its
+  arguments, the shape is the bug, not the callers.
 - **A same-length mutation can leave stale bytecode behind, and the restored tree
   then fails.** Mutation-testing a guard means editing a source file, running the
   suite, and restoring it. CPython validates a `.pyc` against the source's

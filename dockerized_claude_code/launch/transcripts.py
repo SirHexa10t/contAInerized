@@ -1,12 +1,13 @@
 """Reading Claude Code's own session records — what a state dir can tell the
 launcher about the conversation inside it.
 
-Four questions, all answered from `<state_dir>/`:
+Five questions, all answered from `<state_dir>/`:
 
   - is there anything `claude --continue` could load, and how big is it
     (`has_continuable_jsonl`, `continuable_jsonl_bytes`)
   - when was this instance last used (`last_history_mtime`)
   - what was said last, by whom (`last_prompt_in_state`, `last_answer_in_state`)
+  - where was a term said, across everything this dir holds (`find_turns`)
 
 Split out of `file_access` 2026-09-03. These are not file-access primitives:
 they encode the SHAPE of a foreign format — which turn types count, that a
@@ -22,14 +23,27 @@ rather than raising, so a truncated transcript or an upstream schema change
 shows up as "no prompt" in a picker preview instead of a traceback in a
 launch. Disk access still goes through `file_access` — this module reads
 through it, exactly like every other consumer.
+
+Still the place to add "a new thing to read out of a session transcript"
+(.claude_dev_guidelines). What lives one door down in `transcript_format` is
+only the per-LINE parse, and only because the container needs the same rules
+without the `launch` package: this module is which FILES to walk and which
+turn wins, that one is what a single line says.
 """
 
-import json
-from datetime import datetime
 from pathlib import Path
 
 from .file_access import read_text
-from .paths import state_history_path, state_workspace_jsonls
+from .paths import (
+    state_history_path, state_workspace_jsonls, state_workspace_subagent_jsonls,
+)
+from .transcript_format import TranscriptHit, matched_turn, turn_text
+
+__all__ = [
+    "TranscriptHit", "continuable_jsonl_bytes", "find_turns",
+    "has_continuable_jsonl", "last_answer_in_state", "last_history_mtime",
+    "last_prompt_in_state",
+]
 
 def has_continuable_jsonl(state_dir: Path) -> bool:
     """True iff `state_dir` has at least one non-empty session JSONL — i.e.,
@@ -84,9 +98,35 @@ def last_answer_in_state(state_dir: Path) -> tuple[str, float] | None:
     its time as epoch seconds — or None if there's no answer yet. Same source
     and same graceful-degrade rules as last_prompt_in_state; the assistant's
     `text` blocks are the answer (redacted `thinking` and `tool_use` blocks
-    carry no readable text, so `_content_text` skips them). Powers quickie's
+    carry no readable text, so `content_text` skips them). Powers quickie's
     `q --answer <id>`."""
     return _last_text_turn(state_dir, "assistant")
+
+
+def find_turns(state_dir: Path, term: str) -> list[TranscriptHit]:
+    """Every spoken turn in `state_dir`'s conversations containing `term`,
+    case-insensitively, oldest first — the session transcripts AND the
+    sub-agent transcripts beneath them.
+
+    SPOKEN turns only: the same `type` + readable-text rules the rest of this
+    module applies, so a tool call carrying the term, a tool result echoing a
+    file that contains it, and the bookkeeping lines that make up about half
+    of a transcript all miss. That is the point of parsing rather than
+    grepping — on this project's own corpus one term matched 26 raw lines and
+    3 actual turns. Each parse still degrades to "skip this line" rather than
+    raising, so a truncated or schema-drifted transcript costs its own hits
+    and nothing else."""
+    needle = term.lower()
+    hits: list[TranscriptHit] = []
+    for jsonl in (*state_workspace_jsonls(state_dir),
+                  *state_workspace_subagent_jsonls(state_dir)):
+        for line in read_text(jsonl).splitlines():
+            if needle not in line.lower():
+                continue                      # cheap reject before the parse
+            hit = matched_turn(line, needle, jsonl)
+            if hit is not None:
+                hits.append(hit)
+    return sorted(hits, key=lambda hit: hit.when)
 
 
 def _last_text_turn(state_dir: Path, event_type: str) -> tuple[str, float] | None:
@@ -96,38 +136,9 @@ def _last_text_turn(state_dir: Path, event_type: str) -> tuple[str, float] | Non
     latest: tuple[str, float] | None = None
     for jsonl in state_workspace_jsonls(state_dir):
         for line in read_text(jsonl).splitlines():
-            found = _transcript_turn(line, event_type)
+            found = turn_text(line, event_type)
             if found is not None and (latest is None or found[1] > latest[1]):
                 latest = found
     return latest
 
 
-def _transcript_turn(line: str, event_type: str) -> tuple[str, float] | None:
-    """(text, epoch-seconds) for a transcript JSONL line of `event_type` that
-    carries readable text, else None — other turn types, tool-result echoes,
-    sidechains, and unparseable lines all return None."""
-    try:
-        event = json.loads(line)
-        if event.get("type") != event_type or event.get("isSidechain"):
-            return None
-        text = _content_text(event.get("message", {}).get("content"))
-        if not text:
-            return None
-        return text, datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError, AttributeError, KeyError, json.JSONDecodeError):
-        return None
-
-
-def _content_text(content: object) -> str:
-    """The human-typed text of a user message's `content`: the string itself,
-    or the joined `text` blocks of a block list; "" for a tool_result-only list
-    (or any other shape), which marks 'not a human prompt'."""
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        return " ".join(
-            block["text"] for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        ).strip()
-    return ""

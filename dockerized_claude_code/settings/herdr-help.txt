@@ -29,6 +29,10 @@
                   a block/rectangular-select modifier (often ctrl+alt or
                   alt +drag), which takes the pane's columns only.
 
+  alt+f           find a term in PAST conversations - every session on
+                  disk, not just what is on screen (in a cluster: every
+                  member). It takes alt+f away from readline's move-a-word
+                  in the shell; alt+b still moves back a word.
   alt+/           this help  (a direct chord - no prefix)
   alt+q           quit: end the session and stop the container  (Y/n)
   prefix+q        detach: leave, everything keeps running

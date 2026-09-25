@@ -15,7 +15,7 @@ from launch.gui.forms import (
     _form_requires, _harness_warnings, _pairing_warnings, _tag_form_options, _tag_row,
     _toolkit_form_options, prompt_tags,
 )
-from launch.gui.form_core import active_warnings
+from launch.gui.form_core import FormResult, active_warnings
 from launch.gui.styles import STYLE_UNDERLINE, _plain
 from launch.paths import AGENTS_DIR
 from launch.tags import AgentBuild, Budget, is_standard, scan_all
@@ -246,8 +246,12 @@ class TestPromptTags(unittest.TestCase):
     axes (registry order) and the engine rides through untouched. The form
     itself is patched — its interactive behavior is out of unit scope."""
 
-    def _run(self, form_result, current=AgentBuild(engine="poet")):
-        with patch.object(forms, "checkbox_form", return_value=form_result) as self.form:
+    def _run(self, checked, current=AgentBuild(engine="poet")):
+        # `checked` is the key list a confirmed form comes back with, or None
+        # for Esc — the fixture wraps it in the record the real form returns,
+        # so a caller below still reads as the tick list it means.
+        result = None if checked is None else FormResult(checked=checked)
+        with patch.object(forms, "checkbox_form", return_value=result) as self.form:
             return prompt_tags(REGISTRY, current,
                                instance="poet__verse", workspace="/tmp/ws", scope="solo")
 
@@ -470,7 +474,7 @@ class TestClusterTagForm(unittest.TestCase):
             captured["title"] = title
             captured["options"] = options
             captured.update(kwargs)
-            return result
+            return None if result is None else FormResult(checked=result)
 
         with patch("launch.gui.forms.checkbox_form", side_effect=fake_form):
             build = forms.prompt_cluster_tags(

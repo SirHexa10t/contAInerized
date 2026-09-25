@@ -42,8 +42,9 @@ from launch.docker_config import (
     running_instance_report, set_container_mounts, set_dry_run,
 )
 from launch.file_access import (
-    agent_md_index, expand_user_path, is_dir,
+    agent_md_index, expand_user_path, is_dir, iter_conversation_dirs,
 )
+from launch.history_find import find_in_history, print_findings
 from launch.claude_code_config import print_launch_banner
 from launch.gui import (
     ask_for_workspace, instance_fields, prompt_stop, prompt_tags, select_agent,
@@ -63,7 +64,7 @@ from launch.user_additions import (
 from launch.ai import active_adapter, adopt, refusal_for
 from launch.startup import open_launcher
 from launch.template_code.docker_prompts import RETRY_SOLO
-from launch.utils import call_or_exit, exit_if_missing
+from launch.utils import call_or_exit, exit_if_missing, plural
 
 
 class LaunchOptions(NamedTuple):
@@ -91,12 +92,16 @@ class LaunchOptions(NamedTuple):
         stop              — `--stop` flag. Instead of launching anything, open
                             the multi-select of RUNNING containers and stop
                             the picked ones (gather_input short-circuits
-                            before the picker)."""
+                            before the picker).
+        find              — `--find TERM`. Instead of launching anything,
+                            print where TERM was said across every past
+                            conversation (same short-circuit as --stop)."""
     picked: Agent | Instance | Cluster | None   # Cluster only via the picker — a CLI target names an agent/instance
     claude_args: list[str]
     dry_run: bool
     refresh_installs: bool
     stop: bool = False        # defaulted: launch-stage helpers build LaunchOptions without it
+    find: str | None = None   # defaulted for the same reason
 
 
 def parse_cli(registry: Registry) -> LaunchOptions:
@@ -128,13 +133,21 @@ def parse_cli(registry: Registry) -> LaunchOptions:
              "of every running instance/cluster. Stopping ends the container only — "
              "state and conversations persist, and the next launch resumes as usual.",
     )
+    parser.add_argument(
+        "--find",
+        metavar="TERM",
+        help="Search past conversations instead of launching: prints every turn "
+             "containing TERM, grouped by the instance, cluster member or quick "
+             "question that said it. Reads the transcripts on disk, so it reaches "
+             "what scrolled out of the terminal long ago.",
+    )
     args, claude_args = parser.parse_known_args()
     picked = resolve_pick(args.target, registry)
     if args.target is not None and picked is None:
         # Unknown name — pass it through to claude as a positional, picker still runs.
         claude_args = [args.target] + claude_args
     return LaunchOptions(picked, claude_args, args.dry_run,
-                         args.refresh_installs, args.stop)
+                         args.refresh_installs, args.stop, args.find)
 
 
 def gather_input() -> tuple[LaunchOptions, Registry]:
@@ -155,6 +168,13 @@ def gather_input() -> tuple[LaunchOptions, Registry]:
     registry = call_or_exit(open_launcher, exceptions=TagError)   # migrations first, then the tree — the one startup every entry shares
     exit_if_missing(agent_md_index(), f"No agents found. Create an .md file in {AGENTS_DIR}/.")
     opts = parse_cli(registry)
+    # --find reads files and starts nothing, so it comes BEFORE the docker
+    # gate: refusing to search a year of transcripts because the daemon is
+    # down would be a gate protecting nothing. --stop is the other side of
+    # that coin — stopping containers needs docker, so it waits.
+    if opts.find is not None:
+        find_history(opts.find)
+        sys.exit(0)
     require_docker()
     if opts.stop:
         stop_running(registry)     # a terminal mode, not a launch
@@ -172,11 +192,35 @@ def stop_running(registry: Registry) -> None:
     how one is ended without re-attaching. Stopping IS removal (`--rm`);
     state dirs and conversations persist host-side, so a stopped instance
     relaunches with `--continue` exactly as if its session had ended from
-    inside."""
-    for target in prompt_stop(registry):
+    inside.
+
+    The "nothing is running" line is printed HERE, from prompt_stop's None,
+    rather than inside the form module: gui/ renders, this layer speaks. The
+    two empty outcomes must stay apart — a user who cancelled a form listing
+    three live containers must not be told nothing was running."""
+    targets = prompt_stop(registry)
+    if targets is None:
+        print("  Nothing is running.")
+        return
+    for target in targets:
         print(f"  stopping {target} …", flush=True)
         if not docker_stop_subprocess(target):
             print(f"  ! docker reported a problem stopping {target}")
+
+
+def find_history(term: str) -> None:
+    """`--find TERM` — print where it was said, across every conversation on
+    this host (instances, cluster members, quick-question threads).
+
+    Needs no registry, no docker and no store: a transcript is a file, and
+    which dirs hold one is a directory fact. The scan is announced before it
+    runs because it is the one launcher command whose cost grows with how
+    long the operator has been using the tool — see `history_find`'s
+    no-index note for the size at which that decision should be re-measured."""
+    conversations = list(iter_conversation_dirs())
+    print(f'  Searching {len(conversations)} conversation'
+          f'{plural(len(conversations))} for "{term}" …', flush=True)
+    print_findings(term, find_in_history(term))
 
 
 def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:

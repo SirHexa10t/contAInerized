@@ -68,7 +68,8 @@ from ..paths import (
     CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
     CLUSTER_WORK_PROTOCOL_DIR, CLAUDE_CONFIG_IN_CONTAINER,
     RO_MOUNT_OPTION, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
-    auth_file_mounts, base_mounts, cluster_banner_path, cluster_member_dir, cluster_path, key_file,
+    auth_file_mounts, base_mounts, cluster_banner_path, cluster_member_dir, cluster_path,
+    container_transcripts_dir, key_file,
 )
 from ..staging import stage_instance
 from ..tag_handlers import apply_tags
@@ -308,6 +309,13 @@ def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = Fa
             # (operator report, 2026-09-02).
             ContainerEnvKey.AGENT_STATUS_LINE.value:
                 build_cluster_status_line(inst, member.id),
+            # Where THIS member's transcripts are — its own config dir's
+            # `projects/`, never /home/claude/.claude's. The in-container
+            # readers (dump_last_msg, find_in_history) follow this rather
+            # than a hardcoded path, which is what made them read another
+            # member's dir, or nothing at all, before 2026-09-19.
+            ContainerEnvKey.AGENT_TRANSCRIPTS_DIR.value:
+                str(container_transcripts_dir(config)),
         }
         command_for[member.id] = (
             harness.binary,

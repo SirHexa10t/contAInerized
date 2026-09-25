@@ -105,13 +105,22 @@ class TestContainerEnvForwards(unittest.TestCase):
         # launch that happened to stage it.
         self.assertNotIn(ContainerEnvKey.WHITELIST_ADDRESSES, CONTAINER_ENV_FORWARDS)
 
-    def test_instance_scoped_keys_are_exactly_the_two_identity_keys(self):
-        # One agent's identity — staged by set_instance_env for a solo
-        # instance or a quickie, per pane for a cluster member, and refused
-        # container-wide by run_cluster_container. A new key here is a
-        # decision about every cluster launch.
+    def test_instance_scoped_keys_are_exactly_the_per_agent_three(self):
+        # What ONE agent gets that its container-mates must not inherit —
+        # staged by set_instance_env for a solo instance or a quickie, per
+        # pane for a cluster member, and refused container-wide by
+        # run_cluster_container. A new key here is a decision about every
+        # cluster launch, which is why the set is written out.
+        #
+        # AGENT_TRANSCRIPTS_DIR joined the two identity keys on 2026-09-19:
+        # a member's transcripts live under ITS config dir, so a
+        # container-wide value would have pointed every member's reader at
+        # /home/claude/.claude — which is what `_dump_last_msg.py` did by
+        # hardcoding it, and it read the wrong dir for every member.
         self.assertEqual(set(ContainerEnvKey.instance_scoped_keys()),
-                         {ContainerEnvKey.AGENT_STATUS_LINE, ContainerEnvKey.CLAUDE_AGENT_INSTANCE})
+                         {ContainerEnvKey.AGENT_STATUS_LINE,
+                          ContainerEnvKey.CLAUDE_AGENT_INSTANCE,
+                          ContainerEnvKey.AGENT_TRANSCRIPTS_DIR})
         for member in ContainerEnvKey:
             with self.subTest(member=member.name):
                 self.assertEqual(member.instance_scoped, member in ContainerEnvKey.instance_scoped_keys())
@@ -152,8 +161,17 @@ class TestTheTwoHalves(ContainerEnvFixture):
     def test_the_instance_half_stages_exactly_the_identity(self):
         inst = make_inst("poet", "s9")
         set_instance_env(inst)
-        self.assertEqual(set(staged_env()), {"AGENT_STATUS_LINE", "CLAUDE_AGENT_INSTANCE"})
+        self.assertEqual(set(staged_env()), {"AGENT_STATUS_LINE", "CLAUDE_AGENT_INSTANCE",
+                                             "AGENT_TRANSCRIPTS_DIR"})
         self.assertEqual(staged_env()["CLAUDE_AGENT_INSTANCE"], "poet__s9")
+
+    def test_a_solo_instance_points_at_its_own_config_dir_transcripts(self):
+        # The path the in-container readers parse. Derived from the harness
+        # adapter's `transcripts_dirname`, not spelled here: one definition
+        # for the day a CLI names that directory something else.
+        set_instance_env(make_inst("poet", "s9"))
+        self.assertEqual(staged_env()["AGENT_TRANSCRIPTS_DIR"],
+                         f"{paths.CLAUDE_CONFIG_IN_CONTAINER}/projects")
 
 
 class TestContainerEnvArgs(ContainerEnvFixture):

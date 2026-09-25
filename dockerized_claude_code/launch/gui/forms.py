@@ -17,7 +17,7 @@ from `styles`. Nothing here builds a prompt_toolkit Application itself.
 """
 
 from dataclasses import dataclass, replace
-from typing import Callable, cast, overload
+from typing import Callable, overload
 
 from ..paths import toolkit_profile_path, ui_profile_path
 from ..tags import (
@@ -202,7 +202,7 @@ def prompt_cluster_tags(registry: Registry, current: AgentBuild, *,
                   "# what makes this a cluster."])
     if result is None:
         return None
-    picked = set(cast("list[str]", result))
+    picked = set(result.checked)
     # No engine axis, and always-on policies stay out of the build exactly as
     # in prompt_tags (they apply unconditionally and are never persisted).
     return AgentBuild(
@@ -397,11 +397,7 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
                            fields=fields)
     if result is None:
         return None
-    values: dict[str, str] = {}
-    if fields is not None:
-        values, keys = cast("tuple[dict[str, str], list[str]]", result)
-    else:
-        keys = cast("list[str]", result)
+    values, keys = result.field_values, result.checked
     picked = set(keys)
     # Always-on (static) tags come back checked — they're locked rows — but
     # are never part of the build: applied unconditionally, never persisted.
@@ -532,7 +528,7 @@ def edit_profiles_form(sections: list[ProfileSection],
     result = checkbox_form(sections[0].title, merged, preamble=preamble)
     if result is None:   # Esc — cancel, no file touched
         return
-    checked = set(result)
+    checked = set(result.checked)
     for index, section in enumerate(sections):
         section.save({option.key for option in section.options
                       if f"{index}:{option.key}" in checked})

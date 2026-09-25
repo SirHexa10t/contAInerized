@@ -12,6 +12,7 @@ test_menu_picker for the menus' end-to-end row assembly)."""
 
 import dataclasses
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from launch.gui import picker_widget
@@ -570,6 +571,144 @@ class TestPaneView(unittest.TestCase):
 
     def test_a_legend_no_caller_supplied_is_never_shown(self):
         self.assertEqual(_pane_view(hidden=False, legend_open=True, has_legend=False), PANE_PREVIEW)
+
+
+def _real_app(**kwargs):
+    """The picker's Application, really constructed but never run — `run()`
+    is intercepted, so this needs no terminal. The app session is the one
+    the form tests use, so prompt_toolkit resolves a dummy input instead of
+    warning that stdin is not a tty."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.input import DummyInput
+    from prompt_toolkit.output import DummyOutput
+    built: dict = {}
+
+    class Recorder(picker_widget.Application):      # type: ignore[misc]
+        def run(self, *args: object, **kw: object) -> None:
+            built["app"] = self
+
+    entries = [PickerEntry(display=[("", "row")], value="v", preview="p")]
+    with create_app_session(input=DummyInput(), output=DummyOutput()), \
+         patch.object(picker_widget, "Application", Recorder):
+        picker_widget.pick_with_preview("t", entries, **kwargs)
+    return built["app"]
+
+
+class TestFindKey(unittest.TestCase):
+    """alt+f — the picker's half of `--find`. It is offered only when the
+    caller asks for it, it carries no row (a search is not about the row
+    under the cursor), and binding it must not make Esc feel broken."""
+
+    def _picker(self, **kwargs):
+        from unittest.mock import patch
+        captured: dict = {}
+
+        class FakeApp:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            def invalidate(self) -> None: ...
+
+            def run(self) -> None: ...
+
+        entries = [PickerEntry(display=[("", "row")], value="v", preview="p")]
+        with patch.object(picker_widget, "Application", FakeApp):
+            result = picker_widget.pick_with_preview("t", entries, **kwargs)
+        return captured, result
+
+    @staticmethod
+    def _keyed(captured, keys):
+        return [b for b in captured["key_bindings"].bindings if tuple(b.keys) == keys]
+
+    def test_the_key_exists_only_when_the_caller_offers_it(self):
+        with_find, _ = self._picker(allow_find=True)
+        without, _ = self._picker()
+        self.assertEqual(len(self._keyed(with_find, ("escape", "f"))), 1)
+        self.assertEqual(self._keyed(without, ("escape", "f")), [])
+
+    def test_pressing_it_returns_find_with_no_row(self):
+        from unittest.mock import MagicMock
+        captured: dict = {}
+
+        class FakeApp:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            def invalidate(self) -> None: ...
+
+            def run(self) -> None:
+                # The key fires while the app is "running", as a real press would.
+                (binding,) = [b for b in captured["key_bindings"].bindings
+                              if tuple(b.keys) == ("escape", "f")]
+                binding.handler(MagicMock())
+
+        from unittest.mock import patch
+        entries = [PickerEntry(display=[("", "row")], value="v", preview="p")]
+        with patch.object(picker_widget, "Application", FakeApp):
+            action, value = picker_widget.pick_with_preview("t", entries, allow_find=True)
+        self.assertEqual(action, picker_widget.PickerAction.FIND)
+        self.assertIsNone(value)     # a search is not about the highlighted row
+
+    def test_the_hint_advertises_it_only_when_offered(self):
+        from prompt_toolkit.layout import Window, walk
+
+        def hint(captured):
+            windows = [w for w in walk(captured["layout"].container)
+                       if isinstance(w, Window) and callable(getattr(w.content, "text", None))]
+            return "".join(text for _, text in windows[-1].content.text())
+
+        with_find, _ = self._picker(allow_find=True)
+        without, _ = self._picker()
+        self.assertIn("alt+f", hint(with_find))
+        self.assertNotIn("alt+f", hint(without))
+
+    def test_escape_does_not_become_slow_to_cancel(self):
+        # alt+f arrives as ESC then f, which makes Esc a PREFIX: without a
+        # short flush timeout, the picker's own cancel key would sit for half
+        # a second doing nothing, which reads as a hang.
+        #
+        # Driven through a REAL Application, because the first version of
+        # this passed the value as a constructor keyword — which prompt
+        # toolkit does not accept — and a fake that swallowed **kwargs said
+        # it was fine while the launcher could not start (2026-09-19).
+        self.assertLessEqual(_real_app(allow_find=True).ttimeoutlen, 0.1)
+
+
+class TestApplicationConstruction(unittest.TestCase):
+    """What the picker hands to prompt_toolkit. Every other test here fakes
+    the Application away — deliberately, since running one needs a terminal
+    — so these two are the only thing standing between a wrong argument and
+    a launcher that cannot open its own picker."""
+
+    def test_every_application_argument_is_one_prompt_toolkit_accepts(self):
+        # Mechanical, so it covers arguments nobody has added yet: bind the
+        # captured call against the REAL signature. A keyword the installed
+        # prompt_toolkit does not take raises TypeError here instead of at
+        # the operator's first launch.
+        import inspect
+        from prompt_toolkit.application import Application as RealApplication
+        captured: dict = {}
+
+        class FakeApp:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            def invalidate(self) -> None: ...
+
+            def run(self) -> None: ...
+
+        entries = [PickerEntry(display=[("", "row")], value="v", preview="p")]
+        with patch.object(picker_widget, "Application", FakeApp):
+            picker_widget.pick_with_preview("t", entries, allow_delete=True,
+                                            allow_modify=True, allow_find=True,
+                                            legend_text="L")
+        inspect.signature(RealApplication.__init__).bind(object(), **captured)
+
+    def test_the_real_application_builds(self):
+        # The end of the same argument: construction itself, for real. It
+        # never runs (that needs a tty), which is the whole reason a fake
+        # stands in everywhere else.
+        self.assertIsNotNone(_real_app(allow_find=True))
 
 
 class TestPreviewPaneToggle(unittest.TestCase):

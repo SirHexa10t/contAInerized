@@ -1,7 +1,9 @@
 """The launcher's MENUS (launch/gui): what rows the user is offered, what
 each key does to them, and what a pick means.
 
-Three of them, all built on `picker_widget.pick_with_preview`:
+Three of them. Two run on `picker_widget.pick_with_preview`; `--stop` is a
+multi-select, which the picker does not do, so it runs on the forms'
+`form_core.checkbox_form` and wears the picker's row anatomy over it:
 
   select_agent(registry)
       The main menu: creatable agents, their continuable instances nested
@@ -16,7 +18,7 @@ Three of them, all built on `picker_widget.pick_with_preview`:
 
   prompt_stop(registry)
       `run.py --stop`'s multi-select over RUNNING containers.
-      -> the picked docker ids
+      -> the picked docker ids, or None when nothing is running
 
   _delete_submenu(registry, legend_text)
       The nested destructive menu, reachable only from select_agent.
@@ -28,11 +30,11 @@ loop are `picker_widget`'s — this module was 1541 lines holding both until
 they were split on 2026-09-03.
 
 The rows for EXISTING things — instances, clusters, `--stop`'s — share one
-anatomy (`_session_row`) and one reading of their workspace (`_CwdContext`,
-resolved once per menu build), which is what lines their paths up in a
-column and gives every kind the same CURRENT / DEFAULT / INVALID hints
-(2026-09-09; cluster rows had their own anatomy and no hints before). Row
-data comes from two factories: `continuable_instances` for instances and
+anatomy and one width pass (`_RowLayout`), and one reading of their
+workspace (`_CwdContext`, resolved once per menu build), which is what lines
+their paths up in a column and gives every kind the same CURRENT / DEFAULT /
+INVALID hints (2026-09-09; cluster rows had their own anatomy and no hints
+before). Row data comes from two factories: `continuable_instances` for instances and
 `cluster_entries` for clusters, whose members are Instances too
 (`Cluster.member_instance`) and so get the instance rows' deferred previews.
 
@@ -89,10 +91,11 @@ from .picker_widget import (
     _tags_column, break_row, pick_with_preview,
 )
 from .picker_prompts import (
-    _agent_description, confirm_dialog,
+    _agent_description, ask_for_find_term, confirm_dialog,
     instance_fields, _report_to_picker,
 )
 from .form_core import FormOption, checkbox_form
+from ..history_find import find_in_history
 from .forms import edit_profiles_menu, prompt_tags
 from .styles import (
     rich_style, STYLE_AGENT_NAME, STYLE_TAG_INVALID, tag_style,
@@ -133,6 +136,13 @@ DELMENU_PREVIEW = "Open the deletion sub-menu to remove agent instances and thei
 BACK_PREVIEW    = "Return to the main agent picker."
 CONFIRM_DELETE_FMT = "Delete '{name}'?"
 STOP_FORM_TITLE = "Stop running containers  (Space to mark, Enter to stop):"
+# Said ONCE, above the list, rather than on each row's body: it is true of
+# every row (it was on the instance rows only, so whoever stopped a cluster
+# never read it) and it does not change with the highlight.
+STOP_FORM_PREAMBLE = [
+    "# Stopping ends the CONTAINER only. State dirs and conversations live",
+    "# host-side, so the next launch of each one resumes where it left off.",
+]
 
 # ============================================================
 # Agent-picker styles (inline, applied per-segment)
@@ -149,6 +159,13 @@ STYLE_RUNNING_NAME   = "fg:ansibrightblack"                      # grey — this
 RUNNING_HINT         = ("bold fg:ansibrightred", "(RUNNING) ")   # (style, label) fragment, same shape as PickerCwdHint.fragment
 
 NO_WORKSPACE_DISPLAY = "?"            # subtitle placeholder when a Cont row's store entry is missing or stale
+
+# Every variable-width piece of a row is measured as it is built, because a
+# fragment list's printable width is not len() of anything: `(fragments, its
+# printable width)`. NO_COLUMN is the empty one — safe to share, as nothing
+# ever appends to a column in place.
+Column = tuple[list[tuple[str, str]], int]
+NO_COLUMN: Column = ([], 0)
 
 # Sentinel entry values signalling "open the delete submenu" / "open the
 # toolkits editor" — used in the main picker where most rows hold an
@@ -362,10 +379,10 @@ def cluster_entries(registry: Registry, running: frozenset[str],
 # Row anatomy — what every row for an EXISTING thing looks like
 # ============================================================
 
-def _runtime_column(ai: Ai | None, harness: Harness | None) -> tuple[list[tuple[str, str]], int]:
+def _runtime_column(ai: Ai | None, harness: Harness | None) -> Column:
     """The runtime column of a row — the AI's ⟪label⟫ in its own colours,
     then the harness's ⟦label⟧ (operator, 2026-09-14), each followed by a
-    space — as (fragments, width); ([], 0) for a row with neither (a cluster
+    space — as (fragments, width); NO_COLUMN for a row with neither (a cluster
     row: its members carry theirs; an agent row: both are chosen per
     instance). Sits between the tag column and the name (operator,
     2026-09-13), padded per population like the tags."""
@@ -378,32 +395,94 @@ def _runtime_column(ai: Ai | None, harness: Harness | None) -> tuple[list[tuple[
     return frags, width
 
 
-def _session_row(lead: list[tuple[str, str]],
-                 column: tuple[list[tuple[str, str]], int], column_width: int,
-                 name: str, name_width: int, *, running: bool,
-                 workspace: WorkspaceView,
-                 runtime: tuple[list[tuple[str, str]], int] = ([], 0), runtime_width: int = 0,
-                 ) -> list[tuple[str, str]]:
-    """The anatomy every row for an EXISTING thing wears — an instance, a
-    cluster, `--stop`'s rows: lead · tag column padded to its population's
-    widest · the runtime column (AI, harness) padded likewise · name padded likewise (grey when
-    running, else the name blue) · a gap · `(RUNNING)` when running · the cwd
-    hint · the workspace path. One definition (2026-09-09) is what lines the
-    paths up in a column whatever the row kind, and what gave cluster rows the
-    hints instance rows had."""
-    frags, width = column
-    run_frags, run_len = runtime
-    out = [*lead, *frags, ("", " " * (column_width - width)),
-           *run_frags, ("", " " * (runtime_width - run_len)),
-           (STYLE_RUNNING_NAME if running else STYLE_AGENT_NAME, f"{name:<{name_width}}"),
-           ("", "    ")]
-    if running:
-        out.append(RUNNING_HINT)
-    return out + workspace.fragments
+@dataclasses.dataclass(frozen=True)
+class _RowCells:
+    """The variable-width pieces of ONE row: its tag column and its runtime
+    column, each as the `(fragments, width)` pair the column builders
+    return. A row with neither (`--stop`'s stray containers) still gets a
+    cells object, so its name lands in the same column as everyone else's."""
+    column: Column = NO_COLUMN
+    runtime: Column = NO_COLUMN
 
 
-def _cluster_column(registry: Registry, entry: ClusterEntry,
-                    ) -> tuple[list[tuple[str, str]], int]:
+@dataclasses.dataclass(frozen=True)
+class _RowLayout:
+    """The widths one POPULATION of rows is padded to, and the anatomy every
+    row for an existing thing wears — an instance, a cluster, `--stop`'s
+    rows: lead · tag column · runtime column (AI, harness) · name · a gap ·
+    `(RUNNING)` · the cwd hint · the workspace path. One definition
+    (2026-09-09) is what lines the paths up in a column whatever the row
+    kind, and what gave cluster rows the hints instance rows had; the widths
+    joined it on 2026-09-18, because computing them was four steps every
+    caller was spelling out for itself.
+
+    WHAT SHARES A POPULATION IS THE CALLER'S CALL, and the two menus answer
+    it differently on purpose. The main menu pads each kind against ITSELF —
+    tying agent rows to instance rows once pushed agent names way out to
+    align with the widest instance tag set, even though the two never share
+    a row, and its cluster rows sit in blocks of their own anyway. `--stop`
+    pads every running thing TOGETHER, because there they are one flat
+    checkbox list, where a name column that restarts halfway down reads as a
+    rendering fault."""
+    column_width: int
+    runtime_width: int
+    name_width: int
+
+    @classmethod
+    def over(cls, *populations: dict[str, _RowCells]) -> "_RowLayout":
+        """The layout for every row in `populations` — pass one dict per kind
+        that must line up with the others, keyed by the name each row shows."""
+        cells = [c for population in populations for c in population.values()]
+        names = [n for population in populations for n in population]
+        return cls(column_width=max((c.column[1] for c in cells), default=0),
+                   runtime_width=max((c.runtime[1] for c in cells), default=0),
+                   name_width=max((len(name) for name in names), default=0))
+
+    def row(self, lead: list[tuple[str, str]], cells: _RowCells, name: str, *,
+            workspace: WorkspaceView, inert: bool, running_hint: bool,
+            ) -> list[tuple[str, str]]:
+        """One row, padded to this layout. The two flags are INDEPENDENT and
+        both used to hang off one `running` argument: `inert` greys the name
+        (this row is information-only — the picker's `selectable=False`
+        rows), while `running_hint` appends the red `(RUNNING)` label.
+        `--stop` wants the label gone and the names live, and said so by
+        claiming its containers were not running (2026-09-18)."""
+        frags, width = cells.column
+        run_frags, run_len = cells.runtime
+        out = [*lead, *frags, ("", " " * (self.column_width - width)),
+               *run_frags, ("", " " * (self.runtime_width - run_len)),
+               (STYLE_RUNNING_NAME if inert else STYLE_AGENT_NAME, f"{name:<{self.name_width}}"),
+               ("", "    ")]
+        if running_hint:
+            out.append(RUNNING_HINT)
+        return out + workspace.fragments
+
+
+def _instance_cells(entries: Iterable[ContEntry], *,
+                    emphasize: frozenset[str] = frozenset()) -> dict[str, _RowCells]:
+    """Instance rows' cells, keyed by instance id: the instance's resolved
+    tags (with `emphasize` for the one the menu is about) and its AI +
+    harness."""
+    return {e.identity.instance: _RowCells(_cont_tags_column(e.identity, emphasize=emphasize),
+                                           _runtime_column(e.identity.ai, e.identity.harness))
+            for e in entries}
+
+
+def _cluster_cells(registry: Registry,
+                   entries: Iterable[ClusterEntry]) -> dict[str, _RowCells]:
+    """Cluster rows' cells, keyed by session. No runtime column: which AI and
+    CLI run is a per-MEMBER fact, and the member rows carry it."""
+    return {c.cluster.session: _RowCells(_cluster_column(registry, c)) for c in entries}
+
+
+def _bare_cells(names: Iterable[str]) -> dict[str, _RowCells]:
+    """Cells for rows nothing is known about but their name — `--stop`'s
+    stray containers. They still join the width pass, so a stray's id lines
+    up with the names above it instead of starting at the margin."""
+    return {name: _RowCells() for name in names}
+
+
+def _cluster_column(registry: Registry, entry: ClusterEntry) -> Column:
     """A cluster row's tag column: the tags the cluster forces on every member
     (`{cc}` emphasized — the one that changes how the team works; an
     unresolvable name in the alert style), then the member count in the
@@ -414,16 +493,6 @@ def _cluster_column(registry: Registry, entry: ClusterEntry,
                                 problems=problems)
     count = f"({len(entry.cluster.members)} members)"
     return [*frags, (STYLE_MEMBER_COUNT, count), ("", " ")], width + len(count) + 1
-
-
-def _column_widths(columns: Iterable[tuple[list[tuple[str, str]], int]],
-                   names: Iterable[str]) -> tuple[int, int]:
-    """(widest tag column, longest name) over one population of rows —
-    each population is padded against ITSELF: tying agent rows to instance
-    rows once pushed agent names way out to align with the widest instance
-    tag set, even though the two never share a row."""
-    return (max((width for _, width in columns), default=0),
-            max((len(name) for name in names), default=0))
 
 
 # ============================================================
@@ -525,82 +594,123 @@ def _build_composition_legend(registry: Registry) -> str:
 # The menus
 # ============================================================
 
-def prompt_stop(registry: Registry) -> list[str]:
+def prompt_stop(registry: Registry) -> list[str] | None:
     """The `--stop` selector: every RUNNING instance and cluster as a checkbox
-    row wearing the picker's own Cont-row anatomy (`_session_row`) — tags ·
+    row wearing the picker's own Cont-row anatomy (`_RowLayout.row`) — tags ·
     name · cwd hint · workspace — minus the `(RUNNING)` hint, which would say
-    nothing in a list that is running by definition. `{muxer}` is emphasized
-    wherever present: sticky sessions are this flag's reason to exist (a muxer
-    container outlives its terminal, so this list is how one is ended without
-    re-attaching). Returns the picked docker ids, CONTAINER_NAME_PREFIX
-    already stripped (the running-snapshot's spelling) — empty on Esc or when
-    nothing runs.
+    nothing in a list that is running by definition, and with the names left
+    live rather than greyed, because here they are what the user is reaching
+    for. `{muxer}` is emphasized on INSTANCE rows: a sticky instance is this
+    flag's reason to exist (a muxer container outlives its terminal, so this
+    list is how one is ended without re-attaching). Cluster rows do not call
+    it out — `muxer` is in `cluster_state.LOCKED_SPECIALTIES`, so every
+    cluster carries it and the emphasis would mark them all.
+
+    Unlike the main menu, every row here is padded against every other: this
+    is one flat list rather than nested blocks, so instances, clusters and
+    strays share one name column (see `_RowLayout`).
+
+    Returns the picked docker ids, CONTAINER_NAME_PREFIX already stripped
+    (the running-snapshot's spelling), OR None when nothing is running at
+    all — the distinction the caller needs, since an empty list also means
+    "the form opened and the user cancelled or ticked nothing", and only one
+    of those two deserves to be told that nothing was running (the
+    `docker_running_instances_subprocess` tri-state rule, one layer up).
 
     A running id that matches no store entry and no cluster still gets a bare
     row (id only): a stray is exactly what someone reaching for --stop most
     needs to be able to stop."""
     running = docker_running_instances_subprocess() or frozenset()
     here = _CwdContext.here()
-    options: list[FormOption] = []
-    matched: set[str] = set()
 
     live = [e for e in continuable_instances(registry, running, here) if e.is_running]
-    columns = {e.identity.instance:
-               _cont_tags_column(e.identity, emphasize=frozenset({"muxer"}))
-               for e in live}
-    col_width, name_width = _column_widths(columns.values(),
-                                           (e.identity.instance for e in live))
-    runtime_columns = {e.identity.instance: _runtime_column(e.identity.ai, e.identity.harness) for e in live}
-    runtime_width = max((w for _, w in runtime_columns.values()), default=0)
-    for entry in live:
-        matched.add(entry.identity.instance)
-        options.append(FormOption(
-            key=entry.identity.instance,
-            label=_session_row([], columns[entry.identity.instance], col_width,
-                               entry.identity.instance, name_width,
-                               running=False, workspace=entry.workspace,
-                               runtime=runtime_columns[entry.identity.instance], runtime_width=runtime_width),
-            body=[("", f"last used {entry.last_used_display}   ·   stopping "
-                       "ends the container; the conversation resumes on the "
-                       "next launch")]))
-
     live_clusters = [c for c in cluster_entries(registry, running, here) if c.is_running]
-    cluster_columns = {c.cluster.session: _cluster_column(registry, c) for c in live_clusters}
-    col_width, name_width = _column_widths(cluster_columns.values(),
-                                           (c.cluster.session for c in live_clusters))
-    for cluster_entry in live_clusters:
-        container_id = cluster_container_id(cluster_entry.cluster.session)
-        matched.add(container_id)
-        options.append(FormOption(
-            key=container_id,
-            label=_session_row([], cluster_columns[cluster_entry.cluster.session],
-                               col_width, cluster_entry.cluster.session, name_width,
-                               running=False, workspace=cluster_entry.workspace),
-            body=[("", f"last used {cluster_entry.last_used_display}   ·   members: "
-                       + ", ".join(cluster_entry.cluster.ids))]))
+    known = ({e.identity.instance for e in live}
+             | {cluster_container_id(c.cluster.session) for c in live_clusters})
+    strays = sorted(running - known)
+    if not (live or live_clusters or strays):
+        return None                     # nothing to offer — never open an empty form
 
-    for stray in sorted(running - matched):
-        options.append(FormOption(
-            key=stray, label=[(STYLE_AGENT_NAME, stray)],
-            body=[("", "a running launcher container with no store entry — "
-                       "stoppable, not otherwise known here")]))
+    instances, clusters = (_instance_cells(live, emphasize=frozenset({"muxer"})),
+                           _cluster_cells(registry, live_clusters))
+    bare = _bare_cells(strays)
+    layout = _RowLayout.over(instances, clusters, bare)
 
-    if not options:
-        print("  Nothing is running.")
-        return []
-    result = checkbox_form(STOP_FORM_TITLE, options)
-    # No text fields ride this form, so a non-None return IS the checked-key
-    # list — the tuple variant exists only for field-carrying forms. The
-    # isinstance narrows for mypy rather than assumes.
-    return result if isinstance(result, list) else []
+    options = [
+        FormOption(key=entry.identity.instance,
+                   label=layout.row([], instances[entry.identity.instance],
+                                    entry.identity.instance,
+                                    workspace=entry.workspace,
+                                    inert=False, running_hint=False),
+                   body=[("", f"last used {entry.last_used_display}")])
+        for entry in live]
+    options += [
+        FormOption(key=cluster_container_id(entry.cluster.session),
+                   label=layout.row([], clusters[entry.cluster.session],
+                                    entry.cluster.session,
+                                    workspace=entry.workspace,
+                                    inert=False, running_hint=False),
+                   body=[("", f"last used {entry.last_used_display}   ·   members: "
+                              + ", ".join(entry.cluster.ids))])
+        for entry in live_clusters]
+    options += [
+        FormOption(key=stray,
+                   label=layout.row([], bare[stray], stray,
+                                    workspace=WorkspaceView("", None),
+                                    inert=False, running_hint=False),
+                   body=[("", "a running launcher container with no store entry — "
+                              "stoppable, not otherwise known here")])
+        for stray in strays]
+
+    result = checkbox_form(STOP_FORM_TITLE, options, preamble=STOP_FORM_PREAMBLE)
+    return [] if result is None else result.checked      # Esc — stop nothing
+
+
+def _hit_counts(term: str) -> dict[Path, int]:
+    """`{state dir: turns that said it}` for alt+f — the picker's view of a
+    search, which is a count per ROW rather than the quoted turns `--find`
+    prints. The quotes have nowhere to go here: the picker owns the whole
+    screen, so anything printed behind it is hidden until it closes."""
+    return {found.state_dir: len(found.hits) for found in find_in_history(term)}
+
+
+def _found_row_data(instances: list[ContEntry], clusters: list[ClusterEntry],
+                    agents: list[Agent], hits: dict[Path, int],
+                    ) -> tuple[list[ContEntry], list[ClusterEntry], list[Agent]]:
+    """The three row populations narrowed to what a find matched: instances
+    that said it, clusters keeping only the members that said it, and the
+    agent rows those instances nest under (an instance row without its agent
+    heading would render orphaned — the heading is the create row, and it
+    stays usable).
+
+    A cluster row survives on its MEMBERS' hits: a cluster holds no
+    transcript of its own, every word of it was said by a member."""
+    kept_instances = [entry for entry in instances if hits.get(entry.identity.state_dir)]
+    kept_clusters = []
+    for cluster in clusters:
+        members = tuple(member for member in cluster.members
+                        if hits.get(member.identity.state_dir))
+        if members:
+            kept_clusters.append(dataclasses.replace(cluster, members=members,
+                                                     missing=()))
+    kept_agent_names = {entry.identity.agent for entry in kept_instances}
+    return (kept_instances, kept_clusters,
+            [agent for agent in agents if agent.name in kept_agent_names])
 
 
 def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluster | None":
     """Run the agent picker (main + nested deletion submenu) until selection or cancel.
     Returns an Agent (create), an Instance (continue), a Cluster (launch it),
     or None (cancel). Caller must ensure at least one agent .md exists before
-    invoking."""
+    invoking.
+
+    alt+f narrows the list to the conversations that SAID something (see
+    `_found_row_data`). It closes the picker to ask for the term, exactly as
+    the delete confirmation does, and reopens filtered — a search that ran
+    while the picker was open would have to freeze it, and the picker owns
+    the screen the answer would print on."""
     legend_text = _build_composition_legend(registry)   # built once per call — the loop below only re-scans instances
+    find_term = ""          # "" = no find active; the list is everything
     while True:
         agents = creatable_agents(registry)
         # ONE `docker ps` and ONE reading of the launch site per menu build,
@@ -609,43 +719,44 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         here = _CwdContext.here()
         instances = continuable_instances(registry, running, here)
         clusters = cluster_entries(registry, running, here)
+        templates = discover_templates(AGENTS_DIR) if not find_term else {}
+        if find_term:
+            instances, clusters, agents = _found_row_data(
+                instances, clusters, agents, _hit_counts(find_term))
 
         instances_by_agent: dict[str, list[ContEntry]] = {}
         for inst in instances:
             instances_by_agent.setdefault(inst.identity.agent, []).append(inst)
 
-        # Each row population — Create rows, Cont rows, cluster rows — pads its
-        # tag column and its name column against ITSELF (see _column_widths).
+        # Each row population — Create rows, Cont rows, cluster rows — pads
+        # its tag column and its name column against ITSELF, so each gets its
+        # own layout (see `_RowLayout`; `--stop` is the menu that does it the
+        # other way).
         #
         # Create rows show the `.lego` default professions/specialties (the
         # names resolve through the registry for warn-aware coloring); Cont
-        # rows show the instance's actual resolved tag objects; cluster rows
-        # the tags they force on every member plus their member count.
-        tag_by_agent = {a.name: _tags_column(_resolve_tags(registry, a.build, scope="solo")[0]) for a in agents}
-        tag_by_inst = {i.identity.instance: _cont_tags_column(i.identity) for i in instances}
-        # The runtime column on Cont rows — the instance's resolved AI and
-        # harness, padded per population. Agent (Create) rows carry none:
-        # which AI runs, and in which CLI, is decided when an instance is
-        # created; neither is a property of the agent (operator, 2026-09-14).
-        runtime_by_inst = {i.identity.instance: _runtime_column(i.identity.ai, i.identity.harness) for i in instances}
-        inst_runtime_width = max((w for _, w in runtime_by_inst.values()), default=0)
-        column_by_cluster = {c.cluster.session: _cluster_column(registry, c) for c in clusters}
-        tag_col_width, agent_name_width = _column_widths(tag_by_agent.values(),
-                                                         (a.name for a in agents))
-        cont_col_width, instance_name_width = _column_widths(
-            tag_by_inst.values(), (i.identity.instance for i in instances))
-        cluster_col_width, cluster_name_width = _column_widths(
-            column_by_cluster.values(), (c.cluster.session for c in clusters))
+        # rows show the instance's actual resolved tag objects plus the
+        # instance's resolved AI and harness — an agent row carries neither,
+        # because which AI runs, and in which CLI, is decided when an
+        # instance is created (operator, 2026-09-14); cluster rows the tags
+        # they force on every member plus their member count.
+        agent_cells = {a.name: _RowCells(_tags_column(_resolve_tags(registry, a.build, scope="solo")[0]))
+                       for a in agents}
+        inst_cells = _instance_cells(instances)
+        cluster_cells = _cluster_cells(registry, clusters)
+        agent_layout = _RowLayout.over(agent_cells)
+        cont_layout = _RowLayout.over(inst_cells)
+        cluster_layout = _RowLayout.over(cluster_cells)
 
         entries: list[PickerEntry] = []
         for agent in agents:
-            tag_frags, tag_len = tag_by_agent[agent.name]
+            tag_frags, tag_len = agent_cells[agent.name].column
             entries.append(PickerEntry(
                 display=[
                     *PickerRowMarker.NEW.fragments("  "),
                     *tag_frags,
-                    ("", " " * (tag_col_width - tag_len)),
-                    (STYLE_AGENT_NAME, f"{agent.name:<{agent_name_width}}"),
+                    ("", " " * (agent_layout.column_width - tag_len)),
+                    (STYLE_AGENT_NAME, f"{agent.name:<{agent_layout.name_width}}"),
                     ("", f" — {_agent_description(read_text(agent.md_path))}"),
                 ],
                 preview=_create_preview(agent),
@@ -657,11 +768,10 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             for inst in instances_by_agent.get(agent.name, []):
                 identity = inst.identity
                 entries.append(PickerEntry(
-                    display=_session_row(PickerRowMarker.CONT.fragments("      "),
-                                         tag_by_inst[identity.instance], cont_col_width,
-                                         identity.instance, instance_name_width,
-                                         running=inst.is_running, workspace=inst.workspace,
-                                         runtime=runtime_by_inst[identity.instance], runtime_width=inst_runtime_width),
+                    display=cont_layout.row(PickerRowMarker.CONT.fragments("      "),
+                                            inst_cells[identity.instance], identity.instance,
+                                            workspace=inst.workspace,
+                                            inert=inst.is_running, running_hint=inst.is_running),
                     preview=_deferred_preview(inst),   # reads transcripts on first highlight, not at menu open
                     preview_quick=_deferred_preview(inst, quick=True),
                     value=identity,
@@ -682,7 +792,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         # picker: templates are hand-authored files, and the picker is where
         # the author is.
         known_agents = frozenset(a.name for a in agents)
-        for template_name, template_path in discover_templates(AGENTS_DIR).items():
+        for template_name, template_path in templates.items():
             try:
                 template = load_legoset(template_path)
                 validate(template, known_agents)
@@ -703,7 +813,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             # so the name lands exactly where agent names do (the cluster tab
             # is wider, so the pad is measured, not copied).
             count = f"({len(template.members)} members)"
-            name_column = PickerRowMarker.NEW.width("  ") + tag_col_width
+            name_column = PickerRowMarker.NEW.width("  ") + agent_layout.column_width
             pad = max(name_column - PickerRowMarker.CLUSTER.width("  ")
                       - len(count), 1)
             entries.append(PickerEntry(
@@ -711,7 +821,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                     *PickerRowMarker.CLUSTER.fragments("  "),
                     (STYLE_MEMBER_COUNT, count),
                     ("", " " * pad),
-                    (STYLE_AGENT_NAME, f"{template_name:<{agent_name_width}}"),
+                    (STYLE_AGENT_NAME, f"{template_name:<{agent_layout.name_width}}"),
                     ("", f" — {template.description or ', '.join(m.id for m in template.members)}"),
                 ],
                 preview=_template_preview(template, template_path),
@@ -738,7 +848,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
         # matching one typed word stay visibly apart when they belong to
         # different clusters (operator, 2026-09-17).
         block_break = break_row(PickerRowMarker.CLSTR.width("  ")
-                                + cluster_col_width + cluster_name_width)
+                                + cluster_layout.column_width + cluster_layout.name_width)
         for position, cluster_entry in enumerate(clusters):
             if position:
                 entries.append(block_break)
@@ -750,11 +860,11 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             # follow their cluster: F2/Del write cluster.toml inside that dir.
             editable = not cluster_entry.is_running
             entries.append(PickerEntry(
-                display=_session_row(PickerRowMarker.CLSTR.fragments("  "),
-                                     column_by_cluster[cluster.session], cluster_col_width,
-                                     cluster.session, cluster_name_width,
-                                     running=cluster_entry.is_running,
-                                     workspace=cluster_entry.workspace),
+                display=cluster_layout.row(PickerRowMarker.CLSTR.fragments("  "),
+                                           cluster_cells[cluster.session], cluster.session,
+                                           workspace=cluster_entry.workspace,
+                                           inert=cluster_entry.is_running,
+                                           running_hint=cluster_entry.is_running),
                 preview=cluster_entry.preview,
                 value=_ClusterRow(cluster.session),
                 marker=PickerRowMarker.CLSTR,
@@ -835,9 +945,24 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             modifiable=False,
         ))
 
-        action, value = pick_with_preview(TITLE_AGENT_PICKER, entries, allow_delete=True, allow_modify=True, legend_text=legend_text)
+        title = (f'{TITLE_AGENT_PICKER}   —   found "{find_term}"'
+                 if find_term else TITLE_AGENT_PICKER)
+        action, value = pick_with_preview(title, entries, allow_delete=True,
+                                          allow_modify=True, allow_find=True,
+                                          legend_text=legend_text)
         if action is None:
             return None
+
+        if action == PickerAction.FIND:
+            # Esc at the prompt, or an empty term, CLEARS an active find —
+            # otherwise the only way back to the full list would be to cancel
+            # the picker and start it again.
+            asked = ask_for_find_term(find_term)
+            if asked and not _hit_counts(asked):
+                _report_to_picker(f'  Nothing said "{asked}" in any conversation.')
+                continue
+            find_term = asked
+            continue
 
         if action == PickerAction.DELETE:  # picker enforces deletability — cont, cluster, and member rows reach here
             if isinstance(value, _ClusterRow):

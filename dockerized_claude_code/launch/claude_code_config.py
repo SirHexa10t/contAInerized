@@ -1,10 +1,12 @@
 """Claude-Code-side experience configuration — pieces of the in-container UX
 the launcher controls from the host side.
 
-  - `build_status_line(inst_id)` — pre-styled ANSI string the launcher
-    forwards via the AGENT_STATUS_LINE env var so Claude Code renders a
-    cyan-agent / grey-workspace / green-email / blue-instance status line
-    at the bottom of its session.
+  - `build_status_line(inst)` / `build_cluster_status_line(inst, member)`
+    — pre-styled ANSI string the launcher forwards via the AGENT_STATUS_LINE
+    env var so Claude Code renders a cyan `<who> - <session>` /
+    grey-workspace / green-email / blue-id status line at the bottom of its
+    session. One anatomy (`_status_line`), two leads: a solo instance's
+    agent, or a cluster member's id.
   - `set_terminal_title(name)` — emits an OSC 0 escape so the terminal
     emulator's window/tab title becomes `Claude Code — <name>`, letting
     the user tell concurrent agent tabs apart at a glance.
@@ -89,50 +91,72 @@ def colored_tag_chain(tags: tuple[Tag, ...]) -> str:
     return " ".join(f"{_tag_ansi(t)}{t.label}{_RESET_ANSI}" for t in tags)
 
 
-def build_status_line(inst: Instance) -> str:
-    """ANSI label for Claude Code's bottom status line — cyan agent + grey
-    workspace + green email + blue instance (`<agent>__<session>`), with the
-    active tag chain (warning-aware reds + greens) trailing. The `<email> :`
-    prefix drops out when .claude.json is missing or lacks a recognisable
-    email field."""
-    CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
-    def cap(name: str) -> str:
-        return name.replace('-', ' ').replace('_', ' ').title()
+def _titled(name: str) -> str:
+    """A machine name as a LABEL — separators to spaces, title-cased, so
+    `project-starter` reads `Project Starter`. Only ever the cyan lead: the
+    canonical spelling rides the blue slot beside it, which is what keeps
+    the line copy-pasteable while the lead stays readable."""
+    return name.replace('-', ' ').replace('_', ' ').title()
 
+
+def _status_line(inst: Instance, *, lead: str, canonical: str) -> str:
+    """The bottom status line's ONE anatomy, shared by both run shapes:
+    cyan `<lead> ( <workspace> )`, a tab, the green account email, the blue
+    canonical id, then the active tag chain (warning-aware reds + greens).
+    Solo and member differ only in the two strings they pass in, so the
+    colours, the tab, the ` : ` separator and the chain have a single
+    definition and the twin lines cannot drift a shade or a space apart."""
+    CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
     email = _account_email()
-    chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
     # Whole prefix (email + separator) drops out when the field is absent —
     # interpolating the raw lookup would render the literal string "None".
     email_part = f"{GREEN}{email}{RESET} : " if email else ""
-    return (f"{CYAN}● {cap(inst.agent)} - {cap(inst.session)} {GREY}( {inst.workspace} ){RESET}"
-            f"\t\t{email_part}{BLUE}{inst.instance}{RESET}"
+    chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
+    return (f"{CYAN}● {lead} {GREY}( {inst.workspace} ){RESET}"
+            f"\t\t{email_part}{BLUE}{canonical}{RESET}"
             f"  {chain}")
+
+
+def build_status_line(inst: Instance) -> str:
+    """ANSI label for Claude Code's bottom status line — cyan `<agent> -
+    <session>` + grey workspace + green email + blue instance
+    (`<agent>__<session>`), with the active tag chain trailing. Nothing is
+    split out of an id to get there: an `Instance` carries `agent` and
+    `session` as separate fields and `instance` is the composition of the
+    two, so the lead is built up rather than parsed back down. The
+    `<email> :` prefix drops out when .claude.json is missing or lacks a
+    recognisable email field."""
+    return _status_line(inst, canonical=inst.instance,
+                        lead=f"{_titled(inst.agent)} - {_titled(inst.session)}")
 
 
 def build_cluster_status_line(inst: Instance, member_id: str) -> str:
     """`build_status_line`'s CLUSTER-member twin — the bottom line in a
-    member's pane. Same anatomy and colours, three differences that matter
+    member's pane. Same anatomy, same colours, four differences that matter
     once N agents share a container:
 
-    - it leads with the MEMBER ID, verbatim and uncapitalised, because that
-      is the name siblings address it by (`ListAgents`, `SendMessage`, the
-      queue's `member` field). Two members built from the same agent differ
-      only in their role, so the capitalised agent name `build_status_line`
-      shows would render them identically;
+    - the lead is `<member id> - <session>`, the member's answer to solo's
+      `<agent> - <session>`: who is in this pane, then which project they
+      are in. A member's pane rarely says the session anywhere else, while
+      a solo instance carries it in its tab title and its id;
+    - the member id stays VERBATIM where the solo lead is title-cased,
+      because it is the name siblings address it by (`ListAgents`,
+      `SendMessage`, the queue's `member` field) and `<agent>__<role>`
+      title-cased is no longer typeable. It is also why the id is not the
+      agent's name: two members built from the same agent differ only in
+      their role, so `build_status_line`'s lead would render them
+      identically;
     - the blue slot carries the CLUSTER's name rather than an instance id —
       `<agent>__<session>` is not a thing here (every member shares the
-      session), and the cluster is what the operator is looking at;
+      session), and the cluster is what the operator launches by name. The
+      session therefore appears twice, exactly as it does on a solo line
+      (title-cased in the lead, verbatim in the blue id);
     - the workspace shown is the cluster's project.
 
     Staged per member (each tab's own `--env`), because container-wide env
     could only ever carry one member's line."""
-    CYAN, BLUE, GREEN, GREY, RESET = "\033[36m", "\033[34m", "\033[32m", "\033[90m", "\033[0m"
-    email = _account_email()
-    email_part = f"{GREEN}{email}{RESET} : " if email else ""
-    chain = colored_tag_chain((*inst.professions, *inst.specialties, *inst.policies))
-    return (f"{CYAN}● {member_id} {GREY}( {inst.workspace} ){RESET}"
-            f"\t\t{email_part}{BLUE}{inst.session}{RESET}"
-            f"  {chain}")
+    return _status_line(inst, canonical=inst.session,
+                        lead=f"{member_id} - {_titled(inst.session)}")
 
 
 def set_terminal_title(name: str) -> None:

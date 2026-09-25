@@ -45,7 +45,8 @@ from typing import Any
 from .claude_code_config import build_status_line
 from .file_access import optional_cred_tokens, present_optional_cred_services
 from .paths import (
-    BASHRC_IN_CONTAINER, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS,
+    BASHRC_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, OPTIONAL_CREDS_MOUNTS,
+    OPTIONAL_CREDS_TOKEN_ENV_VARS, container_transcripts_dir,
     toolkit_profile_path,
 )
 from .tags import Instance, Profession
@@ -95,6 +96,7 @@ class ContainerEnvKey(str, Enum):
     # Always-on run env (emitted as `-e KEY=VALUE` flags by container_env_args)
     AGENT_STATUS_LINE        = (auto(), True, True)   # pre-styled ANSI status line at the bottom of Claude Code — INSTANCE-SCOPED: one agent's; a cluster member gets its own per pane
     BASH_ENV                 = (auto(), True)    # path to the bashrc that non-interactive bash sources at startup
+    AGENT_TRANSCRIPTS_DIR    = (auto(), True, True)   # absolute path to THIS container's `projects/` dir — INSTANCE-SCOPED, because a cluster member's is its own config dir's, not /home/claude/.claude's. Read by the bashrc helpers that parse transcripts (dump_last_msg, find_in_history); staged from the harness adapter so the path's `projects` half has one definition
     CLAUDE_AGENT_INSTANCE    = (auto(), True, True)   # this instance's id (`<agent>__<session>`) — the container's own name for itself, which nothing else carried: ~/.claude is the same path in every instance and the hostname is a docker id. Read by bashrc helpers that name their output files after the instance (dump_last_msg)
 
     # Custom __new__ + __init__ so the str-mixin and the extra `container_emit`
@@ -310,4 +312,5 @@ def set_instance_env(inst: Instance) -> None:
     _container_env.update({
         ContainerEnvKey.AGENT_STATUS_LINE:       build_status_line(inst),
         ContainerEnvKey.CLAUDE_AGENT_INSTANCE:   inst.instance,
+        ContainerEnvKey.AGENT_TRANSCRIPTS_DIR:   str(container_transcripts_dir(CLAUDE_CONFIG_IN_CONTAINER)),
     })

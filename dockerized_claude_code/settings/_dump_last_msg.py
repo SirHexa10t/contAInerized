@@ -27,14 +27,26 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
+TRANSCRIPTS_ENV = "AGENT_TRANSCRIPTS_DIR"  # staged by the launcher per instance
 INSTANCE_ENV = "CLAUDE_AGENT_INSTANCE"     # staged by the launcher per instance
 FALLBACK_INSTANCE = "session"              # outside a launcher container
+# Only for a shell started outside a launcher container, where nothing staged
+# the env. Inside one it is never used — and it must not be: a cluster
+# member's transcripts live under ITS config dir (/cluster/members/<id>),
+# and hardcoding this path is exactly why this script read the wrong dir for
+# every member until 2026-09-19.
+FALLBACK_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
-def newest_transcript(projects_dir: Path = PROJECTS_DIR) -> Path | None:
+def projects_dir() -> Path:
+    """The transcripts root for THIS container, from the launcher's env."""
+    return Path(os.environ.get(TRANSCRIPTS_ENV) or FALLBACK_PROJECTS_DIR)
+
+
+def newest_transcript(root: Path | None = None) -> Path | None:
     """The session transcript last written to, or None when there is none."""
-    candidates = [path for project in projects_dir.glob("*")
+    root = root if root is not None else projects_dir()
+    candidates = [path for project in root.glob("*")
                   if project.is_dir()
                   for path in project.glob("*.jsonl")
                   if path.stat().st_size > 0]
@@ -80,7 +92,7 @@ def main(argv: list[str]) -> int:
     target_dir = Path(argv[0]) if argv else Path.cwd()
     transcript = newest_transcript()
     if transcript is None:
-        print(f"dump_last_msg: no session transcript under {PROJECTS_DIR}",
+        print(f"dump_last_msg: no session transcript under {projects_dir()}",
               file=sys.stderr)
         return 1
     text = last_assistant_text(transcript)

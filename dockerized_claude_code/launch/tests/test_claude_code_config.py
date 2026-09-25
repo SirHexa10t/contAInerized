@@ -2,6 +2,7 @@
 strings. build_status_line is pure string assembly over an Instance plus one
 JSON field read (patched here), so it tests without any launcher state."""
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +51,68 @@ class TestBuildStatusLine(unittest.TestCase):
 
     def test_workspace_shown(self):
         self.assertIn("/tmp/ws", self._line(None))
+
+
+class TestBuildClusterStatusLine(unittest.TestCase):
+    """A cluster member's bottom line. Same anatomy as the solo one, led by
+    `<member id> - <session>` where solo leads with `<agent> - <session>`:
+    a member's pane says the session nowhere else (every member shares one,
+    and an id names only the agent and the role), which is why the operator
+    asked for it here. Nothing is parsed out of an id to build either lead —
+    `Instance` carries `agent` and `session` as separate fields."""
+
+    MEMBER = "golem__helper"
+
+    def _line(self, email=None, member_id=MEMBER, inst=None):
+        with patch.object(claude_code_config, "read_json_field", return_value=email):
+            return claude_code_config.build_cluster_status_line(inst or _inst(), member_id)
+
+    def test_lead_is_member_id_then_session(self):
+        self.assertIn(f"{self.MEMBER} - S1", self._line())
+
+    def test_member_id_stays_verbatim(self):
+        # Siblings address a member by this exact string (`ListAgents`,
+        # `SendMessage`, the queue's `member` field), so the lead may not
+        # title-case it the way the solo lead title-cases an agent name.
+        line = self._line()
+        self.assertIn(self.MEMBER, line)
+        self.assertNotIn("Golem Helper", line)
+
+    def test_session_is_a_label_in_the_lead_and_verbatim_in_the_id(self):
+        # `cluster.py launch <session>` takes the raw name, so the typeable
+        # spelling has to survive the title-casing the lead applies.
+        line = self._line(inst=dataclasses.replace(_inst(), session="my-proj"))
+        self.assertIn(f"{self.MEMBER} - My Proj", line)
+        self.assertIn("my-proj", line)
+
+    def test_workspace_shown(self):
+        self.assertIn("/tmp/ws", self._line())
+
+    def test_missing_email_renders_no_none_text(self):
+        line = self._line(None)
+        self.assertNotIn("None", line)
+        self.assertNotIn(" : ", line)
+
+    def test_email_present_renders_email_and_separator(self):
+        line = self._line("dev@example.com")
+        self.assertIn("dev@example.com", line)
+        self.assertIn(" : ", line)
+
+    def test_same_anatomy_as_the_solo_line(self):
+        # The pin against the twins drifting: blank out the only two pieces
+        # that are meant to differ (the lead, the canonical id) and the two
+        # lines are the SAME string. Fails on a colour, a space or a
+        # separator changed in one shape and not the other.
+        with patch.object(claude_code_config, "read_json_field",
+                          return_value="dev@example.com"):
+            solo = claude_code_config.build_status_line(_inst())
+            member = claude_code_config.build_cluster_status_line(_inst(), self.MEMBER)
+
+        def skeleton(line: str, lead: str, canonical: str) -> str:
+            return line.replace(lead, "<LEAD>").replace(canonical, "<ID>")
+
+        self.assertEqual(skeleton(solo, "Golem - S1", "golem__s1"),
+                         skeleton(member, f"{self.MEMBER} - S1", "s1"))
 
 
 class TestColoredTagChain(unittest.TestCase):

@@ -50,8 +50,9 @@ from .paths import (
     AGENTS_DIR,
     FIREWALL_WHITELIST_FILE,
     FIREWALL_WHITELIST_TEMPLATE, OPTIONAL_CREDS_MOUNTS,
-    OPTIONAL_CREDS_TOKEN_ENV_VARS, optional_creds_service_path,
-    optional_creds_token_path,
+    OPTIONAL_CREDS_TOKEN_ENV_VARS, clusters_dir, instances_dir,
+    optional_creds_service_path, optional_creds_token_path,
+    quickie_communal_workspace, quickie_dir,
 )
 from .utils import shell_returncode
 
@@ -284,6 +285,29 @@ def is_symlink(path: Path | str) -> bool:
 
 
 # --- Listing + searching ---
+
+def iter_conversation_dirs() -> Iterator[Path]:
+    """Every state dir on this host that can hold a conversation, in no
+    promised order: one per instance, one per CLUSTER MEMBER, one per quickie
+    thread. `--find` searches exactly this set.
+
+    Three roots because the launcher parks three kinds of conversation in
+    three places, and a search that knew only about `instances/` would answer
+    "never discussed" about work a cluster did. Nothing here parses
+    `cluster.toml` or the instance store: a conversation dir is a DIRECTORY
+    FACT, and keeping it one keeps the disk layer free of tag and TOML
+    knowledge (the caller labels a dir by which root it came from).
+
+    Not cached, unlike `agent_md_index`: that index is read per row per
+    render, while this is walked once per search, and a cache would hide an
+    instance created since the launcher started."""
+    yield from iter_subdirs(instances_dir())
+    for cluster in iter_subdirs(clusters_dir()):
+        yield from iter_subdirs(cluster / "members")
+    communal = quickie_communal_workspace().name
+    yield from (thread for thread in iter_subdirs(quickie_dir())
+                if thread.name != communal)     # the shared drop-box is not a thread
+
 
 def iter_subdirs(parent: Path) -> Iterator[Path]:
     """Yield immediate subdirectories of `parent` (filesystem order). No-op

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from launch.gui import form_core
 from launch.gui.form_core import (
-    FormOption, active_warnings, ordered_form_options,
+    FormOption, FormResult, active_warnings, ordered_form_options,
     requires_closure,
 )
 # The registry ADAPTERS live with the forms that need them (forms.py maps a
@@ -186,24 +186,24 @@ class TestFormDrivenHeadless(unittest.TestCase):
         result = self.drive("\rx\r", fields=[
             form_core.TextField(key="f", label="name", value="",
                                validate=lambda v: "empty" if not v else None)])
-        self.assertEqual(result, ({"f": "x"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "x"}))
 
     def test_space_is_a_literal_in_a_field(self):
         result = self.drive("a b\r", fields=[
             form_core.TextField(key="f", label="name", value="")])
-        self.assertEqual(result, ({"f": "a b"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "a b"}))
 
     def test_backspace_edits_the_field(self):
         result = self.drive("ab\x7f\r", fields=[
             form_core.TextField(key="f", label="name", value="")])
-        self.assertEqual(result, ({"f": "a"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "a"}))
 
     def test_options_below_the_fields_still_toggle(self):
         # Down-arrow onto the option row, Space toggles it, Enter confirms —
         # the field rows must not have broken the row offset arithmetic.
         result = self.drive("\x1b[B \r", fields=[
             form_core.TextField(key="f", label="name", value="ok")])
-        self.assertEqual(result, ({"f": "ok"}, ["o"]))
+        self.assertEqual(result, FormResult(checked=["o"], field_values={"f": "ok"}))
 
     def test_arrows_never_edit_a_field(self):
         # ← once ate a character in a live form (a remove handler fell through
@@ -211,25 +211,25 @@ class TestFormDrivenHeadless(unittest.TestCase):
         # — which makes this form UNCHANGED, so Enter asks and `y` closes it.
         result = self.drive("\x1b[D\x1b[C\ry", fields=[
             form_core.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "abc"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "abc"}))
 
     def test_left_arrow_moves_the_cursor_so_typing_lands_mid_string(self):
         result = self.drive("\x1b[Dx\r", fields=[
             form_core.TextField(key="f", label="name", value="ab")])
-        self.assertEqual(result, ({"f": "axb"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "axb"}))
 
     def test_ctrl_left_jumps_a_word_in_a_path(self):
         # ctrl+← from the end of /tmp/proj lands before `proj` (path
         # separators end a word), so the x goes in front of the basename.
         result = self.drive("\x1b[1;5Dx\r", fields=[
             form_core.TextField(key="f", label="path", value="/tmp/proj")])
-        self.assertEqual(result, ({"f": "/tmp/xproj"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "/tmp/xproj"}))
 
     def test_home_and_the_delete_key_erase_at_the_cursor(self):
         # Home to column 0, Delete eats the char AT the cursor (not before).
         result = self.drive("\x1b[H\x1b[3~\r", fields=[
             form_core.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "bc"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "bc"}))
 
     def test_an_unchanged_confirm_asks_and_any_other_key_stays(self):
         # Enter on an untouched form arms the really-done? question. The next
@@ -237,14 +237,14 @@ class TestFormDrivenHeadless(unittest.TestCase):
         # field as text; the x afterwards proves the form is still live.
         result = self.drive("\rnx\r", fields=[
             form_core.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "abcx"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "abcx"}))
 
     def test_a_changed_confirm_never_asks(self):
         # One real edit and Enter closes directly — no `y` is queued, so if
         # the question wrongly armed, the tripwire would cancel to None.
         result = self.drive("x\r", fields=[
             form_core.TextField(key="f", label="name", value="abc")])
-        self.assertEqual(result, ({"f": "abcx"}, []))
+        self.assertEqual(result, FormResult(checked=[], field_values={"f": "abcx"}))
 
 
 class TestWantsWarnings(unittest.TestCase):

@@ -434,6 +434,35 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertIn('description = "help', text)
         self.assertIn('description = "quit', text)
 
+    def test_the_find_key_is_bound_to_the_mounted_reader(self):
+        # alt+f runs the launcher's OWN transcript reader inside the
+        # container (mounted RO beside the parser it imports), not a
+        # look-alike living in settings/. Both halves are pinned: a popup
+        # that names a script nobody mounts is a popup that prints an
+        # ImportError.
+        text = (paths.SETTINGS_DIR / "herdr.toml").read_text()
+        self.assertIn('key = "alt+f"', text)
+        self.assertIn('description = "find', text)
+        self.assertIn("_find_in_history.py", text)
+        for source, name in ((paths.SETTINGS_DIR / "_find_in_history.py",
+                              "_find_in_history.py"),
+                             (paths.TRANSCRIPT_FORMAT_SOURCE,
+                              "_transcript_format.py")):
+            with self.subTest(mount=name):
+                self.assertTrue(source.is_file())
+                self.assertIn(name, paths.DOCKER_BASE_MOUNTS[source])
+
+    def test_the_container_reader_is_the_launchers_own_parser(self):
+        # ONE implementation of somebody else's format. The mounted file IS
+        # launch/transcript_format.py, and it stays importable without the
+        # package: a `from .` added to it would break the container's search
+        # while every host test kept passing (gate history-find).
+        source = paths.TRANSCRIPT_FORMAT_SOURCE.read_text()
+        self.assertNotIn("\nfrom .", source)
+        self.assertNotIn("\nimport launch", source)
+        script = (paths.SETTINGS_DIR / "_find_in_history.py").read_text()
+        self.assertIn("from _transcript_format import", script)
+
     def test_the_sidebar_hint_row_matches_the_scripts_metadata_token(self):
         # herdr.toml renders `$keys` in the spaces rows; the generated startup
         # script REPORTS that token as workspace metadata. Either side alone

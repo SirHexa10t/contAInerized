@@ -256,6 +256,17 @@ class TestPrepare(LaunchingTmp):
         self.assertNotEqual(golem["AGENT_STATUS_LINE"],
                             researcher["AGENT_STATUS_LINE"])
 
+    def test_each_member_points_at_its_own_transcripts(self):
+        # Per-member, like the status line: a member's conversation lives in
+        # ITS config dir, so a container-wide value would aim every member's
+        # reader at /home/claude/.claude — the bug `_dump_last_msg.py`
+        # shipped by hardcoding that path (2026-09-19).
+        for member_id in ("golem", "researcher__primary"):
+            with self.subTest(member=member_id):
+                self.assertEqual(
+                    self.window_env(member_id)["AGENT_TRANSCRIPTS_DIR"],
+                    f"/cluster/members/{member_id}/projects")
+
     def test_the_work_protocol_rides_every_cluster_launch(self):
         # The queue's plumbing: the package + its tunables RO-mounted at the
         # PACKAGE-OWNED /opt targets (importing them here IS the drift-pin),

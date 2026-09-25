@@ -366,10 +366,45 @@ class TestSetupState(unittest.TestCase):
         self.assertIn("loose vs tight", str(caught.exception))
 
 
+class TestFindHistory(unittest.TestCase):
+    """`--find` — the flag reaches LaunchOptions, and the handler announces
+    the scan before running it (the one launcher command whose cost grows
+    with how long the operator has used the tool)."""
+
+    def test_the_flag_carries_the_term(self):
+        with patch("sys.argv", ["run.py", "--find", "widget"]):
+            opts = run.parse_cli(REGISTRY)
+        self.assertEqual(opts.find, "widget")
+        self.assertIsNone(opts.picked)
+
+    def test_absent_flag_is_none_not_empty(self):
+        # None vs "" is what gather_input branches on — `--find ""` searches.
+        with patch("sys.argv", ["run.py"]):
+            self.assertIsNone(run.parse_cli(REGISTRY).find)
+
+    def test_the_handler_announces_the_scan_then_prints_the_result(self):
+        order = []
+        with patch.object(run, "iter_conversation_dirs", return_value=[Path("/a"), Path("/b")]), \
+             patch.object(run, "find_in_history", return_value=[]) as search, \
+             patch.object(run, "print_findings",
+                          side_effect=lambda *a: order.append("printed")), \
+             patch("builtins.print", side_effect=lambda *a, **k: order.append(a[0])):
+            run.find_history("widget")
+        self.assertIn("Searching 2 conversations", order[0])
+        self.assertEqual(order[-1], "printed")     # announced first, result last
+        search.assert_called_once_with("widget")
+
+
 class TestStopRunning(unittest.TestCase):
     """stop_running — the `--stop` flow: whatever prompt_stop hands back gets
     one docker-stop call each, in order; a refused stop is reported, never
-    raised (the loop must reach the remaining picks)."""
+    raised (the loop must reach the remaining picks).
+
+    Its two EMPTY answers mean different things and this layer is where they
+    part: None is "nothing was running" and gets the sentence (which used to
+    be printed inside gui/), [] is "the form opened and came back empty" and
+    gets silence. Both must stop nothing — and neither may iterate None,
+    which the old unguarded `for target in prompt_stop(...)` would have."""
 
     def test_stops_each_picked_container(self):
         with patch.object(run, "prompt_stop",
@@ -381,6 +416,26 @@ class TestStopRunning(unittest.TestCase):
         picker.assert_called_once_with(REGISTRY)
         self.assertEqual([c.args[0] for c in stop.call_args_list],
                          ["golem__a", "cluster-team"])
+
+    def test_nothing_running_says_so_and_stops_nothing(self):
+        with patch.object(run, "prompt_stop", return_value=None), \
+             patch.object(run, "docker_stop_subprocess") as stop, \
+             patch("builtins.print") as printed:
+            run.stop_running(REGISTRY)
+        stop.assert_not_called()
+        self.assertTrue(any("Nothing is running" in str(call)
+                            for call in printed.call_args_list))
+
+    def test_a_cancelled_form_stops_nothing_and_says_nothing(self):
+        # The user saw the list and pressed Esc — telling them nothing was
+        # running would be a lie about what they just looked at.
+        with patch.object(run, "prompt_stop", return_value=[]), \
+             patch.object(run, "docker_stop_subprocess") as stop, \
+             patch("builtins.print") as printed:
+            run.stop_running(REGISTRY)
+        stop.assert_not_called()
+        self.assertFalse(any("Nothing is running" in str(call)
+                             for call in printed.call_args_list))
 
     def test_a_failed_stop_is_reported_not_raised(self):
         with patch.object(run, "prompt_stop", return_value=["x", "y"]), \
@@ -445,6 +500,49 @@ class TestGatherInput(unittest.TestCase):
         active["stop_running"].assert_called_once_with(REGISTRY)
         active["select_agent"].assert_not_called()
         active["require_docker"].assert_called_once()   # stopping needs docker too
+
+    def test_find_mode_short_circuits_before_the_picker(self):
+        # --find is the other terminal mode: read transcripts, print, exit 0.
+        active = self._gather(
+            run.LaunchOptions(None, [], False, False, find="widget"),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent"),
+            find_history=patch.object(run, "find_history"),
+        )
+        with self.assertRaises(SystemExit) as caught:
+            run.gather_input()
+        self.assertEqual(caught.exception.code, 0)
+        active["find_history"].assert_called_once_with("widget")
+        active["select_agent"].assert_not_called()
+
+    def test_find_does_not_need_docker(self):
+        # It reads files and starts nothing. Refusing to search because the
+        # daemon is down would be a gate protecting nothing — unlike --stop,
+        # which genuinely needs docker and stays behind it.
+        active = self._gather(
+            run.LaunchOptions(None, [], False, False, find="widget"),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent"),
+            find_history=patch.object(run, "find_history"),
+        )
+        with self.assertRaises(SystemExit):
+            run.gather_input()
+        active["require_docker"].assert_not_called()
+        active["find_history"].assert_called_once_with("widget")
+
+    def test_find_for_an_empty_string_still_searches(self):
+        # `--find ""` is a strange thing to type, but "" is not None: the
+        # mode was asked for, so it must not fall through to a LAUNCH.
+        active = self._gather(
+            run.LaunchOptions(None, [], False, False, find=""),
+            require_docker=patch.object(run, "require_docker"),
+            select_agent=patch.object(run, "select_agent"),
+            find_history=patch.object(run, "find_history"),
+        )
+        with self.assertRaises(SystemExit):
+            run.gather_input()
+        active["find_history"].assert_called_once_with("")
+        active["select_agent"].assert_not_called()
 
     def test_docker_gate_fires_even_with_direct_target(self):
         # A CLI-named target skips the picker but not the docker gate.

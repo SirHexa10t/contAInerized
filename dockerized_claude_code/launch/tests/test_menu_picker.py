@@ -7,14 +7,17 @@ scope."""
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 from launch.gui import menu_picker, picker_widget
+from launch.gui.form_core import FormResult
 from launch.gui.menu_picker import (
     RUNNING_HINT, STYLE_RUNNING_NAME, continuable_instances,
 )
-from launch.gui.picker_widget import PickerCwdHint
+from launch.gui.menu_picker import ClusterEntry
+from launch.gui.picker_widget import PickerCwdHint, WorkspaceView
 from launch.paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS
 from launch.gui.styles import STYLE_TAG_HARNESS
 from launch.tags import AgentBuild, Instance
@@ -296,9 +299,13 @@ class TestRowAssembly(unittest.TestCase):
 class TestPromptStop(unittest.TestCase):
     """prompt_stop — the `--stop` flag's selector. Running rows only, wearing
     the picker's Cont-row anatomy WITHOUT the (RUNNING) hint (everything here
-    runs by definition), `{muxer}` emphasized wherever present, clusters and
-    stray container ids included, and the checked keys returned verbatim in
-    the running-snapshot's prefix-stripped spelling."""
+    runs by definition) and with the names left live rather than greyed,
+    `{muxer}` emphasized on INSTANCE rows (every cluster carries it — it is
+    locked — so calling it out there would mark them all), clusters and stray
+    container ids included in ONE aligned list, and the checked keys returned
+    verbatim in the running-snapshot's prefix-stripped spelling. Nothing
+    running is None, not []: only that outcome may be reported as "nothing
+    is running", and a cancel must not be."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -320,7 +327,8 @@ class TestPromptStop(unittest.TestCase):
         def fake_form(title, options, **kwargs):
             captured["title"] = title
             captured["options"] = options
-            return picked
+            captured.update(kwargs)
+            return None if picked is None else FormResult(checked=picked)
 
         by_id = {i.instance: i for i in insts}
         with patch.object(menu_picker, "list_all_instances",
@@ -396,10 +404,14 @@ class TestPromptStop(unittest.TestCase):
         (row,) = captured["options"]
         self.assertEqual(row.key, "mystery__leftover")
 
-    def test_esc_stops_nothing(self):
+    def test_esc_stops_nothing_and_is_not_the_nothing_running_answer(self):
+        # [] — the form OPENED and came back empty. It must stay distinct
+        # from None below, or `--stop` tells a user who just cancelled a
+        # list of live containers that nothing was running.
         insts = [make_inst("golem", "up", self.ws)]
-        result, _ = self._run(insts, running={"golem__up"}, picked=None)
+        result, captured = self._run(insts, running={"golem__up"}, picked=None)
         self.assertEqual(result, [])
+        self.assertIn("options", captured)      # it did open
 
     def test_picked_keys_come_back_verbatim(self):
         insts = [make_inst("golem", "up", self.ws)]
@@ -407,11 +419,112 @@ class TestPromptStop(unittest.TestCase):
                               picked=["golem__up"])
         self.assertEqual(result, ["golem__up"])
 
-    def test_nothing_running_skips_the_form_entirely(self):
+    def test_nothing_running_is_none_and_skips_the_form_entirely(self):
+        # None is the caller's cue to print "Nothing is running." — the
+        # message moved to run.stop_running, so gui/ prints nothing itself.
         result, captured = self._run([make_inst("golem", "s", self.ws)],
                                      running=set())
-        self.assertEqual(result, [])
+        self.assertIsNone(result)
         self.assertNotIn("options", captured)   # checkbox_form never opened
+
+    def test_every_kind_shares_one_name_column(self):
+        # Instances, clusters and strays are ONE flat list here, unlike the
+        # main menu's nested blocks — so they are padded together and every
+        # name starts at the same offset. Per-population padding made the
+        # column restart twice down the list.
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        cluster = state.from_template("team", Path("/proj"),
+                                      (Member.of("golem"), Member.of("poet")))
+        insts = [make_inst("golem", "up", self.ws, specialties=["auto", "muxer"])]
+        _, captured = self._run(insts, running={"golem__up", "cluster-team",
+                                                "mystery__leftover"},
+                                clusters=[cluster])
+        names = {"golem__up": "golem__up", "cluster-team": "team",
+                 "mystery__leftover": "mystery__leftover"}
+        offsets = {opt.key: self._row_text(opt).index(names[opt.key])
+                   for opt in captured["options"]}
+        self.assertEqual(len(set(offsets.values())), 1, offsets)
+
+    def test_the_persistence_note_is_said_once_above_the_list(self):
+        # It rode every INSTANCE row's body — and only those, so whoever
+        # stopped a cluster never read it. It is true of every row and does
+        # not change with the highlight, so it belongs in the preamble.
+        from launch.cluster import state
+        from launch.cluster.member import Member
+        cluster = state.from_template("team", Path("/proj"), (Member.of("golem"),))
+        insts = [make_inst("golem", "up", self.ws)]
+        _, captured = self._run(insts, running={"golem__up", "cluster-team"},
+                                clusters=[cluster])
+        self.assertTrue(any("resumes" in line for line in captured["preamble"]))
+        for option in captured["options"]:
+            with self.subTest(row=option.key):
+                self.assertNotIn("resumes", "".join(t for _, t in option.body))
+
+
+class TestFoundRowData(unittest.TestCase):
+    """alt+f's narrowing: what stays in the menu once a find is active.
+    Duck-typed row data — the function reads only `identity.state_dir`,
+    `members` and `name`, and building real ContEntries here would test
+    `continuable_instances` instead."""
+
+    @staticmethod
+    def _inst(agent, state_dir):
+        return SimpleNamespace(identity=SimpleNamespace(agent=agent,
+                                                        state_dir=Path(state_dir)))
+
+    @classmethod
+    def _cluster(cls, members):
+        return ClusterEntry(
+            cluster=SimpleNamespace(session="devteam"),
+            members=tuple(members), missing=(SimpleNamespace(id="gone"),),
+            workspace=WorkspaceView("/p", None), last_used_display="x",
+            is_running=False, preview="")
+
+    def test_only_conversations_that_said_it_survive(self):
+        said = self._inst("golem", "/state/golem__a")
+        silent = self._inst("poet", "/state/poet__b")
+        instances, _, _ = menu_picker._found_row_data(
+            [said, silent], [], [], {Path("/state/golem__a"): 3})
+        self.assertEqual(instances, [said])
+
+    def test_an_agent_row_stays_only_to_head_a_surviving_instance(self):
+        # The instance nests under it; an orphaned instance row would read as
+        # belonging to whatever agent row happened to precede it.
+        agents = [SimpleNamespace(name="golem"), SimpleNamespace(name="poet")]
+        _, _, kept = menu_picker._found_row_data(
+            [self._inst("golem", "/state/golem__a")], [], agents,
+            {Path("/state/golem__a"): 1})
+        self.assertEqual([agent.name for agent in kept], ["golem"])
+
+    def test_a_cluster_keeps_only_the_members_that_said_it(self):
+        spoke = SimpleNamespace(identity=SimpleNamespace(state_dir=Path("/c/refactorer")))
+        quiet = SimpleNamespace(identity=SimpleNamespace(state_dir=Path("/c/poet")))
+        _, (cluster,), _ = menu_picker._found_row_data(
+            [], [self._cluster([spoke, quiet])], [], {Path("/c/refactorer"): 2})
+        self.assertEqual(cluster.members, (spoke,))
+
+    def test_a_cluster_whose_members_all_stayed_quiet_is_dropped(self):
+        quiet = SimpleNamespace(identity=SimpleNamespace(state_dir=Path("/c/poet")))
+        _, clusters, _ = menu_picker._found_row_data(
+            [], [self._cluster([quiet])], [], {Path("/c/refactorer"): 2})
+        self.assertEqual(clusters, [])
+
+    def test_a_narrowed_cluster_drops_its_broken_members(self):
+        # `missing` rows are red "this member's agent is gone" rows. They are
+        # never dropped from the normal menu; under a find they have said
+        # nothing, so they are not an answer to the question asked.
+        spoke = SimpleNamespace(identity=SimpleNamespace(state_dir=Path("/c/refactorer")))
+        _, (cluster,), _ = menu_picker._found_row_data(
+            [], [self._cluster([spoke])], [], {Path("/c/refactorer"): 1})
+        self.assertEqual(cluster.missing, ())
+
+    def test_a_zero_count_is_not_a_hit(self):
+        # `.get()` returning 0 must read as "did not say it", not as present.
+        said = self._inst("golem", "/state/golem__a")
+        instances, _, _ = menu_picker._found_row_data(
+            [said], [], [], {Path("/state/golem__a"): 0})
+        self.assertEqual(instances, [])
 
 
 class TestCwdContext(unittest.TestCase):
@@ -464,7 +577,7 @@ class TestCwdContext(unittest.TestCase):
 
 
 class TestClusterRows(unittest.TestCase):
-    """Cluster rows wear the instance rows' anatomy (`_session_row`): their
+    """Cluster rows wear the instance rows' anatomy (`_RowLayout.row`): their
     project paths line up in one column, they carry the cwd hints, and their
     members are rows with the instance rows' deferred previews. Real clusters
     in a redirected AGENTS_STATE; the TUI is stubbed."""

@@ -541,6 +541,22 @@ class TestKeyPolicyConf(unittest.TestCase):
         self.assertIn(f"'{tmux.HELP_KEY}'", line)
         self.assertIn(str(paths.MUXER_HELP_IN_CONTAINER.name), line)
 
+    def test_find_is_bound_in_the_root_table_and_in_copy_mode(self):
+        # BOTH, and the second is the one that matters: the root table is
+        # not consulted while a pane is in copy mode, the mouse wheel enters
+        # copy mode, so a root-only binding would die exactly when someone
+        # has scrolled back hunting the thing they want to find. Verified
+        # against the real tmux binary, which ships copy-mode M-f as
+        # next-word-end — this displaces it (researcher__primary and
+        # strict-reviewer both caught this at gate history-find).
+        root = self.find("display-popup", "_find_in_history.py", " -n ")
+        self.assertIn(" M-f ", root)
+        copy = self.find("display-popup", "_find_in_history.py", "copy-mode")
+        self.assertIn("send-keys -X cancel", copy)   # leaves copy mode first
+        for line in (root, copy):
+            with self.subTest(line=line):
+                self.assertIn("-N", line)            # named in tmux's own key list
+
     def test_tmuxs_full_list_stays_reachable_and_names_the_socket(self):
         # Without `-L muxer` the popup would list an empty scratch server.
         line = self.find("list-keys -N")

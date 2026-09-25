@@ -37,6 +37,7 @@ SHARED_COMMANDS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_commands"   # slash comma
 COMMANDS_DIR_NAME = "_commands"                                   # dirname under agents/ holding every TAG-granted slash command — split out because the registry validates against a parameterised tree root (scan_all(agents_dir)), so it needs the name, not the composed repo path. Underscore-prefixed to read as the project's established "internal asset, not a tag" marker (_muxer, _quickie) beside the four kind subtrees — and NOT "[commands]", which would wear a profession's punctuation while being no tag, and is a shell glob-class that mangles hand-typed paths
 AGENTS_COMMANDS_DIR = AGENTS_DIR / COMMANDS_DIR_NAME              # one file per command; a tag grants one by NAME (`commands = [...]` in its tag.info), so several tags can share a file and every specialized command is findable in one place. Sits safely beside the four kind subtrees: the scanners walk only engine/profession/specialty/policy
 CLUSTER_WORK_PROTOCOL_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "cluster_work_protocol"   # the cluster work-protocol package — RO-mounted WHOLE into cluster containers; its container-side paths live in the package itself (it is what runs there)
+TRANSCRIPT_FORMAT_SOURCE = DOCKERIZED_CLAUDE_ROOT / "launch" / "transcript_format.py"     # the per-line transcript parser — stdlib-only and import-free on purpose, so this one FILE is also what runs in the container (mounted below)
 CLUSTER_PROTOCOL_CONF = SETTINGS_DIR / "cluster_protocol.toml"     # the protocol's tunables (gate timeouts, caps, the 0-10 stance scale) — RO-mounted beside the package; LIVE: protocol tweaks are edits here, not code
 TEMPLATE_FILES_DIR = DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files"   # source-side files that file_access plants on first launch (firewall whitelist preamble, optional_creds README)
 OPTIONAL_CREDS_README_TEMPLATE = TEMPLATE_FILES_DIR / "optional_creds_readme.txt"   # planted as OPTIONAL_CREDS_README_PATH on first launch
@@ -234,6 +235,12 @@ DOCKER_BASE_MOUNTS = {
     SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
     SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
     SETTINGS_DIR / "_dump_last_msg.py":         f"{CLAUDE_CONFIG_IN_CONTAINER}/_dump_last_msg.py:{RO_MOUNT_OPTION}",# backs dump_last_msg in bashrc (reads the session transcript, writes the last reply to a .md)
+    SETTINGS_DIR / "_find_in_history.py":       f"{CLAUDE_CONFIG_IN_CONTAINER}/_find_in_history.py:{RO_MOUNT_OPTION}",# backs find_in_history in bashrc and the muxer's alt+f popup
+    # The launcher's OWN parser, mounted so the container's search reads a
+    # transcript by the same rules `--find` does on the host. A copy living
+    # in settings/ would be a second implementation of somebody else's
+    # format, and it would drift quietly (gate history-find, 2026-09-19).
+    TRANSCRIPT_FORMAT_SOURCE:                   f"{CLAUDE_CONFIG_IN_CONTAINER}/_transcript_format.py:{RO_MOUNT_OPTION}",
     SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
     SETTINGS_DIR / "tmux.conf":                 f"{TMUX_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                      # the muxer's KEY POLICY (quit/help/layout/mouse) + user overrides — sourced last by the generated startup script, so its lines win; inert without {muxer}
     SETTINGS_DIR / "muxer-help.txt":            f"{MUXER_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the `^b ?` popup body (tmux backend) — plain text, cat into the popup; inert without {muxer}
@@ -527,6 +534,25 @@ cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: FIREWA
 # history.jsonl out and checks per-file size. `Path.glob` on a missing dir
 # yields an empty iterator, so no existence-check needed at the call site.
 state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / _HARNESS.transcripts_dirname / "-workspace").glob("*.jsonl")   # "-workspace": Claude Code's cwd slug for /workspace — the transcript LAYOUT is the reader's (a later seam)
+
+# A SIBLING of the line above, never a widening of it: each sub-agent a
+# session spawns gets its own transcript one level down, at
+# `<session-uuid>/subagents/agent-<id>.jsonl` (with an `.jsonl`-less
+# `.meta.json` beside it naming the agent type and its task). Those files are
+# real conversation and `--find` reads them, but they are NOT resumable and
+# must stay out of `state_workspace_jsonls`, whose two callers mean exactly
+# "what `claude --continue` would load" (`has_continuable_jsonl`,
+# `continuable_jsonl_bytes`). Same reason `settings/_dump_last_msg.py` globs
+# one level only.
+state_workspace_subagent_jsonls: Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / _HARNESS.transcripts_dirname / "-workspace").glob("*/subagents/*.jsonl")
+
+# Where a container's own transcripts sit, given the config dir that container
+# runs with: `/home/claude/.claude/projects` for a solo instance,
+# `/cluster/members/<id>/projects` for a member (its CLAUDE_CONFIG_DIR). The
+# harness owns the `projects` half, so a future CLI that names it differently
+# changes one adapter field and not the in-container scripts that read this
+# through AGENT_TRANSCRIPTS_DIR.
+container_transcripts_dir: Callable[[Path], Path] = lambda config_dir: config_dir / _HARNESS.transcripts_dirname
 
 # Instances live under ~/.ai-agents/instances/ — their own subdir keeps the
 # AGENTS_STATE root uncluttered (cache/, firewall_cache/, user_extras/, the store

@@ -47,6 +47,23 @@ def confirm_dialog(message: str) -> bool:
     return answer in CONFIRM_YES_ANSWERS
 
 
+def ask_for_find_term(current: str = "") -> str:
+    """Prompt for alt+f's search term; "" when the user wants no find.
+
+    Enter on an empty line CLEARS an active one (and does nothing when there
+    is none), which is the only way back to the whole list without cancelling
+    the picker. A term already in force is shown so the prompt says what it
+    would replace. Asked on the plain terminal, like `confirm_dialog`: the
+    picker has closed, and a modal inside it would have to re-implement a
+    text field the forms already own."""
+    shown = f" [{current}]" if current else ""
+    prompt = f"Find in past conversations{shown} (Enter clears): "
+    try:
+        return input(prompt).strip()
+    except EOFError:      # ^D at the prompt reads as "never mind"
+        return ""
+
+
 def _path_completer(text: str, state: int) -> str | None:
     """Tab-complete `text` as a host filesystem path; expands `~` for matching."""
     matches = tab_complete_paths(text)

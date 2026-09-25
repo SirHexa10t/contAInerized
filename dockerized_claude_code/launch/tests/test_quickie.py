@@ -222,7 +222,8 @@ class TestCli(unittest.TestCase):
         self.assertEqual(calls, ["opened", "history"])
 
     def test_resume_routes_to_ask_with_session(self):
-        with patch.object(cli, "ask") as ask_mock:
+        with patch.object(cli, "quickie_state_dir_path") as thread, patch.object(cli, "ask") as ask_mock:
+            thread.return_value.is_dir.return_value = True      # "abc123" names a thread on disk
             cli.main(["--resume", "abc123", "and", "clouds?"])
         ask_mock.assert_called_once_with("and clouds?", REGISTRY, resume_session="abc123", agent=cli.QUICK, ai=None)
 
@@ -237,7 +238,8 @@ class TestCli(unittest.TestCase):
         ask_mock.assert_called_once_with("latest on fusion", REGISTRY, resume_session=None, agent=cli.RESEARCH, ai=None)
 
     def test_resume_combines_with_agent_flag(self):
-        with patch.object(cli, "ask") as ask_mock:
+        with patch.object(cli, "quickie_state_dir_path") as thread, patch.object(cli, "ask") as ask_mock:
+            thread.return_value.is_dir.return_value = True
             cli.main(["--resume", "id1", "--explain", "more"])
         ask_mock.assert_called_once_with("more", REGISTRY, resume_session="id1", agent=cli.TRIVIA, ai=None)
 
@@ -648,3 +650,74 @@ class TestAnswerDefaultsToTheLatest(unittest.TestCase):
         with patch.object(cli, "open_launcher", return_value=REGISTRY), \
              self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.main(["--answer", "--history"])
+
+
+class TestResumeDefaultsToTheLatest(unittest.TestCase):
+    """`q --resume "follow-up"` continues the last thread — the same default
+    `--answer` takes. The catch argparse cannot solve: `--resume` takes an
+    OPTIONAL id, so it swallows the question as the id; the disk decides."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.parser_registry = REGISTRY
+
+    def _thread(self, session, prompt, when):
+        import json as _json
+        transcript = quickie_state_dir_path(session) / "projects" / "-workspace" / "s.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(_json.dumps(
+            {"type": "user", "timestamp": when, "message": {"role": "user", "content": prompt}}) + "\n")
+
+    def _split(self, argv):
+        return cli.resume_and_question(cli.build_parser(self.parser_registry).parse_args(argv))
+
+    def test_a_question_after_the_flag_is_not_mistaken_for_an_id(self):
+        # THE trap: argparse gives "and" to --resume and the rest to the
+        # question. No thread is named "and", so it is the question's first word.
+        self.assertEqual(self._split(["--resume", "and", "their", "trunks?"]),
+                         ("", "and their trunks?"))
+
+    def test_a_real_id_is_taken_as_the_thread(self):
+        quickie_state_dir_path("a1b2c3d4e5f6").mkdir(parents=True)
+        self.assertEqual(self._split(["--resume", "a1b2c3d4e5f6", "more", "please"]),
+                         ("a1b2c3d4e5f6", "more please"))
+
+    def test_the_bare_flag_means_the_latest_and_no_question(self):
+        self.assertEqual(self._split(["--resume"]), ("", ""))
+        self.assertEqual(self._split(["why", "the", "sky"]), (None, "why the sky"))
+
+    def test_ask_resolves_the_empty_id_to_the_newest_thread(self):
+        self._thread("older", "first?", "2026-09-01T10:00:00Z")
+        self._thread("newer", "second?", "2026-09-18T10:00:00Z")
+        with patch("launch.quickie.ask.require_docker"), \
+             patch("launch.quickie.ask.ensure_image", return_value="img"), \
+             patch("launch.quickie.ask.run_container"), \
+             patch("launch.quickie.ask.build_quickie_instance", wraps=build_quickie_instance) as built, \
+             contextlib.redirect_stdout(io.StringIO()):
+            ask("and then?", REGISTRY, resume_session="")
+        self.assertEqual(built.call_args.args[1], "newer")
+        self.assertFalse(built.call_args.kwargs["is_brand_new"])   # a continuation, so --continue is offered
+
+    def test_resuming_with_no_threads_says_how_to_start_one(self):
+        # require_docker is patched out: the docker gate runs first by design
+        # (nothing can run without it), and this test is about what follows.
+        with patch("launch.quickie.ask.require_docker"), self.assertRaises(SystemExit) as caught:
+            ask("and then?", REGISTRY, resume_session="")
+        self.assertIn("No quickie threads yet", str(caught.exception))
+
+    def test_an_empty_follow_up_names_the_command_without_a_gap(self):
+        with self.assertRaises(SystemExit) as caught:
+            ask("  ", REGISTRY, resume_session="")
+        self.assertIn('q --resume "your question"', str(caught.exception))
+        with self.assertRaises(SystemExit) as named:
+            ask("  ", REGISTRY, resume_session="abc123")
+        self.assertIn('q --resume abc123 "your question"', str(named.exception))
+
+    def test_history_still_rejects_a_resume_beside_it(self):
+        with patch.object(cli, "open_launcher", return_value=REGISTRY), \
+             self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["--history", "--resume"])

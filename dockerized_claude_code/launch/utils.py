@@ -42,6 +42,22 @@ def relative_time(mtime: float) -> str:
     return f"{minutes} minute{plural(minutes)} ago" if minutes else "just now"
 
 
+def stamp_time(when: float) -> str:
+    """An epoch-seconds time as a local `YYYY-MM-DD HH:MM` — the absolute
+    twin of `relative_time`, for listings where rows are compared to each
+    other rather than to now (`q --history`, `--find`'s results)."""
+    return datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M")
+
+
+def one_line(text: str, limit: int) -> str:
+    """`text` squeezed onto one line and capped at `limit` characters, with a
+    trailing '…' marking a cut. Every listing that quotes a conversation
+    needs this: a transcript turn carries newlines and runs for paragraphs,
+    and a row is a row."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
 # === Sorting ===
 
 def ordering_index_or_end(value: object, ordering: Sequence[object]) -> int:

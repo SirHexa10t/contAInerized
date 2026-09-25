@@ -23,6 +23,11 @@
   ^b m            give the mouse to your terminal, or take it back
 
   ^b [            scroll back by keyboard - Escape to leave
+  alt+f           find a term in PAST conversations - every session on
+                  disk, not just what is on screen (in a cluster: every
+                  member). Works while scrolled back too. It takes alt+f
+                  away from readline's move-a-word in the shell; alt+b
+                  still moves back a word.
   ^b d            detach: leave, everything keeps running
   alt+q           quit: end the session and stop the container  (Y/n)
 

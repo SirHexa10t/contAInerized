@@ -87,6 +87,8 @@ _SUMMARY_PY="/home/claude/.claude/_summary.py"
 [ -f "$_SUMMARY_PY" ] || _SUMMARY_PY="$(dirname "${BASH_SOURCE[0]}")/_summary.py"
 _DUMP_LAST_MSG_PY="/home/claude/.claude/_dump_last_msg.py"
 [ -f "$_DUMP_LAST_MSG_PY" ] || _DUMP_LAST_MSG_PY="$(dirname "${BASH_SOURCE[0]}")/_dump_last_msg.py"
+_FIND_IN_HISTORY_PY="/home/claude/.claude/_find_in_history.py"
+[ -f "$_FIND_IN_HISTORY_PY" ] || _FIND_IN_HISTORY_PY="$(dirname "${BASH_SOURCE[0]}")/_find_in_history.py"
 
 # Save the CURRENT session's last assistant reply into
 # `<instance>-message_<timestamp>.md` (in $1, or the current dir). No AI runs:
@@ -94,6 +96,14 @@ _DUMP_LAST_MSG_PY="/home/claude/.claude/_dump_last_msg.py"
 # unlike /file-message, which asks the agent to write the file itself. Prints
 # the path it wrote. Handy from the {mux} shell pane while the agent is busy.
 dump_last_msg() { python3 "$_DUMP_LAST_MSG_PY" "$@"; }
+
+# Search this container's PAST conversations for a term — the same reader the
+# launcher's `ai --find` uses on the host, and what the muxer's alt+f popup
+# runs. Reaches what scrolled out of the terminal long ago (the scrollback a
+# terminal's own find can see is a few thousand lines at best, and none of it
+# survives a restart); inside a cluster it covers every member, not just this
+# one. With no argument it asks for the term.
+find_in_history() { python3 "$_FIND_IN_HISTORY_PY" "$@"; }
 
 # Diff /workspace against the manifest in /workspace/.claude_summary;
 # print NEW / CHANGED / DELETED lines for every file that differs.

@@ -190,3 +190,22 @@ type = "popup"
 command = "sh -c 'cat /home/claude/.claude/herdr-help.txt; read _'"
 width = 76
 height = 34
+
+# Find: search PAST conversations on alt+f (the launcher's `--find`, run
+# inside the container — `_find_in_history.py`, mounted read-only, reading
+# the transcripts through AGENT_TRANSCRIPTS_DIR). It is the one search that
+# reaches further than copy mode: copy mode greps this pane's live buffer,
+# which holds 10 MB at most, dies with the server, and never receives the
+# rows an agent draws on the alternate screen.
+#
+# The chord SHADOWS readline's forward-word in every pane and in the agent's
+# input box, knowingly — the operator chose it, both help texts say so, and
+# alt+b (backward-word) is left alone. `prefix+f` is the one-line change if
+# the word key is wanted back.
+[[keys.command]]
+key = "alt+f"
+description = "find: search past conversations"
+type = "popup"
+command = "sh -c 'python3 /home/claude/.claude/_find_in_history.py; read _'"
+width = "90%"
+height = "60%"

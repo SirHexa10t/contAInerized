@@ -14,6 +14,7 @@ and the parser itself needs the tree: `--ai` offers the AI members
 import argparse
 
 from ..ai import ADAPTERS
+from ..paths import quickie_state_dir_path
 from ..startup import open_launcher
 from ..tags import Registry, TagError
 from ..utils import call_or_exit
@@ -70,14 +71,30 @@ def build_parser(registry: Registry) -> argparse.ArgumentParser:
              "or the one named (an id from --history).",
     )
     parser.add_argument(
-        "--resume", metavar="ID",
-        help="Ask the question as a follow-up in an existing thread (an id from --history).",
+        "--resume", metavar="ID", nargs="?", const="",
+        help="Ask the question as a follow-up — in the LATEST thread with no id, "
+             "or the one named (an id from --history).",
     )
     parser.add_argument(
         "question", nargs="*",
         help="The question. Quote it so the shell keeps it as a single argument.",
     )
     return parser
+
+
+def resume_and_question(args: argparse.Namespace) -> tuple[str | None, str]:
+    """`(thread to continue, question)` — untangling what argparse cannot.
+
+    `--resume` takes an OPTIONAL id, so argparse hands it the next token
+    whatever that token is: `q --resume "and their trunks?"` parses the
+    QUESTION as the id. The disambiguation is the disk, not a guess about what
+    an id looks like: a value naming no thread under `quickie/` is the first
+    word of the question, and the thread meant is the latest (`""`). A value
+    that does name one is the id, and the rest is the question."""
+    question = " ".join(args.question)
+    if args.resume and not quickie_state_dir_path(args.resume).is_dir():
+        return "", " ".join(word for word in (args.resume, question) if word)
+    return args.resume, question
 
 
 def main(argv: list[str]) -> None:
@@ -87,7 +104,7 @@ def main(argv: list[str]) -> None:
     means the latest thread); otherwise ask the
     question with the selected agent (default QUICK; `--explain`→TRIVIA,
     `--research`→RESEARCH) on the lego's AI or the `--ai` one, optionally
-    continuing the `--resume` thread."""
+    continuing the `--resume` thread (its id, or the latest with none)."""
     registry = call_or_exit(open_launcher, exceptions=TagError)
     parser = build_parser(registry)
     args = parser.parse_args(argv)
@@ -100,10 +117,13 @@ def main(argv: list[str]) -> None:
         print_history() if args.history else print_answer(args.answer)
         return
     agent = TRIVIA if args.explain else RESEARCH if args.research else QUICK
-    ask(" ".join(args.question), registry, resume_session=args.resume, agent=agent, ai=args.ai)
+    resume, question = resume_and_question(args)
+    ask(question, registry, resume_session=resume, agent=agent, ai=args.ai)
 
 
 def _has_ask_args(args: argparse.Namespace) -> bool:
     """True if any ask-mode argument is set — used to reject them alongside the
-    standalone `--history` / `--answer` display modes."""
-    return bool(args.question or args.resume or args.explain or args.research or args.ai)
+    standalone `--history` / `--answer` display modes. `--resume` counts by
+    PRESENCE, not truthiness: with no id it arrives as "" and still means a
+    question is being asked."""
+    return bool(args.question or args.explain or args.research or args.ai) or args.resume is not None
