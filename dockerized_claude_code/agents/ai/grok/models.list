@@ -1,0 +1,23 @@
+# Grok's MODELS — what the tag form offers as an instance's model, one line
+# per model, and each one's EFFORT RANGE — what the form's effort row offers
+# for it (launch/tags/models.py documents the columns). No `model` in an
+# instance's mapping means its engine's (at the engine's rated level); a pinned
+# model with no `effort` runs at its top level.
+# Order is the form's: one family, newest version first, the fixed-reasoning
+# 4.20 models and Grok Build after the line that takes an effort.
+# Ids and effort ranges verified 2026-09-28 against docs.x.ai/developers/
+# models, parsed from the page's embedded model records (their
+# reasoningEffortOptions; `ai_project-update-models`): no id has a retirement
+# date. The aliases are the vendor's own (a model can carry more than listed
+# here). grok-4.3's extra `none` level is NOT offered: it asks for no
+# reasoning, which is not the same as sending no level. Left out: the image,
+# video and voice models.
+
+grok-4.7                      efforts=low,medium,high,xhigh                                           # available, not yet a tier: unrated (efforts.tiers)
+grok-4.6                      efforts=low,medium,high,xhigh
+grok-4.5                      alias=grok-4.5-latest  alias=grok-build-latest  efforts=low,medium,high,xhigh
+grok-4.3                      alias=grok-4.3-latest  efforts=low,medium,high,xhigh
+grok-4.20-0309-reasoning      alias=grok-4.20  alias=grok-4.20-reasoning  efforts=-   # takes no effort level (xAI lists no reasoningEffortOptions)
+grok-4.20-0309-non-reasoning  alias=grok-4.20-non-reasoning  efforts=-   # takes no effort level (xAI lists no reasoningEffortOptions)
+grok-4.20-multi-agent-0309    efforts=-   # takes no effort level (xAI lists no reasoningEffortOptions)
+grok-build-0.1                alias=grok-code-fast-1  alias=grok-code-fast  alias=grok-code-fast-1-0825  efforts=-   # takes no effort level (xAI lists no reasoningEffortOptions)

@@ -13,9 +13,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rich.cells import cell_len
+
 from launch.gui import menu_picker, picker_previews, picker_widget
-from launch.tags import AgentBuild
-from launch.gui.picker_previews import cont_preview, engine_fact
+from launch.tags import AgentBuild, resolve_build
+from launch.gui.picker_previews import cont_preview, engine_fact, model_fact
 from launch.tests.fixtures import REGISTRY, make_inst
 
 
@@ -315,11 +317,45 @@ class TestClusterAndMemberPreviews(unittest.TestCase):
         self.assertLess(tags.index(ai.label), tags.index(harness.label))
         self.assertLess(tags.index(harness.label), tags.index("{mux}"))
         self.assertLess(tags.index(harness.label), tags.index("(cluster-wide)"))    # its own, not the cluster's
-        # The cluster pane's member lines carry each member's AI and harness too.
-        cluster_text = _plain_text(self._entry().preview)
-        members = cluster_text.split("Members:")[1]
-        self.assertEqual(members.count(ai.label), 2)
+        # The cluster pane's member lines carry each member's AI — with the
+        # model it runs — and harness too.
+        entry = self._entry()
+        members = _plain_text(entry.preview).split("Members:")[1]
+        for member in entry.members:
+            self.assertIn(member.identity.ai_label, members)
         self.assertEqual(members.count(harness.label), 2)
+
+    def test_the_cluster_panes_member_fields_start_in_one_column(self):
+        # Member ids differ in length (golem, researcher__primary), and an
+        # engine shortname can be a wide emoji: the AI, harness and engine
+        # labels still start in one column down the list (operator, 2026-09-28).
+        entry = self._entry()
+        members = _plain_text(entry.preview).split("Members:")[1]
+        lines = [line for line in members.splitlines() if "•" in line]
+        self.assertEqual(len(lines), len(entry.members))
+        chips = {"ai": lambda inst: inst.ai_label, "harness": lambda inst: inst.harness.label,
+                 "engine": lambda inst: inst.engine.label}
+        for field, chip in chips.items():
+            with self.subTest(field=field):
+                starts = {cell_len(line[:line.index(chip(member.identity))])
+                          for line, member in zip(lines, entry.members)}
+                self.assertEqual(len(starts), 1, f"the {field} labels start in different columns")
+
+    def test_a_members_pick_rides_on_its_ai_chip_and_the_columns_still_align(self):
+        # A model widens one member's AI chip (⟪Claude:Opus-5.5⟫): the pane
+        # shows it there, and the harness and engine columns after it still
+        # start together (gate model-picker, rider 8: measured, never squashed).
+        self.state.save(self.cluster.with_build("golem", AgentBuild(ai="claude", model="claude-opus-5-5")))
+        entry = self._entry()
+        members = _plain_text(entry.preview).split("Members:")[1]
+        lines = [line for line in members.splitlines() if "•" in line]
+        golem_line = next(line for line in lines if "golem" in line)
+        self.assertIn("⟪Claude:Opus-5.5⟫", golem_line)
+        for field in ("harness", "engine"):
+            with self.subTest(field=field):
+                starts = {cell_len(line[:line.index(getattr(member.identity, field).label)])
+                          for line, member in zip(lines, entry.members)}
+                self.assertEqual(len(starts), 1, f"the {field} labels start in different columns")
 
     def test_an_instance_pane_lists_its_ai_then_its_harness_first(self):
         inst = make_inst("golem", "a", "/tmp", specialties=["auto"])
@@ -340,6 +376,38 @@ class TestEngineFact(unittest.TestCase):
         self.assertTrue(fact.startswith("golem"))
         self.assertIn(inst.model, fact)
         self.assertTrue(inst.model)   # the fixture's engine has a step, so the assertion above is not vacuous
+
+
+def _picked(model: str | None):
+    """The fixture's golem with `model` as its default-model pick."""
+    inst = make_inst("golem", "a", "/tmp")
+    return dataclasses.replace(inst, **resolve_build(dataclasses.replace(inst.build, model=model), "golem", REGISTRY))
+
+
+class TestModelFact(unittest.TestCase):
+    """The pane's Model fact: present only for a pick, which it names as
+    running instead of the engine's; a stale pick says why it cannot run.
+    The Engine fact keeps naming the ENGINE's model either way."""
+
+    def test_no_pick_no_model_fact(self):
+        self.assertIsNone(model_fact(_picked(None)))
+
+    def test_a_pick_is_named_and_the_engine_fact_keeps_the_engines_model(self):
+        inst = _picked("claude-opus-5-5")
+        self.assertEqual(model_fact(inst), ("Model", "claude-opus-5-5  (picked — runs instead of the engine's)"))
+        self.assertIn(inst.engine_model, engine_fact(inst))
+        self.assertNotIn("claude-opus-5-5", engine_fact(inst))
+
+    def test_a_stale_pick_says_why_and_what_the_launch_does(self):
+        label, value = model_fact(_picked("claude-opus-4-1"))
+        self.assertEqual(label, "Model")
+        self.assertIn("claude-opus-4-1  (not among ⟪Claude⟫'s models — dropped at launch for the engine's", value)
+
+    def test_the_instance_pane_carries_it_between_engine_and_state(self):
+        text = _plain_text(cont_preview(_picked("claude-opus-5-5"), "/tmp", "(never)", None))
+        self.assertLess(text.index("Engine:"), text.index("Model:"))
+        self.assertLess(text.index("Model:"), text.index("State:"))
+        self.assertNotIn("Model:", _plain_text(cont_preview(_picked(None), "/tmp", "(never)", None)))
 
 
 if __name__ == "__main__":

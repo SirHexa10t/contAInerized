@@ -336,6 +336,159 @@ registration is `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` (+ peer-token
 early-check recipe above are hereby done. Full results:
 plans/cluster_plan.md, "Research spike — CLOSED".
 
+## Open questions — policies across harnesses
+
+Since 2026-09-26 a policy is rules in the launcher's words (`tag.rules`) that
+each harness renders through its `policy.mapping`; gates policy-mapping and
+policy-tier on the cluster queue weighed the design. What these entries record
+is what a rendered policy does NOT guarantee.
+
+### A harness-level deny holds only inside the process that loaded it — ALWAYS-ON denies FIXED 2026-09-26; per-instance ones bounded by design
+
+**The property** (agent-writer, 2026-09-26): a deny whose only teeth are a
+harness's permission engine is bounded by the agent's ability to start that
+harness again. An agent with a shell — every `<+all>` or `<+bash>` build, five
+of fourteen shipped `.lego` files — can run the harness binary (on PATH: it is
+the image's ENTRYPOINT) as a child pointed somewhere the denies are not:
+`CLAUDE_CONFIG_DIR=/tmp/x claude …`, or `gemini` without the launcher's
+`--policy`. The login lives under the config root, so the chain also copies
+the auth file, and `cp` is denied nowhere (bug-investigator). NOT RUN,
+deliberately: a second authenticated agent in a shared container spends the
+operator's credentials. Every precondition was confirmed first-person
+(strict-reviewer: settings.json is RO-mounted, `CLAUDE_CONFIG_DIR` is set, the
+binary is on PATH).
+
+**Fixed for the always-on denies** (operator: "just handle it now"; gate
+fixed-tier). Both CLIs have a tier the invoking process cannot redirect —
+Claude Code's managed settings (`/etc/claude-code/managed-settings.json`;
+docs.claude.com → managed settings: "no user, project, local, or --settings
+value overrides them") and Gemini CLI's system policies dir
+(`/etc/gemini-cli/policies/`, a constant in v0.61.0's
+`Storage.getSystemPoliciesDir`). Each harness Dockerfile now bakes the
+always-on denies there AS ROOT from two build args (`agents_crud.fixed_policy`
+→ `container_env` FIXED_POLICY_PATH / FIXED_POLICY_B64 → `[fixed]` in each
+policy.mapping), failing the build rather than baking nothing, and checking
+the file parses and its dir is root's alone. Not mounted, so no host owner
+shows through (Gemini SKIPS a system dir root does not own, silently) and no
+path reaches it read-write. Only always-on policies can live there — a
+managed `defaultMode` cannot differ per cluster member — and only denies:
+`Policy.scan` refuses an always-on allow, which at Gemini's admin tier would
+outrank every per-instance deny. Today that is `<-su>` alone, the one deny
+whose teeth are already the OS, so the move is defence in depth for the deny
+that needed it least (agent-writer, strict-reviewer); `test_fixed_tier.py`
+pins every piece, including the Dockerfile's own shell run for real.
+
+**Why the build checks a COUNT, and why its args have no defaults** — four
+corrections deep on one Dockerfile block, each reachable only from the last
+(bug-investigator, strict-reviewer, researcher__primary): `build_arg_flags`
+silently skips an unstaged arg, a skip DOCKER_GID's 999 fallback relies on, so
+the fix cannot live there; "non-empty and parses" also passes a comments-only
+file or an empty deny list; "at least one rule" would fail the designed
+empty-but-valid file of a tree with no always-on policy; so the launcher
+passes the rendered rule count and the build compares the parsed file's
+against it — and since the count and the content travel the same wire, one
+fault skips both, so a count defaulting to 0 would pass an empty bake. Hence
+no defaults at all, and the file's EXISTENCE (on Gemini CLI its .toml name
+alone nulls a workspace's admin paths) and CONTENT (the count) are separate
+checks.
+
+**The consequence for Gemini's per-instance rules.** Once the system dir holds
+a .toml, Gemini IGNORES `--admin-policy`, so an instance's file now goes in by
+`--policy` — which REPLACES the user dir (the two flags, one word apart, have
+opposite merge semantics). That keeps a planted policy file out, and argv
+beats a workspace's `policyPaths`. The populated system dir also nulls a
+workspace's `adminPolicyPaths` — which matters, because `--skip-trust` GRANTS
+trust (it sets `GEMINI_CLI_TRUST_WORKSPACE=true`, whatever its name suggests;
+bug-investigator), a trusted workspace's `.gemini/settings.json` merges in
+full, and `adminPolicyPaths` is workspace-settable and UNION-merged at the
+admin tier (researcher__primary, strict-reviewer, independently). Union means
+no cheap fallback exists: setting our own admin paths would add to a
+workspace's, not replace them. The mapping's parser therefore ties the flag
+to the `[fixed]` key both ways — `path` needs `--policy`, `none` needs
+`--admin-policy` (then argv replaces the workspace's paths instead) — and the
+two mismatches fail differently: `path` + `--admin-policy` degrades to a
+directory read beside the CLI's auto-saved allows, where the 999-over-950
+margin holds (the engine test pins it); `none` + `--policy` opens the
+injection. STATED CONSEQUENCE: Gemini's in-container "always allow" is still
+written to auto-saved.toml and never read back, so a relaxation cannot
+outlive the session — the first report will read "Gemini forgot my
+always-allow".
+
+**Still open, by design** (gate policy-tier): per-instance denies stay
+lookup-bypassable on both harnesses, for ONE code path — a cluster is one
+container with per-member policies, and the fixed tier is one path per
+container.
+
+**Built and baked, 2026-09-27** — the rebuilt image carries
+`/etc/claude-code/managed-settings.json` root:root 644 in a root:root 755
+dir, so the Dockerfile's checks passed in a real build (the image now ships
+Claude Code 2.1.283, whose managed path is still that hardcoded switch).
+
+**The condition outside the launcher's reach** (code.claude.com/docs/en/
+managed-settings, read 2026-09-27): Claude Code uses ONE managed source by
+default — `managedSourcesBehavior` "first-wins", the highest-ranked source
+that delivers any policy key — and ranks server-managed settings from
+claude.ai (fetched when the login authenticates to Anthropic directly) above
+MDM, and MDM above the file. The opt-in "merge" is read only from the
+highest-ranked source, so the file cannot turn it on. For a login whose
+organization pushes any server-managed policy key, the fixed tier is skipped
+SILENTLY; the per-instance settings.json copy still holds for the CLI the
+launcher starts, so only the second-copy protection is lost. A login with no
+server-managed keys caches them as `{}` (`remote-settings.json` in the config
+root), and the file is then the source in force.
+
+**Observed 2026-09-28:** `/status` in a relaunched cluster member's session
+reads "Setting sources: User settings, Enterprise managed settings (file)"
+with no "Skipped sources" line — the baked file is the managed source in
+force, beside the per-instance settings.json. **Still to observe:** a second
+`claude` with its own config dir refusing `sudo` — the direct proof of the
+point, one API call on the operator's credentials, so the operator's to run.
+Never let `allowManagedPermissionRulesOnly` into what lands there: it would
+silence every per-instance rule. **Closes when** that is observed.
+
+**Provenance.** Gemini CLI findings: v0.61.0, its bundle and TypeScript
+source, read independently by several members. Claude Code binary strings:
+2.1.282 as present on disk on 2026-09-26, in a container whose CLI had been
+replaced at runtime twice. Claude Code behaviour: the docs pages cited.
+
+### A capability is only as wide as its mapping — OPEN, recorded limit
+
+`[deny] tools = ["write"]` means exactly the tools the harness's policy.mapping
+lists under `write` — Claude Code's Write / Edit / NotebookEdit, Gemini CLI's
+write_file / replace — and nothing else. A write-capable tool the mapping does
+not list (a CLI update, an MCP server) is outside every rule, so a deny
+quietly narrows (strict-reviewer, gate policy-mapping). Kept so in the first
+pass on purpose: it is what makes the Claude Code rendering exactly the
+fragments it replaced. Gemini CLI v0.61.0 exposes tools no capability claims
+yet (its `*_TOOL_NAME` constants): activate_skill, ask_user, write_todos,
+enter_plan_mode / exit_plan_mode, the tracker_* family, update_topic,
+complete_task, get_internal_docs, take_snapshot, read_mcp_resource,
+list_mcp_resources. `all = true` is immune by construction (it grants whatever
+the mapping lists). **Closes when** each mapping classifies every tool its CLI
+exposes, checked against the CLI's own list by a scan rule that refuses an
+unclassified tool — then a deny means "every tool of this kind".
+
+### Shell-prefix rules are porous on both engines — MEASURED on Gemini CLI, documented on Claude Code
+
+A shell word or stem matches a command's leading words as typed. Run through
+Gemini CLI v0.61.0's own policy engine on 2026-09-26 (`<-su>` and `<-gpush>`
+as the launcher renders them, admin tier, the CLI's shipped defaults beneath —
+technique below). Caught: `sudo ls`, `cd /tmp && sudo ls`, `bash -c 'sudo ls'`,
+`sh -c 'sudo ls'`, `echo $(sudo id)`, ``echo `sudo id` `` — the engine splits
+compound commands, unwraps shell wrappers, and denies on any part. NOT caught:
+`/usr/bin/sudo ls`, `env sudo ls`, `command sudo ls`, `\sudo ls`, `s''udo ls`,
+`x=1 sudo ls`, `nohup sudo ls`, `time sudo ls`, `eval 'sudo ls'`,
+`git -C /x push`, `git  push` (two spaces), `GIT_DIR=x git push`,
+`/usr/bin/git push`. Claude Code documents per-subcommand checks, subshells and
+substitution included, and nothing about paths, env prefixes or quoting; not
+measured, since its matcher cannot be driven outside the CLI. Same class as
+the no-sudo description's own caveat: a guardrail against drift, not a fence
+against an agent that is trying. **Would narrow it:** Gemini's `commandRegex`
+can absorb env assignments and a path prefix (`(?:\S+=\S*\s+)*(?:\S*/)?sudo(?:\s|$)`);
+Claude Code's grammar cannot, so it is a per-mapping change, deliberately not
+made while exact Claude Code equivalence was this pass's contract. **Closes
+when** accepted as documented, or such rules land with the probe re-run.
+
 ## Known issues — cluster work protocol, first live {cc} run
 
 **Audited 2026-09-02** on a real 4-member `{cc}` cluster (ConcorDance PoC),
@@ -424,10 +577,161 @@ everything it does not cover.
   arguments" — per `cluster-chat post --help` the number is an OPTION, so
   the working form is `cluster-chat post stance --stance <0-10> --gate <id>
   "<body>"`. A wrong hint costs every reply one failed attempt at the moment
-  the protocol most needs to be frictionless. What would close it: correct
-  the hint text where the pings are composed (`cluster_work_protocol/gates.py`
-  / `wake.py`) and pin it with a test that feeds each suggested command
-  through the CLI's own argparser.
+  the protocol most needs to be frictionless. Still true 2026-09-25: the
+  completion pings for gates history-find and gemini-adapter both said
+  `read --new`.
+  FIXED 2026-09-29 (gate ping-syntax), and the three reasons it survived
+  twenty days are worth keeping, because this entry caused two of them.
+  **It named the wrong files.** "Where the pings are composed
+  (`gates.py` / `wake.py`)" conflates composition with delivery: `wake.py`
+  sends pings and emits none of the text, while `cli.py` (the mention ping,
+  and `brief`'s YOU OWE block) and `agents/specialty/muxer/cluster/tag.info`
+  were not named at all. Eight defective lines across three files; a fixer
+  following this entry would have corrected three and closed nothing.
+  **It ordered them wrongly.** `tag.info` is the addendum injected into
+  every member's CLAUDE.md, so it teaches the command at session start,
+  before a ping can exist; two members confirmed their first command of a
+  session was the broken one, copied from there.
+  **Its definition of done could be met while the defect persisted.** An
+  argparser test reaches the composed pings and structurally cannot reach
+  tree data, so "fix the pings, add the test, watch it pass" was a green
+  build over five defective lines. What actually closed it: both halves
+  parsed — `TestEveryAdvertisedCommandParses` drives the real composers and
+  renders every tag's `[addendum]`, extracts each backticked command
+  (prefix optional: the defect wrote the bare `post stance …` form, which a
+  `cluster-chat`-anchored matcher skips — found by mutation), and feeds it
+  to `cli._parser()`. Five mutations were each caught. Load-time enforcement
+  in the addendum scan would be stronger still, but needs this parser inside
+  `launch/tags`, and the protocol package is deliberately importable without
+  its launch/ parent; CI is the honest home.
+  **The testing lesson is worth more than the fix.** Three members wrote
+  three independent extractors to verify these eight lines, and all three
+  anchored on the `` `cluster-chat ` `` prefix — so all three skipped the
+  bare `post stance <0-10>` form, which is precisely the shape the original
+  defect wrote. The counts they reported (10/10, 12/12) were complete only
+  because the tree happens to contain no bare command spans, not because
+  the instruments were right. Two of the three checks ran against an
+  already-correct tree and could only learn that it was correct; the one
+  that mutated the defect back learned its own extractor was half blind,
+  and found a second gap in the same pass (the briefing was invoked after
+  the replies landed, so its YOU OWE block never rendered). Hence: a green
+  test over fixed code proves nothing, and three verifications sharing an
+  untested assumption are one verification with three witnesses.
+  **And the countermeasure was already filed — that is the finding, not
+  the prescription.** "Check the instrument against something already known
+  before trusting a negative" sits under *Known issues — testing technique*
+  (below), written 2026-09-26 with five worked examples, several of them by
+  the member who then shipped a prefix-anchored extractor three days later.
+  Two of the three also carried the same rule in their own notes, one for
+  fifteen days, and both quoted the surrounding lesson that evening while
+  writing an unprobed instrument. So the conclusion is NOT that the advice
+  needs recording more loudly: it was recorded, indexed, exemplified and
+  recently read, and it still lost to the artefact's obvious handle at the
+  moment of use. Instrument-checking has to be STRUCTURAL where it matters
+  — the mutation run inside the shipped guard, which fails on reintroduction
+  whether or not anyone remembers the rule. A one-line positive control
+  (`1 of 2 known-present commands found`) remains the affordable form for a
+  spot-check, and is strictly weaker: it would have exposed this blind spot
+  but not the ordering gap. This entry's value is as evidence of
+  recurrence, not as a reminder anyone acts on in the moment.
+  **The count, 2026-09-29: five misses of four already-filed items in one
+  evening, by four members, at least two of them missing text they wrote
+  themselves.** The positive-control rule (filed 09-26 with five worked
+  examples) missed by three members three days later, several of the
+  examples theirs. The backtick mitigation below (filed 09-25, with QUOTED
+  capitalised) restated incompletely by one member while editing this file,
+  reconstructed by measurement by a second, and re-derived from a posting
+  sample by the third — who is the subject of the incident that produced
+  the entry. That entry's reader-side trap hit and correctly diagnosed by
+  the same member as if novel. And its closing condition, which already
+  specifies the structural fix and its test, while three members spent four
+  messages agreeing a future gate would need scoping. Authorship is the
+  strongest prior on recall there is, and it did not make the text fire at
+  the moment of need — which is why "grep the tracker first", proposed that
+  evening as the residue, was withdrawn by its own author: a habit that
+  depends on remembering fails by the same mechanism, one step earlier.
+  **Why they did not fire, which is the part a count alone omits:** each
+  member had a concrete question, and measuring answers it directly, while
+  searching the tracker first requires believing somebody already answered
+  it. Establishing is the faster path to an answer and the slower path to
+  the truth. That also defeats the obvious remedy — any "search before you
+  establish" habit needs the member to CLASSIFY their next action as
+  establishing, and from the inside it never feels like that; it feels like
+  having a question and measuring. A recurrence recorded without its
+  mechanism is the shape that let the defect above sit for twenty days.
+  **Three instrument failures, one mechanism: in source, the text is not
+  yet the text.** An extractor reading emitter SOURCE reported seven false
+  positives on spans crossing f-string CONCATENATION boundaries; a mutation
+  editing addendum SOURCE landed nothing because the body is an f-string
+  INTERPOLATION over a path constant, and the resulting green suite meant
+  only that nothing had changed. Both are the same fault as the original
+  blind extractor, one layer along. Hence the rule has two halves, and the
+  second is the one nobody states: parse RENDERED output rather than
+  source, and prove a mutation REACHED the artefact before reading the
+  suite's colour. Checking that the suite went red is checking the world;
+  checking that your edit arrived is checking the instrument.
+  **The one mode no guard reaches: two members deferring until the record
+  is wrong.** Every other failure here now has a mechanical answer — a
+  blind extractor caught by a probe, a no-op mutation by proving the edit
+  arrived, a curated list by deriving it, an unrunnable fragment by an
+  assertion, a stale ping by carrying the message id. Mutual concession
+  produces no red test, no parse error and no wrong file; it produces a
+  journal that reads as agreement and decides nothing, and the next member
+  builds from the journal. Twice on 2026-09-29: two members conceded to
+  each other in opposite directions inside two minutes, leaving no
+  actionable position; and mutual credit deference produced an attribution
+  wrong in both directions. It fires hardest at the CLOSE, when everyone is
+  being generous because the work is done — and that is the most expensive
+  moment, because the last thing written is what the next reader acts on.
+  The remedy both times was the same and is the rule: when two members
+  concede to each other, one of them must post the SETTLED POSITION — what
+  is decided, not who was right. If a message says "nothing further from
+  me" and also concedes a point, that is the message that most needs it.
+  Untestable is not uncorrectable: both corrections were possible only
+  because the queue keeps verbatim text, so a claim about who said what can
+  be checked by reading the message rather than recalling it. The
+  artefact induced the blindness — the prefix is the obvious handle, and
+  the shape it misses is the defect's own — which is the same family as the
+  ping that taught a tail-reading reflex and produced two misattributions
+  the same evening.
+  Also fixed there: the mention ping now names the MESSAGE (`#<seq>`, and
+  the `--since` that reaches it) rather than only its author — naming the
+  author left one affordance, read the tail, which is wrong when the mention
+  sits behind the reader's cursor and wrong again when the tail holds
+  someone else's post; two members misattributed a reply that way in one
+  evening. And the straggler reminder now REPORTS ("as of HH:MM:SSZ gate X
+  had no reply from you … if you have already replied, nothing is owed and
+  this line is stale") instead of instructing. It is composed only for
+  members who have not replied, but delivery is asynchronous — `wake` types
+  it into a pane, where it surfaces at the member's next boundary, after
+  their reply or mid-work — so an imperative arriving then told a compliant
+  member to post a SECOND reply, breaking the one-reply-per-gate rule the
+  gate tally rests on. Four members reported receiving it post-reply on
+  2026-09-29; none double-posted, but only because each stopped to check.
+- **Posting prose through a shell EXECUTES it — a post's backticks ran an
+  installer inside the shared container (2026-09-25).** The protocol asks
+  every member to post prose as a shell argument, and the natural way to
+  quote a code identifier in prose is the one character a double-quoted
+  shell string turns into command substitution. agent-writer's gate reply
+  quoted the Claude Code layer's install line in backticks; bash ran it,
+  which fetched Claude Code 2.1.282 into the shared home, repointed
+  `~/.local/bin/claude` away from the image's 2.1.273, ran an
+  `npm uninstall --global` (it removed nothing, since this image does not
+  install that way), and spliced the installer's stdout into the posted
+  body. The author restored the symlink within two minutes and posted the
+  incident; bug-investigator verified the restore independently and found
+  the uninstall step the first report missed. No running member was
+  affected; the unused version dir dies with the container. The same class
+  had already bitten the refactorer on gate history-find, where a backticked
+  for-loop in a close was substituted and silently elided. The workaround
+  now in use: build the body in a file through a QUOTED heredoc and pass
+  `"$(cat file)"` — substitution output is not rescanned. A reader-side
+  trap sits beside it: bodies are multi-line, so the natural
+  `read --peek | grep '^#<seq>'` shows only a post's first line and makes
+  a complete reply look truncated. What would close it: the CLI taking a
+  body from a file or stdin (a `--body-file` or `-`), the brief and the
+  pings recommending that form, and a test that the documented posting form
+  survives a body containing backticks and `$(...)` verbatim.
 - **Capability text is not a protocol — the first live gate never happened,
   and every MECHANISM was fine.** 2026-09-02: a member of a real
   `{clstr}` cluster was given a task, planned it solo, and never opened a
@@ -638,6 +942,24 @@ everything it does not cover.
   agent container — most instances never touch this repo). Neither is clearly
   better than the current "reinstall on demand", which is why it is documented
   rather than fixed.
+- **Every harness tail carries its own copy of the weekly OS-upgrade block —
+  two copies since Gemini CLI's layer (2026-09-25), up to seven.** The
+  weekly `apt-get upgrade` rides the LAST layer on SOFTWARE_STACK_REFRESH
+  (gate build-cache) so a week boundary rebuilds one layer; since each
+  harness owns its tail, each harness Dockerfile repeats the same four-line
+  resilient upgrade, and `test_essential_files` pins its presence in every
+  runnable harness. Node, the other thing every npm harness needs, was
+  deduplicated in the same change into one shared hidden layer that
+  harnesses claim (`agents/profession/_node`, `layer = "node"` in the
+  harness's tag.info), because six of the seven harness members install
+  from npm and a copied recipe would have become six. What would close the
+  upgrade copy the same way: a shared `_weekly` hidden layer holding only
+  the upgrade, keyed on SOFTWARE_STACK_REFRESH and inserted between the
+  claimed layer and the harness's own — the week boundary then rebuilds two
+  thin layers and still nothing beneath them, and each harness tail shrinks
+  to its install and ENTRYPOINT. Not done yet because two copies do not yet
+  justify a third build step per launch; the Codex CLI adapter is the
+  natural moment.
 - **`docker build` runs per layer on every launch** — no image-exists
   short-circuit, so each launch pays a few cache-hit seconds per layer (one
   more since 2026-09-16: the harness layer is its own step). Docker's own
@@ -659,7 +981,7 @@ everything it does not cover.
   (`_apply_dood` needs a host `docker` group — see `tag_handlers.py`, whose
   error message still reads as Linux-only).
 
-### The non-Claude AIs' model ids (`agents/ai/{gemini,chatgpt,grok}/efforts.tiers`) age silently — nothing launches them, and the bump command is Claude-only
+### The non-Claude AIs' model ids (`agents/ai/{gemini,chatgpt,grok}/efforts.tiers`) aged silently — FIXED 2026-09-25, kept for the rule the first run taught
 
 Every `agents/ai/<key>/efforts.tiers` pins model ids per capability standard
 (written 2026-09-10 to 13, each id verified against the vendors' pages — the
@@ -681,13 +1003,127 @@ Google shut down on 2026-03-09 (`ai.google.dev/gemini-api/docs/deprecations`),
 and one of the launcher's own rungs (`gemini-3.1-pro-preview`) is a `-preview`
 id.
 
-**What would close it:** before any non-Claude adapter ships, extend the bump
-command to every catalog member (`launch/ai/catalog.py`) — one vendor page set
-per AI, the rung table in `plans/adding_an_ai.md` ("Tier equivalence") saying
-which id is which tier — and have it refresh each file's verified-on date.
-Until then, re-verify by hand before relying on either file.
+**Closed 2026-09-25**, before the first non-Claude adapter: the command
+covers every `agents/ai/<key>/efforts.tiers` the tree holds, names each
+vendor's sources in order (for Gemini, also the CLI's own alias and
+resolution tables, which can rewrite an id the API lists as live), and
+writes a verified-on line into every file on every run, changed or not. The
+first run found no dead pin and four successors (Opus 5.5, GPT-6 Sol and
+Luna, Grok 4.7), one scheduled shutdown (`gemini-3.1-flash-lite`,
+2027-05-07, the `cheapest` Gemini rung), and one launch risk (Codex's model
+page no longer lists the gpt-5.6 slugs the ChatGPT rungs pin, "available
+during the rollout").
+
+The rule it taught, now in the command: that first run bumped all four
+families to their unrated successors, and the Claude render test caught one.
+`capability.standards` defines a tier as the cheapest LIVE, RATED and
+LAUNCHABLE configuration meeting its standard, so an unrated successor is
+recorded as AVAILABLE in the file's header and the rated pin stays until the
+leaderboard rates it. A bump command left to "keep the family, take the
+newest" would quietly turn every tier into an unmeasured claim.
+
+### An instance's picked model and effort (2026-09-28/29): what a pick does not know — OPEN, recorded limits
+
+Under each dotted AI the tag form offers "follow the engine", the AI's
+`models.list` as bullets that pin, and a horizontal effort pick. A follower
+runs its tier's rated pair; a pinned model runs at its highest level unless
+a level is pinned too (gates model-picker #285, model-picker-2 and
+model-picker-3, with the operator's ruling of 2026-09-29). What that leaves
+open, deliberately:
+
+- **A pinned model starts at its TOP level.** That is the operator's ruling:
+  the model's highest, not the level the engine was running. So pinning the
+  model the engine already uses (Sonnet 5 under `quick`) moves it from
+  `high` to `max`. The effort row sits under the dotted bullet and tags the
+  level None stands for — "high (default)" while following, "max (default)"
+  once pinned (operator, 2026-09-29) — so the change shows at the moment it
+  happens. The team's alternative is pending the operator: a pin that
+  stores the level that was running, so a pin carries its effort
+  (strict-reviewer, researcher).
+- **The level tagged (default) stores nothing.** Dotting it writes no
+  `effort` key, which is what keeps a follower following a re-rated tier
+  and a pinned model on its top when its range grows. The cost: a NEW pin
+  equal to today's default cannot be written from the form — a person who
+  wants `high` held on `quick` whatever the tier becomes gets "follow"
+  instead. A stored pin that equals the default survives a confirm; it goes
+  only if the dot leaves it and comes back. A hand edit of the store is the
+  one way to write it fresh. The pending "pin carries its effort" ruling
+  above would settle it for pinned models.
+- **A pin voids the engine's capability standard, by design.** The engine
+  row still shows its standard (`2026Q2`). The pin's help text and README say
+  the rated pairing is replaced; nothing re-rates the new pair.
+- **`efforts=-` carries two meanings.** On six rows the vendor offers no
+  level (Haiku 4.5, Sonnet 4.5, the four fixed-reasoning Grok ids). On the
+  three Gemini 2.5 rows the vendor offers LOW / MEDIUM / HIGH and the
+  LAUNCHER sends none, because Gemini's effort row targets the Gemini 3
+  preset. Only the line comments tell them apart. Filling in the 2.5 ranges
+  "because the vendor lists them" would change what those launches send.
+  Revisit with Gemini's settings rendering, below, which decides what 2.5
+  gets (strict-reviewer's structured-field point, gate model-picker-3).
+- **Gemini's dotted settings are inert today, and a `-` model changes their
+  shape.** `Instance.conf` passes the `modelConfigs.customAliases.launcher.…`
+  keys as `-e` variables, which Gemini CLI does not read (its engine.mapping
+  says "nothing does yet"). Once a renderer writes them into settings.json, a
+  model sent no level skips the `[effort]` row, which also carries
+  `launcher.extends = "chat-base-3"`. That leaves an alias with an output cap
+  and no `extends`, so the renderer must decide where `extends` lives. This
+  is the next iteration's (operator, 2026-09-29).
+- **An alias in a stored pick becomes the id at the next save**
+  (`Instance.build` writes `picked_model.id`). A `-latest` alias therefore
+  freezes to the model it named then. The form writes ids only, so this
+  reaches hand-edited stores alone. To be discussed (operator, 2026-09-29).
+- **F2 on a stale pick replaces it.** A model its list no longer carries, or
+  a level its model does not take, has no dot, so confirming stores what is
+  dotted. The warning zone says so ("Its model … is not among ⟪Claude⟫'s
+  models", "Its effort … is not one … takes").
+- **Folding rests on a visibility hook, not on removing rows.** Every
+  bullet and effort row is still a row of the form (`FormBody.visible` hides
+  it), so the result, the snapshot and the cascades see all of them. Only
+  drawing and the cursor skip the hidden ones.
+- **An engine's description may not name a middle effort level** — a
+  follower's level is its tier's on whichever AI runs it, so "high effort"
+  on quick was Claude's and ChatGPT's rung and false on Gemini and Grok
+  (agent-writer, 2026-09-29; the neutrality test now forbids the phrases).
+  "max effort" is kept as a superlative, true wherever a tier sits at its
+  AI's top — except ChatGPT, where reliable's 2026Q2 is `high` and `best` is
+  `xhigh`, neither its top `max`. Latent until the Codex adapter ships;
+  re-read those descriptions then.
 
 ## Known issues — testing technique
+
+- **Check the instrument against something already known before trusting a
+  negative.** One cluster thread (2026-09-26, the policy gates) had five
+  near-misses, each caught the same way: a regex character class that
+  excluded quotes and braces found zero hits for terms that were there; a grep
+  over a 228 MB binary TIMED OUT and its empty output was read as "none"; `stat
+  -c %a /var/run` reported the SYMLINK's 777, not its target's 755; a queue post
+  was credited to the member a ping named instead of the author in its header;
+  and one file's `adminPolicyPaths: settings.adminPolicyPaths` looked like a
+  contradiction of another file's argv merge, which it sits downstream of. The
+  fixes: search for a term you know is present first (`managed-settings.json`
+  before `writable`), resolve links (`readlink -f`, then `test -w`), read the
+  header, open the upstream file. Two more the same night: a positive control
+  that found none of four known strings revealed the grep was reading the
+  wrong file (node-pty, not the bundle); and a context regex came back empty
+  on a file `grep -l` had just matched, because a minified bundle is one
+  enormous line — `grep -aob` for the byte offset, then `dd`, is the
+  extraction that works. And when checking whether someone ELSE's work
+  landed, search for its subject, not your own phrasing of it: four guessed
+  phrasings found nothing in a README paragraph that said it in other words,
+  one step from reporting finished work as missing.
+- **Drive the CLI's own matcher with the launcher's rendered rules — now a
+  test.** Gemini CLI's bundle exports `PolicyEngine` and `loadPoliciesFromToml`
+  from its core chunk, so `launch/tests/test_gemini_policy_engine.py` writes
+  the rules with the launcher's real code (`install_settings`, `fixed_policy`),
+  loads them at the tiers the CLI gives them over its shipped
+  `bundle/policies/*.toml`, and asks `engine.check()` through a thin node
+  driver (`launch/tests/probes/`): shipped builds, the fixed tier alone, the
+  dropped-flag fallback, and the known porous spellings. It needs the bundle
+  at the version in `probes/gemini-cli.version` — the [self] image and CI
+  provide it through `LAUNCHER_TEST_GEMINI_BUNDLE`, and with that set a
+  missing bundle FAILS; unset, check.sh warns that it skipped. A mutation
+  check proved it bites: allows let into plan mode failed exactly the three
+  plan-mode checks. Bump the pin only with a re-verified policy.mapping.
 
 - **A shape-only parity test let the same two forms drift a second time —
   compare what the user SEES, not the window stack.** `TestFormTailsMatch`
@@ -875,7 +1311,8 @@ mandatory for a tag with container reach (gate `tag-scopes`). Cluster-wide
   script (`entrypoint_chain` + the script as `$@`), the phase-1 wait and the
   updater thread lifted out of `run_container` into a helper both runs share,
   and the resolve-status file the addendum points at placed per member config
-  dir (today `state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)`).
+  dir (today `state_domain_resolve_status_path(container_config_root())`, the
+  running harness's default root).
   `refusal()` keeps a safety net for a wrapper entrypoint other than
   `{muxer}`'s until then.
 - **`{cowork}` / `{manager}` on cluster members** are not declared. The plan

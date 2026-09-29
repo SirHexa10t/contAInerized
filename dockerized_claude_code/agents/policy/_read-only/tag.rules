@@ -1,0 +1,4 @@
+# {ro}'s soft half: the harness refuses its file-writing tools. The hard half
+# is the read-only /workspace mount its specialty declares.
+[deny]
+tools = ["write"]

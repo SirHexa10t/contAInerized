@@ -13,8 +13,8 @@ from pathlib import Path
 
 from launch import paths
 from launch.ai import (
-    ADAPTERS, CLAUDE_CODE, DEFAULT_HARNESS_KEY, active_adapter, active_harness_key, adapter_for, refusal_for,
-    set_active_harness,
+    ADAPTERS, CLAUDE_CODE, DEFAULT_HARNESS_KEY, GEMINI_CLI, active_adapter, active_harness_key, adapter_for,
+    readiness_note, refusal_for, set_active_harness,
 )
 from launch.paths import AGENTS_DIR
 from launch.tags import BEST, CHEAPEST, scan_all, sorted_ais, sorted_engines, sorted_harnesses, sorted_standards
@@ -99,6 +99,13 @@ class TestAiOrder(unittest.TestCase):
         self.assertEqual(set(ordered), set(REGISTRY.ais))
 
 
+def render_tier(harness, budget, ai):
+    """What an instance FOLLOWING its engine sends (`Instance.model` /
+    `.effort` for a follower): the tier's model at the tier's level."""
+    tier = ai.tier(budget.effort_tier)
+    return harness.render(budget, ai, model=tier.model, effort=tier.effort)
+
+
 class TestRendering(unittest.TestCase):
     """An engine's budget × an AI's tier × a harness's knobs → that CLI's native settings."""
 
@@ -107,7 +114,7 @@ class TestRendering(unittest.TestCase):
             for ai in REGISTRY.ais.values():
                 for name in REGISTRY.harnesses_running(ai.name):
                     with self.subTest(engine=engine.name, ai=ai.name, harness=name):
-                        rendering = REGISTRY.harnesses[name].render(engine.budget, ai)
+                        rendering = render_tier(REGISTRY.harnesses[name], engine.budget, ai)
                         self.assertTrue(rendering.settings)
                         model = ai.tier(engine.budget.effort_tier).model
                         self.assertTrue(any(model in value for value in rendering.map.values()), rendering.map)
@@ -119,7 +126,7 @@ class TestRendering(unittest.TestCase):
         # Haiku 4.5 takes no effort level (Anthropic's models overview, checked
         # by the researcher 2026-09-14); its thinking switch is the knob.
         claude = REGISTRY.ais["claude"]
-        render = lambda name: REGISTRY.harnesses["claude-code"].render(REGISTRY.engines[name].budget, claude).map
+        render = lambda name: render_tier(REGISTRY.harnesses["claude-code"], REGISTRY.engines[name].budget, claude).map
         self.assertEqual(render("default"), {"ANTHROPIC_MODEL": "claude-fable-5-1", "CLAUDE_CODE_EFFORT_LEVEL": "max",
                                              "CLAUDE_CODE_ENABLE_THINKING": "1"})
         self.assertEqual(render("golem"), {
@@ -136,15 +143,15 @@ class TestRendering(unittest.TestCase):
 
     def test_unmapped_purposes_are_reported_never_invented(self):
         researcher = REGISTRY.engines["researcher"].budget
-        codex = REGISTRY.harnesses["codex-cli"].render(researcher, REGISTRY.ais["chatgpt"])
+        codex = render_tier(REGISTRY.harnesses["codex-cli"], researcher, REGISTRY.ais["chatgpt"])
         self.assertIn("max_output_tokens", codex.unmapped)       # Codex has no output cap
         self.assertIn("compact_at_percent", codex.unmapped)      # absolute tokens only
         self.assertFalse(any("output" in key.lower() and "tool" not in key for key in codex.map))
-        gemini = REGISTRY.harnesses["gemini-cli"].render(REGISTRY.engines["poet"].budget, REGISTRY.ais["gemini"])
+        gemini = render_tier(REGISTRY.harnesses["gemini-cli"], REGISTRY.engines["poet"].budget, REGISTRY.ais["gemini"])
         self.assertEqual(gemini.unmapped, ("tool_search.on",))
 
     def test_unit_conversions_happen_once_at_the_boundary(self):
-        gemini = REGISTRY.harnesses["gemini-cli"].render(REGISTRY.engines["researcher"].budget, REGISTRY.ais["gemini"]).map
+        gemini = render_tier(REGISTRY.harnesses["gemini-cli"], REGISTRY.engines["researcher"].budget, REGISTRY.ais["gemini"]).map
         self.assertEqual(gemini["tools.truncateToolOutputThreshold"], "400000")   # 100000 tokens × 4 characters
         self.assertEqual(gemini["model.compressionThreshold"], "0.6")             # 60 % → a fraction
 
@@ -267,11 +274,53 @@ class TestAdapterRecord(unittest.TestCase):
     accessors, never through a fallback to Claude Code's names."""
 
     def test_claude_code_defines_every_field(self):
+        # A bool is always a decision, so False counts as defined; everything
+        # else must carry a value — Claude Code is the reference record.
         for field in dataclasses.fields(CLAUDE_CODE):
             with self.subTest(field=field.name):
                 value = getattr(CLAUDE_CODE, field.name)
                 self.assertIsNotNone(value)
-                self.assertTrue(value, f"{field.name} is empty")
+                if not isinstance(value, bool):
+                    self.assertTrue(value, f"{field.name} is empty")
+
+    def test_gemini_cli_leaves_empty_only_what_it_does_not_have(self):
+        # Iterating the dataclass keeps this exhaustive: a new field must be
+        # filled for Gemini CLI or added here WITH its reason. Each empty
+        # one is a fact about the CLI, not a gap in the record.
+        deliberate = {
+            "session_name_env": "`--session-id` sets a new session's UUID, not a name",
+            "effort_flag": "thinking is a settings level, never a flag",
+            "auth_files": "its Google sign-in cannot be carried in from the host; the AI's API key is",
+            "config_files": "Claude Code's statusline script and key bindings mean nothing to it",
+            "subagent_transcript_glob": "its sub-agent layout is step 7's to verify",
+            "transcript_format": "found, not yet parsed — the launcher reads Claude Code's line shape only",
+            "settings_base": "step 4 writes its own (auto-update off among it); Claude Code's would mean nothing to it",
+        }
+        for field in dataclasses.fields(GEMINI_CLI):
+            value = getattr(GEMINI_CLI, field.name)
+            with self.subTest(field=field.name):
+                if field.name in deliberate:
+                    self.assertFalse(value, f"{field.name} is filled now — drop it from `deliberate`")
+                elif not isinstance(value, bool):
+                    self.assertTrue(value, f"{field.name} is empty with no stated reason")
+
+    def test_gemini_cli_is_registered_but_not_startable(self):
+        # Its image builds (the harness layer and the Node layer beneath it);
+        # its container does not start until step 4 of plans/adding_an_ai.md.
+        self.assertIs(adapter_for("gemini-cli"), GEMINI_CLI)
+        self.assertTrue(CLAUDE_CODE.startable)
+        self.assertFalse(GEMINI_CLI.startable)
+
+    def test_the_relocation_variable_says_what_it_names(self):
+        # CLAUDE_CONFIG_DIR IS the config root; GEMINI_CLI_HOME is the HOME
+        # the CLI creates .gemini inside (verified by running it). A consumer
+        # that treated the two alike would land every Gemini path one level off.
+        self.assertFalse(CLAUDE_CODE.config_dir_env_parent)
+        self.assertTrue(GEMINI_CLI.config_dir_env_parent)
+
+    def test_resume_is_an_argument_list_because_the_clis_differ_in_shape(self):
+        self.assertEqual(CLAUDE_CODE.continue_args, ("--continue",))
+        self.assertEqual(GEMINI_CLI.continue_args, ("--resume", "latest"))
 
     def test_the_registry_is_keyed_by_the_harness_member_each_record_implements(self):
         for key, adapter in ADAPTERS.items():
@@ -285,10 +334,12 @@ class TestAdapterRecord(unittest.TestCase):
     def test_active_adapter_follows_the_active_key(self):
         self.assertEqual(active_adapter().key, active_harness_key())
         try:
-            set_active_harness("gemini-cli")
+            # hermes: the one shipped harness with neither an adapter nor an
+            # npm layer, so it stays a genuine negative as adapters land.
+            set_active_harness("hermes")
             with self.assertRaises(LookupError) as caught:
                 active_adapter()
-            self.assertIn("gemini-cli", str(caught.exception))
+            self.assertIn("hermes", str(caught.exception))
         finally:
             set_active_harness(None)
         self.assertEqual(active_harness_key(), DEFAULT_HARNESS_KEY)
@@ -318,9 +369,33 @@ class TestRefusal(unittest.TestCase):
     names the harness, says the launcher can describe but not run it, and
     points at the fix."""
 
-    def test_an_adapted_harness_is_not_refused(self):
-        for key in ADAPTERS:
-            self.assertIsNone(refusal_for(key, REGISTRY.harnesses[key].label))
+    def test_a_startable_harness_is_not_refused(self):
+        for key, adapter in ADAPTERS.items():
+            if adapter.startable:
+                with self.subTest(harness=key):
+                    self.assertIsNone(refusal_for(key, REGISTRY.harnesses[key].label))
+
+    def test_a_registered_but_unstartable_harness_is_still_refused_accurately(self):
+        # The regression the readiness field exists to prevent: an adapter in
+        # the registry used to silence the refusal, and the launch then paid
+        # for a whole image build before the missing config dir bit
+        # (agent-writer, gate gemini-adapter). The sentence says what is
+        # true — it builds, it does not start — and keeps the way out.
+        label = REGISTRY.harnesses["gemini-cli"].label
+        reason = refusal_for("gemini-cli", label)
+        self.assertIsNotNone(reason)
+        self.assertIn(label, reason)
+        self.assertIn("does not start yet", reason)
+        self.assertIn("step 4", reason)
+        self.assertIn("F2", reason)
+        self.assertNotIn("no adapter", reason)
+
+    def test_the_readiness_note_is_the_one_predicate(self):
+        # Read by the refusal, the form's harness rows, the quickie's help and
+        # the audit, so they cannot disagree about what is ready.
+        self.assertIsNone(readiness_note("claude-code"))
+        self.assertEqual(readiness_note("gemini-cli"), "builds, does not start yet")
+        self.assertEqual(readiness_note("hermes"), "not runnable yet")
 
     def test_an_unadapted_harness_is_refused_by_label_with_the_way_out(self):
         for harness in (h for h in REGISTRY.harnesses.values() if h.name not in ADAPTERS):
@@ -406,9 +481,9 @@ class TestConsumersReadTheAdapter(unittest.TestCase):
         self.assertTrue(all(f.mode == "rw" for f in CLAUDE_CODE.auth_files), "the CLI refreshes both in place")
         self.assertEqual(paths.auth_file_path(CLAUDE_CODE, "account"), paths.credentials_dir(CLAUDE_CODE.key) / account.name)
         self.assertIsNone(paths.auth_file_path(CLAUDE_CODE, "env"))
-        self.assertEqual(paths.CLAUDE_CONFIG_IN_CONTAINER.name, CLAUDE_CODE.config_dir_name)
+        self.assertEqual(paths.container_config_root(CLAUDE_CODE).name, CLAUDE_CODE.config_dir_name)
         self.assertEqual(paths.state_md_path(Path("/s")).name, CLAUDE_CODE.persona_filename)
-        self.assertEqual(paths.state_history_path(Path("/s")).name, CLAUDE_CODE.history_filename)
+        self.assertEqual(CLAUDE_CODE.history_glob, "history.jsonl")        # one file at the root, the plain case of the glob
 
 
 if __name__ == "__main__":

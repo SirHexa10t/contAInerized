@@ -11,13 +11,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from launch import docker_config, paths
-from launch.ai import CLAUDE_CODE
-from launch.staging import stage_instance
-from launch.tags import TagError
+from launch.ai import CLAUDE_CODE, GEMINI_CLI
+from launch.staging import stage_instance, stale_model_notice
+from launch.tags import TagError, resolve_build
 
 from launch.tests.fixtures import REGISTRY, make_inst
 
-SOLO_CONFIG = str(paths.CLAUDE_CONFIG_IN_CONTAINER)
+SOLO_CONFIG = str(paths.container_config_root())   # the default harness's root: Claude Code's
 MEMBER_CONFIG = "/cluster/members/poet"
 
 
@@ -40,7 +40,45 @@ class StagingTmp(unittest.TestCase):
 
     def _stage(self, *, config=SOLO_CONFIG, relocated=False):
         with contextlib.redirect_stdout(io.StringIO()):
-            return stage_instance(self.inst, REGISTRY, harness=CLAUDE_CODE, config=config, relocated=relocated)
+            return stage_instance(self.inst, REGISTRY, harness=CLAUDE_CODE, config=config, relocated=relocated,
+                                  who=self.inst.instance)
+
+
+class TestStagingARulesFileHarness(StagingTmp):
+    """A harness that keeps its rules in a file of their own (Gemini CLI):
+    the file is staged read-only over its own path — the FILE, never its
+    directory, which the CLI writes its own auto-saved policies into — and
+    that directory exists host-side before any mount is staged, since docker
+    would otherwise create it root-owned (gate policy-tier, 2026-09-26)."""
+
+    GEMINI_CONFIG = "/home/claude/.gemini"
+
+    def _stage_gemini(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return stage_instance(self.inst, REGISTRY, harness=GEMINI_CLI, config=self.GEMINI_CONFIG, relocated=False,
+                                  who=self.inst.instance)
+
+    def test_the_rules_file_is_mounted_read_only_and_its_dir_is_not(self):
+        pairs = dict(self._stage_gemini().mounts)
+        source = self.inst.state_dir / REGISTRY.harnesses[GEMINI_CLI.key].policy_file
+        self.assertEqual(pairs[str(source)], f"{self.GEMINI_CONFIG}/policies/launcher.toml:ro")
+        self.assertNotIn(f"{self.GEMINI_CONFIG}/policies", [t.removesuffix(":ro") for t in pairs.values()])
+
+    def test_the_rules_dir_exists_host_side_before_any_mount_is_staged(self):
+        rules_dir = self.inst.state_dir / "policies"
+        existed = []
+        real = docker_config.add_docker_mount
+
+        def record(source, target):
+            existed.append(rules_dir.is_dir())
+            real(source, target)
+        with patch("launch.staging.add_docker_mount", side_effect=record):
+            self._stage_gemini()
+        self.assertTrue(existed and all(existed))
+
+    def test_claude_code_keeps_no_rules_file(self):
+        pairs = dict(self._stage().mounts)
+        self.assertFalse(any("policies" in target for target in pairs.values()))
 
 
 class TestStageInstance(StagingTmp):
@@ -102,12 +140,64 @@ class TestStageInstance(StagingTmp):
         first = self._stage(config="/cluster/members/a", relocated=True).mounts
         other = _real(make_inst("golem", "s2"))
         with contextlib.redirect_stdout(io.StringIO()):
-            second = stage_instance(other, REGISTRY, harness=CLAUDE_CODE, config="/cluster/members/b", relocated=True).mounts
+            second = stage_instance(other, REGISTRY, harness=CLAUDE_CODE, config="/cluster/members/b", relocated=True,
+                                    who="b").mounts
         self.assertEqual(len(docker_config.staged_mounts()), len(first) + len(second))
         targets = [t for _, t in docker_config.staged_mounts()]
         self.assertEqual(len(targets), len(set(targets)))
         creds = str(paths.credentials_dir(CLAUDE_CODE.key) / ".credentials.json")
         self.assertEqual(sum(1 for s, _ in docker_config.staged_mounts() if s == creds), 2)
+
+
+class TestStaleModelNotice(StagingTmp):
+    """A picked model the instance's AI no longer offers: the launch drops it
+    and says so in the staging's notices — which pick, why, and what runs
+    instead, named for the agent the operator knows (gate model-picker)."""
+
+    def _with_model(self, spelling):
+        build = dataclasses.replace(self.inst.build, model=spelling)
+        return dataclasses.replace(self.inst, **resolve_build(build, self.inst.agent, REGISTRY))
+
+    def test_a_stale_pick_is_announced_with_both_models_and_why(self):
+        self.inst = self._with_model("claude-opus-4-1")
+        notices = self._stage().notices
+        (line,) = [n for n in notices if "claude-opus-4-1" in n]
+        self.assertIn(f"{self.inst.instance}'s model claude-opus-4-1 is not among ⟪Claude⟫'s models", line)
+        self.assertIn(f"running {self.inst.engine.label}'s {self.inst.engine_model}", line)
+        self.assertIn("F2 in the picker picks another", line)
+
+    def test_in_a_cluster_the_notice_names_the_member(self):
+        self.inst = self._with_model("claude-opus-4-1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            staged = stage_instance(self.inst, REGISTRY, harness=CLAUDE_CODE, config=MEMBER_CONFIG, relocated=True,
+                                    who="poet__writer")
+        self.assertTrue(any(n.startswith("  Note: poet__writer's model claude-opus-4-1") for n in staged.notices))
+
+    def _with_picks(self, model, effort):
+        build = dataclasses.replace(self.inst.build, model=model, effort=effort)
+        return dataclasses.replace(self.inst, **resolve_build(build, self.inst.agent, REGISTRY))
+
+    def test_a_stale_effort_names_both_levels_and_the_member(self):
+        # Opus 4.6 takes max but not xhigh: the pin falls to the nearest level
+        # BELOW it, never up (bug-investigator, strict-reviewer, gate
+        # model-picker-3).
+        self.inst = self._with_picks("claude-opus-4-6", "xhigh")
+        (line,) = [n for n in self._stage().notices if "xhigh" in n]
+        self.assertIn(f"{self.inst.instance}'s effort xhigh is not one claude-opus-4-6 takes — running high instead", line)
+
+    def test_a_stale_model_takes_its_effort_pin_and_names_the_pair_that_runs(self):
+        self.inst = self._with_picks("claude-opus-4-1", "low")
+        notices = self._stage().notices
+        (line,) = [n for n in notices if "claude-opus-4-1" in n]
+        self.assertIn("claude-opus-4-1, with its effort low, is not among", line)
+        self.assertIn(f"running {self.inst.engine.label}'s {self.inst.engine_model} at {self.inst.effort}", line)
+        self.assertFalse([n for n in notices if "effort low is not one" in n])    # one notice for the pair
+
+    def test_a_live_pick_and_no_pick_say_nothing_about_the_model(self):
+        for spelling in ("claude-opus-5", None):
+            with self.subTest(model=spelling):
+                self.inst = self._with_model(spelling)
+                self.assertIsNone(stale_model_notice(self.inst, self.inst.instance))
 
 
 class TestStageInstanceErrors(StagingTmp):

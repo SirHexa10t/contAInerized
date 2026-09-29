@@ -1,0 +1,4 @@
+# `all`, not a list of the capabilities: a capability added to the vocabulary
+# later is granted too, so the name cannot outgrow what it allows.
+[allow]
+all = true

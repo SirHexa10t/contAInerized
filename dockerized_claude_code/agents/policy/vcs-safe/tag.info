@@ -1,4 +1,4 @@
 shortname         = "-gpush"
 short_description = "no git push/reset"
-full_description  = "Deny history-destructive and outward-facing git operations (push, hard reset) via the Bash tool. Local commits and branches stay allowed."
+full_description  = "Deny history-destructive and outward-facing git operations (push, hard reset) via the Bash tool. Local commits and branches stay allowed. Bash-pattern-level only, and narrower than <-git> in two ways: 'git lfs push' begins with 'git lfs', not 'git push', so this policy misses what <-git> catches; and gh / glab reach a remote without the word git at all (gh pr create, gh repo sync). Those two are installed only when their credentials are staged on the host — which is exactly when they can reach a remote — so this gap arms itself with the capability it should be closing. Deny them too if the instance carries such credentials."
 stance            = "deny"

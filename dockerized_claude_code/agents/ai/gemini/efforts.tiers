@@ -6,7 +6,7 @@
 # 2026-09-14 from an AA model page's embedded records.
 #
 # Gemini 3 thinks by LEVEL (thinkingLevel MINIMAL / LOW / MEDIUM / HIGH; the
-# knobs mapping sets it on the `launcher` alias); Gemini 2.5 by token budget —
+# harness's engine.mapping sets it on the `launcher` alias); Gemini 2.5 by token budget —
 # no tier uses a 2.5 model. "Live" means ai.google.dev's model page lists the
 # id, which it does for every id below (AA marks 3.5 Flash and 3.1 Flash-Lite
 # superseded by 3.6 Flash and 3.5 Flash-Lite, not withdrawn). Only `cheapest`
@@ -15,11 +15,27 @@
 # plans/adding_an_ai.md — the CLI's resolution table has no rule for an unknown
 # id, so it is assumed to request it as written. Gemini's ceiling is 3.8 Flash
 # at 41.19, so 2026Q2 and 2026Q3 fall short.
+# Ids verified 2026-09-25 against ai.google.dev's models and deprecations
+# pages and the CLI's model tables at v0.61.0 (`ai_project-update-models`):
+# every pin is live. SCHEDULED: gemini-3.1-flash-lite (`cheapest`) shuts down
+# 2027-05-07, the vendor's replacement gemini-3.5-flash-lite — the pin stays
+# while it is live and the rule's answer, and moves on the last run before
+# that date. CLI hazards, not ours to fix: `auto` / `pro` still default to
+# the shut-down gemini-3-pro-preview, `flash` to gemini-3-flash-preview and
+# `flash-lite` to 3.1-flash-lite, each reaching a live id only behind an
+# experiment flag; 3.6 / 3.7 Flash are in no CLI table and pass through
+# verbatim (models.ts resolveModel's default branch), which confirms the
+# verbatim-request assumption above for the legacy resolver.
+# WHAT A LAUNCH RUNS (2026-09-29): an instance that FOLLOWS its engine runs its
+# tier's pair below, model AND effort. One that PINS a model runs that model
+# at its highest level unless it pins a level too (agents/ai/<ai>/models.list,
+# the tag form's effort row). Every index annotated below is the rated PAIR's,
+# so it describes a pinned instance only when it pins that same pair.
 
 [scale]
 efforts = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
-[cheapest]                       # unrated at MINIMAL (16.03 at HIGH) · 0.25 / 1.5 — Google's cheapest listed model at its lowest level; the CLI's own `flash-lite` tier
+[cheapest]                       # unrated at MINIMAL (16.03 at HIGH) · 0.25 / 1.5 — Google's cheapest listed model at its lowest level; the CLI's own `flash-lite` tier. Shuts down 2027-05-07 (see the header)
 model  = "gemini-3.1-flash-lite"
 effort = "MINIMAL"
 

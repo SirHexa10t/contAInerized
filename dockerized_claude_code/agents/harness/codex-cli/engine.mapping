@@ -1,5 +1,5 @@
 # The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Codex's own
-# settings (shape and rules: ai/claude/knobs.mapping). Every key is a
+# settings (shape and rules: harness/claude-code/engine.mapping). Every key is a
 # config.toml key (dotted = nested table), also settable per launch as
 # `codex -c key=value`; Codex reads no budget from the environment. Sources,
 # read 2026-09-10: learn.chatgpt.com/docs/config-file/config-reference [C1],

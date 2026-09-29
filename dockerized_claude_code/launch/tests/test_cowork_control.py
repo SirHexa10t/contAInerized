@@ -368,7 +368,7 @@ class TestRoundTripThroughServe(ControlHarness):
         outbox.mkdir(parents=True, exist_ok=True)
         (outbox / "c.json").write_text(json.dumps({
             "last_assistant_message": "fixed it", "prompt_id": "p1",
-            "transcript_path": str(paths.CLAUDE_CONFIG_IN_CONTAINER / relative)}))
+            "transcript_path": str(paths.container_config_root() / relative)}))
         with patch.object(relay.time, "sleep", lambda _: None):
             relay.serve(interval=0, report=False, passes=1, also_poll=self.poll)
 

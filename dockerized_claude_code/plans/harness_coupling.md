@@ -89,6 +89,15 @@ permission bypass.
 
 ### 3. Config-dir layout and the mounts — HARD
 
+> **SPLIT 2026-09-25 (gate step4-start).** The one constant below stood for
+> two things that coincide only for Claude Code: the LAUNCHER's container
+> assets (now `LAUNCHER_ASSETS_IN_CONTAINER`, fixed for every harness) and a
+> HARNESS's config root (now `container_config_root(adapter)`, call-time),
+> with a cluster member's relocated root as a third. The mounts are fixed,
+> harness-rooted or absent per adapter, and the transcript and input-log
+> layout is each adapter's globs, listed by `file_access`. The bullets below
+> describe the state before.
+
 `launch/paths.py` is the single place, which is the good news:
 
 - `CLAUDE_CONFIG_IN_CONTAINER = /home/claude/.claude` (l.143) — Claude Code's
@@ -153,6 +162,19 @@ write per instance; then the copy is a mechanical reword of tool names.
 
 ### 5. Settings, permissions and hooks — HARD (the biggest one)
 
+- **Updated 2026-09-26 — the policies themselves are no longer harness data.**
+  Each policy's rules are launcher words (`tag.rules`: capabilities, shell
+  words and stems, modes — `launch/tags/rules.py`), and each harness's
+  `policy.mapping` renders them (`launch/tags/policy_mapping.py`,
+  `Harness.render_policy`): Claude Code into exactly the permission lists
+  described below (a test pins every former fragment, no exemptions), Gemini
+  CLI into Policy Engine rules in a file of their own, passed as `--policy`
+  (and the always-on denies baked into each image at the CLI's fixed tier,
+  gate fixed-tier). `install_settings` forks per harness and refuses a deny or
+  demand a harness cannot express. What stays Claude-bound in this seam: the
+  base settings (now `Adapter.settings_base`, None for Gemini CLI until step
+  4), and the two hook fragments, now raw `claude-code.json` files that refuse
+  on any other harness. The rest of this section is as written on 2026-09-09.
 - `settings/settings.json` (base): `statusLine` (runs `statusline.sh`) and
   `respondToBashCommands` — Claude Code settings keys.
 - Every `agents/policy/*/policy.json` is a Claude Code **settings fragment**:
@@ -166,12 +188,12 @@ write per instance; then the copy is a mechanical reword of tool names.
   policies + the instance's policies + specialty-claimed fragments →
   `<state>/settings.json`, mounted RO over the config root's settings file.
 - **Hooks** — two features hang on them:
-  - `agents/policy/_cowork/policy.json`: a `Stop` hook piping the hook's
+  - `agents/policy/_cowork/policy.json` (now `claude-code.json`): a `Stop` hook piping the hook's
     stdin JSON into `/cowork/outbox/<ts>-<pid>.json`. The capture's fields
     are read by `launch/cowork/mailbox.py` (`last_assistant_message`,
     `prompt_id`, `session_id`, `transcript_path`, ≈l.146-167) and
     `transcript_path` is translated from the CONTAINER path (`host_transcript_path`).
-  - `agents/policy/_cluster-cowork/policy.json`: a `UserPromptSubmit` hook
+  - `agents/policy/_cluster-cowork/policy.json` (now `claude-code.json`): a `UserPromptSubmit` hook
     running `cluster-chat brief` before every prompt — and the knowledge that a
     non-zero exit BLOCKS the prompt (the brief always exits 0).
 - Verified behaviours the design leans on (plans/ISSUES.md, "cowork permission
@@ -226,7 +248,7 @@ plain stdout, dropping the thinking ticker).
   and, until 2026-09-10, `engine.conf`): the budget in the launcher's OWN words
   — a capability standard, switches, amounts — so this seam is now DATA in
   `agents/ai/<key>/`: `efforts.tiers` (the standard → that AI's model + effort) and
-  `knobs.mapping` — in the HARNESS's dir since 2026-09-14 — (each purpose → that CLI's native settings, `{value}`
+  `engine.mapping` — in the HARNESS's dir since 2026-09-14 — (each purpose → that CLI's native settings, `{value}`
   templates with the unit conversions). `Ai.render(budget)` is the adapter
   boundary; `Instance.conf` is the rendering for the instance's AI. The
   FORWARDING is still Claude-shaped: `docker_config.conf_env_args` emits
@@ -311,7 +333,7 @@ socket beats typing), a turn-end capture, and a headless permission mode.
 - `launch/cluster_work_protocol/wake.py` `inject`: wakes a member by typing
   `[cluster-chat] …` + Enter into its pane (herdr `pane run` / tmux
   `send-keys … Enter`) — assumes a TUI that treats typed text as a prompt.
-- `agents/policy/_cluster-cowork/policy.json` `UserPromptSubmit` hook (§5).
+- `agents/policy/_cluster-cowork/claude-code.json` `UserPromptSubmit` hook (§5).
 - `launch/cluster/herdr.py` `--kind claude` (§1);
   `claude_code_config.build_cluster_status_line` (§10).
 
@@ -384,11 +406,12 @@ status-line hook (§10); the turn-end and pre-prompt hooks, and the prompt
 injection channel (§11-12); the critical hosts and widening blocks (§13).
 The natural selector is the **engine**: an engine already is "model + budget",
 and every key in an engine's budget file is harness-bound today — so the
-budget vocabulary (now `tag.budget` + the AI's `efforts.tiers` + the harness's `knobs.mapping`,
+budget vocabulary (now `tag.budget` + the AI's `efforts.tiers` + the harness's `engine.mapping`,
 2026-09-13) already IS the per-harness data, and the harness's CLI would become an image
-layer selected by it, the way professions are layers. Policies become
-per-harness DATA rows (`policy.<harness>.json` beside today's `policy.json`),
-which keeps the tree's "a tag is folders and files, no launcher code" rule.
+layer selected by it, the way professions are layers. Policies became the
+budget's pattern rather than per-harness copies (2026-09-26): launcher words
+in `tag.rules`, rendered by each harness's `policy.mapping` — which keeps the
+tree's "a tag is folders and files, no launcher code" rule.
 Features a harness cannot back degrade explicitly, per a capability matrix:
 no hooks → no cowork capture, no cluster brief; no transcripts → no `Last
 prompt`, no resumability probe; no messaging → the queue alone; no headless

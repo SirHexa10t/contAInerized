@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 from launch import paths, tag_handlers
+from launch.ai import CLAUDE_CODE
 from launch.tags import load_lego, scan_all
 
 # Chain tags with host-side launch behavior must have an _apply_ handler;
@@ -90,8 +91,75 @@ class TestHarnessLayers(unittest.TestCase):
                 self.assertIn("SOFTWARE_STACK_REFRESH", text)
                 self.assertIn("apt-get upgrade", text)                    # the weekly OS patch cadence rides the tail
                 self.assertIn("USER claude", text)                        # explicit — never the parent's last USER
+                self.assertIn('FIXED_POLICY_COUNT" ]', text)               # the fixed-tier bake and its guard (test_fixed_tier runs it) — a guard cannot assert its own presence
                 self.assertIsNotNone(harness.docker)
-                self.assertEqual(harness.docker.build_arg_forward, ("SOFTWARE_STACK_REFRESH",))
+                # The weekly buster, and the always-on denies it bakes at the CLI's fixed tier.
+                self.assertEqual(harness.docker.build_arg_forward,
+                                 ("SOFTWARE_STACK_REFRESH", "FIXED_POLICY_PATH", "FIXED_POLICY_B64", "FIXED_POLICY_COUNT"))
+
+    def test_every_adapted_npm_harness_claims_the_node_layer(self):
+        # The base image has no Node; a CLI installed from npm needs the
+        # shared layer beneath it or its image ships no binary for its own
+        # ENTRYPOINT. Driven from the tree, so Codex CLI (next) is covered the
+        # day its adapter lands.
+        from launch.ai import ADAPTERS
+        for key in ADAPTERS:
+            harness = self.reg.harnesses[key]
+            with self.subTest(harness=key):
+                if harness.package.startswith("npm "):
+                    self.assertIsNotNone(harness.layer, "an npm CLI with no Node beneath it")
+                    self.assertEqual(harness.layer.name, "node")
+                else:
+                    self.assertIsNone(harness.layer)
+
+    def test_claude_codes_package_names_the_installer_it_really_uses(self):
+        # It said npm while the layer ran the standalone installer, which
+        # ships its own Node — the one reason the base needs none, and the
+        # reason this harness alone claims no Node layer (agent-writer).
+        claude = self.reg.harnesses["claude-code"]
+        self.assertNotIn("npm", claude.package)
+        self.assertIn("claude.ai/install.sh", _instructions(claude.dockerfile))
+
+    def test_the_node_layer_goes_directly_beneath_its_harness(self):
+        # The chain stays linear: the claimed layer is inserted immediately
+        # before the harness's own, whatever professions come first.
+        from launch.tags import Instance
+        from launch.tags.identity import resolve_build
+        from launch.tags import AgentBuild
+        inst = Instance(agent="golem", md_path=paths.AGENTS_DIR / "golem.md", session="s",
+                        workspace="/w", is_brand_new=True,
+                        **resolve_build(AgentBuild(ai="gemini", harness="gemini-cli", professions=("code",)),
+                                        "golem", self.reg))
+        names = [name for name, _, _ in inst.build_steps]
+        self.assertEqual(names[-2:], ["node", "gemini-cli"])
+        self.assertEqual(names[0], "code")
+
+    def test_the_node_layer_is_stable_fail_hard_and_leaves_existing_node_alone(self):
+        layer = self.reg.harnesses["gemini-cli"].layer
+        text = _instructions(layer.path / "Dockerfile")
+        self.assertIn("FORCE_INSTALLS_REFRESH", text)            # stable buster; the weekly one is the tail's alone (test below)
+        self.assertEqual(layer.docker.build_arg_forward, ("FORCE_INSTALLS_REFRESH",))
+        self.assertIn("command -v node", text)                   # [code]'s Node is never upgraded from here
+        self.assertNotIn("install_failures.log", text)           # fail-hard: no degraded image with no binary
+        self.assertIn("exit 1", text)
+        self.assertNotIn("ENTRYPOINT", text)
+
+    def test_the_npm_prefix_is_on_the_path_the_base_exports(self):
+        # `npm install -g` as the claude user lands binaries in
+        # <prefix>/bin, so the prefix is only right if that dir is on PATH —
+        # pinned as a RELATIONSHIP, not as two literals (bug-investigator).
+        # And [code] sets the same variable earlier in a chain that has it;
+        # if the two drifted, whichever layer came last would win silently.
+        import re
+        def prefix(path):
+            match = re.search(r'ENV NPM_CONFIG_PREFIX="([^"]+)"', _instructions(path))
+            self.assertIsNotNone(match, f"{path} sets no NPM_CONFIG_PREFIX")
+            return match.group(1)
+        node = prefix(self.reg.harnesses["gemini-cli"].layer.path / "Dockerfile")
+        base_path = re.findall(r'ENV PATH="([^"]+)"', _instructions(paths.BASE_DOCKERFILE))
+        self.assertTrue(any(f"{node}/bin" in entry.split(":") for entry in base_path),
+                        f"{node}/bin is not on the base image's PATH")
+        self.assertEqual(prefix(self.reg.professions["code"].path / "Dockerfile"), node)
 
     def test_the_weekly_buster_is_the_harness_layers_word_alone(self):
         harness_layers = {h.dockerfile for h in self.reg.harnesses.values() if h.dockerfile}
@@ -539,7 +607,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # rides along on the NEXT prompt (no documented way to drop it), so
         # the genuinely free path stays the {mux} shell pane.
         import json
-        settings = json.loads(paths.BASE_SETTINGS_FILE.read_text())
+        settings = json.loads(paths.base_settings_file(CLAUDE_CODE).read_text())
         self.assertIs(settings["respondToBashCommands"], False)
 
     def test_no_binding_claims_the_unbindable_exit_action(self):
@@ -588,12 +656,11 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # it nests — and its TEETH are the claimed policy fragment's
         # UserPromptSubmit hook, not more addendum prose: the live trial
         # proved prose alone doesn't reach the moment of commitment.
-        import json
         cc = self.reg.specialties["cluster-cowork"]
         self.assertEqual(cc.shortname, "cc")
         self.assertEqual(cc.requires, frozenset({"cluster", "muxer"}))
-        self.assertIsNotNone(cc.policy_dir)
-        fragment = json.loads((cc.policy_dir / "policy.json").read_text())
+        self.assertIsNotNone(cc.fragment)
+        fragment = cc.fragment.raw_fragment(CLAUDE_CODE.key)   # a hook: settings no policy word can say
         hook = fragment["hooks"]["UserPromptSubmit"][0]["hooks"][0]
         self.assertEqual(hook["command"], "cluster-chat brief")
         # No image layer of its own: cluster-chat rides {clstr}'s _cluster.
@@ -696,11 +763,16 @@ class TestTagTreeDiscovery(unittest.TestCase):
     def test_all_actions_is_the_union_of_the_grant_pair(self):
         # <+all>'s description says "pick this OR that pair — they overlap
         # completely"; this pins the claim so neither side can drift under it.
-        def allows(name):
-            return set(self.reg.policies[name].load_fragment()["permissions"]["allow"])
-        umbrella = allows("all-actions")
-        self.assertLessEqual(allows("free-bash") | allows("web-research"), umbrella)
-        # And it covers every denial the probe surfaced.
+        # In words: <+all> allows every tool a harness maps, and the pair
+        # names capabilities only, so no harness can render one outside it.
+        rules = {name: self.reg.policies[name].rules for name in ("all-actions", "free-bash", "web-research")}
+        self.assertTrue(rules["all-actions"].allow.all)
+        for name in ("free-bash", "web-research"):
+            with self.subTest(policy=name):
+                self.assertEqual((rules[name].allow.shell, rules[name].allow.shell_stems), ((), ()))
+        # And on Claude Code it covers every denial the probe surfaced.
+        claude = self.reg.harnesses[CLAUDE_CODE.key]
+        umbrella = set(claude.render_policy("all-actions", rules["all-actions"]).settings["permissions"]["allow"])
         self.assertLessEqual({"Bash", "WebFetch", "WebSearch"}, umbrella)
         self.assertEqual(self.reg.policies["all-actions"].label, "<+all>")
 
@@ -903,10 +975,18 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # day another AI runs — and stale the day Anthropic renames a family.
         forbidden = ["fable", "mythos", "opus", "sonnet", "haiku", "claude", "anthropic",
                      "gemini", "gpt", "codex", "grok"]
+        # A middle effort LEVEL is as AI-specific as a model name: a follower
+        # runs its tier's level on whichever AI runs it, so quick's "high
+        # effort" was Claude's rung and false on Gemini and Grok (agent-writer,
+        # 2026-09-29). Phrases, not words — "high" and "low" are ordinary
+        # English ("High-investment", "allows"; bug-investigator). "max
+        # effort" stays: a superlative, true at each AI's top (plans/ISSUES.md
+        # has the one exception, latent on ChatGPT).
+        levels = ["minimal effort", "low effort", "medium effort", "high effort", "xhigh effort"]
         for eng in self.reg.engines.values():
             text = f"{eng.short_description} {eng.full_description}".lower()
             with self.subTest(engine=eng.name):
-                self.assertEqual([w for w in forbidden if w in text], [], text)
+                self.assertEqual([w for w in (*forbidden, *levels) if w in text], [], text)
 
     def test_the_legend_renders_a_tag_commands_section(self):
         import re
@@ -978,13 +1058,23 @@ class TestTagTreeDiscovery(unittest.TestCase):
         self.assertEqual(self.reg.policies["web-research"].label, "<+qry>")
         self.assertEqual(self.reg.policies["vcs-safe"].label, "<-gpush>")
 
+    def test_read_only_git_nests_under_the_push_guard_and_the_form_cascades_it(self):
+        # <-gw> goes beyond <-gpush>, so picking it brings <-gpush> along
+        # (operator, 2026-09-28): nesting is the requires mechanism.
+        from launch.gui.forms import _form_requires
+        gw = self.reg.policies["no-git-write"]
+        self.assertEqual(gw.label, "<-gw>")
+        self.assertEqual(gw.requires, frozenset({"vcs-safe"}))
+        self.assertEqual(_form_requires(self.reg)["no-git-write"], frozenset({"vcs-safe"}))
+
     def test_no_git_denies_the_whole_family_not_just_push(self):
         # <-git> forbids ALL git via Bash — stage, commit, push, everything —
         # in both pattern spellings the engine honours (<-su> sets the shape).
         # <-gpush> stays the lighter option that still allows local commits.
-        fragment = self.reg.policies["no-git"].load_fragment()
-        self.assertEqual(fragment["permissions"]["deny"],
-                         ["Bash(git *)", "Bash(git:*)"])
+        rules = self.reg.policies["no-git"].rules
+        self.assertEqual(rules.deny.shell, ("git",))   # the command as a WORD: git and git anything, never gitk
+        rendered = self.reg.harnesses[CLAUDE_CODE.key].render_policy("no-git", rules)
+        self.assertEqual(rendered.settings["permissions"]["deny"], ["Bash(git *)", "Bash(git:*)"])
         self.assertEqual(self.reg.policies["no-git"].label, "<-git>")
 
     def test_the_doer_agents_carry_the_grant_umbrella(self):

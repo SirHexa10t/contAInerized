@@ -2,7 +2,7 @@
 # `effort_tier` names a capability standard every agents/ai/*/efforts.tiers
 # answers: `cheapest`, `best`, or a dated one from agents/ai/capability.standards (a
 # quarter whose frontier model set the level — `2025Q4`); the other keys are
-# purposes each AI's knobs.mapping translates. A nested engine dir overlays its
+# purposes each AI's engine.mapping translates. A nested engine dir overlays its
 # parent's file key-by-key. Baseline: the strongest tier, thinking shown.
 effort_tier = "best"
 thinking    = true

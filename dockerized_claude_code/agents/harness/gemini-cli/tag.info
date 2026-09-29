@@ -6,3 +6,4 @@ vendor            = "Google"
 ais               = ["gemini"]
 binary            = "gemini"
 package           = "npm @google/gemini-cli"
+layer             = "node"             # the shared Node layer (agents/profession/_node) its npm install needs, built directly beneath its own

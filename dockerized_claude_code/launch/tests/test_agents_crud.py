@@ -6,7 +6,9 @@ resolve_pick / creatable_agents / instance_from_store lean on the real
 agents/ tree + the md index — their discovery halves are covered by
 test_essential_files against the shipped tree."""
 
+import dataclasses
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,12 +17,16 @@ from unittest.mock import patch
 import json
 
 from launch import paths
+from launch.ai import CLAUDE_CODE, GEMINI_CLI
 from launch.agents_crud import (
     RESUME_SIZE_WARN_BYTES, compute_resume_flag, delete_instance,
     install_latest_md, install_settings, invalid_tags_report, modify_instance,
     persist_instance,
 )
-from launch.tags import AgentBuild, Instance, TagError, scan_all, store
+from launch.paths import AGENTS_DIR
+from launch.tags import AgentBuild, Instance, TagError, load_lego, scan_all, store
+from launch.tags.rules import parse_rules
+from launch.tests.fixtures import REGISTRY
 from launch.tags.identity import resolve_build
 from launch.tags import addendums
 from launch.tags.addendums import ADDENDUM_SECTION_TITLE, SEEK_SUMMARY
@@ -228,10 +234,12 @@ class TestInstallLatestMd(unittest.TestCase):
 
 
 class TestInstallSettings(unittest.TestCase):
-    """install_settings — base settings + policy fragments → the per-instance
-    settings.json that gets RO-mounted over ~/.claude/settings.json. Policy
-    fragments come through duck-typed stand-ins (`.name` + `.load_fragment()`
-    are all it reads); the base file is the real shipped one."""
+    """install_settings — the instance's policies, rendered through its
+    harness's policy.mapping, → the per-instance settings.json RO-mounted
+    over the CLI's own, plus the harness's rules file when it keeps one.
+    Driven through the REAL harness members, the real shipped base and real
+    `Rules`; the policies are stand-ins (`.name`, `.label`, `.rules` and
+    `.always_on` are all it reads)."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -241,67 +249,175 @@ class TestInstallSettings(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     @staticmethod
-    def _policy(name, fragment, always_on=False):
-        return SimpleNamespace(name=name, load_fragment=lambda: fragment, always_on=always_on)
+    def _policy(name, rules, always_on=False):
+        return SimpleNamespace(name=name, label=f"<{name}>", always_on=always_on,
+                               rules=parse_rules(rules, Path(name) / "tag.rules"))
 
     @staticmethod
-    def _registry(*policies):
-        """A registry stand-in — install_settings only reads `.policies`
-        (values + each one's always_on/name/load_fragment)."""
-        return SimpleNamespace(policies={p.name: p for p in policies})
+    def _registry(*policies, harnesses=None):
+        """A registry stand-in — install_settings reads `.policies` and the
+        member of `.harnesses` it renders through (the real ones by default)."""
+        return SimpleNamespace(policies={p.name: p for p in policies},
+                               harnesses=harnesses or REGISTRY.harnesses)
 
     def _written(self, inst):
         return json.loads((inst.state_dir / "settings.json").read_text())
 
     def test_no_policies_yields_base_settings(self):
         inst = _inst()
-        install_settings(inst, self._registry())
-        base = json.loads(paths.BASE_SETTINGS_FILE.read_text())
+        self.assertEqual(install_settings(inst, self._registry(), CLAUDE_CODE), ())
+        base = json.loads(paths.base_settings_file(CLAUDE_CODE).read_text())
         self.assertEqual(self._written(inst), base)
 
-    def test_policy_fragment_merges_onto_base(self):
-        inst = _inst(policies=(self._policy("web-research",
-                                            {"permissions": {"allow": ["WebSearch"]}}),))
-        install_settings(inst, self._registry())
+    def test_policy_renders_onto_base(self):
+        inst = _inst(policies=(self._policy("web-research", {"allow": {"tools": ["web"]}}),))
+        install_settings(inst, self._registry(), CLAUDE_CODE)
         merged = self._written(inst)
-        self.assertEqual(merged["permissions"], {"allow": ["WebSearch"]})
+        self.assertEqual(merged["permissions"], {"allow": ["WebFetch", "WebSearch"]})
         self.assertIn("statusLine", merged)   # base settings preserved
 
     def test_two_policies_lists_concatenate(self):
         inst = _inst(policies=(
-            self._policy("a", {"permissions": {"deny": ["Bash(sudo *)"]}}),
-            self._policy("b", {"permissions": {"deny": ["WebFetch"]}}),
+            self._policy("a", {"deny": {"shell": ["sudo"]}}),
+            self._policy("b", {"deny": {"tools": ["web"]}}),
         ))
-        install_settings(inst, self._registry())
+        install_settings(inst, self._registry(), CLAUDE_CODE)
         self.assertEqual(self._written(inst)["permissions"]["deny"],
-                         ["Bash(sudo *)", "WebFetch"])
+                         ["Bash(sudo *)", "Bash(sudo:*)", "WebFetch", "WebSearch"])
 
-    def test_always_on_policy_merges_without_being_selected(self):
+    def test_always_on_policy_applies_without_being_selected(self):
         # The static-tag path: <-su>-style policies come from the REGISTRY,
         # not the instance — every settings.json carries them.
-        static = self._policy("no-sudo", {"permissions": {"deny": ["Bash(sudo *)"]}}, always_on=True)
-        offered = self._policy("web-research", {"permissions": {"allow": ["WebSearch"]}})
+        static = self._policy("no-sudo", {"deny": {"shell": ["sudo"]}}, always_on=True)
+        offered = self._policy("web-research", {"allow": {"tools": ["web"]}})
         inst = _inst()   # no policies selected
-        install_settings(inst, self._registry(static, offered))
+        install_settings(inst, self._registry(static, offered), CLAUDE_CODE)
         merged = self._written(inst)
-        self.assertEqual(merged["permissions"], {"deny": ["Bash(sudo *)"]})   # static applied
-        self.assertNotIn("allow", merged["permissions"])                       # non-static NOT applied unselected
+        self.assertEqual(merged["permissions"], {"deny": ["Bash(sudo *)", "Bash(sudo:*)"]})   # static applied
+        self.assertNotIn("allow", merged["permissions"])                                       # non-static NOT applied unselected
 
     def test_scalar_conflict_aborts_naming_culprits(self):
-        inst = _inst(policies=(
-            self._policy("loose", {"cleanupPeriodDays": 90}),
-            self._policy("tight", {"cleanupPeriodDays": 7}),
-        ))
+        # A shipped pair that cannot hold together: <!plan> demands plan mode,
+        # {cowork}'s raw Claude Code settings demand dontAsk — one scalar.
+        inst = _inst(policies=(REGISTRY.policies["plan-first"],), specialties=(REGISTRY.specialties["cowork"],))
         with self.assertRaises(TagError) as ctx:
-            install_settings(inst, self._registry())
-        self.assertIn("loose", str(ctx.exception))
-        self.assertIn("tight", str(ctx.exception))
+            install_settings(inst, self._registry(), CLAUDE_CODE)
+        self.assertIn("plan-first", str(ctx.exception))
+        self.assertIn("cowork", str(ctx.exception))
 
     def test_regenerated_each_call(self):
-        inst = _inst(policies=(self._policy("p", {"x": {"a": 1}}),))
-        install_settings(inst, self._registry())
-        install_settings(_inst(), self._registry())   # same instance id, no policies → base only
-        self.assertNotIn("x", self._written(inst))
+        inst = _inst(policies=(self._policy("p", {"deny": {"tools": ["web"]}}),))
+        install_settings(inst, self._registry(), CLAUDE_CODE)
+        install_settings(_inst(), self._registry(), CLAUDE_CODE)   # same instance id, no policies → base only
+        self.assertNotIn("permissions", self._written(inst))
+
+    def test_specialty_fragment_rules_render_with_the_policies(self):
+        # {ro} claims policy/_read-only's rules: its write-tool deny lands
+        # beside the selected policies' on either harness.
+        inst = _inst(specialties=(REGISTRY.specialties["read-only"],))
+        install_settings(inst, self._registry(), CLAUDE_CODE)
+        self.assertEqual(self._written(inst)["permissions"]["deny"], ["Write", "Edit", "NotebookEdit"])
+
+    def test_a_deny_the_harness_cannot_express_refuses_naming_tag_and_word(self):
+        # A harness whose mapping lacks a capability: the deny must stop the
+        # launch rather than evaporate, and say what to drop.
+        gemini = REGISTRY.harnesses["gemini-cli"]
+        mapping = dataclasses.replace(gemini.policy_mapping,
+                                      tools=tuple(row for row in gemini.policy_mapping.tools if row[0] != "write"))
+        registry = self._registry(harnesses={**REGISTRY.harnesses,
+                                             "gemini-cli": dataclasses.replace(gemini, policy_mapping=mapping)})
+        read_only = REGISTRY.specialties["read-only"]
+        with self.assertRaises(TagError) as ctx:
+            install_settings(_inst(specialties=(read_only,)), registry, GEMINI_CLI)
+        self.assertIn(read_only.label, str(ctx.exception))
+        self.assertIn("[deny] tools 'write'", str(ctx.exception))
+
+    def test_a_harness_without_a_mapping_refuses_every_deny(self):
+        codex = dataclasses.replace(GEMINI_CLI, key="codex-cli", name="Codex CLI")
+        inst = _inst(policies=(self._policy("no-git", {"deny": {"shell": ["git"]}}),))
+        with self.assertRaises(TagError) as ctx:
+            install_settings(inst, self._registry(), codex)
+        self.assertIn("no policy.mapping yet", str(ctx.exception))
+
+    def test_an_allow_the_harness_cannot_express_is_a_note(self):
+        gemini = REGISTRY.harnesses["gemini-cli"]
+        mapping = dataclasses.replace(gemini.policy_mapping,
+                                      tools=tuple(row for row in gemini.policy_mapping.tools if row[0] != "web"))
+        registry = self._registry(harnesses={**REGISTRY.harnesses,
+                                             "gemini-cli": dataclasses.replace(gemini, policy_mapping=mapping)})
+        inst = _inst(policies=(self._policy("web-research", {"allow": {"tools": ["web"]}}),))
+        (note,) = install_settings(inst, registry, GEMINI_CLI)
+        self.assertIn("<web-research>", note)
+        self.assertIn("[allow] tools 'web'", note)
+
+    def test_raw_settings_for_another_harness_refuse(self):
+        # {cowork}'s Stop hook is Claude Code settings no word can say yet;
+        # on Gemini CLI the specialty would silently lose it.
+        cowork = REGISTRY.specialties["cowork"]
+        with self.assertRaises(TagError) as ctx:
+            install_settings(_inst(specialties=(cowork,)), self._registry(), GEMINI_CLI)
+        self.assertIn(cowork.label, str(ctx.exception))
+        self.assertIn("claude-code", str(ctx.exception))
+
+
+class TestInstallSettingsGemini(unittest.TestCase):
+    """The fork: a harness that keeps its rules in a file of their own gets
+    that file, read back at once, beside a settings.json with no Claude Code
+    base in it. Real registry, real mappings, real policies."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = patch.object(paths, "AGENTS_STATE", Path(self.tmpdir.name) / "state")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _install(self, policies=(), specialties=()):
+        inst = _inst(policies=tuple(REGISTRY.policies[n] for n in policies),
+                     specialties=tuple(REGISTRY.specialties[n] for n in specialties))
+        install_settings(inst, REGISTRY, GEMINI_CLI)
+        rules_file = inst.state_dir / REGISTRY.harnesses["gemini-cli"].policy_file
+        return inst, json.loads((inst.state_dir / "settings.json").read_text()), tomllib.loads(rules_file.read_text())
+
+    def test_rules_land_in_the_rules_file_not_the_settings(self):
+        _, settings, rules = self._install(policies=["no-git"])
+        self.assertEqual(settings, {})   # no base yet (step 4), no mode demanded
+        commands = {rule.get("commandPrefix") for rule in rules["rule"]}
+        self.assertEqual(commands, {"sudo", "git"})   # the always-on <-su>, then the selection
+
+    def test_a_demanded_mode_lands_in_the_settings(self):
+        _, settings, _ = self._install(policies=["plan-first"])
+        self.assertEqual(settings, {"general": {"defaultApprovalMode": "plan"}})
+
+    def test_project_starters_allows_never_reach_plan_mode(self):
+        # project-starter carries <!plan> and <+all>. Gemini's plan mode is
+        # enforced by default-tier rules, so an allow ranked above them in
+        # plan mode would lift it: every allow must name its modes, and
+        # never plan. The day someone widens the scope, this names the agent
+        # it breaks.
+        build = load_lego(AGENTS_DIR / "project-starter.lego")
+        _, settings, rules = self._install(policies=build.policies)
+        self.assertEqual(settings["general"]["defaultApprovalMode"], "plan")
+        allows = [rule for rule in rules["rule"] if rule["decision"] == "allow"]
+        self.assertTrue(allows)
+        for rule in allows:
+            with self.subTest(tools=rule["toolName"]):
+                self.assertEqual(rule["modes"], ["default", "autoEdit", "yolo"])
+
+    def test_the_rules_dir_is_made_host_side_and_takes_new_files(self):
+        # Staging mounts the FILE read-only; its dir must exist before docker
+        # would create it root-owned, and must take a new file — the CLI
+        # writes its auto-saved policies there through a temp file.
+        inst, _, _ = self._install()
+        rules_dir = (inst.state_dir / REGISTRY.harnesses["gemini-cli"].policy_file).parent
+        self.assertTrue(rules_dir.is_dir())
+        (rules_dir / "auto-saved.toml.probe.tmp").write_text("")
+
+    def test_an_unreadable_rules_file_stops_the_launch(self):
+        with patch("launch.agents_crud.rules_file_text", return_value="[[rule]\n"), \
+                self.assertRaises(TagError) as ctx:
+            self._install()
+        self.assertIn("does not parse", str(ctx.exception))
 
 
 class TestInvalidTagsReport(unittest.TestCase):
@@ -412,6 +528,16 @@ class TestComputeResumeFlag(unittest.TestCase):
             flag = compute_resume_flag(self._instance(transcript_bytes=1024))
         self.assertEqual(flag, ["--continue"])
         printed.assert_not_called()
+
+    def test_resume_takes_the_harnesss_whole_argument_list(self):
+        # Gemini CLI resumes with `--resume latest`, a flag AND a value; a
+        # reader that took one flag would emit a broken command line.
+        from launch import agents_crud
+        from launch.ai import GEMINI_CLI
+        with patch.object(agents_crud, "active_adapter", return_value=GEMINI_CLI), \
+             patch("builtins.print"):
+            flag = compute_resume_flag(self._instance(transcript_bytes=1024))
+        self.assertEqual(flag, ["--resume", "latest"])
 
     def test_a_huge_transcript_still_resumes_but_says_the_risk_out_loud(self):
         # Still resumes — the operator asked to continue, and most launches

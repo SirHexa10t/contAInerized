@@ -19,12 +19,14 @@ from `styles`. Nothing here builds a prompt_toolkit Application itself.
 from dataclasses import dataclass, replace
 from typing import Callable, overload
 
+from ..ai import readiness_note
 from ..paths import toolkit_profile_path, ui_profile_path
 from ..tags import (
     is_scope, scope_note,
-    AgentBuild, Ai, Engine, Harness, Policy, Profession, Registry, Specialty, Tag, ToolkitEntry,
+    AgentBuild, Ai, Engine, Harness, Policy, Profession, Registry, Specialty, Tag, TagError, ToolkitEntry,
 )
 from ..tags.ai import sorted_ais
+from ..tags.models import Model, model_label
 from ..tags.engine import sorted_engines
 from ..tags.harness import sorted_harnesses
 from ..tags.toolkit_profile import load_profile, save_profile
@@ -33,6 +35,14 @@ from .form_core import (
     TITLE_TAGS_FORM, TOOLKIT_SIZE_NOTE, FormOption, TextField, checkbox_form,
 )
 from .styles import STYLE_UNDERLINE, UiClass, tag_style
+
+def _harness_note(harness: Harness, registry: Registry) -> str:
+    """A harness row's dim trailer: the AIs it runs, then — while the
+    launcher cannot start it — how far off that is (`readiness_note`)."""
+    runs = "runs " + " ".join(registry.ais[a].label for a in harness.ais if a in registry.ais)
+    readiness = readiness_note(harness.name)
+    return runs if readiness is None else f"{runs} · {readiness}"
+
 
 def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, note: str = "",
              inherited: bool = False, forbidden: str | None = None) -> FormOption:
@@ -94,16 +104,166 @@ def _tag_row(tag: Tag, checked: bool, group: str | None = None, *, note: str = "
     )
 
 
+# What each kind of row under an AI does, in its focused panel — said once
+# here and once in README, never per model (agent-writer, gates model-picker
+# to model-picker-3).
+_FOLLOW_NOTE = ("the model the engine's capability standard rates for this AI, at the engine's rated effort — "
+                "and whatever it rates next: the tier moves, the instance moves with it. Stores no `model`.")
+_PIN_NOTE = ("pin this model: the instance keeps it whatever the engine rates, replacing the engine's rated "
+             "pairing — with no effort pinned it runs at the model's highest level; the engine's switches stay.")
+_EFFORT_NOTE = ("the level this instance runs at, ←/→ to move — the model's own range (models.list). The one "
+                "marked (default) stores nothing: the engine's rated level while the instance follows the "
+                "engine, the pinned model's highest once one is pinned. Any other pins that level.")
+_FOLLOW = "(follow)"      # a model id never holds a parenthesis, so these two keys cannot shadow a model's
+_EFFORT = "(effort)"
+
+
+def _model_key(ai: Ai, model: Model) -> str:
+    """A model row's form key: `<ai>:<id>`, since the form's keys share one
+    namespace with the tag names. Read back through `_model_keys`, never by
+    splitting, so even a tag named with a colon cannot pass for a model."""
+    return f"{ai.name}:{model.id}"
+
+
+def _follow_key(ai: Ai) -> str:
+    return f"{ai.name}:{_FOLLOW}"
+
+
+def _effort_key(bullet: str) -> str:
+    """The effort row under a bullet — `<bullet key>:(effort)`."""
+    return f"{bullet}:{_EFFORT}"
+
+
+def _model_keys(registry: Registry) -> dict[str, tuple[Ai, Model]]:
+    """Every model row's form key → its AI and model: each AI's models, in
+    list order."""
+    return {_model_key(ai, model): (ai, model)
+            for ai in sorted_ais(registry.ais.values()) for model in ai.models}
+
+
+def _engine_model(ai: Ai, engine: Engine) -> Model:
+    """The model `engine` lands on for `ai`: the one its capability
+    standard's tier pins, resolved through the AI's list — by id OR alias,
+    because a tier may pin the alias (`claude-haiku-4-5` for the dated Haiku
+    row; researcher, gate model-picker-2). The scan holds every engine to a
+    standard and every tier pin to the list, so this always resolves."""
+    standard = engine.budget.effort_tier
+    model = ai.model(ai.tier(standard).model) if standard else None
+    if model is None:
+        raise TagError(f"{engine.path}: no model of {ai.label} answers its standard {standard!r}")
+    return model
+
+
+def _dotted_engine(registry: Registry, dotted: frozenset[str]) -> Engine | None:
+    return next((engine for name, engine in registry.engines.items() if name in dotted), None)
+
+
+def _model_defaults(registry: Registry) -> dict[frozenset[str], str]:
+    """checkbox_form's `defaults` for the tag form: every (engine, AI) pair →
+    that AI's follow-the-engine bullet. Dotting an engine or an AI therefore
+    returns the model to the engine's choice — the operator's "the selected
+    engine selects the model" — and the form opens there for an instance
+    with no live pin."""
+    return {frozenset({engine.name, ai.name}): _follow_key(ai)
+            for engine in registry.engines.values() for ai in registry.ais.values()}
+
+
+def _stale_warning(registry: Registry, current: AgentBuild) -> dict[frozenset[str], tuple[str, list[str]]]:
+    """The warning zone's lines for stored picks that cannot stand while their
+    AI is dotted — a model its list no longer carries, an effort its model
+    does not take. The confirm replaces them, so the form says so rather
+    than discard them silently (agent-writer, gate model-picker-2)."""
+    if current.ai is not None and current.ai not in registry.ais:
+        return {}
+    ai = registry.ai_for(current)
+    if ai is None:
+        return {}
+    lines: list[str] = []
+    stale = ai.stale(current.model) if current.model else None
+    if stale is not None:
+        lines.append(f"Its model {stale.spelling} is {stale.why(ai.label)}.")
+    engine = registry.engines.get(current.engine) if current.engine else None
+    running = ai.model(current.model) if current.model and stale is None else (
+        _engine_model(ai, engine) if engine is not None else None)
+    if current.effort and running is not None and current.effort not in running.efforts:
+        lines.append(f"Its effort {current.effort} is not one {running.id} takes.")
+    if not lines:
+        return {}
+    return {frozenset({ai.name}): (lines[0], [*lines[1:], "Confirming stores what is dotted in their place."])}
+
+
+def _follow_row(ai: Ai, registry: Registry) -> FormOption:
+    """The first bullet under an AI: follow the engine. Its words name the
+    model the DOTTED engine means for this AI, so they follow the engine
+    dot as it moves. The form's `defaults` dot it whenever the engine or the
+    AI changes, and at open for an instance with no live pin."""
+    def label(dotted: frozenset[str]) -> list[tuple[str, str]]:
+        engine = _dotted_engine(registry, dotted)
+        if engine is None:
+            return [("", "follow the engine")]
+        model = _engine_model(ai, engine)
+        return [("", "follow the engine"), (UiClass.STATUS.css, f"  now {model_label(model, ai.model_prefix)}  {model.id}")]
+    return FormOption(key=_follow_key(ai), label=label, body=[(STYLE_UNDERLINE, "follow the engine"), ("", f": {_FOLLOW_NOTE}")],
+                      attached_to=ai.name, group="model", folds_with_anchor=True)
+
+
+def _model_row(key: str, ai: Ai, model: Model, current: AgentBuild, effective_ai: Ai | None, *,
+               label_width: int) -> FormOption:
+    """One model bullet under its AI's row: the label the picker's chip will
+    show, padded to `label_width` so the ids beside it line up, then the id
+    dim — prefilled only for a live stored pick on the dotted AI. With the
+    follow bullet, one MANDATORY radio group across every AI — exactly one,
+    always — each bullet requiring its AI and folding away while that AI is
+    not the dotted one."""
+    shown = model_label(model, ai.model_prefix)
+    label: list[tuple[str, str]] = [("", f"{shown:<{label_width}}"), (UiClass.STATUS.css, f"  {model.id}")]
+    picked = (current.model is not None and effective_ai is not None and ai.name == effective_ai.name
+              and model.spells(current.model))
+    return FormOption(key=key, label=label, body=[(STYLE_UNDERLINE, model.id), ("", f": {_PIN_NOTE}")],
+                      checked=picked, attached_to=ai.name, group="model", folds_with_anchor=True)
+
+
+def _effort_row(ai: Ai, registry: Registry, bullet: str, model: Model | None, choice: str | None) -> FormOption:
+    """The effort pick under ONE bullet (operator, 2026-09-29: "below the
+    selected model"), shown only while that bullet is dotted: the levels
+    its model takes, in its AI's scale order, with the default PRE-SELECTED
+    and tagged "(default)" rather than given a position of its own. Under
+    follow (`model` None) the model is the dotted engine's and the default
+    that engine's rated level; under a pinned model the default is its top.
+    `choice` is a stored level to start from (None: the default)."""
+    def running(dotted: frozenset[str]) -> tuple[Model | None, str | None]:
+        if model is not None:
+            return model, model.top_effort
+        engine = _dotted_engine(registry, dotted)
+        if engine is None:
+            return None, None
+        return _engine_model(ai, engine), ai.tier(engine.budget.effort_tier or "").effort
+
+    def choices(dotted: frozenset[str]) -> list[tuple[str | None, str]]:
+        running_model, default = running(dotted)
+        if running_model is None:
+            return []                       # an empty range folds the row away (bug-investigator, gate model-picker-3)
+        return [(level, f"{level} (default)" if level == default else level) for level in running_model.efforts]
+
+    return FormOption(key=_effort_key(bullet), label=[("", "effort")], choices=choices, choice=choice,
+                      choice_default=lambda dotted: running(dotted)[1],
+                      body=[(STYLE_UNDERLINE, "effort"), ("", f": {_EFFORT_NOTE}")],
+                      attached_to=bullet, folds_with_anchor=True)
+
+
 def _tag_form_options(registry: Registry, current: AgentBuild, *, scope: str,
                       engines: bool = True,
                       locked: frozenset[str] = frozenset(),
                       ) -> list[FormOption]:
-    """The full sectioned form: one header per kind (its nutshell), the AI
-    as a radio group at the very top (pre-dotted from `current.ai`, else the
-    tree's default member), the harness as a radio group under it (pre-dotted
-    from `current.harness`, else the AI's default), engines as a radio group beneath them (pre-dotted from `current.engine` — the
-    caller passes the RESOLVED engine, so the dot shows what would actually
-    run), then professions / specialties / policies as checkboxes pre-checked
+    """The full sectioned form: one header per kind (its nutshell), the
+    engines as a radio group at the very top (pre-dotted from
+    `current.engine` — the caller passes the RESOLVED engine, so the dot
+    shows what would actually run), the AI as a radio group beneath them
+    (pre-dotted from `current.ai`, else the tree's default member) with the
+    dotted AI's models as bullets under it (`_model_row`; the others fold
+    away), the harness as a radio group under that (pre-dotted from
+    `current.harness`, else the AI's default), then professions /
+    specialties / policies as checkboxes pre-checked
     from `current`'s axis lists. Policies are ordered by shortname WITH its
     leading symbol (`!` < `+` < `-` in ASCII), so same-stance policies sit
     together: demands, then grants, then denials.
@@ -133,27 +293,51 @@ def _tag_form_options(registry: Registry, current: AgentBuild, *, scope: str,
 
     out: list[FormOption] = []
     if engines:
-        # The AI leads: it decides which model each engine's standard below means,
-        # and like the engine it is per member — the cluster form omits both.
-        # Pre-dotted from the build's ai, else the tree's default member.
+        # The engine leads, the AI fine-tunes it (operator, 2026-09-28; the AI
+        # led until then): the engine's standard picks a model for whichever
+        # AI is dotted, and the AI's bullets refine that pick. Like the engine
+        # the AI is per member — the cluster form omits both. Pre-dotted from
+        # the build's ai, else the tree's default member.
+        out.append(header(Engine))
+        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
+                for tag in sorted_engines(registry.engines.values())]
         effective_ai = registry.ai_for(current)
         if registry.ais:
             out.append(header(Ai))
-            out += [_tag_row(tag, checked=(effective_ai is not None and tag.name == effective_ai.name), group="ai")
-                    for tag in sorted_ais(registry.ais.values())]
+            models = _model_keys(registry)
+            for ai in sorted_ais(registry.ais.values()):
+                out.append(_tag_row(ai, checked=(effective_ai is not None and ai.name == effective_ai.name), group="ai"))
+                # Its models as bullets under it (operator, 2026-09-28): the
+                # instance's model, one always — the engine's until another
+                # is dotted.
+                own = [(key, model) for key, (owner, model) in models.items() if owner is ai]
+                width = max((len(model_label(model, ai.model_prefix)) for _, model in own), default=0)
+                # The bullet a stored build starts on — its live pin, else
+                # follow — also starts its effort row on the stored level.
+                on_ai = effective_ai is not None and ai.name == effective_ai.name
+                pinned = ai.model(current.model) if on_ai and current.model else None
+                start = _model_key(ai, pinned) if pinned is not None else _follow_key(ai)
+                stored = current.effort if on_ai else None
+                out.append(_follow_row(ai, registry))
+                out.append(_effort_row(ai, registry, _follow_key(ai), None, stored if start == _follow_key(ai) else None))
+                for key, model in own:
+                    out.append(_model_row(key, ai, model, current, effective_ai, label_width=width))
+                    out.append(_effort_row(ai, registry, key, model, stored if start == key else None))
         # Then the harness — the CLI around that AI; each row names the AIs
         # it runs, and the warning zone says when the dotted pair cannot work
-        # (prompt_tags then falls back to the AI's own harness).
+        # (prompt_tags then falls back to the AI's own harness). A harness
+        # the launcher cannot run yet says so in the same note, on EVERY
+        # such row — and stays selectable: describing an instance now and
+        # running it once its adapter lands is the design (launch/ai), and
+        # the launch refuses it with the way out. A lock would claim "never"
+        # for what is "not this month" (bug-investigator, agent-writer).
         effective_harness = registry.harness_for(current)
         if registry.harnesses:
             out.append(header(Harness))
             default_ai = registry.default_ai
             out += [_tag_row(tag, checked=(effective_harness is not None and tag.name == effective_harness.name), group="harness",
-                             note="runs " + " ".join(registry.ais[a].label for a in tag.ais if a in registry.ais))
+                             note=_harness_note(tag, registry))
                     for tag in sorted_harnesses(registry.harnesses.values(), default_ai.name if default_ai else None)]
-        out.append(header(Engine))
-        out += [_tag_row(tag, checked=(tag.name == current.engine), group="engine")
-                for tag in sorted_engines(registry.engines.values())]
     for kind_cls, members in ((Profession, list(registry.professions.values())),
                               (Specialty, list(registry.specialties.values())),
                               (Policy, sorted(registry.policies.values(),
@@ -324,15 +508,25 @@ def _pairing_warnings(registry: Registry) -> dict[frozenset[str], tuple[str, lis
 
 
 def _form_requires(registry: Registry) -> dict[str, frozenset[str]]:
-    """{tag name: prerequisite tag names} across the three form kinds — the
-    shape checkbox_form's check-cascade consumes. Tags without prerequisites
-    are omitted (requires_closure treats absent keys as empty)."""
-    return {
+    """{row key: prerequisite row keys} — the shape checkbox_form's
+    check-cascade consumes. Covers, deliberately: the three checkbox kinds'
+    tree nesting (professions, specialties, policies), and every model row's
+    AI (`_model_keys`: a model is its AI's). The model bullets are the one
+    MANDATORY group with requires: moving the AI's dot empties it, and
+    `_model_defaults` fills it again in the same step. NOT the AI, harness
+    and engine rows: nothing would refill those groups, so a requires on one
+    wants that looked at first (bug-investigator, gate model-picker). Rows
+    without prerequisites are omitted (requires_closure treats absent keys
+    as empty)."""
+    tags = {
         tag.name: frozenset(tag.requires)
         for tag in (*registry.professions.values(), *registry.specialties.values(),
                     *registry.policies.values())
         if tag.requires
     }
+    bullets = {key: frozenset({ai.name}) for key, (ai, _) in _model_keys(registry).items()}
+    follows = {_follow_key(ai): frozenset({ai.name}) for ai in registry.ais.values()}
+    return {**tags, **bullets, **follows}
 
 
 def _form_wants(registry: Registry) -> dict[str, tuple[tuple[str, str], ...]]:
@@ -389,20 +583,22 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
                       f"# workspace: {workspace}"])
     result = checkbox_form(TITLE_TAGS_FORM, options,
                            warnings={**_combo_warnings(registry), **_harness_warnings(registry),
-                                     **_pairing_warnings(registry)},
+                                     **_pairing_warnings(registry), **_stale_warning(registry, current)},
                            requires=_form_requires(registry),
                            wants=_form_wants(registry),
                            labels=_form_labels(registry),
                            preamble=preamble,
-                           fields=fields)
+                           fields=fields,
+                           defaults=_model_defaults(registry))
     if result is None:
         return None
     values, keys = result.field_values, result.checked
     picked = set(keys)
     # Always-on (static) tags come back checked — they're locked rows — but
     # are never part of the build: applied unconditionally, never persisted.
+    ai_name = next((n for n in registry.ais if n in picked), current.ai)
     build = AgentBuild(
-        ai=next((n for n in registry.ais if n in picked), current.ai),
+        ai=ai_name,
         harness=next((n for n in registry.harnesses if n in picked), current.harness),
         engine=next((n for n in registry.engines if n in picked), current.engine),
         professions=tuple(n for n in registry.professions if n in picked),
@@ -410,9 +606,19 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
         policies=tuple(n for n, p in registry.policies.items()
                        if n in picked and not p.always_on),
     )
+    # The one dotted bullet — always the dotted AI's, since a bullet requires
+    # its AI: follow stores no model, any other its id. The effort row under
+    # it stores its pick; its (default) stores nothing.
+    ai = registry.ai_for(build)
+    if ai is not None:
+        dotted = next(((key, model) for key, (owner, model) in _model_keys(registry).items()
+                       if key in picked and owner is ai), None)
+        bullet = dotted[0] if dotted is not None else _follow_key(ai)
+        build = replace(build, model=dotted[1].id if dotted is not None else None,
+                        effort=result.choices.get(_effort_key(bullet)))
     # A harness that cannot run the picked AI is not stored: the instance
     # falls back to the AI's own harness (the form's warning zone said so).
-    ai, harness = registry.ai_for(build), registry.harness_for(build)
+    harness = registry.harness_for(build)
     if build.harness and ai is not None and harness is not None and not harness.runs(ai.name):
         build = replace(build, harness=None)
     return build if fields is None else (values, build)

@@ -13,7 +13,7 @@ and the parser itself needs the tree: `--ai` offers the AI members
 
 import argparse
 
-from ..ai import ADAPTERS
+from ..ai import readiness_note
 from ..paths import quickie_state_dir_path
 from ..startup import open_launcher
 from ..tags import Registry, TagError
@@ -23,12 +23,15 @@ from .history import print_answer, print_history
 
 
 def ai_choices(registry: Registry) -> tuple[list[str], list[str]]:
-    """(every AI member's name, the names whose default CLI has an adapter) —
-    the `--ai` choices and the help's "can answer today" list. An AI without
-    an adapted CLI is still a legal choice: `ask` refuses it with the one
-    message every launch path uses, naming what an adapter needs."""
+    """(every AI member's name, the names whose default CLI can run today) —
+    the `--ai` choices and the help's "can answer today" list. "Can run" is
+    `readiness_note` — the launch refusal's own predicate — never "has an
+    adapter": Gemini CLI has one whose container does not start yet, and
+    listing it as able to answer would be the help promising what the
+    refusal takes back. Any AI is still a legal choice: `ask` refuses it with
+    the one message every launch path uses."""
     names = sorted(registry.ais)
-    runnable = [name for name in names if registry.ais[name].harness in ADAPTERS]
+    runnable = [name for name in names if readiness_note(registry.ais[name].harness) is None]
     return names, runnable
 
 

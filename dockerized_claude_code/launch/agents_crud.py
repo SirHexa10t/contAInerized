@@ -8,6 +8,9 @@ Sections:
     writers (load → mutate → save over tags.store) + state-dir lifecycle
   - install_latest_md — source `.md` + chain-keyed addendum section →
     state-dir CLAUDE.md in one overwrite (tags.addendums supplies the text)
+  - install_settings — the instance's policies, rendered through its
+    harness, → state-dir settings (and the harness's own rules file, if it
+    keeps one); fixed_policy — the always-on denies for the image's fixed tier
   - compute_resume_flag — Instance → resume args (["--continue"] | [])
   - resolve_pick — name string → Agent (create) | Instance (cont) factory
     used by run.py's CLI parsing
@@ -21,24 +24,28 @@ run.py import from here; nothing here imports them back.
 """
 
 import json
+import tomllib
+from pathlib import Path
+from typing import Any, NamedTuple
 
-from .ai import active_adapter
+from .ai import Adapter, active_adapter
 from .file_access import (
     copy_file, ensure_dir, force_remove, home_relative, is_dir, iter_subdirs,
     move_path, path_exists, read_text, write_text,
 )
 from .paths import (
-    AGENTS_COMMANDS_DIR, AGENTS_DIR, BASE_SETTINGS_FILE, INSTANCES_FILE,
-    SHARED_COMMANDS_DIR, instance_state_dir_path, instances_dir,
+    AGENTS_COMMANDS_DIR, AGENTS_DIR, INSTANCES_FILE, SHARED_COMMANDS_DIR,
+    base_settings_file, instance_state_dir_path, instances_dir,
     state_commands_dir, state_settings_path,
 )
 from .tags import (
-    Agent, Instance, Registry, TagError, addendums, load_agent, resolve_build,
-    store,
+    Agent, Harness, Instance, Registry, Rules, TagError, addendums, load_agent,
+    resolve_build, store,
 )
 from .tags.engine import effort_tier_rank
 from .tags.identity import SESSION_SEP
 from .tags.policy import merge_fragments
+from .tags.policy_mapping import FIXED_FILE_HEADER, SETTINGS_FORMAT, PolicyRendering, rules_file_text
 from .utils import ordering_index_or_end, plural, prompt_keypress
 
 
@@ -141,27 +148,158 @@ def install_commands(inst: Instance) -> None:
         copy_file(source, destination / source.name)
 
 
-def install_settings(inst: Instance, registry: Registry) -> None:
-    """Merge the shared base settings (settings/settings.json) with the
-    instance's policy fragments into `<state>/settings.json`, refreshed each
-    launch. docker_config.set_container_mounts RO-mounts the result over
-    `~/.claude/settings.json` in-container, so the agent reads its policies
-    but can't relax them (the mount shadows the state-dir's rw view of the
-    same path). Policy-vs-policy or policy-vs-base scalar conflicts abort
-    the launch via merge_fragments' TagError, naming both culprits.
+def install_settings(inst: Instance, registry: Registry, harness: Adapter) -> tuple[str, ...]:
+    """Render the instance's policies through `harness` (the CLI it runs in)
+    and install the result in its state dir, refreshed each launch. Returns
+    the rendering's notes for the operator, for the caller to print — this
+    function never prints.
 
-    ALWAYS-ON (static) policies — `always_on = true` in their tag.info, e.g.
-    `<-su>` — merge into EVERY instance, straight from the registry: they're
-    never listed on the instance itself. Then the instance's selected
-    policies, then specialties that claim a hidden `policy/_<name>` fragment
-    (e.g. `{ro}`) — same merge, so any conflict is caught the same way."""
-    fragments = [(BASE_SETTINGS_FILE.name + " (base)", json.loads(read_text(BASE_SETTINGS_FILE)))]
-    fragments += [(p.name, p.load_fragment())
-                  for p in sorted(registry.policies.values(), key=lambda p: p.name) if p.always_on]
-    fragments += [(p.name, p.load_fragment()) for p in inst.policies]
-    fragments += [(s.name, s.load_fragment()) for s in inst.specialties if s.policy_dir]
+    Which rules: the ALWAYS-ON (static) policies — `always_on = true` in
+    their tag.info, e.g. `<-su>` — straight from the registry, since they're
+    never listed on the instance itself; then the instance's selected
+    policies; then specialties that claim a hidden `policy/_<name>` fragment
+    (e.g. `{ro}`). Each renders through the harness's policy.mapping
+    (`Harness.render_policy`), and a word the harness has no row for:
+      - in [deny] or [demand], refuses the launch with a TagError naming the
+        tag and the word — a deny that silently evaporated would leave the
+        agent less fenced than its build says;
+      - in [allow], becomes a note: the agent is asked where it would have
+        been spared, which is safe.
+    A claimed fragment's RAW settings (`<harness>.json`, e.g. `_cowork`'s
+    Stop hook) merge on their own harness only; on any other, the specialty
+    refuses here, since the part of it no word can say would be missing.
+
+    Where it lands — the harnesses FORK here:
+      - `<state>/settings.json`: the harness's base (`paths.base_settings_file`),
+        then every rendering's settings fragment and raw fragment, in the
+        order above, deep-merged; a scalar conflict aborts the launch via
+        merge_fragments' TagError, naming both culprits. Staging RO-mounts it
+        over the CLI's own settings file, so the agent reads its policies but
+        can't relax them (the mount shadows the state dir's rw view of the
+        same path). Claude Code's rules live here, as permission lists.
+      - the harness's rules file, when it keeps one (`Harness.policy_file` —
+        Gemini CLI's Policy Engine): every rendering's records, written to
+        `<state>/<policy_file>` and read back at once, because the CLI loads
+        nothing, and says nothing, for a missing or unreadable file; staging
+        RO-mounts it and the launch names it in the harness's policy args."""
+    owner = registry.harnesses.get(harness.key)
+    if owner is None:
+        raise TagError(f"no agents/harness/{harness.key} member for the {harness.name} adapter")
+    base = base_settings_file(harness)
+    fragments = [(f"{base.name} (base)", json.loads(read_text(base)))] if base is not None else []
+    sections: list[tuple[str, tuple[dict, ...]]] = []
+    notes: list[str] = []
+
+    def add(label: str, name: str, rules: Rules) -> None:
+        rendering = owner.render_policy(name, rules)
+        notes.extend(_unmapped_notes(label, owner, rendering))
+        if rendering.settings:
+            fragments.append((name, rendering.settings))
+        sections.append((name, rendering.rules))
+
+    for policy in [*sorted((p for p in registry.policies.values() if p.always_on), key=lambda p: p.name),
+                   *inst.policies]:
+        add(policy.label, policy.name, policy.rules)
+    for specialty in inst.specialties:
+        if (fragment := specialty.fragment) is None:
+            continue
+        if fragment.rules is not None:
+            add(specialty.label, specialty.name, fragment.rules)
+        if fragment.raw_harnesses:
+            raw = fragment.raw_fragment(harness.key)
+            if raw is None:
+                raise TagError(f"{specialty.label} cannot run on {harness.name}: part of it is settings only "
+                               f"{', '.join(fragment.raw_harnesses)} can read ({fragment.path}/"
+                               f"<harness>.json), which no policy word can say yet")
+            fragments.append((specialty.name, raw))
     merged = merge_fragments(fragments)
     write_text(state_settings_path(inst.state_dir), json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    if owner.policy_file is not None:
+        _install_rules_file(inst.state_dir / owner.policy_file, sections)
+    return tuple(notes)
+
+
+class FixedPolicy(NamedTuple):
+    """What the image bakes at a CLI's fixed tier: where, the file, and how
+    many rules the launcher rendered into it — the count the Dockerfile
+    checks the parsed file against, since "non-empty and parses" also passes
+    a file holding only comments (gate fixed-tier)."""
+    path: str
+    text: str
+    rules: int
+
+
+def fixed_policy(harness: Harness, registry: Registry) -> FixedPolicy | None:
+    """The ALWAYS-ON policies as `harness`'s fixed tier holds them, for the
+    image to bake in as root at the mapping's `[fixed] path` (the harness
+    Dockerfile, fed by `container_env.set_container_env`) — or None for a
+    harness without a fixed tier.
+
+    The same renderings `install_settings` makes per instance, and those
+    stay: the fixed copy is additive, so a CLI that ever skips it still
+    enforces every always-on rule. Only denies can arrive here, since
+    `Policy.scan` holds always-on policies to stance deny. Serialised in the
+    format's own shape — a settings JSON for Claude Code's managed settings,
+    a rules file for Gemini CLI's system policies dir — and a deny the
+    harness cannot express refuses, as it does per instance. With no
+    always-on policy at all the file is still produced, empty but valid, so
+    the build's check holds for every tree: it expects the count, 0
+    included."""
+    mapping = harness.policy_mapping
+    if mapping is None or mapping.fixed_path is None:
+        return None
+    rendered = [(policy, harness.render_policy(policy.name, policy.rules))
+                for policy in sorted(registry.policies.values(), key=lambda p: p.name) if policy.always_on]
+    for policy, rendering in rendered:
+        _unmapped_notes(policy.label, harness, rendering)   # refuses an unmapped deny
+    if mapping.format == SETTINGS_FORMAT:
+        merged = merge_fragments([(policy.name, rendering.settings) for policy, rendering in rendered])
+        return FixedPolicy(mapping.fixed_path, json.dumps(merged, indent=2, sort_keys=True) + "\n",
+                           _list_entries(merged))
+    records = [(policy.name, rendering.rules) for policy, rendering in rendered]
+    return FixedPolicy(mapping.fixed_path, rules_file_text(records, header=FIXED_FILE_HEADER),
+                       sum(len(rules) for _, rules in records))
+
+
+def _list_entries(settings: Any) -> int:
+    """Every list entry in a settings document, at any depth: a settings-
+    format rule is a string in a list (after merge_fragments' dedupe), and
+    the Dockerfile counts the baked JSON the same way."""
+    if isinstance(settings, dict):
+        return sum(_list_entries(value) for value in settings.values())
+    return len(settings) if isinstance(settings, list) else 0
+
+
+def _unmapped_notes(label: str, harness: Harness, rendering: PolicyRendering) -> list[str]:
+    """The words `harness` could not render: a TagError for the first deny or
+    demand among them, else one note per allow."""
+    for word in rendering.unmapped:
+        if word.stance != "allow":
+            where = (f"its policy.mapping has no row for {word}" if harness.policy_mapping
+                     else "it has no policy.mapping yet")
+            raise TagError(f"{label} cannot be enforced by {harness.fullname}: {where} — drop {label} "
+                           f"from this build, or map the word in agents/harness/{harness.name}/policy.mapping")
+    return [f"{label}: {harness.fullname} has no row for {word}, so the agent is asked "
+            f"before it rather than spared" for word in rendering.unmapped]
+
+
+def _install_rules_file(path: Path, sections: list[tuple[str, tuple[dict, ...]]]) -> None:
+    """Write a harness's rules file into the state dir and read it back.
+
+    `write_text` creates the file's directory host-side first, and that is
+    load-bearing twice over: staging mounts the FILE read-only, and a mount
+    whose parent is missing makes docker create that parent root-owned —
+    where the CLI must be able to create files of its own (Gemini writes its
+    auto-saved policies there, through a temp file and a rename; it would
+    make the dir itself, but docker gets there first)."""
+    expected = sum(len(records) for _, records in sections)
+    write_text(path, rules_file_text(sections))
+    try:
+        loaded = tomllib.loads(read_text(path))
+    except tomllib.TOMLDecodeError as e:
+        raise TagError(f"{path}: the rules file the launcher just wrote does not parse ({e})") from e
+    if len(loaded.get("rule", [])) != expected:
+        raise TagError(f"{path}: wrote {expected} rules but reads back {len(loaded.get('rule', []))}")
 
 
 def install_latest_md(inst: Instance) -> None:
@@ -184,8 +322,9 @@ RESUME_SIZE_WARN_BYTES = 50 * 1024 * 1024
 
 
 def compute_resume_flag(inst: Instance) -> list[str]:
-    """The claude args to resume an existing conversation (`["--continue"]`) or
-    `[]` for a fresh session — shared by run.py's launch and quickie's
+    """The args to resume an existing conversation (the adapter's
+    `continue_args` — `["--continue"]` for Claude Code) or `[]` for a fresh
+    session — shared by run.py's launch and quickie's
     `--resume`. A continuing instance with no transcript prints a notice and
     starts fresh, because `--continue` against history-only state crashes
     claude with 'No conversation found'. A huge transcript still resumes, but
@@ -199,7 +338,7 @@ def compute_resume_flag(inst: Instance) -> list[str]:
                   f"claude has silently DROPPED the history of a ~92 MB one at "
                   f"launch (plans/ISSUES.md) — if this conversation matters, "
                   f"consider retiring it for a fresh session soon.")
-        return [active_adapter().continue_flag]
+        return list(active_adapter().continue_args)
     print(f"  (Instance '{inst.instance}' has no prior conversation; starting fresh.)")
     return []
 

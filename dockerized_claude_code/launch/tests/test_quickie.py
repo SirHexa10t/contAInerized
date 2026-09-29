@@ -134,21 +134,32 @@ class TestAskGuard(unittest.TestCase):
         self.assertTrue((state / "credentials" / "claude-code" / ".credentials.json").is_file())
         self.assertFalse((state / ".credentials.json").exists())
 
-    def test_an_ai_whose_cli_has_no_adapter_is_refused_naming_the_flag(self):
-        # `--ai gemini`: the lego's harness runs claude, so the AI's own default
-        # CLI takes over — Gemini CLI, unadapted — and the refusal says which
-        # AI answers through which CLI, since the user named the AI.
+    def _refused(self, ai_name):
         with patch("launch.quickie.ask.require_docker"), \
              patch("launch.quickie.ask.ensure_image") as image, \
              patch.object(paths, "AGENTS_STATE", Path(tempfile.mkdtemp())), \
              contextlib.redirect_stdout(io.StringIO()), \
              self.assertRaises(SystemExit) as caught:
-            ask("why?", REGISTRY, ai="gemini")
-        message = str(caught.exception)
+            ask("why?", REGISTRY, ai=ai_name)
+        image.assert_not_called()          # refused before any docker work
+        return str(caught.exception)
+
+    def test_an_ai_whose_cli_has_no_adapter_is_refused_naming_the_flag(self):
+        # `--ai chatgpt`: the lego's harness runs claude, so the AI's own
+        # default CLI takes over — Codex CLI, unadapted — and the refusal says
+        # which AI answers through which CLI, since the user named the AI.
+        message = self._refused("chatgpt")
+        self.assertIn("--ai chatgpt", message)
+        self.assertIn(REGISTRY.harnesses["codex-cli"].label, message)
+        self.assertIn("no adapter", message)
+
+    def test_an_ai_whose_cli_builds_but_cannot_start_is_refused_too(self):
+        # `--ai gemini`: Gemini CLI HAS an adapter, but not a startable one.
+        # Before the readiness field that adapter silenced this refusal.
+        message = self._refused("gemini")
         self.assertIn("--ai gemini", message)
         self.assertIn(REGISTRY.harnesses["gemini-cli"].label, message)
-        self.assertIn("no adapter", message)
-        image.assert_not_called()
+        self.assertIn("does not start yet", message)
 
     def test_the_quickie_is_staged_like_every_other_shape(self):
         # Evidence (2) of the 2026-09-15 unification: the quickie mounted a

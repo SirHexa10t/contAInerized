@@ -21,7 +21,7 @@ from typing import NamedTuple
 
 from ..file_access import installed_cred_clis
 from ..paths import (
-    CLAUDE_CONFIG_IN_CONTAINER, CLAUDE_SUMMARY_IN_CONTAINER,
+    CLAUDE_SUMMARY_IN_CONTAINER, container_config_root,
     FIREWALL_WHITELIST_FILE, state_domain_resolve_status_path,
 )
 from .base import Tag
@@ -75,7 +75,7 @@ def _placeholder_values() -> dict[str, str]:
     at import."""
     return {
         "cred_clis":               installed_cred_clis(),
-        "domain_resolve_status":   str(state_domain_resolve_status_path(CLAUDE_CONFIG_IN_CONTAINER)),
+        "domain_resolve_status":   str(state_domain_resolve_status_path(container_config_root())),
         "firewall_whitelist_file": str(FIREWALL_WHITELIST_FILE),
     }
 

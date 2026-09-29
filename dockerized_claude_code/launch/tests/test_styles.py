@@ -5,12 +5,15 @@ conversion that keeps one tag the same colour in a row and in a pane."""
 
 import unittest
 
+import dataclasses
+
 from launch.gui.styles import (
-    _STYLE_BY_STANCE, RICH_BY_STYLE, STYLE_TAG_ENGINE, STYLE_TAG_HARNESS, STYLE_TAG_SAFE, STYLE_TAG_WARN, _normalize,
-    _plain, rich_style, squashed_tag_style, tag_style,
+    _STYLE_BY_STANCE, RICH_BY_STYLE, STYLE_TAG_ENGINE, STYLE_TAG_HARNESS, STYLE_TAG_INVALID, STYLE_TAG_SAFE,
+    STYLE_TAG_WARN, _normalize, _plain, ai_chip, rich_style, squashed_tag_style, tag_style,
 )
 from launch.paths import AGENTS_DIR
-from launch.tags import scan_all
+from launch.tags import resolve_build, scan_all
+from launch.tests.fixtures import make_inst
 
 REGISTRY = scan_all(AGENTS_DIR)
 
@@ -109,4 +112,29 @@ class TestDisplayCoercion(unittest.TestCase):
 # ============================================================
 # Checkbox form — pure assembly / ordering / cascade / warning logic
 # ============================================================
+
+
+class TestAiChip(unittest.TestCase):
+    """ai_chip — an instance's AI as rows and panes draw it: its label
+    carrying the picked model, in the AI's own colours — except a stale
+    pick, which wears the invalid-tag alert, since the launch drops it."""
+
+    def _with(self, model):
+        inst = make_inst("golem", "s")
+        return dataclasses.replace(inst, **resolve_build(dataclasses.replace(inst.build, model=model), "golem", REGISTRY))
+
+    def test_no_pick_carries_the_engines_model_in_the_ais_colours(self):
+        inst = self._with(None)
+        self.assertEqual(ai_chip(inst), (tag_style(inst.ai), inst.ai.label_with(inst.ai.model(inst.engine_model))))
+
+    def test_a_pick_is_carried_in_the_ais_colours(self):
+        inst = self._with("claude-sonnet-5")
+        self.assertEqual(ai_chip(inst), (tag_style(inst.ai), "⟪Claude:Sonnet-5⟫"))
+
+    def test_a_stale_pick_is_an_alert(self):
+        self.assertEqual(ai_chip(self._with("claude-opus-4-1")), (STYLE_TAG_INVALID, "⟪Claude:Opus-4.1⟫"))
+        self.assertEqual(rich_style(STYLE_TAG_INVALID), "black on red")   # the pane's alert, the same colours
+
+    def test_no_ai_no_chip(self):
+        self.assertIsNone(ai_chip(dataclasses.replace(make_inst("golem", "s"), ai=None)))
 

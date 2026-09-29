@@ -1,0 +1,3 @@
+[deny]
+tools = ["web"]
+shell = ["curl", "wget"]

@@ -9,10 +9,28 @@
 #
 # Claude's scale: effort low / medium / high / xhigh / max
 # (CLAUDE_CODE_EFFORT_LEVEL), plus a separate thinking switch (an engine's
-# `thinking` knob). Ids from platform.claude.com's models overview,
-# 2026-09-12: claude-fable-5-1, claude-opus-5, claude-sonnet-5,
-# claude-haiku-4-5 (alias of the dated snapshot). Superseded lines (Fable 5,
-# Opus 4.8, Sonnet 4.6 — Anthropic's "legacy, still available") are not tiers.
+# `thinking` knob). Ids from platform.claude.com's models overview:
+# claude-fable-5-1, claude-opus-5, claude-sonnet-5, claude-haiku-4-5 (alias of
+# the dated snapshot). Superseded lines (Fable 5, Opus 4.8, Sonnet 4.6 —
+# Anthropic's "legacy, still available") are not tiers.
+# Ids verified 2026-09-25 against platform.claude.com's models overview and
+# model-deprecations pages (`ai_project-update-models`): every pin is live.
+# AVAILABLE, NOT YET A TIER: claude-opus-5-5 (released 2026-09-22, 4 / 20,
+# default effort medium, adaptive thinking always on). It moved Opus 5 to
+# "legacy, still available" (Active, retirement not sooner than 2027-07-24),
+# but it has no Artificial Analysis index yet, and a tier must be RATED
+# (agents/ai/capability.standards) — re-derive the two Opus tiers once it is.
+# AVAILABLE, NOT YET A TIER: claude-sonnet-5-5 (released 2026-09-28, 2 / 10,
+# default effort high, adaptive thinking), which moved Sonnet 5 to legacy
+# (still Active, floor 2027-06-30); unrated, like Opus 5.5.
+# Retirement floors to watch: claude-haiku-4-5 not sooner than 2026-10-15
+# (no deprecation announced at this read). A floor is not a date: Anthropic
+# retires only after a deprecation notice, "at least 60 days" ahead.
+# WHAT A LAUNCH RUNS (2026-09-29): an instance that FOLLOWS its engine runs its
+# tier's pair below, model AND effort. One that PINS a model runs that model
+# at its highest level unless it pins a level too (agents/ai/<ai>/models.list,
+# the tag form's effort row). Every index annotated below is the rated PAIR's,
+# so it describes a pinned instance only when it pins that same pair.
 
 [scale]
 efforts = ["low", "medium", "high", "xhigh", "max"]

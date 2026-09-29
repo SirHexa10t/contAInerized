@@ -1,0 +1,23 @@
+# ChatGPT's MODELS — what the tag form offers as an instance's model, one
+# line per model, and each one's EFFORT RANGE — what the form's effort row
+# offers for it (launch/tags/models.py documents the columns). No `model` in
+# an instance's mapping means its engine's (at the engine's rated level); a
+# pinned model with no `effort` runs at its top level.
+# Order is the form's: strongest family first — Astra, Sol, Terra, Luna, then
+# GPT-5.5 — and newest version first within it (6 before 5.6).
+# Ids and effort ranges verified 2026-09-28 against developers.openai.com's
+# per-model pages and deprecations page, and learn.chatgpt.com's config
+# reference (`ai_project-update-models`): each id has a live page, none has a
+# retirement announced. Ranges are in Codex's `model_reasoning_effort` words.
+# The API's `none` level (every id but Astra) is NOT offered: it asks for no
+# reasoning, which is not the same as sending no level, and the config
+# reference does not list it. Left out: the specialist models (cyber,
+# life-sciences), which are not general-purpose.
+
+gpt-6-astra      efforts=low,medium,high,xhigh,max
+gpt-6-sol        efforts=low,medium,high,xhigh,max        # available, not yet a tier: unrated (efforts.tiers)
+gpt-5.6-sol      efforts=low,medium,high,xhigh,max
+gpt-5.6-terra    efforts=low,medium,high,xhigh,max        # no GPT-6 successor
+gpt-6-luna       efforts=low,medium,high,xhigh,max        # available, not yet a tier: unrated (efforts.tiers)
+gpt-5.6-luna     efforts=low,medium,high,xhigh,max
+gpt-5.5          efforts=low,medium,high,xhigh            # tops out at xhigh; leaves ChatGPT and Codex 2026-10-14, stays on the API (efforts.tiers)

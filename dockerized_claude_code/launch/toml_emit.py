@@ -2,14 +2,16 @@
 escaping, and the string-list line.
 
 Reading TOML is `tomllib`'s job (stdlib, read-only). Writing it is ours, and
-two modules do it: `tags/store.py` (instances.toml) and `cluster/state.py`
-(cluster.toml). Both carried byte-identical copies of the quoting rules,
-which is one edit away from two files that quote differently — and the
-failure mode is quiet, because each file's own reader keeps parsing until a
-key finally needs escaping.
+three modules do it: `tags/store.py` (instances.toml), `cluster/state.py`
+(cluster.toml) and `tags/policy_mapping.py` (a harness's policy rules file).
+The first two carried byte-identical copies of the quoting rules, which is
+one edit away from two files that quote differently — and the failure mode
+is quiet, because each file's own reader keeps parsing until a key finally
+needs escaping.
 
-Deliberately not `tomli-w`: what the launcher emits is two fixed shapes
-(optional strings and string lists), and this module is the whole of it.
+Deliberately not `tomli-w`: what the launcher emits is a few fixed shapes
+(strings, string lists, and the rules file's integers and booleans), and
+this module is the whole of it.
 
 Leaf module: stdlib only, imports nothing from launch/ — pullable from any
 layer without circular-import risk.
@@ -34,6 +36,21 @@ def string(value: str) -> str:
     TOML's (`\\"` `\\\\` `\\n` `\\t` `\\uXXXX` …), so json.dumps emits a
     valid TOML string."""
     return json.dumps(value)
+
+
+def value(item: str | int | bool | list[str]) -> str:
+    """`item` as a TOML value — a string, an integer, a boolean, or a list of
+    strings, the shapes a policy rule's fields take. Anything else is a
+    TypeError: a value this module cannot promise to quote is not written."""
+    if isinstance(item, bool):
+        return "true" if item else "false"
+    if isinstance(item, str):
+        return string(item)
+    if isinstance(item, int):
+        return str(item)
+    if isinstance(item, list) and all(isinstance(v, str) for v in item):
+        return f"[{', '.join(string(v) for v in item)}]"
+    raise TypeError(f"no TOML shape for {item!r}: strings, integers, booleans and lists of strings only")
 
 
 def string_list(name: str, values: Iterable[str]) -> str:

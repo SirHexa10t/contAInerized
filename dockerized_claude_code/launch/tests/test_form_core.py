@@ -74,6 +74,28 @@ class TestOrderedFormOptions(unittest.TestCase):
         out = ordered_form_options([self._opt("a"), self._opt("x", attached_to="ghost")])
         self.assertEqual([o.key for o in out], ["a", "x"])
 
+    def test_an_attachment_to_an_attached_row_nests_beneath_it(self):
+        # An AI, its bullets, the effort row under each bullet — declared in
+        # any order, laid out as a tree (operator, 2026-09-29).
+        out = ordered_form_options([self._opt("ai"), self._opt("e1", attached_to="m1"),
+                                    self._opt("m1", attached_to="ai"), self._opt("m2", attached_to="ai"),
+                                    self._opt("e2", attached_to="m2"), self._opt("next")])
+        self.assertEqual([o.key for o in out], ["ai", "m1", "e1", "m2", "e2", "next"])
+
+    def test_an_orphans_own_attachments_follow_it(self):
+        # A row whose anchor is unknown is kept, and so is what hangs under it.
+        out = ordered_form_options([self._opt("a"), self._opt("x", attached_to="ghost"),
+                                    self._opt("y", attached_to="x")])
+        self.assertEqual([o.key for o in out], ["a", "x", "y"])
+
+    def test_a_cycle_of_attachments_is_refused(self):
+        # The rows are code: a loop is a programming error, and must never
+        # reach a render (bug-investigator, gate effort-row).
+        for options in ([self._opt("a", attached_to="b"), self._opt("b", attached_to="a")],
+                        [self._opt("a", attached_to="a")]):
+            with self.subTest(options=[o.key for o in options]), self.assertRaisesRegex(ValueError, "cycle"):
+                ordered_form_options(options)
+
 
 class TestActiveWarnings(unittest.TestCase):
     """active_warnings against the real combos.info copy (re-keyed by tag
@@ -281,6 +303,418 @@ class TestWantsWarnings(unittest.TestCase):
         # Engines included (a want may point at one) — asserted via the tag's
         # own label because engine shortnames are expressive (thinker is 🧠).
         self.assertEqual(labels["thinker"], REGISTRY.engines["thinker"].label)
+
+
+class TestRadiosInTheCascade(unittest.TestCase):
+    """Radios in the requires-cascade, with `defaults` and folding (gates
+    model-picker and model-picker-2), on rows shaped like the tag form's:
+    the engine, then the AI with its models as bullets that fold under it.
+    EXACTLY ONE model is dotted at all times: dotting an engine or an AI dots
+    that pair's model, the model group is mandatory, and a bullet requires
+    its AI. Driven for real, keystrokes through a pipe."""
+
+    DOWN, UP = "\x1b[B", "\x1b[A"
+    REQUIRES = {"claude:opus": frozenset({"claude"}), "claude:haiku": frozenset({"claude"}),
+                "gemini:flash": frozenset({"gemini"}), "gemini:pro": frozenset({"gemini"})}
+    DEFAULTS = {frozenset({"thinker", "claude"}): "claude:opus", frozenset({"golem", "claude"}): "claude:haiku",
+                frozenset({"thinker", "gemini"}): "gemini:pro", frozenset({"golem", "gemini"}): "gemini:flash"}
+    MODELS = {"claude:opus", "claude:haiku", "gemini:flash", "gemini:pro"}
+
+    @staticmethod
+    def options(picked=None):
+        # Display order: thinker · golem · claude · opus · haiku · gemini · flash · pro; Gemini's two fold.
+        def bullet(key, ai):
+            return FormOption(key=key, label=key.split(":")[1], attached_to=ai, group="model",
+                              folds_with_anchor=True, checked=key == picked)
+        return [
+            FormOption(key="thinker", label="thinker", group="engine", checked=True),
+            FormOption(key="golem", label="golem", group="engine"),
+            FormOption(key="claude", label="claude", group="ai", checked=True),
+            bullet("claude:opus", "claude"), bullet("claude:haiku", "claude"),
+            FormOption(key="gemini", label="gemini", group="ai"),
+            bullet("gemini:flash", "gemini"), bullet("gemini:pro", "gemini"),
+        ]
+
+    def drive(self, keys, picked=None):
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                pipe.send_text(keys + "\x03\x03")   # the tripwire TestFormDrivenHeadless explains
+                result = form_core.checkbox_form("t", self.options(picked), requires=self.REQUIRES,
+                                                 defaults=self.DEFAULTS)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(set(result.checked) & self.MODELS), 1, result.checked)   # exactly one, whatever the keys
+        return result.checked
+
+    # --- opening: one dot, always ---
+
+    def test_an_empty_model_group_opens_on_the_engines_model(self):
+        self.assertEqual(self.drive("\r"), ["thinker", "claude", "claude:opus"])
+
+    def test_a_prefilled_pick_is_kept_at_open(self):
+        self.assertEqual(self.drive("\r", picked="claude:haiku"), ["thinker", "claude", "claude:haiku"])
+
+    # --- the engine and the AI move the model's dot ---
+
+    def test_choosing_another_engine_dots_its_model_even_over_a_pick(self):
+        self.assertEqual(self.drive(self.DOWN + " \r", picked="claude:opus"), ["golem", "claude", "claude:haiku"])
+
+    def test_switching_claude_to_gemini_dots_geminis_model_and_drops_claudes(self):
+        # strict-reviewer's trap, still pinned: the member the dot LEFT
+        # cascades too, so Claude's model cannot survive the switch. Cursor:
+        # thinker → golem → claude → opus → haiku → gemini (Gemini's bullets
+        # are folded, so no stop between).
+        self.assertEqual(self.drive(self.DOWN * 5 + " \r"), ["thinker", "gemini", "gemini:pro"])
+
+    def test_the_engine_then_the_ai_fine_tunes(self):
+        self.assertEqual(self.drive(self.DOWN + " " + self.DOWN * 4 + " \r"), ["golem", "gemini", "gemini:flash"])
+
+    # --- the bullets ---
+
+    def test_picking_a_sibling_bullet_moves_the_dot(self):
+        self.assertEqual(self.drive(self.DOWN * 4 + " \r"), ["thinker", "claude", "claude:haiku"])
+
+    def test_space_on_the_dotted_bullet_does_nothing(self):
+        self.assertEqual(self.drive(self.DOWN * 3 + " \r"), ["thinker", "claude", "claude:opus"])
+
+    def test_space_on_the_dotted_engine_or_ai_does_nothing(self):
+        for keys in (" \r", self.DOWN * 2 + " \r"):
+            with self.subTest(keys=keys):
+                self.assertEqual(self.drive(keys), ["thinker", "claude", "claude:opus"])
+
+    # --- folding ---
+
+    def test_the_cursor_skips_a_folded_ais_bullets(self):
+        # From gemini (5 downs), one more lands on the BUTTON: Gemini's
+        # bullets are folded, so Space there confirms.
+        self.assertEqual(self.drive(self.DOWN * 6 + " "), ["thinker", "claude", "claude:opus"])
+
+    def test_the_opened_ais_bullets_take_the_cursor(self):
+        # Dot gemini, then down onto its first bullet (flash) and dot that.
+        self.assertEqual(self.drive(self.DOWN * 5 + " " + self.DOWN + " \r"), ["thinker", "gemini", "gemini:flash"])
+
+    # --- defaults are refused where they could chain ---
+
+    def test_defaults_that_could_chain_are_refused(self):
+        # Each case breaks exactly ONE rule, so each rule is pinned alone.
+        cases = {
+            "would chain": ({frozenset({"thinker", "claude"}): "claude:opus",
+                             frozenset({"claude:opus", "claude"}): "claude:haiku"}, "a target AND in a set"),
+            "outside its set": ({frozenset({"thinker"}): "claude:opus"}, "outside its set"),
+            "is not a radio row": ({frozenset({"thinker"}): "loose"}, "not a radio row"),
+        }
+        from unittest.mock import MagicMock
+        for label, (defaults, message) in cases.items():
+            # The Application is stubbed so a refusal that regressed FAILS
+            # here — the form would otherwise open and wait for a keyboard.
+            with self.subTest(case=label), self.assertRaisesRegex(ValueError, message), \
+                    patch("launch.gui.form_core.Application", return_value=MagicMock()):
+                form_core.checkbox_form("t", [*self.options(), FormOption(key="loose", label="loose")],
+                                        requires=self.REQUIRES, defaults=defaults)
+
+    # --- what is drawn, and where the cursor says it is (gate gui-dedup's harness) ---
+
+    def _captured(self, **kw):
+        """The form's REAL layout and key bindings, the Application stubbed."""
+        from unittest.mock import MagicMock
+        captured = {}
+
+        def fake_app(**kwargs):
+            captured.update(layout=kwargs["layout"], key_bindings=kwargs["key_bindings"])
+            return MagicMock()
+
+        with patch("launch.gui.form_core.Application", side_effect=fake_app):
+            form_core.checkbox_form("t", self.options(), requires=self.REQUIRES, defaults=self.DEFAULTS, **kw)
+        window = next(child for child in captured["layout"].container.children
+                      if callable(getattr(getattr(child, "content", None), "text", None))
+                      and "opus" in "".join(text for _, text in child.content.text()))
+        return captured, window
+
+    def test_bullets_draw_round_the_radios_parenthesised_and_a_fold_draws_nothing(self):
+        _, window = self._captured()
+        rows = "".join(text for _, text in window.content.text())
+        self.assertIn(form_core.RADIO_ON + "claude", rows)
+        self.assertIn(form_core.RADIO_OFF + "gemini", rows)
+        self.assertIn(form_core.ATTACHED_CONNECTOR + form_core.BULLET_ON + "opus", rows)
+        self.assertIn(form_core.ATTACHED_CONNECTOR + form_core.BULLET_OFF + "haiku", rows)
+        self.assertNotIn("flash", rows)                    # Gemini is not dotted: its bullets fold away
+        self.assertEqual(rows.count("\n") + 1, 6)          # thinker · golem · claude · opus · haiku · gemini
+
+    def test_cursor_pos_names_the_line_the_highlighted_row_renders_on_across_a_fold(self):
+        # With a field above the rows (the separator gate gui-dedup's
+        # off-by-one missed), a fold closed, then the fold opened.
+        captured, window = self._captured(fields=[form_core.TextField(key="name", label="name", value="x")])
+
+        def assert_cursor_on_highlight(context):
+            focused = _focused_row(window)
+            if focused is not None:                        # a field or the button: no row highlighted
+                with self.subTest(context=context, row=focused[1]):
+                    self.assertEqual(window.content.get_cursor_position().y, focused[0])
+            return focused[1] if focused else None
+
+        for step in range(7):                              # field → thinker … gemini → the button
+            _press(captured, "down")
+            assert_cursor_on_highlight(f"closed, down {step + 1}")
+        _press(captured, "up")
+        self.assertIn("gemini", assert_cursor_on_highlight("back up"))
+        _press(captured, " ")                              # dot Gemini: Claude's bullets fold, Gemini's open
+        _press(captured, "down")
+        self.assertIn("flash", assert_cursor_on_highlight("opened, down 1"))
+        _press(captured, "down")
+        self.assertIn("pro", assert_cursor_on_highlight("opened, down 2"))
+        for _ in range(3):
+            _press(captured, "up")                         # pro → flash → gemini → claude, Claude's bullets folded
+        self.assertIn("claude", assert_cursor_on_highlight("folded, up 3"))
+
+
+def _press(captured, key):
+    """Fire the form's own handler for `key` — the real binding, not a
+    re-implementation of what the key is supposed to do."""
+    from unittest.mock import MagicMock
+    from prompt_toolkit.keys import Keys
+    wanted = (Keys(key),) if key in ("up", "down") else (key,)
+    binding = next(b for b in captured["key_bindings"].bindings if tuple(b.keys) == wanted)
+    event = MagicMock()
+    event.data = key if key == " " else ""
+    binding.handler(event)
+
+
+def _focused_row(window):
+    """(the line the highlighted row renders on, its text) in a captured
+    options window — None while the cursor is on a field or the button."""
+    fragments = window.content.text()
+    marked = [i for i, (style, _) in enumerate(fragments) if form_core.UiClass.CURSOR.css in style]
+    if not marked:
+        return None
+    return "".join(text for _, text in fragments[:marked[0]]).count("\n"), "".join(fragments[i][1] for i in marked)
+
+
+class TestRunFormFolding(unittest.TestCase):
+    """run_form's rows that come and go (`FormBody.visible`), on the bare
+    scaffold: a hidden row draws no line and takes no cursor, and a cursor
+    whose own row hides moves to the nearest shown stop above — its anchor,
+    for an attached row. The tag form's keys never fold the focused row
+    today; the scaffold must not depend on that (strict-reviewer,
+    bug-investigator, gate model-picker-2)."""
+
+    def test_a_cursor_whose_row_hides_goes_to_the_nearest_shown_stop_above(self):
+        from unittest.mock import MagicMock
+        shown = {"child": True}
+        body = form_core.FormBody(
+            rows=lambda: [[("", "anchor")], [("", "child")]],
+            stops=[0, 1],
+            actions={" ": lambda row: shown.update(child=False) if row == 1 else None},
+            filler=lambda focused: [], warnings=lambda: [], confirm_label="[ ok ]", hint="",
+            snapshot=lambda: shown["child"],
+            visible=lambda row: row == 0 or shown["child"])
+        captured = {}
+
+        def fake_app(**kwargs):
+            captured.update(layout=kwargs["layout"], key_bindings=kwargs["key_bindings"])
+            return MagicMock()
+
+        with patch("launch.gui.form_core.Application", side_effect=fake_app):
+            form_core.run_form("t", None, None, body)
+        window = next(child for child in captured["layout"].container.children
+                      if callable(getattr(getattr(child, "content", None), "text", None))
+                      and "anchor" in "".join(text for _, text in child.content.text()))
+        _press(captured, "down")
+        self.assertEqual(_focused_row(window), (1, "child"))
+        _press(captured, " ")                              # the child hides itself
+        self.assertEqual(_focused_row(window), (0, "anchor"))
+        self.assertEqual(window.content.get_cursor_position().y, 0)
+        self.assertNotIn("child", "".join(text for _, text in window.content.text()))
+
+
+class TestHorizontalPicks(unittest.TestCase):
+    """Rows with `choices` — a pick drawn side by side, moved with ←/→
+    (operator, 2026-09-29: the effort row). There is no "default" position:
+    `choice_default` names the level None stands for, drawn dotted and where
+    ←/→ start; landing back on it returns the pick to None. A pick that
+    leaves its list returns to None too; with nothing to pick the row is
+    not shown, and a row under a FOLDED row folds with it. The row's kind
+    takes the arrows before any action of the form's (`FormBody.choose`),
+    and a text field keeps them for its caret."""
+
+    LEVELS = {"opus": ["low", "high", "max"], "haiku": []}
+
+    def options(self, *, choice=None):
+        def model(dotted):
+            return next((name for name in self.LEVELS if name in dotted), None)
+
+        def levels(dotted):
+            return [(level, level) for level in self.LEVELS.get(model(dotted) or "", [])]
+
+        def default(dotted):
+            found = self.LEVELS.get(model(dotted) or "", [])
+            return found[-1] if found else None
+        return [
+            FormOption(key="ai", label="ai", group="ai", checked=True),
+            FormOption(key="opus", label="opus", attached_to="ai", group="model", checked=True),
+            FormOption(key="haiku", label="haiku", attached_to="ai", group="model"),
+            FormOption(key="effort", label=[("", "effort")], attached_to="ai", choices=levels, choice=choice,
+                       choice_default=default),
+        ]
+
+    def drive(self, keys, *, fields=None, choice=None):
+        return self.run_keys(self.options(choice=choice), keys, fields=fields)
+
+    def run_keys(self, options, keys, **kwargs):
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                pipe.send_text(keys + "\x03\x03")
+                result = form_core.checkbox_form("t", options, **kwargs)
+        self.assertIsNotNone(result)
+        return result
+
+    DOWN, UP, RIGHT, LEFT = "\x1b[B", "\x1b[A", "\x1b[C", "\x1b[D"
+    TO_EFFORT = DOWN * 3          # ai → opus → haiku → effort
+
+    def test_arrows_start_from_the_default_and_stop_at_the_ends(self):
+        # opus: low · high · max (default). One left from the default is high.
+        self.assertEqual(self.drive(self.TO_EFFORT + self.LEFT + "\r").choices, {"effort": "high"})
+        self.assertEqual(self.drive(self.TO_EFFORT + self.LEFT * 9 + "\r").choices, {"effort": "low"})
+
+    def test_landing_back_on_the_default_returns_the_pick_to_none(self):
+        # So a dot on "(default)" stores nothing (operator, 2026-09-29).
+        self.assertEqual(self.drive(self.TO_EFFORT + self.LEFT + self.RIGHT + "\r").choices, {"effort": None})
+        self.assertEqual(self.drive(self.TO_EFFORT + self.RIGHT * 5 + "\r").choices, {"effort": None})   # already at the top
+
+    def test_a_stored_pick_the_list_offers_is_kept_and_one_it_does_not_returns_to_none(self):
+        self.assertEqual(self.drive("\r", choice="high").choices, {"effort": "high"})
+        self.assertEqual(self.drive("\r", choice="xhigh").choices, {"effort": None})
+
+    def test_dotting_a_model_that_takes_none_folds_the_row_and_its_pick_goes(self):
+        result = self.drive(self.TO_EFFORT + self.LEFT + self.UP + " \r")        # pick high, then dot haiku
+        self.assertEqual((result.checked, result.choices), (["ai", "haiku"], {"effort": None}))
+
+    def test_a_fired_default_resets_the_picks_under_its_target_and_no_others(self):
+        # Choosing an engine re-selects the model AND its default level —
+        # only under the row the default dots: a pick under another bullet
+        # stays that bullet's (researcher, gate effort-row).
+        def levels(dotted):
+            return [(level, level) for level in ("low", "high", "max")]
+
+        def effort(key, anchor, choice):
+            return FormOption(key=key, label=[("", "effort")], attached_to=anchor, folds_with_anchor=True,
+                              choices=levels, choice=choice, choice_default=lambda dotted: "max")
+        options = [
+            FormOption(key="e1", label="e1", group="engine", checked=True),
+            FormOption(key="e2", label="e2", group="engine"),
+            FormOption(key="ai", label="ai", group="ai", checked=True),
+            FormOption(key="follow", label="follow", attached_to="ai", group="model"),
+            effort("follow-effort", "follow", "low"),
+            FormOption(key="opus", label="opus", attached_to="ai", group="model", checked=True),
+            effort("opus-effort", "opus", "high"),
+        ]
+        defaults = {frozenset({"e1", "ai"}): "follow", frozenset({"e2", "ai"}): "follow"}
+        result = self.run_keys(options, self.DOWN + " \r", defaults=defaults)       # dot e2
+        self.assertEqual((result.checked, result.choices),
+                         (["e2", "ai", "follow"], {"follow-effort": None, "opus-effort": "high"}))
+
+    def test_a_folded_effort_row_takes_no_cursor(self):
+        # Dot haiku (two downs, Space); one more down must land on the BUTTON,
+        # where Space confirms — an unfolded effort row there would take the
+        # Space inertly and leave the form open.
+        result = self.drive(self.DOWN * 2 + " " + self.DOWN + " ")
+        self.assertEqual(result.checked, ["ai", "haiku"])
+
+    def test_the_arrows_on_a_text_field_move_its_caret_and_never_the_pick(self):
+        # bug-investigator's pin: at BOTH ends of the text, where a caret move
+        # is a no-op, the key must still not fall through to the pick.
+        field = form_core.TextField(key="name", label="name", value="ab")
+        for keys in (self.LEFT * 5, self.RIGHT * 5, self.LEFT * 5 + self.RIGHT * 5):
+            with self.subTest(keys=keys):
+                result = self.drive(keys + "\r" + "y", fields=[field], choice="high")
+                self.assertEqual(result.choices, {"effort": "high"})
+
+    def test_the_arrows_on_a_row_without_choices_do_nothing(self):
+        result = self.drive(self.RIGHT * 3 + self.DOWN + self.LEFT * 3 + "\r", choice="low")
+        self.assertEqual((result.checked, result.choices), (["ai", "opus"], {"effort": "low"}))
+
+    @staticmethod
+    def _drawn(options):
+        """The rows as the form's REAL layout draws them, the Application stubbed."""
+        from unittest.mock import MagicMock
+        captured = {}
+
+        def fake_app(**kwargs):
+            captured.update(layout=kwargs["layout"])
+            return MagicMock()
+
+        with patch("launch.gui.form_core.Application", side_effect=fake_app):
+            form_core.checkbox_form("t", options)
+        texts = ["".join(t for _, t in child.content.text()) for child in captured["layout"].container.children
+                 if callable(getattr(getattr(child, "content", None), "text", None))]
+        return next(text for text in texts if options[0].key in text)
+
+    def test_the_default_is_drawn_dotted_until_a_pick_moves_the_dot(self):
+        on, off = form_core.BULLET_ON, form_core.BULLET_OFF
+        self.assertIn(f"effort  {off}low  {off}high  {on}max", self._drawn(self.options()))
+        self.assertIn(f"effort  {off}low  {on}high  {off}max", self._drawn(self.options(choice="high")))
+
+    def test_a_row_under_an_attached_row_is_drawn_one_step_deeper(self):
+        options = [
+            FormOption(key="ai", label="ai", group="ai", checked=True),
+            FormOption(key="opus", label="opus", attached_to="ai", group="model", checked=True),
+            FormOption(key="effort", label=[("", "effort")], attached_to="opus",
+                       choices=lambda dotted: [("max", "max")]),
+        ]
+        rows = self._drawn(options).split("\n")
+        self.assertEqual(rows[1:], [form_core.ATTACHED_CONNECTOR + form_core.BULLET_ON + "opus",
+                                    "  " + form_core.ATTACHED_CONNECTOR + "effort  " + form_core.BULLET_OFF + "max"])
+
+    def test_a_row_under_a_folded_row_folds_with_it(self):
+        # Nested folding (gate effort-row): an effort row under a bullet under
+        # an AI shows only while BOTH are dotted.
+        options = [
+            FormOption(key="claude", label="claude", group="ai", checked=True),
+            FormOption(key="gemini", label="gemini", group="ai"),
+            FormOption(key="flash", label="flash", attached_to="gemini", group="model", folds_with_anchor=True,
+                       checked=True),     # checked, yet its AI is not: hidden, so its effort row must be too
+            FormOption(key="flash-effort", label=[("", "effort")], attached_to="flash", folds_with_anchor=True,
+                       choices=lambda dotted: [("LOW", "LOW")]),
+        ]
+        rows = self._drawn(options)
+        self.assertNotIn("flash", rows)
+        self.assertNotIn("effort", rows)
+
+
+class TestTheRowKindTakesTheArrowsFirst(unittest.TestCase):
+    """strict-reviewer's case, on the bare scaffold: a form whose OWN action
+    for ← is destructive (the membership form's is "remove"), carrying a row
+    whose kind claims ←. The row's kind wins on that row; the form's action
+    runs everywhere else — the precedence a test states, not a lookup order."""
+
+    def test_a_choosing_row_takes_left_and_the_destructive_action_never_runs(self):
+        from unittest.mock import MagicMock
+        removed, chosen = [], []
+        body = form_core.FormBody(
+            rows=lambda: [[("", "plain")], [("", "pick")]],
+            stops=[0, 1],
+            actions={"left": lambda row: removed.append(row)},
+            filler=lambda focused: [], warnings=lambda: [], confirm_label="[ ok ]", hint="",
+            snapshot=lambda: None,
+            choose=lambda row, delta: row == 1 and not chosen.append(delta))
+        captured = {}
+
+        def fake_app(**kwargs):
+            captured.update(layout=kwargs["layout"], key_bindings=kwargs["key_bindings"])
+            return MagicMock()
+
+        with patch("launch.gui.form_core.Application", side_effect=fake_app):
+            form_core.run_form("t", None, None, body)
+        _press(captured, "down")                             # onto the pick
+        _press(captured, "left")
+        self.assertEqual((chosen, removed), ([-1], []))
+        _press(captured, "up")                               # onto the plain row
+        _press(captured, "left")
+        self.assertEqual(removed, [0])
 
 
 class TestCascadeInForm(unittest.TestCase):

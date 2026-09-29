@@ -5,15 +5,34 @@
 # v4.3 (est. = AA's estimate) and prices in USD per 1M tokens in / out, read
 # 2026-09-14 from an AA model page's embedded records.
 #
-# Codex's scale is model_reasoning_effort minimal / low / medium / high / xhigh
-# (config-reference enum); the API pages list `max` above xhigh for every
-# current slug, and whether config.toml accepts it is a probe — until then
-# xhigh is the top the reference defends and no tier uses `max`. Slugs from
-# learn.chatgpt.com/docs/models: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra,
-# gpt-5.6-luna. Luna's page lists no `minimal`, so low is its floor.
+# Codex's scale is model_reasoning_effort low / medium / high / xhigh / max:
+# the config reference (read 2026-09-28) documents it as a string the model
+# advertises, "such as low, medium, high, xhigh, max, or ultra" — `minimal`
+# is gone from it and `max` is in. Not every slug takes `max` (gpt-5.5 tops
+# out at xhigh; models.list holds each one's range), and no tier uses it:
+# the rated pairs below were chosen before the reference listed it. Slugs from
+# learn.chatgpt.com/docs/models as it read until the GPT-6 rollout:
+# gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. Luna's page lists no
+# `minimal`, so low is its floor.
+# Ids verified 2026-09-25 against learn.chatgpt.com/docs/models and
+# developers.openai.com's model, pricing and deprecation pages
+# (`ai_project-update-models`): every pin is live on the API, none deprecated.
+# AVAILABLE, NOT YET TIERS: gpt-6-sol (2 / 10) and gpt-6-luna (0.10 / 0.50),
+# released 2026-09-22, both without an Artificial Analysis index at this read
+# — a tier must be RATED (agents/ai/capability.standards), so the Luna and Sol
+# rungs stay on 5.6 until they are. WATCH, the one that can bite: Codex's own
+# model page no longer lists any gpt-5.6-* slug, saying only that the 5.6 line
+# "remain[s] available during the rollout". Nothing launches Codex yet; the
+# Codex adapter (plans/adding_an_ai.md) must re-check this before it ships.
+# Terra has no GPT-6 successor.
+# WHAT A LAUNCH RUNS (2026-09-29): an instance that FOLLOWS its engine runs its
+# tier's pair below, model AND effort. One that PINS a model runs that model
+# at its highest level unless it pins a level too (agents/ai/<ai>/models.list,
+# the tag form's effort row). Every index annotated below is the rated PAIR's,
+# so it describes a pinned instance only when it pins that same pair.
 
 [scale]
-efforts = ["minimal", "low", "medium", "high", "xhigh"]
+efforts = ["low", "medium", "high", "xhigh", "max"]
 
 [cheapest]                       # 21.55 · 0.2 / 1.2 — the cheapest model at its lowest effort
 model  = "gpt-5.6-luna"
@@ -55,4 +74,5 @@ effort = "xhigh"
 # 44.14 / high 42.50 / low 33.80 / non-reasoning 28.33 est.; Terra max 42.25 /
 # xhigh 38.19 / high 34.49 / medium 30.42 / low 27.92 / non-reasoning 22.30
 # est.; Luna max 37.50 / xhigh 34.77 / non-reasoning 16.76 est.; GPT-5.5 xhigh
-# 38.63 (deprecated, successor Sol). gpt-5.3-codex-spark is not rated.
+# 38.63 (leaves ChatGPT and Codex 2026-10-14, stays on the API; OpenAI points
+# to GPT-6 Sol). gpt-5.3-codex-spark is not rated.

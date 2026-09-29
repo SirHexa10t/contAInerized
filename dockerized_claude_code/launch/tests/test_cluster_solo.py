@@ -51,11 +51,14 @@ class TestEntrypointAgreement(unittest.TestCase):
         self.assertIsNotNone(muxer.docker, "{muxer} needs a tag.docker")
         self.assertEqual(muxer.docker.entrypoint, solo.CONTAINER_SCRIPT)
 
-    def test_the_declared_path_is_inside_the_mounted_state_dir(self):
-        # It only exists in the container because the state dir is bind-mounted
-        # there; a path outside that mount would silently not be found.
-        self.assertTrue(
-            solo.CONTAINER_SCRIPT.startswith(str(paths.CLAUDE_CONFIG_IN_CONTAINER)))
+    def test_the_declared_path_is_the_fixed_launcher_assets_path(self):
+        # A launcher asset, at the one path the tag.docker literal names for
+        # every harness, mounted as its own file (docker_config.run_container):
+        # the state dir is mounted at the HARNESS's root, which moves. Derived
+        # from that root, it moved under Gemini while the literal did not, and
+        # refusal() then called the muxer's own entrypoint foreign
+        # (bug-investigator, gate step4-start).
+        self.assertTrue(solo.CONTAINER_SCRIPT.startswith(f"{paths.LAUNCHER_ASSETS_IN_CONTAINER}/"))
 
     def test_the_tag_declares_no_layer_of_its_own(self):
         # tmux rides {muxer}'s hidden profession layer, so tag.docker should carry

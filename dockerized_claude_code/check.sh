@@ -84,6 +84,15 @@ run_check() {
 echo "Quality gate — $SCRIPT_DIR"
 echo "  $(python3 -V) at $(command -v python3)"
 
+# One test drives Gemini CLI's own policy engine and needs its bundle. Without
+# LAUNCHER_TEST_GEMINI_BUNDLE it skips — said here, loudly, because a check that
+# did not run is not a check that passed. The [self] image and CI set it, and
+# with it set a missing bundle FAILS (launch/tests/test_gemini_policy_engine.py).
+if [[ -z "${LAUNCHER_TEST_GEMINI_BUNDLE:-}" ]]; then
+    echo "  ⚠ LAUNCHER_TEST_GEMINI_BUNDLE is unset: the Gemini policy-engine test will SKIP"
+    echo "    (the [self] image and CI provide it; by hand: see launch/tests/test_gemini_policy_engine.py)"
+fi
+
 run_check tests "it ships with python3" \
     python3 -m unittest discover -s launch/tests
 

@@ -51,7 +51,7 @@ from .firewall import (
     wait_for_critical_addresses,
 )
 from .paths import (
-    BASE_DOCKERFILE, CLAUDE_CONFIG_IN_CONTAINER, cowork_dir_path, COWORK_IN_CONTAINER,
+    BASE_DOCKERFILE, container_config_root, cowork_dir_path, COWORK_IN_CONTAINER,
     DEFAULT_WORKSPACE, DOCKERIZED_CLAUDE_ROOT,
     INSTALL_FAILURES_LOG_IN_CONTAINER, LOCAL_BIN_IN_CONTAINER, RO_MOUNT_OPTION,
     base_mounts, key_file,
@@ -525,7 +525,7 @@ def set_container_mounts(inst_id: Instance) -> None:
     there)."""
     workspace_target = "/workspace" + (f":{RO_MOUNT_OPTION}" if inst_id.workspace_readonly else "")
     add_docker_mount(inst_id.workspace or DEFAULT_WORKSPACE, workspace_target)
-    add_docker_mount(inst_id.state_dir, CLAUDE_CONFIG_IN_CONTAINER)
+    add_docker_mount(inst_id.state_dir, container_config_root())   # the running harness's root — adopted before staging
     if inst_id.is_cowork:
         # {cowork}: this instance's group-hosting dir, read-write. Created here
         # rather than by the hub because docker fixes mounts at container
@@ -631,9 +631,32 @@ def effort_args(effort: str | None, claude_args: list[str]) -> list[str]:
     flag is the supported way to declare the level so the session both runs
     at it and reports it."""
     harness = active_adapter()
-    if not effort or any(a == harness.effort_flag or a.startswith(f"{harness.effort_flag}=") for a in claude_args):
+    flag = harness.effort_flag
+    if flag is None:
+        # Checked FIRST: interpolating a None flag into the `startswith` test
+        # below would compare against the literal "None=" and still return
+        # [], hiding the gap instead of stating it (bug-investigator, gate
+        # gemini-adapter). Said out loud because the engine's effort is then
+        # simply not applied, until the harness's settings path renders it.
+        if effort:
+            print(f"  note: {harness.name} takes no effort flag — the engine's "
+                  f"{effort!r} is not applied until its settings carry it.")
         return []
-    return [harness.effort_flag, effort]
+    if not effort or any(a == flag or a.startswith(f"{flag}=") for a in claude_args):
+        return []
+    return [flag, effort]
+
+
+def policy_args(inst: Instance, config: str) -> list[str]:
+    """The args that point the instance's harness at the rules file staging
+    mounted inside `config` (its config root in this launch shape) — Gemini
+    CLI's `--policy <file>`, which makes that file the whole of its user tier
+    (the always-on denies sit above it, baked into the image's admin tier) —
+    or [] for a harness whose rules live in its settings. The flag itself is
+    policy.mapping data (`[file] args`).
+    One definition for a solo launch and a cluster member, taking the same
+    `config` as the mount it names, so the two cannot point apart."""
+    return list(inst.harness.policy_args(config)) if inst.harness else []
 
 
 def run_cluster_container(session: str, image: str,
@@ -745,6 +768,7 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
     agent_argv = (
         [harness.binary]
         + effort_args(inst.effort, claude_args)
+        + policy_args(inst, str(container_config_root()))
         + resume_flag
         + list(inst.claude_args)
         + claude_args
@@ -756,6 +780,12 @@ def run_container(inst: Instance, image: str, claude_args: list[str], resume_fla
         # value with spaces would come apart), so nothing follows it.
         from .cluster import solo
         solo.install_launcher(inst, tuple(agent_argv))
+        # Its own file mount, at the fixed path {muxer}'s tag.docker names:
+        # the state dir is mounted at the HARNESS's root, which only for
+        # Claude Code is where launcher assets live. The same nested
+        # read-only file mount `settings_mount` makes over the state dir.
+        host_script, container_script = solo.script_paths(inst)
+        add_docker_mount(str(host_script), f"{container_script}:{RO_MOUNT_OPTION}")
 
     entry_flags, inner_links = entrypoint_chain(contributions)
     # What the container is actually told to run, after the image name:

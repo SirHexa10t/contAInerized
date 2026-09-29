@@ -6,6 +6,14 @@ when its create-form opens. Every key is optional; a missing file (or key)
 means an empty default for that axis. Reference validity is checked against
 a `Registry` (see `registry.Registry.validate_build`), not here.
 
+Two fields of the build are never a `.lego`'s: `model` and `effort`, an
+INSTANCE's picks (`tags/models.py`). A shipped pin would turn a vendor's
+routine retirement into a failing tree for every clone, and an agent names
+the capability it needs through its engine, whose tiers the tree keeps rated
+and current — so the picks live only in `instances.toml` and `cluster.toml`.
+`load_lego` refuses every key outside `LEGO_KEYS` (operator, 2026-09-29): a
+typo'd key would otherwise do nothing, silently.
+
 Kept separate from the tag tree: a `.lego` names tags, it isn't one.
 """
 
@@ -27,6 +35,8 @@ class AgentBuild:
     ai: str | None = None              # the AI to run on (None → the tree's default member)
     harness: str | None = None         # the agent CLI to run it in (None → the AI's default harness)
     engine: str | None = None
+    model: str | None = None           # an instance's model, one of its AI's models.list (None → follow the engine's tier model); never a .lego's
+    effort: str | None = None          # an instance's effort level, one its model takes (None → the model's highest); never a .lego's
     professions: tuple[str, ...] = ()
     specialties: tuple[str, ...] = ()
     policies: tuple[str, ...] = ()
@@ -48,10 +58,19 @@ def load_lego(path: Path) -> AgentBuild:
     """Parse an agent's `.lego`. Missing file → an all-empty `AgentBuild`
     (equivalent to an empty file — both legal). Type-checks each key: `ai`,
     `harness` and `engine` strings, the three axis keys lists of strings; anything else is a
-    `TagError` naming the file and key."""
+    `TagError` naming the file and key — as is any key outside `LEGO_KEYS`,
+    `model` and `effort` with their own reason (see the module doc: they
+    are an instance's picks)."""
     if not path.is_file():
         return AgentBuild()
     data = read_toml(path)
+    for pick in ("model", "effort"):
+        if pick in data:
+            raise TagError(f"{path}: a .lego cannot pin a {pick} — the {pick} is an instance's pick (the tag form, "
+                           f"under the AI); name the capability the agent needs through its engine")
+    unknown = sorted(set(data) - set(LEGO_KEYS))
+    if unknown:
+        raise TagError(f"{path}: unknown key(s) {', '.join(unknown)} — a .lego takes only {', '.join(LEGO_KEYS)}")
 
     engine = data.get("engine")
     if engine is not None and not isinstance(engine, str):

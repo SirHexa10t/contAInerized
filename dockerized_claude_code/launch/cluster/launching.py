@@ -55,21 +55,24 @@ from pathlib import Path
 from ..ai import DEFAULT_HARNESS_KEY, adapter_for, refusal_for
 from ..agents_crud import compute_resume_flag
 from ..claude_code_config import build_cluster_status_line, optional_creds_line
-from ..container_env import ContainerEnvKey, set_container_env
+from ..container_env import ContainerEnvKey, set_container_env, transcripts_env_value
 from ..cluster_work_protocol import (
     CONFIG_IN_CONTAINER as PROTOCOL_CONF_TARGET,
     PACKAGE_IN_CONTAINER as PROTOCOL_PACKAGE_TARGET,
     PROTOCOL_DIR_IN_CONTAINER,
 )
 from ..cluster_work_protocol.queue import CURSORS_DIRNAME
-from ..docker_config import add_docker_mount, effort_args, ensure_image, prompt_install_failures, run_cluster_container, staged_mounts
+from ..docker_config import (
+    add_docker_mount, effort_args, ensure_image, policy_args, prompt_install_failures, run_cluster_container,
+    staged_mounts,
+)
 from ..file_access import is_file, write_text
 from ..paths import (
     CLUSTER_IN_CONTAINER, CLUSTER_PROTOCOL_CONF,
-    CLUSTER_WORK_PROTOCOL_DIR, CLAUDE_CONFIG_IN_CONTAINER,
+    CLUSTER_WORK_PROTOCOL_DIR, container_config_root,
     RO_MOUNT_OPTION, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
     auth_file_mounts, base_mounts, cluster_banner_path, cluster_member_dir, cluster_path,
-    container_transcripts_dir, key_file,
+    key_file,
 )
 from ..staging import stage_instance
 from ..tag_handlers import apply_tags
@@ -93,8 +96,11 @@ SCRIPT_NAME = "cluster-start.sh"
 MESSAGING_KILL_SWITCH = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
 # Config-dir children that must exist per member but live centrally: sessions/
 # is HOW siblings discover each other (registration is per-config-dir — spike),
-# skills and keybindings ship at ~/.claude via the base mounts and would
-# silently vanish from a member that looks only in its own config dir.
+# skills and keybindings ship at the container's DEFAULT harness root via the
+# base mounts and would silently vanish from a member that looks only in its
+# own config dir. Harness-specific payload (skills dirname, Claude Code's key
+# bindings file): a mixed-harness cluster would link one CLI's file into
+# another's root, which is plans/adding_an_ai.md step 12's to resolve.
 SHARED_SESSIONS = CLUSTER_IN_CONTAINER / "sessions"
 _SHARED_LINKS = ("skills", "keybindings.json")
 
@@ -230,10 +236,14 @@ def _setup_commands(cluster: Cluster) -> tuple[str, ...]:
     - the work-protocol's home (`/cluster/protocol` + its cursors/) — created
       HERE, member-owned, never as a docker mountpoint parent (those arrive
       root-owned: the recorded herdr lesson);
-    - skills and keybindings symlinked from the shared ~/.claude mounts, which
-      a member's CLAUDE_CONFIG_DIR would otherwise hide.
+    - skills and keybindings symlinked from where the base mounts landed —
+      the container's DEFAULT harness root — into each member's RELOCATED
+      root, which a member's relocation variable would otherwise hide. Two
+      different roots, named apart (gate step4-start): one constant used to
+      stand for both.
 
     `ln -sfn` so a relaunch over existing links is idempotent."""
+    default_root = container_config_root(adapter_for(DEFAULT_HARNESS_KEY))
     lines = [f"mkdir -p {SHARED_SESSIONS}",
              f"mkdir -p {PROTOCOL_DIR_IN_CONTAINER / CURSORS_DIRNAME}"]
     for member in cluster.members:
@@ -242,7 +252,7 @@ def _setup_commands(cluster: Cluster) -> tuple[str, ...]:
         lines.append(f"ln -sfn {SHARED_SESSIONS} {config}/sessions")
         for name in _SHARED_LINKS:
             lines.append(
-                f"ln -sfn {CLAUDE_CONFIG_IN_CONTAINER}/{name} {config}/{name}")
+                f"ln -sfn {default_root}/{name} {config}/{name}")
     return tuple(lines)
 
 
@@ -274,7 +284,7 @@ def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = Fa
         apply_tags(probe)
     except (ValueError, RuntimeError) as e:
         raise ClusterError(str(e)) from None
-    set_container_env(probe.professions, refresh_installs=refresh_installs)   # `cluster.py launch --refresh-installs`, or run.py's flag through its cluster branch
+    set_container_env(probe, registry, refresh_installs=refresh_installs)   # `cluster.py launch --refresh-installs`, or run.py's flag through its cluster branch
     plant_user_extras(probe)
 
     env_for: dict[str, dict[str, str]] = {}
@@ -292,7 +302,8 @@ def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = Fa
         # shadowing, from the one definition). A stop names the member.
         harness = adapter_for(inst.harness.name if inst.harness else DEFAULT_HARNESS_KEY)
         try:
-            staged = stage_instance(inst, registry, harness=harness, config=str(config), relocated=True)
+            staged = stage_instance(inst, registry, harness=harness, config=str(config), relocated=True,
+                                    who=member.id)
         except (TagError, RuntimeError) as e:
             raise ClusterError(f"member {member.id!r}: {e}") from None
         notices.extend(n for n in staged.notices if n not in notices)
@@ -309,17 +320,19 @@ def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = Fa
             # (operator report, 2026-09-02).
             ContainerEnvKey.AGENT_STATUS_LINE.value:
                 build_cluster_status_line(inst, member.id),
-            # Where THIS member's transcripts are — its own config dir's
-            # `projects/`, never /home/claude/.claude's. The in-container
-            # readers (dump_last_msg, find_in_history) follow this rather
-            # than a hardcoded path, which is what made them read another
-            # member's dir, or nothing at all, before 2026-09-19.
-            ContainerEnvKey.AGENT_TRANSCRIPTS_DIR.value:
-                str(container_transcripts_dir(config)),
         }
+        # Where THIS member's transcripts are — under its own config dir,
+        # never /home/claude/.claude. The in-container readers (dump_last_msg,
+        # find_in_history) follow this rather than a hardcoded path, which is
+        # what made them read another member's dir, or nothing at all, before
+        # 2026-09-19. Staged only for a CLI whose transcripts they can read
+        # (the solo launch's rule, one definition — container_env).
+        if (location := transcripts_env_value(config, harness)) is not None:
+            env_for[member.id][ContainerEnvKey.AGENT_TRANSCRIPTS_DIR.value] = location
         command_for[member.id] = (
             harness.binary,
             *effort_args(inst.effort, []),
+            *policy_args(inst, str(config)),
             *compute_resume_flag(inst),
             *inst.claude_args,
         )
@@ -351,7 +364,11 @@ def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = Fa
     # bashrc, member settings reference the statusline script, and the
     # per-member skills/keybindings symlinks point INTO these mounts. Found
     # missing by an operator question, not a boot — recorded so it stays pinned.
-    for source, target in base_mounts():
+    # The container-wide set is the DEFAULT harness's (one container, one
+    # default root; each member's own root gets its files through the links
+    # above and its own staging) — named, not left to whatever this process
+    # last adopted.
+    for source, target in base_mounts(adapter_for(DEFAULT_HARNESS_KEY)):
         add_docker_mount(source, target)
 
     script_host = cluster_path(cluster.session) / SCRIPT_NAME
@@ -382,8 +399,9 @@ def prepare(cluster: Cluster, registry: Registry, *, refresh_installs: bool = Fa
     # The free shell pane keeps the default harness's login at the DEFAULT
     # location too (HOME / the default config root), for a human running the
     # CLI by hand there — not for any member, whose files sit in its own dir.
-    for source, target in auth_file_mounts(adapter_for(DEFAULT_HARNESS_KEY),
-                                           config=str(CLAUDE_CONFIG_IN_CONTAINER), relocated=False):
+    default_adapter = adapter_for(DEFAULT_HARNESS_KEY)
+    for source, target in auth_file_mounts(default_adapter,
+                                           config=str(container_config_root(default_adapter)), relocated=False):
         add_docker_mount(source, target)
     # The operator's optional credentials (user_extras/optional_creds/), as
     # every solo instance mounts them: presence on the host is the opt-in,

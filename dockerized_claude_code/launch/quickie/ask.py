@@ -27,7 +27,7 @@ from ..ai import active_adapter, adopt, refusal_for
 from ..container_env import set_container_env, set_instance_env
 from ..docker_config import ensure_image, require_docker, run_container, set_container_mounts
 from ..file_access import ensure_dir, is_file, login_state
-from ..paths import CLAUDE_CONFIG_IN_CONTAINER, auth_file_path, key_file, quickie_communal_workspace, quickie_state_dir_path
+from ..paths import auth_file_path, container_config_root, key_file, quickie_communal_workspace, quickie_state_dir_path
 from ..paths import AGENTS_DIR
 from ..staging import stage_instance
 from ..tag_handlers import apply_tags
@@ -147,11 +147,11 @@ def ask(question: str, registry: Registry, *, resume_session: str | None = None,
     # The one per-agent staging every run shape calls (launch/staging.py) —
     # a quickie keeps the default config root, like a solo instance.
     staged = call_or_exit(stage_instance, inst, registry, harness=active_adapter(),
-                          config=str(CLAUDE_CONFIG_IN_CONTAINER), relocated=False,
+                          config=str(container_config_root()), relocated=False, who=inst.instance,
                           exceptions=(TagError, RuntimeError))
     for notice in staged.notices:
         print(notice)
-    set_container_env(inst.professions)
+    set_container_env(inst, registry)
     set_instance_env(inst)
     set_container_mounts(inst)
     image = ensure_image(inst)

@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from rich import box                                                       # dep — declared in pyproject.toml [project]
+from rich.cells import cell_len
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
@@ -78,7 +79,7 @@ from ..paths import (
     AGENTS_COMMANDS_DIR, AGENTS_DIR, DEFAULT_WORKSPACE, DEFAULTING_DIRS,
 )
 from .picker_previews import (
-    _ansi, _cluster_preview, _create_preview, _member_line, _resolve_tags,
+    _ansi, _cluster_preview, _create_preview, _member_line, _resolve_tags, member_chips, member_columns,
     _template_preview,
 )
 from .picker_flows import (
@@ -95,12 +96,12 @@ from .picker_prompts import (
     instance_fields, _report_to_picker,
 )
 from .form_core import FormOption, checkbox_form
-from ..history_find import find_in_history
+from ..history_find import find_in_history, unsearched_counts, unsearched_note
 from .forms import edit_profiles_menu, prompt_tags
 from .styles import (
     rich_style, STYLE_AGENT_NAME, STYLE_TAG_INVALID, tag_style,
 )
-from ..tags import Agent, Ai, Engine, Harness, Instance, Registry, SCOPES, Tag, resolve_build
+from ..tags import Agent, Engine, Harness, Instance, Registry, SCOPES, Tag, resolve_build
 from ..tags.ai import sorted_ais
 from ..tags.engine import sorted_engines, effort_tier_rank
 from ..tags.harness import sorted_harnesses
@@ -359,12 +360,14 @@ def cluster_entries(registry: Registry, running: frozenset[str],
                 member=member, cluster=cluster.session, inherited=inherited))
         # The cluster pane lists each member with its OWN tags (the inherited
         # ones are the pane's tag list already) and its own last use.
-        lines = [_member_line(entry.member.id, entry.identity.ai, entry.identity.harness, entry.identity.engine,
+        columns = member_columns([(entry.member.id, entry.identity) for entry in members]
+                                 + [(member.id, None) for member in missing])
+        lines = [_member_line(entry.member.id, entry.identity,
                               [t for t in entry.identity.active_tags if t.name not in inherited],
                               [p for p in entry.identity.invalid_tags if p.name not in inherited],
-                              entry.last_used_display)
+                              entry.last_used_display, columns=columns)
                  for entry in members]
-        lines += [_member_line(member.id, None, None, None, [], [], "", missing_agent=member.agent)
+        lines += [_member_line(member.id, None, [], [], "", columns=columns, missing_agent=member.agent)
                   for member in missing]
         tags, problems = _resolve_tags(registry, cluster.tags, scope="cluster")
         last_used = _last_used_display(cluster.last_used_mtime)
@@ -379,19 +382,26 @@ def cluster_entries(registry: Registry, running: frozenset[str],
 # Row anatomy — what every row for an EXISTING thing looks like
 # ============================================================
 
-def _runtime_column(ai: Ai | None, harness: Harness | None) -> Column:
-    """The runtime column of a row — the AI's ⟪label⟫ in its own colours,
-    then the harness's ⟦label⟧ (operator, 2026-09-14), each followed by a
-    space — as (fragments, width); NO_COLUMN for a row with neither (a cluster
-    row: its members carry theirs; an agent row: both are chosen per
-    instance). Sits between the tag column and the name (operator,
-    2026-09-13), padded per population like the tags."""
+def _runtime_column(inst: Instance, *, ai_width: int = 0) -> Column:
+    """The runtime column of an instance's row — its AI chip (`ai_chip`: the
+    ⟪label⟫ in its own colours, carrying the picked model — ⟪Claude:Opus-5.5⟫,
+    operator 2026-09-28), then the harness's ⟦label⟧ (operator, 2026-09-14),
+    each followed by a space — as (fragments, width in cells). Rows of other
+    kinds have none (a cluster row: its members carry theirs; an agent row:
+    both are chosen per instance). Sits between the tag column and the name
+    (operator, 2026-09-13), padded per population like the tags; never
+    squashed, so a model cannot vanish from it. `ai_width` pads the AI chip
+    to that many cells, so the harness labels of rows running different AIs
+    start in one column (a cluster's member rows, operator 2026-09-28)."""
     frags: list[tuple[str, str]] = []
     width = 0
-    for tag in (ai, harness):
-        if tag is not None:
-            frags += [(tag_style(tag), tag.label), ("", " ")]
-            width += len(tag.label) + 1
+    ai, harness, _ = member_chips(inst)
+    for chip, pad_to in ((ai, ai_width), (harness, 0)):
+        if chip is not None:
+            style, label = chip
+            pad = " " * max(0, pad_to - cell_len(label))
+            frags += [(style, label), ("", pad + " ")]
+            width += cell_len(label) + len(pad) + 1
     return frags, width
 
 
@@ -464,7 +474,7 @@ def _instance_cells(entries: Iterable[ContEntry], *,
     tags (with `emphasize` for the one the menu is about) and its AI +
     harness."""
     return {e.identity.instance: _RowCells(_cont_tags_column(e.identity, emphasize=emphasize),
-                                           _runtime_column(e.identity.ai, e.identity.harness))
+                                           _runtime_column(e.identity))
             for e in entries}
 
 
@@ -874,20 +884,26 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             # launch in, so the list here IS the `^b 1..9` numbering. A member
             # row shows only its OWN tags: the cluster's are on the cluster row.
             # Enter is inert on a member (`pickable=False`) — it launches with
-            # its cluster; F2 and Del are what the row is for.
+            # its cluster; F2 and Del are what the row is for. Within a block
+            # the ids are padded to the widest and the AI labels likewise, so
+            # every member's AI, then harness, starts in one column (operator,
+            # 2026-09-28) — the same widths the cluster's pane lines use.
+            id_width, ai_width, _, _ = member_columns(
+                [(m.member.id, m.identity) for m in cluster_entry.members]
+                + [(m.id, None) for m in cluster_entry.missing])
             for member_entry in cluster_entry.members:
                 own_tags = [t for t in member_entry.identity.active_tags
                             if t.name not in member_entry.inherited]
                 own_problems = [p for p in member_entry.identity.invalid_tags
                                 if p.name not in member_entry.inherited]
                 member_tags, _ = _tags_column(own_tags, problems=own_problems)
-                member_runtime, _ = _runtime_column(member_entry.identity.ai, member_entry.identity.harness)
+                member_runtime, _ = _runtime_column(member_entry.identity, ai_width=ai_width)
                 entries.append(PickerEntry(
                     display=[
                         *PickerRowMarker.MEMBER.fragments(""),
                         (STYLE_RUNNING_NAME if cluster_entry.is_running else STYLE_AGENT_NAME,
                          member_entry.member.id),
-                        ("", "  "),
+                        ("", " " * (id_width - cell_len(member_entry.member.id)) + "  "),
                         *member_runtime,     # the member's AI and harness right after its name — this anatomy leads with the name
                         *member_tags,
                     ],
@@ -906,7 +922,7 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
                 entries.append(PickerEntry(
                     display=[*PickerRowMarker.MEMBER.fragments(""),
                              (STYLE_TAG_INVALID, member.id),
-                             ("", f" — no agent '{member.agent}' in agents/")],
+                             ("", " " * (id_width - cell_len(member.id)) + f" — no agent '{member.agent}' in agents/")],
                     preview=_ansi(Markdown(
                         f"*`{member.id}` — member of cluster `{cluster.session}`.*\n\n---\n\n"
                         f"Its agent `{member.agent}` has no `agents/{member.agent}.md` "
@@ -945,8 +961,13 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             modifiable=False,
         ))
 
-        title = (f'{TITLE_AGENT_PICKER}   —   found "{find_term}"'
-                 if find_term else TITLE_AGENT_PICKER)
+        title = TITLE_AGENT_PICKER
+        if find_term:
+            # The narrowed list can only show what was READ; say what was not,
+            # or a conversation that was never searched reads as one that
+            # never said it.
+            skipped = sum(unsearched_counts().values())
+            title += f'   —   found "{find_term}"' + (f"   ({skipped} not searched)" if skipped else "")
         action, value = pick_with_preview(title, entries, allow_delete=True,
                                           allow_modify=True, allow_find=True,
                                           legend_text=legend_text)
@@ -959,7 +980,9 @@ def select_agent(registry: Registry) -> "Agent | Instance | cluster_state.Cluste
             # the picker and start it again.
             asked = ask_for_find_term(find_term)
             if asked and not _hit_counts(asked):
-                _report_to_picker(f'  Nothing said "{asked}" in any conversation.')
+                note = unsearched_note(unsearched_counts())
+                _report_to_picker(f'  Nothing said "{asked}" in any conversation.'
+                                  + (f"\n  {note}" if note else ""))
                 continue
             find_term = asked
             continue

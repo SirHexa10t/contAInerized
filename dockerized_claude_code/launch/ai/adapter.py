@@ -56,20 +56,58 @@ class Adapter:
     key: str                         # the `agents/harness/<key>` member this adapter implements (the tag carries the display facts and the AIs it runs)
     name: str                        # the CLI's own name as the vendor writes it — "Claude Code", "Gemini CLI", "Codex CLI", "Grok Build" — for the strings a user reads; equals the member's fullname
     binary: str                      # the executable in the image (`docker run … <binary> …`; herdr matches it to pick `agent start`)
+    # Whether an instance in this harness may LAUNCH. Declared, never inferred:
+    # being in ADAPTERS and having a Dockerfile are both true of a harness
+    # whose image builds but whose container cannot start yet (config dir,
+    # persona, credentials — plans/adding_an_ai.md step 4), and before this
+    # field the launch treated those two facts as "ready" and paid for a full
+    # image build before the gap bit (agent-writer, gate gemini-adapter).
+    # `refusal_for` reads it; so do the form's harness rows and the audit.
+    startable: bool
     herdr_agent_kind: str | None     # herdr's `agent start --kind <kind>` vocabulary for this CLI; None = herdr has no kind for it, members fall back to `pane run`
     config_dir_name: str             # the CLI's config root under the container user's home (`.claude`) — the instance state dir is bind-mounted there
     config_dir_env: str              # the env var that relocates that root (cluster members each get their own)
+    # What that variable NAMES. False: the config root itself
+    # (CLAUDE_CONFIG_DIR, CODEX_HOME). True: the directory the root sits IN —
+    # Gemini CLI's GEMINI_CLI_HOME stands in for HOME and the CLI creates
+    # `.gemini` inside it (verified in its paths.ts and by running it). A
+    # consumer that sets the variable to a config root must read this, or
+    # every path lands one level wrong.
+    config_dir_env_parent: bool
     session_name_env: str | None     # the env var that names the session inside the CLI (the cluster sets it to the member id); None if the CLI has none
     settings_filename: str           # the settings file the launcher generates and RO-mounts into the config root
+    settings_base: str | None        # the launcher's base settings for this CLI, a file under settings/ that every policy's rendering merges onto (paths.base_settings_file); None: none written yet
+    config_files: tuple[str, ...]    # launcher-authored files under settings/ that ONLY this CLI reads, mounted into its config root (Claude Code's statusline script and key bindings); a CLI without them gets none, never another CLI's (paths.harness_base_mounts)
     persona_filename: str            # the instruction file the launcher composes into the state dir (`CLAUDE.md`)
     commands_dirname: str            # slash-command dir under the config root, assembled per launch
     skills_dirname: str              # skills dir under the config root (the shared custom_skills/ mount)
-    history_filename: str            # the per-launch input log at the state-dir root — the "last launched" signal
-    transcripts_dirname: str         # where session transcripts live under the config root (`projects/<cwd-slug>/*.jsonl` for Claude Code)
+    # The transcript LAYOUT, as data — it differs between CLIs in SHAPE, not
+    # just name, so one dirname could not describe it (strict-reviewer, gate
+    # step4-start). Globs, because every CLI so far is described by one, and
+    # a glob is cheaper to review than code per harness.
+    history_glob: str                # the input log(s) the "last used" time comes from, relative to the config root
+    transcripts_dirname: str         # the dir under the config root that holds the session transcripts — what the in-container helpers are pointed at
+    transcript_glob: str             # the session transcripts, relative to that dir
+    subagent_transcript_glob: str | None   # sub-agents' transcripts, relative to that dir; None where the layout is not verified yet
+    # Which line shape the launcher's parser (launch/transcript_format.py)
+    # reads for this CLI; None when it reads none of them yet. Transcripts
+    # can then be FOUND (resume detection works) but not READ, and every
+    # reader says so rather than returning an empty history.
+    transcript_format: str | None
     auth_files: tuple[AuthFile, ...]  # the login state this CLI keeps, mounted from ~/.ai-agents/credentials/<key>/ (plans/credentials.md); API keys travel separately, per AI, as an env file
     print_flag: str                  # one-shot headless mode (quickie)
-    continue_flag: str               # resume the most recent conversation of this config root
-    effort_flag: str                 # pin the session's effort on the command line (see docker_config.effort_args for why a flag AND an env var)
+    # The args that resume the most recent conversation of this config root —
+    # a tuple, not a flag, because the CLIs spell it differently in SHAPE:
+    # Claude Code's `--continue` is bare, Gemini CLI's `--resume` takes a
+    # value (`latest`, or a session index). A constant value, not an id, so
+    # a field still suffices; a CLI that needs a looked-up id would need a
+    # method here instead.
+    continue_args: tuple[str, ...]
+    # Pins the session's effort on the command line (see
+    # docker_config.effort_args for why a flag AND an env var). None when the
+    # CLI has no such flag — Gemini CLI sets thinking only in settings — the
+    # same Optional-with-a-guarded-reader shape `session_name_env` has.
+    effort_flag: str | None
     stream_args: tuple[str, ...]     # the flags that make print mode emit a line-delimited event stream quickie can render
     critical_hosts: tuple[str, ...]  # the hosts the CLI cannot operate without — the firewall resolves them first and aborts the launch if it cannot
 

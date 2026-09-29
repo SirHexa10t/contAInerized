@@ -77,7 +77,7 @@ class RelayHarness(unittest.TestCase):
         with host.open("a") as handle:
             handle.write(json.dumps({"promptId": prompt_id, "uuid": "u1",
                                      "message": {"role": "user", "content": text}}) + "\n")
-        return str(paths.CLAUDE_CONFIG_IN_CONTAINER / relative)
+        return str(paths.container_config_root() / relative)
 
     def drop_capture(self, instance: str, answer: str, *, prompt_id: str = "p1",
                      session: Session | None = None, tagged: bool = True) -> None:

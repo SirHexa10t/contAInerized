@@ -2,6 +2,8 @@
 
     ["researcher__proj"]
     workspace = "/home/u/proj"
+    model = "claude-opus-5"
+    effort = "high"
     engine = "researcher"
     professions = ["code"]
     specialties = ["auto", "firewall"]
@@ -13,7 +15,11 @@ display shortnames and tag objects are resolved against the registry at
 read time. Full-replacement semantics: an entry wins over the agent's
 `.lego` defaults wholesale; a missing entry means "fresh — open the form
 on the `.lego` pre-picks". `workspace` / `engine` are simply omitted when
-unset (TOML has no null); readers see the absent key as None.
+unset (TOML has no null); readers see the absent key as None. `model` and
+`effort` are the instance's picks (`tags/models.py`): absent, it follows its
+engine's model and runs that model's highest level. A pick is kept verbatim
+even once its model stops offering it, so the picker and the audit go on
+flagging it until it is changed.
 
 Reading goes through stdlib `tomllib`; writing through `dumps` below, which
 owns THIS file's shape (its header, its `workspace`/`engine` pair) and takes
@@ -50,13 +56,13 @@ _FILE_HEADER = (
 def dumps(mapping: dict[str, dict[str, Any]]) -> str:
     """Serialize the store: header comment, then one key-sorted table per
     instance. Only the shapes this store holds are supported — optional
-    strings (`workspace`, `ai`, `harness`, `engine`; omitted when None) and string lists
+    strings (`workspace`, `ai`, `model`, `effort`, `harness`, `engine`; omitted when None) and string lists
     (the three axes)."""
     blocks = [_FILE_HEADER]
     for instance_id in sorted(mapping):
         entry = mapping[instance_id]
         lines = [f"[{toml_emit.key(instance_id)}]"]
-        for field in ("workspace", "ai", "harness", "engine"):
+        for field in ("workspace", "ai", "model", "effort", "harness", "engine"):
             if entry.get(field) is not None:
                 lines.append(f"{field} = {toml_emit.string(entry[field])}")
         for axis in ("professions", "specialties", "policies"):
@@ -90,6 +96,8 @@ def entry_to_build(entry: dict[str, Any]) -> AgentBuild:
         ai=entry.get("ai"),
         harness=entry.get("harness"),
         engine=entry.get("engine"),
+        model=entry.get("model"),
+        effort=entry.get("effort"),
         professions=tuple(entry.get("professions", [])),
         specialties=tuple(entry.get("specialties", [])),
         policies=tuple(entry.get("policies", [])),
@@ -103,6 +111,8 @@ def build_entry(build: AgentBuild, workspace: str | None) -> dict[str, Any]:
     return {
         "workspace":   workspace,
         "ai":          build.ai,
+        "model":       build.model,
+        "effort":      build.effort,
         "harness":     build.harness,
         "engine":      build.engine,
         "professions": list(build.professions),

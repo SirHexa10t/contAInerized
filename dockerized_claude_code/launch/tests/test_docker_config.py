@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from launch import docker_config, paths
+from launch.ai import CLAUDE_CODE
 from launch.paths import AGENTS_DIR
 from launch.tags import scan_all
 from launch.container_env import ContainerEnvKey, _container_env, stage_container_env
@@ -24,12 +25,21 @@ from launch.docker_config import (
 from launch.tags import DockerContribution
 
 
+def _cowork_raw_settings() -> dict:
+    """{cowork}'s claimed fragment: raw Claude Code settings (policy/_cowork/
+    claude-code.json), which no policy word can say yet — a hook and a mode."""
+    fragment = scan_all(paths.AGENTS_DIR).specialties["cowork"].fragment
+    raw = fragment.raw_fragment(CLAUDE_CODE.key) if fragment else None
+    assert raw is not None, "{cowork} claims no raw Claude Code settings"
+    return raw
+
+
 def _run_inst(**over):
     """Duck-typed Instance for run_container tests — only the attrs it reads."""
     # `is_muxer` is read by run_container to decide whether the command becomes a
     # generated tmux script; False keeps these tests about the ordinary path.
     defaults = dict(docker_contributions=[], conf={}, effort=None, model="", claude_args=[],
-                    instance="poet__x", is_muxer=False, ai=None)
+                    instance="poet__x", is_muxer=False, ai=None, harness=None, state_dir=Path("/fake/state/poet__x"))
     defaults.update(over)
     return SimpleNamespace(**defaults)
 
@@ -41,6 +51,12 @@ class TestRunContainerMuxer(unittest.TestCase):
     """`{muxer}` replaces the container command with a generated tmux script, so
     claude's own argv must NOT also be appended — it is baked into the script, and
     passing it twice would hand the script stray arguments."""
+
+    def setUp(self):
+        # run_container adds the script's own file mount to the module's
+        # accumulator; start and end each case with it empty.
+        docker_config._docker_mounts.clear()
+        self.addCleanup(docker_config._docker_mounts.clear)
 
     def _capture(self, **over):
         # The entrypoint flag comes from {muxer}'s tag.docker via entrypoint_flags,
@@ -58,6 +74,14 @@ class TestRunContainerMuxer(unittest.TestCase):
                 _run_inst(is_muxer=True, docker_contributions=[contribution], **over),
                 "claude-agents:base", ["--extra"], ["--continue"])
         return recorded[0]
+
+    def test_the_script_rides_its_own_mount_at_the_fixed_path(self):
+        # The state dir is mounted at the HARNESS's root; the script must be
+        # where {muxer}'s tag.docker says for every harness, so it gets its own
+        # read-only file mount there (gate step4-start).
+        from launch.cluster.solo import CONTAINER_SCRIPT
+        argv = self._capture()
+        self.assertIn(f"/fake/state/poet__x/muxer-start.sh:{CONTAINER_SCRIPT}:ro", argv)
 
     def test_the_entrypoint_comes_from_the_tag_not_from_code(self):
         from launch.cluster.solo import CONTAINER_SCRIPT
@@ -157,7 +181,6 @@ class TestKeyEnvFiles(unittest.TestCase):
 
     def test_stage_credentials_is_the_one_staging_for_every_launch_shape(self):
         # Blanks appear (private), the key preflight runs, the notices come back.
-        from launch.ai import CLAUDE_CODE
         ai = REGISTRY.ais["claude"]
         notices = docker_config.stage_credentials(CLAUDE_CODE, [ai])
         for f in CLAUDE_CODE.auth_files:
@@ -301,6 +324,29 @@ class TestEffortArgs(unittest.TestCase):
         self.assertEqual(
             effort_args("medium", ["--print", "hi"]),
             ["--effort", "medium"])
+
+    def test_a_harness_with_no_effort_flag_emits_nothing_and_says_so(self):
+        # Gemini CLI sets thinking in settings only. The None check must come
+        # FIRST: an iterable that fails the test when read proves the
+        # user-args scan never ran, where interpolating None would have
+        # compared against the literal "None=" and passed by accident.
+        from launch.ai import GEMINI_CLI
+
+        class Unreadable:
+            def __iter__(self):
+                raise AssertionError("effort_args read the user's args for a flagless harness")
+
+        with patch.object(docker_config, "active_adapter", return_value=GEMINI_CLI), \
+             patch("builtins.print") as printed:
+            self.assertEqual(effort_args("HIGH", Unreadable()), [])
+        self.assertIn("not applied", str(printed.call_args))
+
+    def test_a_flagless_harness_with_no_effort_stays_quiet(self):
+        from launch.ai import GEMINI_CLI
+        with patch.object(docker_config, "active_adapter", return_value=GEMINI_CLI), \
+             patch("builtins.print") as printed:
+            self.assertEqual(effort_args(None, []), [])
+        printed.assert_not_called()
 
 
 class TestImageTag(unittest.TestCase):
@@ -489,7 +535,7 @@ class TestSetContainerMountsWorkspaceFallback(unittest.TestCase):
         mounts = self._capture_mounts(inst_id)
         ws = next(p for p in mounts if p[1].startswith("/workspace"))
         self.assertEqual(ws, ("/w", "/workspace:ro"))
-        state = next(p for p in mounts if p[1] == "/home/claude/.claude")  # CLAUDE_CONFIG_IN_CONTAINER
+        state = next(p for p in mounts if p[1] == "/home/claude/.claude")  # container_config_root() under Claude Code
         self.assertFalse(state[1].endswith(":ro"))
 
     def test_workspace_read_write_by_default(self):
@@ -575,16 +621,14 @@ class TestCoworkMountRealInstance(unittest.TestCase):
     def test_stop_hook_writes_under_the_mount_target(self):
         # The mount and the hook path are one mechanism; if this drifts,
         # captures are written somewhere the hub will never read.
-        from launch.tags import scan_all
-        frag = scan_all(paths.AGENTS_DIR).specialties["cowork"].load_fragment()
+        frag = _cowork_raw_settings()
         command = frag["hooks"]["Stop"][0]["hooks"][0]["command"]
         self.assertIn(f"{paths.COWORK_IN_CONTAINER}/outbox", command)
 
     def test_fragment_permits_writing(self):
         # dontAsk makes `allow` exhaustive, so a manager that cannot Write
         # cannot merge an inbox — the flow would be impossible.
-        from launch.tags import scan_all
-        perms = scan_all(paths.AGENTS_DIR).specialties["cowork"].load_fragment()["permissions"]
+        perms = _cowork_raw_settings()["permissions"]
         self.assertEqual(perms["defaultMode"], "dontAsk")
         self.assertLessEqual({"Write", "Edit"}, set(perms["allow"]))
 
@@ -593,9 +637,8 @@ class TestCoworkMountRealInstance(unittest.TestCase):
         # inbox into its working copy and clear it, and a manager to review with
         # `diff -r`. Under dontAsk, a command missing here makes the protocol's
         # own instructions impossible to follow.
-        from launch.tags import scan_all
         cowork = scan_all(paths.AGENTS_DIR).specialties["cowork"]
-        allow = set(cowork.load_fragment()["permissions"]["allow"])
+        allow = set(_cowork_raw_settings()["permissions"]["allow"])
         self.assertLessEqual({"Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)",
                               "Bash(diff:*)"}, allow)
         # And the addendum really does instruct those operations — if it stops
@@ -609,13 +652,36 @@ class TestCoworkMountRealInstance(unittest.TestCase):
         # allowing ls/cat/grep/... contradicted our own advice and only padded
         # settings.json. `wc` is the kept exception (counting lines without
         # reading a whole file into context).
-        from launch.tags import scan_all
-        allow = set(scan_all(paths.AGENTS_DIR).specialties["cowork"]
-                    .load_fragment()["permissions"]["allow"])
+        allow = set(_cowork_raw_settings()["permissions"]["allow"])
         for command in ("ls", "find", "grep", "rg", "cat", "head", "tail"):
             with self.subTest(command=command):
                 self.assertNotIn(f"Bash({command}:*)", allow)
         self.assertLessEqual({"Read", "Glob", "Grep", "Bash(wc:*)"}, allow)
+
+
+class TestPolicyArgs(unittest.TestCase):
+    """policy_args — the one definition both launch shapes use to point a
+    harness at the rules file staging mounted, from the same config root as
+    the mount, so the argv and the mount cannot point apart."""
+
+    def test_gemini_is_pointed_at_its_rules_file_as_its_whole_user_tier(self):
+        inst = SimpleNamespace(harness=REGISTRY.harnesses["gemini-cli"])
+        self.assertEqual(docker_config.policy_args(inst, "/cluster/members/m1/.gemini"),
+                         ["--policy", "/cluster/members/m1/.gemini/policies/launcher.toml"])
+
+    def test_a_harness_whose_rules_live_in_its_settings_gets_none(self):
+        self.assertEqual(docker_config.policy_args(SimpleNamespace(harness=REGISTRY.harnesses["claude-code"]), "/c"), [])
+        self.assertEqual(docker_config.policy_args(SimpleNamespace(harness=None), "/c"), [])
+
+    def test_the_solo_argv_carries_them(self):
+        inst = _run_inst(harness=REGISTRY.harnesses["gemini-cli"])
+        with patch.object(docker_config, "_interactive_docker_run") as run, \
+                patch.object(docker_config, "start_firewall_updater"):
+            docker_config.run_container(inst, "claude-agents:base", [], [])
+        argv = run.call_args.args[0]
+        root = str(paths.container_config_root())
+        self.assertIn("--policy", argv)
+        self.assertEqual(argv[argv.index("--policy") + 1], f"{root}/policies/launcher.toml")
 
 
 class TestAddDockerMountCollisions(unittest.TestCase):

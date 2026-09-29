@@ -379,7 +379,7 @@ class TestServe(CliHarness):
         outbox.mkdir(parents=True, exist_ok=True)
         (outbox / "c.json").write_text(json.dumps({
             "last_assistant_message": "finished it", "prompt_id": "p1",
-            "transcript_path": str(paths.CLAUDE_CONFIG_IN_CONTAINER / relative)}))
+            "transcript_path": str(paths.container_config_root() / relative)}))
 
 
 class TestClose(CliHarness):

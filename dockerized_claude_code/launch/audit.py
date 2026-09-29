@@ -8,7 +8,7 @@ Reports:
     ~/.ai-agents/ root — instances now live under instances/, so the
     launcher no longer sees one left at the root)
   - orphan state dirs (instance dir present but no matching agent .md)
-  - no_history (state dir has no history.jsonl — the last-used signal we rely on)
+  - no_history (state dir has no input log in any CLI's layout — the last-used signal we rely on)
   - ghost store entries (instances.toml entry without a corresponding state dir)
   - badworkspace (entry's workspace points to a non-existent or non-directory path)
   - bad_tags (entry references an engine/profession/specialty/policy that the
@@ -19,9 +19,21 @@ Reports:
     the two kinds existed (2026-09-13 / 14) is most likely meant for `claude`
     in `claude-code`, the only option then: F2 dots them for an instance, a
     line in the .lego for an agent)
+  - unstartable_harness (an instances.toml entry, a cluster member or an
+    agent .lego whose effective harness the launcher cannot run yet — no
+    adapter, or an adapter not yet `startable`; the launch would refuse it
+    before building anything, and the audit says so before anyone tries —
+    F2 switches an instance's harness)
   - forbidden_tag (a build carries a real tag at a scope its tag.info's
     `forbid_on` refuses — {dood} as a member's own tag, {clstr} in a solo
     store entry; the message says where the tag can go)
+  - stale_model / stale_effort (an instances.toml entry or a cluster member
+    pinned a model its AI no longer lists — deleted when the vendor retired
+    it, or never one of its ids — or an effort level the model it runs does
+    not take; the launch drops a stale model for the engine's, and replaces
+    a stale level with the nearest at or below it, never refusing — so this,
+    and the picker row for a model, are what say so beforehand — F2 picks
+    another)
   - bad_lego (an agent's .lego fails to parse)
   - bad_name (an instance's session, or a cluster's directory name, that the
     launcher's label rule refuses — `tags.identity.label_error`, applied to
@@ -73,13 +85,14 @@ from .file_access import (
     agent_md_index, file_mode, is_dir, is_file, iter_files, iter_subdirs, key_file_problems, login_state, path_exists,
     read_text,
 )
-from .ai import ADAPTERS, CLAUDE_CODE
+from .ai import ADAPTERS, CLAUDE_CODE, readiness_note
+from .transcripts import last_history_mtime
 from .paths import (
     AGENTS_DIR, AGENTS_STATE, INSTANCES_FILE,
     cluster_state_path, clusters_dir, cowork_outbox_path, group_hosting_dir,
-    credentials_dir, hub_pid_path, instance_state_dir_path, key_file, state_history_path,
+    credentials_dir, hub_pid_path, instance_state_dir_path, key_file,
 )
-from .tags import AgentBuild, Registry, TagError, scan_all, scope_note
+from .tags import AgentBuild, Registry, TagError, resolve_build, scan_all, scope_note
 from .tags.identity import SESSION_SEP, label_error
 from .tags.lego import load_lego
 from .tags.store import entry_to_build
@@ -151,6 +164,21 @@ def _implicit_axes(build: AgentBuild, target: str, registry: Registry | None) ->
     return out
 
 
+def _harness_readiness(build: AgentBuild, target: str, registry: Registry | None) -> list[Issue]:
+    """The `unstartable_harness` finding for one build: its effective harness
+    (the build's, else its AI's default) is one the launcher cannot start
+    yet — the same predicate the launch refusal and the form's note read
+    (`launch.ai.readiness_note`), so the three never disagree. Describing
+    such an instance is allowed; this finding is the only thing that says,
+    before a launch, that it will be refused."""
+    harness = registry.harness_for(build) if registry else None
+    if harness is None or (note := readiness_note(harness.name)) is None:
+        return []
+    return [("unstartable_harness", target,
+             f"runs in {harness.label}, which {note} — a launch refuses it before building; "
+             f"F2 switches an instance's harness")]
+
+
 def _scope_issues(build: AgentBuild, target: str, registry: Registry | None, scope: str) -> list[Issue]:
     """The `forbidden_tag` findings for one build living in `scope` (`solo`
     for a store entry or a .lego, `cluster` for a cluster's shared set,
@@ -161,6 +189,31 @@ def _scope_issues(build: AgentBuild, target: str, registry: Registry | None, sco
         return []
     return [("forbidden_tag", target, f"{tag.label} cannot be a {scope} build's tag — {scope_note(tag, scope)}")
             for tag in registry.forbidden(build, scope)]
+
+
+def _stale_picks(build: AgentBuild, target: str, agent: str, registry: Registry | None) -> list[Issue]:
+    """The `stale_model` / `stale_effort` findings for one build: a pinned
+    model its AI no longer lists, a pinned effort level the model it runs
+    does not take. Judged by the ONE resolution a launch uses (the store's
+    cleaning, then `resolve_build`), so the audit cannot disagree with it.
+    Skipped for an AI name that does not resolve — `bad_tags` reports that,
+    and there is then no list to judge by."""
+    if registry is None or (build.model is None and build.effort is None):
+        return []
+    if build.ai is not None and build.ai not in registry.ais:
+        return []
+    clean, _ = registry.resolve_store_build(build, scope=None)
+    resolved = resolve_build(clean, agent, registry)
+    ai, out = resolved["ai"], []
+    if (stale := resolved["stale_model"]) is not None and ai is not None:
+        out.append(("stale_model", target,
+                    f"model {stale.spelling} is {stale.why(ai.label)} — a launch drops the pick, and any effort "
+                    f"pinned with it, and runs its engine's model; F2 picks another"))
+    if (level := resolved["stale_effort"]) is not None and resolved["stale_model"] is None:   # beside a stale model: that finding covers the pair
+        out.append(("stale_effort", target,
+                    f"effort {level} is not one its model takes — a launch runs the nearest level at or below "
+                    f"it instead; F2 picks another"))
+    return out
 
 
 def _lego_issues(legos: Iterable[tuple[str, Path]], registry: Registry | None) -> list[Issue]:
@@ -175,6 +228,7 @@ def _lego_issues(legos: Iterable[tuple[str, Path]], registry: Registry | None) -
             out.append(("bad_lego", path.name, str(e)))
             continue
         out.extend(_implicit_axes(build, path.name, registry))
+        out.extend(_harness_readiness(build, path.name, registry))
         out.extend(_scope_issues(build, path.name, registry, "solo"))
     return out
 
@@ -201,8 +255,9 @@ def _unmigrated_issues(state_root: Path) -> list[Issue]:
 
 
 def _auth_file_issues() -> list[Issue]:
-    """`oauth` findings: for every harness the launcher can run (an adapter
-    exists), each auth file its adapter names under credentials/<harness>/
+    """`oauth` findings: for every harness with an adapter — including one
+    not yet `startable`, whose login files are worth having in place before
+    its container can start — each auth file its adapter names under credentials/<harness>/
     that is missing, empty or not valid JSON — populated by a login inside a
     container, never by the launcher. Only JSON-shaped files are parsed; an
     env-shaped one is checked for presence."""
@@ -250,7 +305,10 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
                      launcher itself uses; skipped when the tree failed to
                      scan (`registry` is None) — the 'tags' issue covers it.
       implicit_ai / implicit_harness — the entry names no ai / harness
-                     (`_implicit_axes`)."""
+                     (`_implicit_axes`).
+      stale_model / stale_effort — the entry's pinned model is one its AI
+                     no longer lists, or its pinned level one its model does
+                     not take (`_stale_picks`)."""
     out: list[Issue] = []
     for instance_id, entry in entries.items():
         if instance_id not in actual:
@@ -266,7 +324,9 @@ def _store_entry_issues(entries: dict[str, Any], actual: set[str],
             except TagError as e:
                 out.append(("bad_tags", instance_id, str(e)))
         out.extend(_implicit_axes(build, instance_id, registry))
+        out.extend(_harness_readiness(build, instance_id, registry))
         out.extend(_scope_issues(build, instance_id, registry, "solo"))
+        out.extend(_stale_picks(build, instance_id, instance_id.partition(SESSION_SEP)[0], registry))
     return out
 
 
@@ -290,8 +350,9 @@ def _cluster_issues(registry: Registry | None = None) -> list[Issue]:
     (`bad_name` — `cluster_state.discover` skips it silently, so the picker
     never shows it), a cluster.toml that fails to load for any other reason
     (`bad_cluster` — corrupt TOML, a member with an illegal id, a missing
-    project key), and per member the implicit-axis findings
-    (`_implicit_axes`, target `<cluster>[<member>]`). Degrades to no findings
+    project key), and per member the implicit-axis, harness-readiness and
+    stale-pick findings (`_implicit_axes`, `_harness_readiness`,
+    `_stale_picks`, target `<cluster>[<member>]`). Degrades to no findings
     on a host that never made a cluster; a subdir without cluster.toml is not
     a cluster (discovery ignores it too)."""
     out: list[Issue] = []
@@ -313,7 +374,9 @@ def _cluster_issues(registry: Registry | None = None) -> list[Issue]:
             out.extend(_scope_issues(cluster.tags, directory.name, registry, "cluster"))
         for member in (cluster.members if cluster else ()):
             out.extend(_implicit_axes(member.build, f"{directory.name}[{member.id}]", registry))
+            out.extend(_harness_readiness(member.build, f"{directory.name}[{member.id}]", registry))
             out.extend(_scope_issues(member.build, f"{directory.name}[{member.id}]", registry, "member"))
+            out.extend(_stale_picks(member.build, f"{directory.name}[{member.id}]", member.agent, registry))
     return out
 
 
@@ -395,8 +458,8 @@ def main() -> None:
         if agent not in agent_md_index():
             issues.append(("orphan", dir_name, f"agent '{agent}' has no .md file"))
             continue
-        if not state_history_path(instance_state_dir_path(dir_name)).is_file():
-            issues.append(("no_history", dir_name, "no history.jsonl found (instance never started?)"))
+        if last_history_mtime(instance_state_dir_path(dir_name)) is None:
+            issues.append(("no_history", dir_name, "no launch history found, in any CLI's layout (instance never started?)"))
 
     issues.extend(_illegal_instance_names(instances))
     issues.extend(_store_entry_issues(entries, actual, registry))

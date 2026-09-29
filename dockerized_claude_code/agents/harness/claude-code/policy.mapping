@@ -1,0 +1,56 @@
+# The launcher's POLICY WORDS (agents/policy/*/tag.rules, launch/tags/rules.py)
+# in Claude Code's own: permission rules in the instance's settings.json
+# (docs.claude.com → Claude Code → Permissions). The permissions twin of
+# engine.mapping: a word this file has no row for is one this CLI cannot
+# express, and the launcher reports it rather than inventing a rule. Written
+# 2026-09-26 from the policy.json fragments it replaced, which every policy
+# still renders to exactly (launch/tests/test_policy_rendering.py).
+#
+# A capability means exactly the tools listed under it here: a tool this file
+# does not list is outside every rule, allow or deny (plans/ISSUES.md, "a
+# capability is only as wide as its mapping").
+
+format = "settings"          # rules are strings in settings.json, merged with every other fragment
+
+[tools]                      # capability → Claude Code tool names
+shell     = ["Bash"]
+web       = ["WebFetch", "WebSearch"]
+read      = ["Read", "Glob", "Grep"]
+write     = ["Write", "Edit", "NotebookEdit"]
+subagents = ["Task"]
+
+# A shell command → Bash rules, `{command}` filled in. A WORD is followed by a
+# space or by nothing (`git` never matches `gitk`); a STEM by anything (`git
+# push` also matches `git pushall`). Each goes in two spellings, as the
+# hand-written fragments had them: `:*` is the prefix form Claude Code
+# documents, so the pair holds whichever way either spelling is read.
+[shell]
+word = ["Bash({command} *)", "Bash({command}:*)"]
+stem = ["Bash({command}*)", "Bash({command}:*)"]
+
+[lists]                      # where each stance's rules land in settings.json
+allow = "permissions.allow"
+deny  = "permissions.deny"
+
+[mode.plan]
+"permissions.defaultMode" = "plan"
+
+# The fixed tier: managed settings, at a system path no config root, flag or
+# environment variable relocates, and above every other settings level ("no
+# user, project, local, or --settings value overrides them" — docs.claude.com,
+# Claude Code, managed settings; the path's platform switch has no override
+# hook in 2.1.282's binary). The image writes the always-on policies' denies
+# there as root (the harness Dockerfile), so a second `claude` the agent starts
+# with its own CLAUDE_CONFIG_DIR still obeys them. Never add
+# allowManagedPermissionRulesOnly to what lands here: it would silence every
+# per-instance rule. One condition outside the launcher's reach: Claude Code
+# uses ONE managed source by default (managedSourcesBehavior "first-wins"),
+# server-managed settings from claude.ai outrank this file, and a lower source
+# cannot opt itself into merging — so for a login whose organization pushes
+# any server-managed policy key, this file is skipped, silently (`/status`
+# lists it under "Skipped sources"). The per-instance copy in settings.json
+# still holds for the CLI the launcher starts; only the second-copy
+# protection is lost (code.claude.com/docs/en/managed-settings, read
+# 2026-09-27).
+[fixed]
+path = "/etc/claude-code/managed-settings.json"

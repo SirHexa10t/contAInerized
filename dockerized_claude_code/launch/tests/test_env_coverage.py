@@ -42,8 +42,14 @@ BUILD_LAYERS = (
     [(p.name, p.path / "Dockerfile", p.docker) for p in REGISTRY.professions.values()]
     + [(s.name, s.layer.path / "Dockerfile", s.layer.docker) for s in REGISTRY.specialties.values() if s.layer]
     + [(h.name, h.dockerfile, h.docker) for h in REGISTRY.harnesses.values() if h.dockerfile]
+    # A harness-claimed hidden layer (`_node`) is a build layer too, and
+    # would slip past every check here if the derivation forgot it. Many
+    # harnesses may claim one layer; each is checked once.
+    + [(layer.name, layer.path / "Dockerfile", layer.docker)
+       for layer in {h.layer.name: h.layer for h in REGISTRY.harnesses.values() if h.layer}.values()]
 )
-assert {name for name, _, _ in BUILD_LAYERS} >= {"code", "webdev", "dood", "muxer", "cluster", "claude-code"}
+assert {name for name, _, _ in BUILD_LAYERS} >= {"code", "webdev", "dood", "muxer", "cluster", "claude-code",
+                                                  "gemini-cli", "node"}
 
 
 # Allowlist for vars referenced in Dockerfiles but NOT staged by the

@@ -52,6 +52,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from rich.cells import cell_len
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
@@ -60,9 +61,9 @@ from ..cluster import state as cluster_state
 from ..cluster.legoset import ClusterTemplate
 from ..cluster.member import Member
 from ..file_access import read_text
-from ..transcripts import last_prompt_in_state
-from ..tags import Agent, AgentBuild, Ai, Engine, Harness, Instance, Registry, Tag, TagProblem
-from .styles import RICH_AGENT_NAME, rich_style, tag_style
+from ..transcripts import last_prompt_in_state, unreadable_layout
+from ..tags import Agent, AgentBuild, Instance, Registry, Tag, TagProblem
+from .styles import RICH_AGENT_NAME, ai_chip, rich_style, tag_style
 
 PREVIEW_WIDTH = 80                # rich renders at this width; prompt_toolkit re-wraps if the pane is narrower
 LAST_PROMPT_PREVIEW_CHARS = 250   # enough to recognise a conversation; not a transcript viewer
@@ -129,10 +130,15 @@ def _last_prompt_display(state_dir: Path) -> str | None:
     preview's YAML fence and a raw line starting ``` would close the fence
     around the rest of the metadata; and anything past
     LAST_PROMPT_PREVIEW_CHARS is cut at an ellipsis, because the field exists
-    to recognise the conversation, not to reread it."""
+    to recognise the conversation, not to reread it.
+
+    A conversation the launcher FOUND but cannot read yet (Gemini CLI's,
+    until step 7) says so instead of dropping out — dropping out would read
+    as an instance nobody has spoken to."""
     found = _read_last_prompt(state_dir)
     if found is None:
-        return None
+        unreadable = unreadable_layout(state_dir)
+        return f"(not read yet — {unreadable} transcripts)" if unreadable else None
     condensed = " ".join(found[0].split())
     if len(condensed) > LAST_PROMPT_PREVIEW_CHARS:
         condensed = condensed[:LAST_PROMPT_PREVIEW_CHARS] + "…"
@@ -219,10 +225,24 @@ def _resolve_tags(registry: Registry, build: AgentBuild, *, scope: str,
 def engine_fact(inst: Instance) -> str:
     """The preview's Engine fact: the engine's name and, after it, the model
     its budget pins for the AI in use — `quick  claude-sonnet-5` — so the
-    model shows without the engine's description having to name it."""
+    model shows without the engine's description having to name it. The
+    ENGINE's model, even under a pick: `model_fact` says what replaces it."""
     name = inst.engine.name if inst.engine else "(default)"
-    model = inst.model
+    model = inst.engine_model
     return f"{name}  {model}" if model else name
+
+
+def model_fact(inst: Instance) -> tuple[str, str] | None:
+    """The preview's Model fact, for an instance with a model picked: the
+    pick, and that it runs instead of the engine's — or, for a STALE pick,
+    why it cannot run and that the launch drops it. None without a pick:
+    the Engine fact already names the model that runs."""
+    if inst.picked_model is not None:
+        return ("Model", f"{inst.picked_model.id}  (picked — runs instead of the engine's)")
+    if inst.stale_model is not None and inst.ai is not None:
+        return ("Model", f"{inst.stale_model.spelling}  ({inst.stale_model.why(inst.ai.label)} — "
+                         f"dropped at launch for the engine's; F2 picks another)")
+    return None
 
 
 def _runtime_tags(inst: Instance) -> tuple[Tag, ...]:
@@ -242,6 +262,7 @@ def cont_preview(inst: Instance, workspace_display: str,
          ("Session", inst.session),
          ("Workspace", workspace_display),
          ("Engine", engine_fact(inst)),
+         *filter(None, [model_fact(inst)]),
          ("State", str(inst.state_dir)),
          ("Last used", last_used_display)],
         tags=_runtime_tags(inst), problems=inst.invalid_tags, prompt=prompt)
@@ -263,28 +284,78 @@ def member_preview(inst: Instance, member: Member, cluster: str,
          ("Cluster", cluster),
          ("Project", project_display),
          ("Engine", engine_fact(inst)),
+         *filter(None, [model_fact(inst)]),
          ("State", str(inst.state_dir)),
          ("Last used", last_used_display)],
         tags=_runtime_tags(inst), problems=inst.invalid_tags, prompt=prompt,
         inherited=inherited, fix_target="this cluster can launch")
 
 
-def _member_line(identifier: str, ai: Ai | None, harness: Harness | None, engine: Engine | None, tags: Sequence[Tag],
+# The cell widths a cluster pane pads each member line's leading fields to —
+# its id, AI, harness and engine, the fields every member has one of — so
+# each starts in one column down the list (operator, 2026-09-28). The
+# member's own tags follow unpadded: how many there are differs per member.
+MemberColumns = tuple[int, int, int, int]
+Chip = tuple[str, str]   # (prompt_toolkit style, label): one field as a line draws it
+
+
+def member_chips(inst: Instance | None) -> tuple[Chip | None, Chip | None, Chip | None]:
+    """A member's AI, harness and engine as its lines draw them — the AI
+    through `ai_chip`, so it carries the picked model; all None for a member
+    whose agent is gone. The one definition the pane's lines and the
+    picker's member rows both measure and draw."""
+    if inst is None:
+        return None, None, None
+    return (ai_chip(inst),
+            (tag_style(inst.harness), inst.harness.label) if inst.harness is not None else None,
+            (tag_style(inst.engine), inst.engine.label) if inst.engine is not None else None)
+
+
+def member_columns(rows: Iterable[tuple[str, Instance | None]]) -> MemberColumns:
+    """The widest of each leading field over a cluster's member `rows` — each
+    member's id and the instance it runs as (None when its agent is gone) —
+    in terminal cells: engine shortnames can be wide emoji, and a model
+    widens the AI chip, so a character count would misalign them."""
+    fields = [(identifier, *member_chips(inst)) for identifier, inst in rows]
+
+    def widest(index: int) -> int:
+        return max((cell_len(_text(row[index])) for row in fields), default=0)
+    return widest(0), widest(1), widest(2), widest(3)
+
+
+def _text(field: str | Chip | None) -> str:
+    return field if isinstance(field, str) else field[1] if field is not None else ""
+
+
+def _member_line(identifier: str, inst: Instance | None, tags: Sequence[Tag],
                  problems: Sequence[TagProblem], last_used: str, *,
-                 missing_agent: str | None = None) -> Text:
+                 columns: MemberColumns = (0, 0, 0, 0), missing_agent: str | None = None) -> Text:
     """One member's line in its cluster's pane: bullet, BLUE name (the colour
-    names wear everywhere in the picker), its AI, its harness, its engine and OWN tag labels in
-    their legend colours — an unresolvable name in the alert style rather than
-    vanishing — and when it last ran, dim. A member whose agent `.md` is gone
-    (`missing_agent`) renders its name in the alert style with what to do."""
+    names wear everywhere in the picker), its AI (carrying the picked model),
+    its harness, its engine and OWN tag labels in their legend colours — an
+    unresolvable name in the alert style rather than vanishing — and when it
+    last ran, dim. The id, AI, harness and engine are padded to `columns`
+    (`member_columns` over the whole list) so each starts in one column. A
+    member whose agent `.md` is gone (`missing_agent`) renders its name in
+    the alert style with what to do."""
+    id_width, *field_widths = columns
     line = Text("  • ", style="dim")
     if missing_agent is not None:
         line.append(identifier, style=STYLE_ALERT)
+        line.append(" " * (id_width - cell_len(identifier)))
         line.append(f"  no agent '{missing_agent}' in agents/ — Del removes it "
                     f"from the cluster", style="bold red")
         return line
     line.append(identifier, style=RICH_AGENT_NAME)
-    for tag in (*((ai,) if ai else ()), *((harness,) if harness else ()), *((engine,) if engine else ()), *tags):
+    line.append(" " * (id_width - cell_len(identifier)))
+    for chip, width in zip(member_chips(inst), field_widths):
+        if chip is None and width == 0:
+            continue                          # no member has one: no empty column either
+        line.append("  ")
+        if chip is not None:
+            line.append(chip[1], style=rich_style(chip[0]))
+        line.append(" " * (width - cell_len(_text(chip))))
+    for tag in tags:
         line.append("  ")
         line.append(tag.label, style=rich_style(tag_style(tag)))
     for problem in problems:

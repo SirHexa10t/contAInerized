@@ -44,7 +44,7 @@ from launch.docker_config import (
 from launch.file_access import (
     agent_md_index, expand_user_path, is_dir, iter_conversation_dirs,
 )
-from launch.history_find import find_in_history, print_findings
+from launch.history_find import find_in_history, print_findings, unsearched_counts
 from launch.claude_code_config import print_launch_banner
 from launch.gui import (
     ask_for_workspace, instance_fields, prompt_stop, prompt_tags, select_agent,
@@ -52,7 +52,7 @@ from launch.gui import (
 from launch.cluster.launching import launch as launch_cluster
 from launch.cluster.member import ClusterError
 from launch.cluster.state import Cluster
-from launch.paths import AGENTS_DIR, CLAUDE_CONFIG_IN_CONTAINER, INSTANCES_FILE
+from launch.paths import AGENTS_DIR, INSTANCES_FILE, container_config_root
 from launch.staging import stage_instance
 from launch.tag_handlers import apply_tags
 from launch.tags import (
@@ -220,7 +220,7 @@ def find_history(term: str) -> None:
     conversations = list(iter_conversation_dirs())
     print(f'  Searching {len(conversations)} conversation'
           f'{plural(len(conversations))} for "{term}" …', flush=True)
-    print_findings(term, find_in_history(term))
+    print_findings(term, find_in_history(term), unsearched_counts())
 
 
 def resolve_target(picked: Agent | Instance, registry: Registry) -> Instance:
@@ -288,11 +288,11 @@ def setup_state(inst: Instance, registry: Registry, refresh_installs: bool = Fal
     # docker would mis-read (RuntimeError) is a clean stop here, not a
     # traceback or a bare 401 later.
     staged = call_or_exit(stage_instance, inst, registry, harness=active_adapter(),
-                          config=str(CLAUDE_CONFIG_IN_CONTAINER), relocated=False,
+                          config=str(container_config_root()), relocated=False, who=inst.instance,
                           exceptions=(TagError, RuntimeError))
     for notice in staged.notices:
         print(notice)
-    set_container_env(inst.professions, refresh_installs=refresh_installs)   # the container's env — the same call a cluster makes over its union
+    set_container_env(inst, registry, refresh_installs=refresh_installs)   # the container's env — the same call a cluster makes over its union
     set_instance_env(inst)                                                    # this one agent's identity — a shape with one agent only
     set_container_mounts(inst)
     plant_user_extras(inst)

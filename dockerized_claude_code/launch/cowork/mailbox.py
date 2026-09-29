@@ -35,8 +35,9 @@ from ..file_access import (
     ensure_dir, is_dir, is_file, iter_files, iter_subdirs, move_path, read_text,
     remove_path, write_text,
 )
+from ..ai import ADAPTERS
 from ..paths import (
-    CLAUDE_CONFIG_IN_CONTAINER, COWORK_IN_CONTAINER, cowork_group_path,
+    COWORK_IN_CONTAINER, container_config_root, cowork_group_path,
     cowork_outbox_path, group_hosting_dir, instance_state_dir_path,
 )
 
@@ -170,16 +171,26 @@ class Capture:
 def host_transcript_path(instance: str, container_path: str) -> Path | None:
     """Translate a capture's in-container `transcript_path` to the host path.
 
-    The hook runs inside the container, where the instance's state dir is mounted
-    at `~/.claude` — so the recorded path is meaningless to a host-side hub until
-    it is rebased onto `instances/<instance>/`. Returns None for a path that is
-    not under the expected mount (a host-run agent, or a layout change), so the
-    caller can fall back rather than read the wrong file."""
-    prefix = str(CLAUDE_CONFIG_IN_CONTAINER)
-    if not container_path.startswith(prefix):
-        return None
-    relative = container_path[len(prefix):].lstrip("/")
-    return instance_state_dir_path(instance) / relative
+    The hook runs inside the container, where the instance's state dir is
+    mounted at its harness's config root — so the recorded path is meaningless
+    to a host-side hub until it is rebased onto `instances/<instance>/`.
+    Returns None for a path under no harness's root (a host-run agent, or a
+    layout change), so the caller can fall back rather than read the wrong
+    file.
+
+    WHICH root is read off the path itself, matched against every adapter's,
+    and never taken from the process's running adapter: the hub is one
+    long-lived host process serving many instances, which may run different
+    harnesses, so the harness it last adopted says nothing about this capture
+    (strict-reviewer and bug-investigator, gate step4-start). Whatever harness
+    wrote the path, what is mounted at that root is the instance's state dir,
+    so the rebase is the same arithmetic for all of them."""
+    for root in sorted({str(container_config_root(adapter)) for adapter in ADAPTERS.values()},
+                       key=len, reverse=True):      # longest first, should one root ever nest in another
+        if container_path == root or container_path.startswith(root + "/"):
+            relative = container_path[len(root):].lstrip("/")
+            return instance_state_dir_path(instance) / relative
+    return None
 
 
 def prompt_text(transcript: Path, prompt_id: str) -> str | None:

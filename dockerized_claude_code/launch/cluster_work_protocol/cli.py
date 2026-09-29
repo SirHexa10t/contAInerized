@@ -143,9 +143,17 @@ def _refuse_if_muted() -> None:
             f"is fine, posting is not")
 
 
-def _mention_pings(args: argparse.Namespace, author: str, body: str) -> list[str]:
+def _mention_pings(args: argparse.Namespace, author: str, body: str,
+                   seq: int) -> list[str]:
     """@mention pings for any successful post — best-effort: outside a real
-    cluster (no members dir) there is nobody to ping, not an error."""
+    cluster (no members dir) there is nobody to ping, not an error.
+
+    The ping names the MESSAGE, not just its author. Naming only the author
+    left the receiver one affordance — read the tail — which is wrong twice
+    on a busy queue: the mention may sit behind their cursor (a bare read
+    then prints nothing), and the tail may hold someone else's message
+    entirely. Two members misattributed a post that way in one evening
+    (2026-09-29). `--since` takes the sequence BEFORE the one you want."""
     if not body or "@" not in body:
         return []
     try:
@@ -156,7 +164,8 @@ def _mention_pings(args: argparse.Namespace, author: str, body: str) -> list[str
     if not named:
         return []
     return ping_members(
-        named, f"{author} mentioned you on the queue — cluster-chat read --new")
+        named, f"{author} mentioned you in #{seq} — `cluster-chat read`, or "
+               f"`cluster-chat read --since {seq - 1}` if your cursor is past it")
 
 
 def _post(args: argparse.Namespace) -> int:
@@ -179,7 +188,7 @@ def _post(args: argparse.Namespace) -> int:
         message = queue.append(member, args.kind, args.body,
                                iteration=args.gate, stance=args.stance)
     print(f"posted {_render(message)}")
-    for line in report + _mention_pings(args, member, args.body):
+    for line in report + _mention_pings(args, member, args.body, message.seq):
         print(line)
     return 0
 
@@ -274,9 +283,9 @@ def _brief(args: argparse.Namespace) -> int:
             print(f"[cluster-chat] YOU OWE A REPLY on gate {gate.iteration} "
                   f"({gate.body!r}) — answer it before continuing: "
                   f"`cluster-chat post nop --gate {gate.iteration}` (the "
-                  f"fold), or `post stance <0-10> \"<reasons>\" --gate "
-                  f"{gate.iteration}`, or `post hold \"<why>\" --gate "
-                  f"{gate.iteration}`.")
+                  f"fold), or `cluster-chat post stance --stance <0-10> "
+                  f"--gate {gate.iteration} \"<reasons>\"`, or `cluster-chat "
+                  f"post hold --gate {gate.iteration} \"<why>\"`.")
         if not owed:
             print(f"[cluster-chat] {STANDING_RULE}")
     except Exception:      # noqa: BLE001 — a hook must never block a prompt

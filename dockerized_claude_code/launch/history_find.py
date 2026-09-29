@@ -31,7 +31,7 @@ from rich.text import Text
 
 from .file_access import iter_conversation_dirs
 from .paths import clusters_dir, instances_dir, quickie_dir
-from .transcripts import TranscriptHit, find_turns
+from .transcripts import TranscriptHit, find_turns, unreadable_layout
 from .utils import one_line, plural, stamp_time
 
 # How much of a matched turn a result line shows. Narrower than the picker
@@ -99,6 +99,26 @@ def find_in_history(term: str) -> list[ConversationFinds]:
     return sorted(found, key=lambda conversation: conversation.when, reverse=True)
 
 
+def unsearched_counts() -> dict[str, int]:
+    """CLI name → how many conversations were FOUND in a layout the launcher
+    cannot read yet, and so were not searched. Reported beside every result,
+    because a search that skipped them silently would present "not read" as
+    "never said" (strict-reviewer, gate step4-start)."""
+    counts: dict[str, int] = {}
+    for state_dir in iter_conversation_dirs():
+        if (name := unreadable_layout(state_dir)) is not None:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def unsearched_note(unsearched: dict[str, int]) -> str | None:
+    """The one sentence saying what a search could not read, or None."""
+    if not unsearched:
+        return None
+    parts = [f"{count} conversation{plural(count)} in {name}" for name, count in sorted(unsearched.items())]
+    return f"Not searched: {', '.join(parts)} — reading those transcripts is not implemented yet."
+
+
 def quote(hit: TranscriptHit) -> str:
     """The matched turn as one line, with enough run-up that the match reads
     in context — and an ellipsis on each side, because it is a fragment."""
@@ -107,14 +127,19 @@ def quote(hit: TranscriptHit) -> str:
     return f"…{body}" if start else body
 
 
-def print_findings(term: str, found: list[ConversationFinds]) -> None:
+def print_findings(term: str, found: list[ConversationFinds],
+                   unsearched: dict[str, int] | None = None) -> None:
     """Print the result: a conversation per block, its newest match first,
     each hit as `<time>  <speaker>  <quote>`. Grey for the times and the
     counts, so the conversation names and what was said carry the eye. rich
-    drops the colour when output is piped."""
+    drops the colour when output is piped. Whatever was found but could not
+    be read (`unsearched_counts`) is said last, found or not."""
     console = Console()
+    note = unsearched_note(unsearched or {})
     if not found:
         print(f'  No conversation mentions "{term}".')
+        if note:
+            print(f"  {note}")
         return
     turns = sum(len(conversation.hits) for conversation in found)
     print(f'  "{term}" — {turns} turn{plural(turns)} '
@@ -127,6 +152,8 @@ def print_findings(term: str, found: list[ConversationFinds]) -> None:
             console.print(_hit_line(hit), no_wrap=True, overflow="ellipsis", crop=True)
         if (rest := len(conversation.hits) - HITS_SHOWN) > 0:
             console.print(Text(f"        + {rest} more", style="bright_black"))
+    if note:
+        print(f"\n  {note}")
 
 
 def _heading(conversation: ConversationFinds) -> Text:

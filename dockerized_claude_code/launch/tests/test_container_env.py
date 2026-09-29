@@ -1,5 +1,9 @@
 """Tests for launch.container_env — env-var taxonomy, formatters, accumulator."""
 
+import base64
+import dataclasses
+import json
+import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +13,8 @@ from launch import paths
 from launch.container_env import (
     CONTAINER_ENV_FORWARDS, ContainerEnvKey, _container_env, conf_env_args, container_env_args, install_creds_flags, set_container_env, set_instance_env, stage_container_env, staged_env, token_env_dict, toolkit_install_flags,
 )
+from launch.agents_crud import fixed_policy
+from launch.docker_config import build_arg_flags
 from launch.tags import Profession
 
 from launch.tests.fixtures import REGISTRY, make_inst
@@ -135,6 +141,47 @@ class TestContainerEnvForwards(unittest.TestCase):
                     self.assertNotIn(member, ContainerEnvKey.container_emits())
 
 
+class TestFixedPolicyStaging(ContainerEnvFixture):
+    """The always-on denies ride to the harness layer's build as two build
+    args — for the image to bake in as root at the CLI's fixed tier — and
+    never into the running container."""
+
+    def _stage(self, inst):
+        with TemporaryDirectory() as tmp, patch.object(paths, "AGENTS_STATE", Path(tmp)):
+            set_container_env(inst, REGISTRY)
+        return staged_env()
+
+    def test_a_claude_code_image_gets_its_managed_settings(self):
+        inst = make_inst()
+        staged = self._stage(inst)
+        fixed = fixed_policy(inst.harness, REGISTRY)
+        self.assertEqual(staged["FIXED_POLICY_PATH"], fixed.path)
+        self.assertEqual(base64.b64decode(staged["FIXED_POLICY_B64"]).decode(), fixed.text)
+        self.assertEqual(staged["FIXED_POLICY_COUNT"], "2")
+        self.assertEqual(json.loads(fixed.text), {"permissions": {"deny": ["Bash(sudo *)", "Bash(sudo:*)"]}})
+
+    def test_a_gemini_cli_image_gets_its_system_policy(self):
+        inst = dataclasses.replace(make_inst(), harness=REGISTRY.harnesses["gemini-cli"])
+        staged = self._stage(inst)
+        self.assertEqual(staged["FIXED_POLICY_PATH"], "/etc/gemini-cli/policies/launcher-always-on.toml")
+        rules = tomllib.loads(base64.b64decode(staged["FIXED_POLICY_B64"]).decode())["rule"]
+        self.assertEqual([(r["commandPrefix"], r["decision"]) for r in rules], [("sudo", "deny")])
+
+    def test_they_are_build_args_for_the_harness_layer_and_never_container_env(self):
+        inst = make_inst()
+        self._stage(inst)
+        forwarded = " ".join(build_arg_flags(inst.harness.docker.build_arg_forward))
+        for key in ("FIXED_POLICY_PATH", "FIXED_POLICY_B64", "FIXED_POLICY_COUNT"):
+            self.assertIn(f"{key}=", forwarded)
+        self.assertFalse(any("FIXED_POLICY" in arg for arg in container_env_args()))
+
+    def test_an_image_without_a_fixed_tier_leaves_no_stale_value(self):
+        self._stage(make_inst())
+        staged = self._stage(dataclasses.replace(make_inst(), harness=None))
+        for key in ("FIXED_POLICY_PATH", "FIXED_POLICY_B64", "FIXED_POLICY_COUNT"):
+            self.assertNotIn(key, staged)
+
+
 class TestTheTwoHalves(ContainerEnvFixture):
     """set_container_env stages what ONE CONTAINER gets (every shape calls
     it — a cluster over its union's professions); set_instance_env adds one
@@ -142,7 +189,7 @@ class TestTheTwoHalves(ContainerEnvFixture):
 
     def test_the_container_half_stages_no_identity(self):
         with TemporaryDirectory() as tmp, patch.object(paths, "AGENTS_STATE", Path(tmp)):
-            set_container_env(REGISTRY.professions.values())
+            set_container_env(make_inst(professions=tuple(REGISTRY.professions)), REGISTRY)
         staged = staged_env()
         self.assertEqual(staged["BASH_ENV"], str(paths.BASHRC_IN_CONTAINER))
         self.assertIn("SOFTWARE_STACK_REFRESH", staged)
@@ -153,7 +200,7 @@ class TestTheTwoHalves(ContainerEnvFixture):
 
     def test_refresh_installs_busts_both_cache_busters(self):
         with TemporaryDirectory() as tmp, patch.object(paths, "AGENTS_STATE", Path(tmp)):
-            set_container_env((), refresh_installs=True)
+            set_container_env(make_inst(), REGISTRY, refresh_installs=True)
         staged = staged_env()
         self.assertTrue(staged["SOFTWARE_STACK_REFRESH"].startswith("forced-"))
         self.assertEqual(staged["SOFTWARE_STACK_REFRESH"], staged["FORCE_INSTALLS_REFRESH"])
@@ -171,7 +218,7 @@ class TestTheTwoHalves(ContainerEnvFixture):
         # for the day a CLI names that directory something else.
         set_instance_env(make_inst("poet", "s9"))
         self.assertEqual(staged_env()["AGENT_TRANSCRIPTS_DIR"],
-                         f"{paths.CLAUDE_CONFIG_IN_CONTAINER}/projects")
+                         f"{paths.container_config_root()}/projects")
 
 
 class TestContainerEnvArgs(ContainerEnvFixture):

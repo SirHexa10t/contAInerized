@@ -1,5 +1,5 @@
 # The launcher's BUDGET WORDS (agents/engine/*/tag.budget) in Gemini CLI's own
-# settings (shape and rules: ai/claude/knobs.mapping). UPPER_CASE keys are
+# settings (shape and rules: harness/claude-code/engine.mapping). UPPER_CASE keys are
 # environment variables Gemini CLI reads; dotted keys are settings.json paths
 # (user file under GEMINI_CLI_HOME; string values may interpolate `${VAR}`), so
 # a Gemini adapter renders them into that file — nothing does yet. Sources, all

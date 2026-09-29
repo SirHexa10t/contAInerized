@@ -6,7 +6,7 @@ effort the engine asks for, which is exactly a row every
 was called `standard` until 2026-09-17; the VALUE SPACE keeps that name, since
 a dated key is the standard the frontier set — `agents/ai/capability.standards`
 — while the field says what an engine picks from it), and
-the other keys are PURPOSES each harness's `knobs.mapping` translates into
+the other keys are PURPOSES each harness's `engine.mapping` translates into
 its native settings (`tags/harness.py`, `Harness.render`). So an engine author never learns
 an AI's vocabulary, and adding an AI never touches an engine (decision
 2026-09-13, plans/adding_an_ai.md).
@@ -68,7 +68,7 @@ def sorted_standards(keys: Iterable[str]) -> list[str]:
 
 
 # The purposes an engine may state beside its effort tier: switches (a boolean → the
-# `<purpose>.on` / `.off` table of a harness's knobs.mapping) and amounts (a positive
+# `<purpose>.on` / `.off` table of a harness's engine.mapping) and amounts (a positive
 # integer → the `<purpose>` table, `{value}` filled in).
 SWITCHES = ("thinking", "memory", "background_agents", "telemetry", "tool_search")
 AMOUNTS = ("max_output_tokens", "tool_output_tokens", "compact_at_percent")

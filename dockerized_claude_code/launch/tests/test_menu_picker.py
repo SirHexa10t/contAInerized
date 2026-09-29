@@ -5,11 +5,14 @@ and the --stop selector. The tag form's tests live in test_form_core.py; the
 prompt_toolkit Applications themselves are interactive and stay out of unit
 scope."""
 
+import dataclasses
 import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
+
+from rich.cells import cell_len
 
 from launch.gui import menu_picker, picker_widget
 from launch.gui.form_core import FormResult
@@ -20,7 +23,7 @@ from launch.gui.menu_picker import ClusterEntry
 from launch.gui.picker_widget import PickerCwdHint, WorkspaceView
 from launch.paths import DEFAULT_WORKSPACE, DEFAULTING_DIRS
 from launch.gui.styles import STYLE_TAG_HARNESS
-from launch.tags import AgentBuild, Instance
+from launch.tags import AgentBuild, Instance, resolve_build
 from launch.tests.fixtures import REGISTRY, make_inst
 
 
@@ -214,6 +217,8 @@ class TestRowAssembly(unittest.TestCase):
         # harness (operator, 2026-09-14). An agent row carries neither: both
         # are decided when an instance is created, they are not properties of
         # the agent — nor does the Create pane show them.
+        # The AI chip carries the model the instance runs (operator,
+        # 2026-09-28): `ai_label`, its pick or its engine's.
         ai = REGISTRY.default_ai
         harness = REGISTRY.harnesses[ai.harness]
         entries = self.entries()
@@ -223,14 +228,15 @@ class TestRowAssembly(unittest.TestCase):
         for row in inst_rows:
             with self.subTest(instance=row.value.instance):
                 text = "".join(t for _, t in row.display)
-                self.assertLess(text.index(ai.label), text.index(harness.label))
+                chip = row.value.ai_label
+                self.assertLess(text.index(chip), text.index(harness.label))
                 self.assertLess(text.index(harness.label), text.index(row.value.instance))
-                self.assertIn((ai.style, ai.label), row.display)
+                self.assertIn((ai.style, chip), row.display)
                 self.assertIn((STYLE_TAG_HARNESS, harness.label), row.display)
         for row in agent_rows:
             with self.subTest(agent=row.value.name):
                 text = "".join(t for _, t in row.display)
-                self.assertNotIn(ai.label, text)
+                self.assertNotIn(ai.parentheses[0] + ai.shortname, text)    # no AI chip, with or without a model
                 self.assertNotIn(harness.label, text)
                 self.assertNotIn("Tags:", row.preview)      # the pane is the persona alone (which may itself mention a tag)
 
@@ -366,9 +372,9 @@ class TestPromptStop(unittest.TestCase):
         self.assertIn("golem__up", row)
         self.assertIn(self.ws, row)
         self.assertNotIn("(RUNNING)", row)
-        ai = REGISTRY.default_ai
-        self.assertLess(row.index("{auto}"), row.index(ai.label))
-        self.assertLess(row.index(ai.label), row.index("golem__up"))
+        chip = insts[0].ai_label
+        self.assertLess(row.index("{auto}"), row.index(chip))
+        self.assertLess(row.index(chip), row.index("golem__up"))
 
     def test_muxer_is_emphasized_other_tags_are_not(self):
         insts = [make_inst("golem", "up", self.ws,
@@ -721,15 +727,47 @@ class TestClusterRows(unittest.TestCase):
         golem, alien = self.text(rows["golem"]), self.text(rows["researcher__alien"])
         default, grok = REGISTRY.default_ai, REGISTRY.ais["grok"]
         default_harness, grok_harness = REGISTRY.harnesses[default.harness], REGISTRY.harnesses[grok.harness]
-        self.assertLess(golem.index("golem"), golem.index(default.label))
-        self.assertLess(golem.index(default.label), golem.index(default_harness.label))
-        self.assertIn((grok.style, grok.label), rows["researcher__alien"].display)
+        default_chip, grok_chip = (default.parentheses[0] + default.shortname, grok.parentheses[0] + grok.shortname)
+        self.assertLess(golem.index("golem"), golem.index(default_chip))
+        self.assertLess(golem.index(default_chip), golem.index(default_harness.label))
+        cluster = self.state.load("team")
+        alien_inst = cluster.member_instance(cluster.member("researcher__alien"), REGISTRY)
+        self.assertTrue(alien_inst.ai_label.startswith(grok_chip))
+        self.assertIn((grok.style, alien_inst.ai_label), rows["researcher__alien"].display)
         self.assertIn((STYLE_TAG_HARNESS, grok_harness.label), rows["researcher__alien"].display)   # its AI's default harness, resolved
-        self.assertNotIn(default.label, alien)
+        self.assertNotIn(default_chip, alien)
         self.assertNotIn(default_harness.label, alien)
         (cluster_row,) = self.cluster_rows()
-        self.assertNotIn(default.label, self.text(cluster_row))
+        self.assertNotIn(default_chip, self.text(cluster_row))
         self.assertNotIn(default_harness.label, self.text(cluster_row))
+
+    def test_member_rows_start_their_ai_and_harness_in_one_column(self):
+        # Ids of different lengths AND AIs whose labels differ in width:
+        # within a cluster's block each member's AI, then its harness, still
+        # starts in one column (operator, 2026-09-28).
+        self.save("team", (self.Member.of("golem"),
+                           self.Member("researcher", "alien", build=AgentBuild(ai="grok"))))
+        rows = {e.value.member_id: self.text(e) for e in self.entries()
+                if isinstance(e.value, menu_picker._MemberRow)}
+        default, grok = REGISTRY.default_ai, REGISTRY.ais["grok"]
+        labels = {"golem": (default.parentheses[0] + default.shortname, REGISTRY.harnesses[default.harness].label),
+                  "researcher__alien": (grok.parentheses[0] + grok.shortname, REGISTRY.harnesses[grok.harness].label)}
+        for field in (0, 1):
+            with self.subTest(field=("ai", "harness")[field]):
+                starts = {cell_len(text[:text.index(labels[member][field])]) for member, text in rows.items()}
+                self.assertEqual(len(starts), 1)
+
+    def test_a_members_pick_rides_on_its_ai_chip_and_the_harness_column_still_aligns(self):
+        self.save("team", (self.Member.of("golem", build=AgentBuild(ai="claude", model="claude-opus-5-5")),
+                           self.Member("researcher", "alien", build=AgentBuild(ai="grok"))))
+        rows = {e.value.member_id: e for e in self.entries()
+                if isinstance(e.value, menu_picker._MemberRow)}
+        claude, grok = REGISTRY.ais["claude"], REGISTRY.ais["grok"]
+        self.assertIn((claude.style, "⟪Claude:Opus-5.5⟫"), rows["golem"].display)
+        harnesses = {"golem": REGISTRY.harnesses[claude.harness].label,
+                     "researcher__alien": REGISTRY.harnesses[grok.harness].label}
+        starts = {cell_len(self.text(rows[m])[:self.text(rows[m]).index(label)]) for m, label in harnesses.items()}
+        self.assertEqual(len(starts), 1)
 
     def test_enter_is_inert_on_every_member_row_but_f2_and_del_are_not(self):
         # A member launches with its cluster: Enter must do nothing there —
@@ -796,3 +834,43 @@ class TestLegendScopes(unittest.TestCase):
         self.assertIn("not on: member", flat)
         self.assertIn("not on: cluster, member", flat)   # {frwl}, in SCOPES order
         self.assertIn("not on: solo", flat)
+
+
+class TestRuntimeColumn(unittest.TestCase):
+    """An instance row's runtime column: the AI chip — carrying the picked
+    model, a stale pick in the alert style — then the harness, measured in
+    cells so the rows' next column lines up."""
+
+    def _with(self, model):
+        inst = make_inst("golem", "s")
+        return dataclasses.replace(inst, **resolve_build(dataclasses.replace(inst.build, model=model), "golem", REGISTRY))
+
+    def test_without_a_pick_the_chip_carries_the_engines_model(self):
+        # Derived at every read, never stored (operator, 2026-09-28): an
+        # instance with no pick follows its engine as the tier moves.
+        inst = self._with(None)
+        frags, width = menu_picker._runtime_column(inst)
+        engine_model = inst.ai.model(inst.engine_model)
+        self.assertEqual(frags[0], (inst.ai.style, inst.ai.label_with(engine_model)))
+        self.assertIsNone(inst.build.model)
+        self.assertEqual(width, cell_len("".join(t for _, t in frags)))
+
+    def test_a_pick_rides_on_the_chip_in_the_ais_colours(self):
+        inst = self._with("claude-opus-5-5")
+        frags, width = menu_picker._runtime_column(inst)
+        self.assertEqual(frags[0], (inst.ai.style, "⟪Claude:Opus-5.5⟫"))
+        self.assertEqual(width, cell_len("".join(t for _, t in frags)))
+
+    def test_a_stale_pick_shows_what_went_stale_as_an_alert(self):
+        inst = self._with("claude-opus-4-1")
+        frags, _ = menu_picker._runtime_column(inst)
+        self.assertEqual(frags[0], (menu_picker.STYLE_TAG_INVALID, "⟪Claude:Opus-4.1⟫"))
+        self.assertTrue(inst.is_startable)                      # flagged, never blocked
+
+    def test_ai_width_pads_the_chip_so_the_harness_starts_in_one_column(self):
+        plain, picked = self._with(None), self._with("claude-opus-5-5")
+        width = max(cell_len(plain.ai_label), cell_len(picked.ai_label))
+        texts = ["".join(t for _, t in menu_picker._runtime_column(inst, ai_width=width)[0]) for inst in (plain, picked)]
+        harness = plain.harness.label
+        self.assertEqual(texts[0].index(harness), texts[1].index(harness))
+

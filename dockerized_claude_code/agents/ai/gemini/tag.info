@@ -5,6 +5,7 @@ full_description  = "Google's Gemini line (Pro, Flash, Flash-Lite). Built multim
 vendor            = "Google"
 harness           = "gemini-cli"       # its default harness — an agents/harness/ member
 key_env           = "GEMINI_API_KEY"        # the vendor's API-key variable: credentials/keys/gemini.env defines it — Gemini CLI (also via .gemini/.env), OpenCode, Hermes, OpenClaw; GOOGLE_API_KEY is the older alias
+model_prefix      = "gemini-"             # every id in models.list starts so; the picker label drops it (⟪Gemini:3.8-Flash⟫)
 # Google's OAuth sign-in is Gemini CLI's own; the other harnesses reach Gemini
 # with GEMINI_API_KEY / GOOGLE_API_KEY, and the CLI's credential file is
 # hostname-bound anyway, so it cannot be carried to another harness even by

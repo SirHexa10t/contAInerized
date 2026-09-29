@@ -6,7 +6,7 @@ CLI, `⟪ChatGPT⟫` by Codex CLI, `⟪Grok⟫` by Grok Build. It is the fifth t
 kind (2026-09-13), a 0-or-1 axis like the engine: an instance runs on exactly
 one, the member marked `default = true` when its build names none.
 
-The kind's root carries one shared file, and each member dir two:
+The kind's root carries one shared file, and each member dir three:
   ai/capability.standards — the DATED capability standards every member must
                     answer (`YYYYQn`: the frontier's level in that quarter, set
                     by the model released then that raised the record — the
@@ -18,8 +18,10 @@ The kind's root carries one shared file, and each member dir two:
                     wraps it unless an instance picks another), `key_env`
                     (the vendor's API-key variable — the one every harness
                     reads; `credentials/keys/<ai>.env` defines it), `default`,
-                    and the tag's own colours `fg` / `bg` as hex (the first
-                    kind coloured per MEMBER, after the logos).
+                    `model_prefix` (what every id in its models.list starts
+                    with — the picker label drops it), and the tag's own
+                    colours `fg` / `bg` as hex (the first kind coloured per
+                    MEMBER, after the logos).
   plan_harnesses  — (tag.info) the harnesses this vendor's SUBSCRIPTION may
                     run in. Vendors differ, so it is per-AI data rather than
                     "its own CLI": Anthropic gates Pro/Max to Claude Code,
@@ -51,9 +53,16 @@ The kind's root carries one shared file, and each member dir two:
                     word that meet it (cheapest of the configurations that do;
                     the AI's best, when none does); a `[scale]` table lists
                     the AI's effort vocabulary.
+  models.list     — every model the vendor serves for this AI, strongest
+                    family first, with each one's effort range
+                    (`tags/models.py`): the options the tag form offers an
+                    instance as its model and its effort. Held to the tiers
+                    at scan: every pin names a listed model (by id or alias),
+                    every tier's effort is one its model takes, and a tier
+                    omits its effort exactly when its model takes none.
 
 The HARNESS (the CLI around the AI, `tags/harness.py`) owns the other half:
-its `knobs.mapping` turns an engine's budget and this AI's tier into the CLI's
+its `engine.mapping` turns an engine's budget and this AI's tier into the CLI's
 native settings (`Harness.render(budget, ai)`) — the settings surface is the
 CLI's, not the model's (moved there 2026-09-14). Colours and vocabulary are
 validated at scan time under the tree's strict rule, so a typo fails the
@@ -70,6 +79,7 @@ from typing import Any, ClassVar
 
 from .base import Tag, TagError, common_fields, read_toml, walk_tag_tree
 from .budget import BEST, CHEAPEST, is_standard, sorted_standards
+from .models import MODELS_FILE, NO_EFFORT, Model, StaleModel, model_label, parse_models
 
 STANDARDS_FILE = "capability.standards"
 TIERS_FILE = "efforts.tiers"
@@ -123,6 +133,8 @@ class Ai(Tag):
     key_free_tier: str = ""           # what an API key ALONE gets on this vendor — the floor a plan-less pairing lands on, in the vendor's published terms. Empty = not established, and the warning says nothing rather than guessing
     foreign_harness_report: str = ""  # what running this AI OUTSIDE its own CLI has been observed to cost — FIELD EVIDENCE, not vendor policy; the picker leads its warning with it, labelled REPORTED. Empty = nothing reported
     tiers: tuple[tuple[str, Tier], ...] = ()                            # standard → tier, cheapest first
+    model_prefix: str = ""            # what every id in its models.list starts with ("gpt-" for ChatGPT) — the picker label drops it
+    models: tuple[Model, ...] = ()    # its models.list, in file order: strongest family first, newest version first, each with its effort range
 
     @property
     def style(self) -> str:
@@ -138,12 +150,35 @@ class Ai(Tag):
     def tier(self, standard: str) -> Tier:
         return dict(self.tiers)[standard]
 
+    def model(self, spelling: str) -> Model | None:
+        """The listed model `spelling` names — by id or alias — or None when
+        this AI lists no such model."""
+        return next((m for m in self.models if m.spells(spelling)), None)
+
+    def stale(self, spelling: str) -> StaleModel | None:
+        """Why a pick of `spelling` cannot run on this AI — a `StaleModel`,
+        for a spelling its list does not carry (deleted when the vendor
+        retired it, or never there) — or None when it lists it: the one
+        test the launch, the picker and the audit share."""
+        return None if self.model(spelling) is not None else StaleModel(spelling=spelling)
+
+    def label_with(self, model: Model | None) -> str:
+        """This AI's label carrying `model` — `⟪Claude:Opus-5.5⟫` — or the
+        plain `⟪Claude⟫` for None: how an INSTANCE's AI reads wherever its
+        model is part of the story (picker rows, member lines, previews).
+        The legend and the form's rows name the AI alone, with `label`."""
+        if model is None:
+            return self.label
+        opener, closer = self.parentheses
+        return f"{opener}{self.shortname or self.name}:{model_label(model, self.model_prefix)}{closer}"
+
     @classmethod
     def scan(cls, agents_dir: Path) -> list["Ai"]:
         """Discover every AI under `agents/ai/`. Members do not nest (an AI is
-        not a refinement of another); each must carry both files, a tier for
-        exactly the standards the kind's shared file declares (plus the
-        two ends), and — across the kind — exactly one `default = true`."""
+        not a refinement of another); each must carry all three files, a tier
+        for exactly the standards the kind's shared file declares (plus the
+        two ends) on models its list offers (`_models`), and — across the
+        kind — exactly one `default = true`."""
         out: list[Ai] = []
         keys: tuple[str, ...] | None = None
         for tag_dir, ancestors in walk_tag_tree(agents_dir / cls.root):
@@ -153,7 +188,10 @@ class Ai(Tag):
                 keys = (CHEAPEST, *(s.key for s in load_standards(agents_dir / cls.root)), BEST)
             fields = common_fields(tag_dir)
             info = fields.pop("_info")
-            out.append(cls(**fields, **_own_fields(info, tag_dir), **_tiers(tag_dir, keys)))
+            own = _own_fields(info, tag_dir)
+            tiered = _tiers(tag_dir, keys)
+            out.append(cls(**fields, **own, **tiered,
+                           models=_models(tag_dir, own["model_prefix"], tiered["tiers"], tiered["scale"])))
         defaults = [ai.name for ai in out if ai.default]
         if out and len(defaults) != 1:
             raise TagError(f"agents/ai: exactly one member must set default = true, found {defaults or 'none'}")
@@ -196,6 +234,11 @@ def _own_fields(info: dict[str, Any], tag_dir: Path) -> dict[str, Any]:
     if not isinstance(default, bool):
         raise TagError(f"{tag_dir}/tag.info: default must be true or false")
     own["default"] = default
+    prefix = info.get("model_prefix", "")
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise TagError(f"{tag_dir}/tag.info: model_prefix must be a non-empty string — what every id in its "
+                       f"{MODELS_FILE} starts with, like \"gpt-\" (the picker label drops it)")
+    own["model_prefix"] = prefix.strip()
     for key in ("fg", "bg"):
         value = info.get(key, "")
         if not isinstance(value, str) or not _HEX_COLOUR.match(value):
@@ -268,3 +311,41 @@ def _tiers(tag_dir: Path, keys: tuple[str, ...]) -> dict[str, Any]:
             raise TagError(f"{path}: [{key}] has unknown keys {sorted(unknown)}")
         tiers.append((key, Tier(model=table["model"], effort=effort)))
     return {"scale": tuple(efforts), "tiers": tuple(tiers)}
+
+
+def _models(tag_dir: Path, prefix: str, tiers: tuple[tuple[str, Tier], ...],
+            scale: tuple[str, ...]) -> tuple[Model, ...]:
+    """`models.list` → the AI's models (`tags/models.parse_models` checks
+    each line against the AI's `scale`), held to the rest of the member:
+    every id starts with the AI's `model_prefix`; no two models share a
+    picker label; and every tier pins a listed model — by id or alias,
+    since vendors publish both — at an effort that model takes, omitting
+    the effort exactly when the model takes none. Total both ways, so a
+    tier can neither send a level its model refuses nor fall silent on a
+    model that has levels (bug-investigator, gate model-picker-3). The tiers
+    stay the engines' rated answers; the list is what a person may pick."""
+    path = tag_dir / MODELS_FILE
+    if not path.is_file():
+        raise TagError(f"{tag_dir}: missing {MODELS_FILE} — the models the tag form offers for this AI")
+    models = parse_models(path.read_text(), path, scale)
+    labels: dict[str, str] = {}
+    for model in models:
+        if not model.id.startswith(prefix):
+            raise TagError(f"{path}: {model.id} does not start with the AI's model_prefix {prefix!r} (tag.info)")
+        label = model_label(model, prefix)
+        if label in labels:
+            raise TagError(f"{path}: {model.id} and {labels[label]} would both read {label!r} in the picker "
+                           f"— give one a display=")
+        labels[label] = model.id
+    for standard, tier in tiers:
+        pinned = next((m for m in models if m.spells(tier.model)), None)
+        where = f"{tag_dir / TIERS_FILE}: [{standard}] pins {tier.model}"
+        if pinned is None:
+            raise TagError(f"{where}, which {MODELS_FILE} does not list (as an id or an alias)")
+        if tier.effort is None and pinned.efforts:
+            raise TagError(f"{where} without an effort, but {pinned.id} takes {', '.join(pinned.efforts)} — "
+                           f"a tier omits its effort only for a model that takes none (efforts={NO_EFFORT})")
+        if tier.effort is not None and tier.effort not in pinned.efforts:
+            raise TagError(f"{where} at effort {tier.effort!r}, which {pinned.id} does not take "
+                           f"({', '.join(pinned.efforts) or 'it takes none'})")
+    return models

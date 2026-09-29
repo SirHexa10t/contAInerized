@@ -35,22 +35,28 @@ line, instance name) for the shapes that host one agent.
 tag_handlers / docker_config / run.py all import from here.
 """
 
+import base64
 import time
 from collections.abc import Collection, Iterable
 from datetime import date
+from pathlib import Path
 from enum import Enum, auto
 from functools import cache
 from typing import Any
 
+from .ai import active_adapter
+from .ai.adapter import Adapter
 from .claude_code_config import build_status_line
 from .file_access import optional_cred_tokens, present_optional_cred_services
 from .paths import (
-    BASHRC_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, OPTIONAL_CREDS_MOUNTS,
+    BASHRC_IN_CONTAINER, OPTIONAL_CREDS_MOUNTS, container_config_root,
     OPTIONAL_CREDS_TOKEN_ENV_VARS, container_transcripts_dir,
     toolkit_profile_path,
 )
-from .tags import Instance, Profession
+from .agents_crud import fixed_policy
+from .tags import Instance, Profession, Registry
 from .tags.toolkit_profile import load_profile
+from .transcripts import READABLE_FORMAT
 
 
 # ============================================================
@@ -90,6 +96,14 @@ class ContainerEnvKey(str, Enum):
     SOFTWARE_STACK_REFRESH   = (auto(), False)   # WEEKLY cache-buster (%Y-W%W) for the harness's layer — the LAST layer of every chain (agents/harness/<name>/Dockerfile): the OS security upgrade for everything beneath it and the CLI's reinstall, so the week boundary rebuilds that one layer and nothing under it; no other Dockerfile may reference it (test_essential_files); --refresh-installs overrides with a per-launch timestamp
     FORCE_INSTALLS_REFRESH   = (auto(), False)   # cache-buster for every tool install layer (base's uv and rich-cli, every INSTALL_<TOOL> RUN and ruff in [code], playwright, [self]'s dev deps); defaults to "stable" so they hit cache on normal launches; --refresh-installs sets a per-launch timestamp so failed/stale installs get retried
     DOCKER_GID               = (auto(), False)   # {dood} host docker group GID — `_dood` Dockerfile build-arg for /var/run/docker.sock access
+    # The always-on policies' denies for the harness layer to bake in, as root, at
+    # the CLI's fixed tier (agents_crud.fixed_policy; the harness Dockerfiles fail
+    # the build without them). A build arg is WORLD-READABLE image metadata
+    # (`docker history`) for the life of the image: fine for public tag data like
+    # these, never a channel for a credential.
+    FIXED_POLICY_PATH        = (auto(), False)   # where: the mapping's [fixed] path
+    FIXED_POLICY_B64         = (auto(), False)   # what: the rendered file, base64 (one line, any content)
+    FIXED_POLICY_COUNT       = (auto(), False)   # how many rules the launcher rendered — the build checks the parsed file holds exactly these, 0 included
     # Tag-conditional run env (pulled by the owning tag's `[run] env_forward`)
     WHITELIST_ADDRESSES      = (auto(), False)   # {firewall} pre-resolved `<ip>[:port]` / `<cidr>[:port]` tokens, space-separated — read by init-firewall.sh; forwarded only when {firewall} is active
     FIREWALL_SELFTEST_ADDR   = (auto(), False)   # {firewall} launcher-resolved api.anthropic.com IP — the entrypoint hands it to init-firewall.sh as $1 so the positive self-test probes via `curl --resolve` (no container-DNS dependency)
@@ -265,13 +279,16 @@ REFRESH_INSTALLS_HELP = ("Rebuild the image stack: re-pull the Debian base and b
                          "CLI reinstall. Used to retry installs that failed in a prior launch.")   # `--refresh-installs`, the same words on run.py and cluster.py
 
 
-def set_container_env(professions: Iterable[Profession], *, refresh_installs: bool = False) -> None:
+def set_container_env(image: Instance, registry: Registry, *, refresh_installs: bool = False) -> None:
     """Stage the CONTAINER's env in one bulk dict-update — what one container
     gets whoever runs in it: the build cache-busters, BASH_ENV, the toolchain
-    INSTALL flags for `professions` (a solo instance's own; a cluster's UNION,
-    since one container has one image), the creds-driven CLI INSTALL flags
-    and the service tokens. Called once per launch by every shape — run.py,
-    the quickie, and `cluster/launching.prepare` over the union probe (until
+    INSTALL flags for `image`'s professions (`image` is the build the
+    container runs: a solo instance's own, a cluster's UNION probe, since one
+    container has one image), the creds-driven CLI INSTALL flags, the service
+    tokens, and the always-on policies for its harness layer's fixed tier
+    (`agents_crud.fixed_policy` over `registry`; unstaged for a harness
+    without one). Called once per launch by every shape — run.py, the
+    quickie, and `cluster/launching.prepare` over the union probe (until
     2026-09-15 the cluster skipped it, so its image was built from the
     Dockerfile's ARG defaults, blind to the operator's toolkit profile, and
     its shells had no BASH_ENV). Sister to docker_config's
@@ -297,10 +314,30 @@ def set_container_env(professions: Iterable[Profession], *, refresh_installs: bo
         ContainerEnvKey.FORCE_INSTALLS_REFRESH:  refresh_value or "stable",
         ContainerEnvKey.BASH_ENV:                BASHRC_IN_CONTAINER,
         # Dynamic-key updates from toolkit profiles + optional_creds/
-        **toolkit_install_flags(professions),                       # INSTALL_<TOOL> for language toolchains (profile-driven)
+        **toolkit_install_flags(image.professions),                 # INSTALL_<TOOL> for language toolchains (profile-driven)
         **install_creds_flags(present_optional_cred_services()),    # INSTALL_<TOOL> for service CLIs (creds-presence-driven)
         **token_env_dict(optional_cred_tokens()),                   # per-service tokens (e.g. JIRA_API_TOKEN)
     })
+    fixed = fixed_policy(image.harness, registry) if image.harness else None
+    if fixed is None:
+        # Not a stale value from an earlier staging: the harness layer then
+        # builds without, and a harness that needs one fails its build loudly.
+        for key in (ContainerEnvKey.FIXED_POLICY_PATH, ContainerEnvKey.FIXED_POLICY_B64, ContainerEnvKey.FIXED_POLICY_COUNT):
+            _container_env.pop(key, None)
+    else:
+        _container_env[ContainerEnvKey.FIXED_POLICY_PATH] = fixed.path
+        _container_env[ContainerEnvKey.FIXED_POLICY_B64] = base64.b64encode(fixed.text.encode()).decode()
+        _container_env[ContainerEnvKey.FIXED_POLICY_COUNT] = str(fixed.rules)
+
+
+def transcripts_env_value(config_dir: Path, adapter: Adapter) -> str | None:
+    """AGENT_TRANSCRIPTS_DIR's value for a container whose CLI keeps its
+    config at `config_dir` — or None when the in-container helpers cannot
+    read that CLI's transcripts yet, and the variable is left unset. One
+    definition for a solo instance and a cluster member."""
+    if adapter.transcript_format != READABLE_FORMAT:
+        return None
+    return str(container_transcripts_dir(config_dir, adapter))
 
 
 def set_instance_env(inst: Instance) -> None:
@@ -312,5 +349,10 @@ def set_instance_env(inst: Instance) -> None:
     _container_env.update({
         ContainerEnvKey.AGENT_STATUS_LINE:       build_status_line(inst),
         ContainerEnvKey.CLAUDE_AGENT_INSTANCE:   inst.instance,
-        ContainerEnvKey.AGENT_TRANSCRIPTS_DIR:   str(container_transcripts_dir(CLAUDE_CONFIG_IN_CONTAINER)),
     })
+    # Pointed at only when the helpers that read it (dump_last_msg,
+    # find_in_history) can parse this CLI's transcripts; for any other, the
+    # helpers say the location was not staged instead of reporting a history
+    # they could not read as empty (gate step4-start).
+    if (location := transcripts_env_value(container_config_root(), active_adapter())) is not None:
+        _container_env[ContainerEnvKey.AGENT_TRANSCRIPTS_DIR] = location

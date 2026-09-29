@@ -1,0 +1,4 @@
+# The shared Node layer's one build-arg: the STABLE installs buster, never the
+# weekly one (see the Dockerfile) — --refresh-installs is what re-runs it.
+[build]
+arg_forward = ["FORCE_INSTALLS_REFRESH"]

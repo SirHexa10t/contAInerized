@@ -213,7 +213,8 @@ def optional_creds_line(cred_names: Sequence[str]) -> str | None:
 def print_launch_banner(inst: Instance, cred_names: Sequence[str]) -> None:
     """Print the multi-line summary that appears before docker builds the
     image — agent definition path, engine, one line per active tag axis, and
-    creds counts when applicable. Each line is conditional on having
+    creds counts when applicable — and the picked model, when there is one,
+    under the engine whose model it replaces. Each line is conditional on having
     something to show (no empty 'Professions: ' if there are none). The
     user-whitelist line counts user_firewall_whitelist_lines() inline —
     only when {firewall} is active, so other launches don't touch the file
@@ -221,8 +222,10 @@ def print_launch_banner(inst: Instance, cred_names: Sequence[str]) -> None:
     kind punctuation comes from each tag's `.label`."""
     print(f"  Agent definition: {inst.md_path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
     if inst.engine:
-        model = inst.model
+        model = inst.engine_model
         print(f"  Engine:           {inst.engine.label}{f' {model}' if model else ''} — {inst.engine.path.relative_to(DOCKERIZED_CLAUDE_ROOT)}")
+    if inst.picked_model is not None:
+        print(f"  Model:            {inst.picked_model.id} (picked — runs instead of the engine's)")
     if inst.professions:
         print(f"  Professions:      {' '.join(p.label for p in inst.professions)}")
     if inst.specialties:

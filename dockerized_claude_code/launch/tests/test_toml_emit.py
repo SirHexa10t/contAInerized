@@ -1,5 +1,6 @@
-"""Tests for launch.toml_emit — the escaping rules both hand-written TOML
-stores (`tags/store.py`, `cluster/state.py`) share.
+"""Tests for launch.toml_emit — the escaping rules every hand-written TOML
+file shares: the two stores (`tags/store.py`, `cluster/state.py`) and a
+harness's policy rules file (`tags/policy_mapping.py`).
 
 The contract these tests hold the module to is not "emits this exact string"
 but "emits something `tomllib` reads back unchanged" — that round trip is the
@@ -80,17 +81,34 @@ class TestStringList(unittest.TestCase):
         self.assertEqual(tomllib.loads(line)["names"], ['odd"name', "with space"])
 
 
-class TestBothStoresShareOneDefinition(unittest.TestCase):
-    """The regression this module exists to prevent: two byte-identical
-    copies of the quoting rules, one edit away from two files that quote
-    differently — a divergence neither file's own reader would notice."""
+class TestValue(unittest.TestCase):
+    """A rule field's value — the shapes a policy rules file needs."""
 
-    def test_neither_store_defines_its_own_escaping_helpers(self):
+    def test_each_shape_round_trips(self):
+        for item in ('has "quotes"', "", 0, 999, True, False, ["run_shell_command"], ['odd"one', "b"], []):
+            with self.subTest(item=item):
+                self.assertEqual(tomllib.loads(f"v = {toml_emit.value(item)}\n")["v"], item)
+
+    def test_a_boolean_is_never_written_as_the_integer_it_subclasses(self):
+        self.assertEqual(toml_emit.value(True), "true")
+
+    def test_a_shape_it_cannot_promise_is_refused(self):
+        for item in (1.5, None, {"a": "b"}, ["a", 1]):
+            with self.subTest(item=item), self.assertRaises(TypeError):
+                toml_emit.value(item)
+
+
+class TestEveryWriterSharesOneDefinition(unittest.TestCase):
+    """The regression this module exists to prevent: copies of the quoting
+    rules, one edit away from files that quote differently — a divergence
+    no file's own reader would notice."""
+
+    def test_no_writer_defines_its_own_escaping_helpers(self):
         from launch.cluster import state
-        from launch.tags import store
-        for module in (store, state):
+        from launch.tags import policy_mapping, store
+        for module in (store, state, policy_mapping):
             with self.subTest(module=module.__name__):
-                for name in ("_toml_key", "_toml_str", "_BARE_KEY_RE"):
+                for name in ("_toml_key", "_toml_str", "_toml_value", "_BARE_KEY_RE"):
                     self.assertFalse(hasattr(module, name),
                                      f"{module.__name__}.{name} is back — "
                                      f"use launch.toml_emit instead")

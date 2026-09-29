@@ -10,10 +10,23 @@
 # "live" means docs.x.ai's model table still prices it, which it does for
 # every id below (AA marks Grok 4.3 and 4.20 superseded, not withdrawn). Grok
 # Build sets the model through `[models] default` / GROK_DEFAULT_MODEL and the
-# effort through `default_reasoning_effort`; the settings reference says only
-# "effort level if supported", so the accepted words are AA's labels for Grok
-# 4.6 (low / medium / high / xhigh) until a binary is probed. Grok's ceiling is
-# 4.6 at 44.41, so 2026Q2 and 2026Q3 fall short.
+# effort through `default_reasoning_effort`. The accepted words are xAI's
+# own: its models payload lists reasoningEffortOptions low / medium / high /
+# xhigh for 4.5 – 4.7 (grok-4.3 adds `none`; read 2026-09-28). Whether Grok
+# Build validates the word or passes it through ("effort level if supported")
+# is still unprobed. Grok's ceiling is 4.6 at 44.41, so 2026Q2 and 2026Q3
+# fall short.
+# Ids verified 2026-09-25 against docs.x.ai/developers/models and its
+# retirement pages (`ai_project-update-models`): every pin is live and priced
+# as recorded below; nothing retired since 2026-05-15. AVAILABLE, NOT YET A
+# TIER: grok-4.7 (September 2026, xAI's new flagship at 4.6's price, 2 / 6),
+# without an Artificial Analysis index at this read — a tier must be RATED
+# (agents/ai/capability.standards), so the three rungs on 4.6 stay until it is.
+# WHAT A LAUNCH RUNS (2026-09-29): an instance that FOLLOWS its engine runs its
+# tier's pair below, model AND effort. One that PINS a model runs that model
+# at its highest level unless it pins a level too (agents/ai/<ai>/models.list,
+# the tag form's effort row). Every index annotated below is the rated PAIR's,
+# so it describes a pinned instance only when it pins that same pair.
 
 [scale]
 efforts = ["low", "medium", "high", "xhigh"]

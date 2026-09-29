@@ -30,7 +30,7 @@ from pathlib import Path
 
 from ..file_access import write_text
 from ..paths import (
-    CLAUDE_CONFIG_IN_CONTAINER, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
+    LAUNCHER_ASSETS_IN_CONTAINER, TMUX_CONF_IN_CONTAINER, WORKSPACE_IN_CONTAINER,
 )
 from ..tags.identity import Instance
 from . import backend, herdr, tmux
@@ -39,17 +39,25 @@ from .panes import AGENT_PANE, Pane
 SCRIPT_NAME = "muxer-start.sh"      # written into the instance state dir each launch
 # What the container runs. Declared in `agents/specialty/muxer/tag.docker` too —
 # that file is the one the launcher reads, this constant is what writes the file
-# it names. test_cluster_solo pins them together.
-CONTAINER_SCRIPT = str(CLAUDE_CONFIG_IN_CONTAINER / SCRIPT_NAME)
+# it names. test_cluster_solo pins them together. A LAUNCHER asset, so it sits
+# at the fixed assets path for every harness (gate step4-start): derived from
+# a harness's config root instead, it would move under a Gemini instance while
+# the tag.docker literal stayed put, and `cluster.launching.refusal` — which
+# exempts {muxer}'s entrypoint by comparing against this — would then call the
+# muxer's own entrypoint foreign and refuse with a message naming the wrong
+# cause (bug-investigator).
+CONTAINER_SCRIPT = str(LAUNCHER_ASSETS_IN_CONTAINER / SCRIPT_NAME)
 
 
 def script_paths(inst: Instance) -> tuple[Path, str]:
     """`(host path to write, container path to exec)` for this launch's script.
 
     Two paths for one file, like the cluster banner: the launcher writes it
-    host-side into the state dir, and the container sees that dir mounted at
-    CLAUDE_CONFIG_IN_CONTAINER. Deriving the container side from the SAME
-    filename keeps them from drifting."""
+    host-side into the state dir, and `docker_config.run_container` mounts
+    that one FILE at the fixed launcher-assets path — the state dir itself is
+    mounted at the harness's own root, which is that same path only for
+    Claude Code. Deriving the container side from the SAME filename keeps
+    them from drifting."""
     return inst.state_dir / SCRIPT_NAME, CONTAINER_SCRIPT
 
 

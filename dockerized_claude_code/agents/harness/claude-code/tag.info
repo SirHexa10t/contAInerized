@@ -5,4 +5,4 @@ full_description  = "Anthropic's agent CLI for the Claude models — the launche
 vendor            = "Anthropic"
 ais               = ["claude"]         # the AI members this CLI runs (agents/ai/<key>)
 binary            = "claude"           # the executable in the image
-package           = "npm @anthropic-ai/claude-code"
+package           = "standalone installer, claude.ai/install.sh"   # NOT npm: the installer ships its own Node, which is why this harness claims no Node layer

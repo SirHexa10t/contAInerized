@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 from launch import paths
 from launch.audit import (
-    _auth_file_issues, _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names, _implicit_axes, _key_file_issues, _lego_issues, _load_store, _scope_issues, _store_entry_issues, _stray_root_instances, _unmigrated_issues, build_parser, main as audit_main,
+    _auth_file_issues, _check_json_file, _cluster_issues, _cowork_issues, _illegal_instance_names, _implicit_axes, _key_file_issues, _lego_issues, _load_store, _scope_issues, _stale_picks, _store_entry_issues, _stray_root_instances, _unmigrated_issues, build_parser, main as audit_main,
 )
 from launch.tags import AgentBuild
 from launch.cowork import control, mailbox
@@ -150,6 +150,21 @@ class TestStoreEntryIssues(unittest.TestCase):
         entries = {"a__s": _entry(None, professions=["fox"])}
         kinds = {k for k, _, _ in _store_entry_issues(entries, {"a__s"}, REGISTRY)}
         self.assertEqual(kinds, {"badworkspace", "bad_tags"})
+
+    def test_an_entry_pinned_to_a_harness_that_cannot_start_is_flagged(self):
+        # The one consumer of the readiness predicate that speaks BEFORE
+        # anyone launches: the launch would refuse this entry, and the audit
+        # says so first (bug-investigator, gate gemini-adapter).
+        entries = {"a__s": {**_entry(self.ws), "ai": "gemini", "harness": "gemini-cli"}}
+        issues = [i for i in _store_entry_issues(entries, {"a__s"}, REGISTRY) if i[0] == "unstartable_harness"]
+        self.assertEqual(len(issues), 1)
+        self.assertIn("does not start yet", issues[0][2])
+        self.assertIn("F2", issues[0][2])
+
+    def test_an_entry_on_a_harness_that_runs_is_not_flagged(self):
+        entries = {"a__s": _entry(self.ws)}                     # claude on claude-code
+        kinds = {k for k, _, _ in _store_entry_issues(entries, {"a__s"}, REGISTRY)}
+        self.assertNotIn("unstartable_harness", kinds)
 
     def test_no_registry_skips_tag_checks(self):
         # When the tree itself failed to scan, per-entry tag validation is
@@ -585,3 +600,53 @@ class TestScopeIssues(unittest.TestCase):
         (issue,) = _scope_issues(AgentBuild(specialties=("cluster",)), "poet__x", REGISTRY, "solo")
         self.assertIn("clusters only", issue[2])
         self.assertEqual(_scope_issues(AgentBuild(specialties=("dood",)), "x", None, "member"), [])
+
+
+class TestStalePicks(unittest.TestCase):
+    """stale_model / stale_effort — a pinned model its AI's list does not
+    carry, a pinned level the model it runs does not take. The launch never
+    refuses either (the engine's pair, or the nearest level at or below), so
+    these findings and the picker row are what say so beforehand. Judged by
+    the launch's own resolution, so the two cannot disagree."""
+
+    def test_a_model_the_list_does_not_carry_is_a_finding_saying_why(self):
+        (issue,) = _stale_picks(AgentBuild(ai="claude", model="claude-opus-4-1"), "poet__x", "poet", REGISTRY)
+        self.assertEqual(issue[:2], ("stale_model", "poet__x"))
+        self.assertIn("model claude-opus-4-1 is not among ⟪Claude⟫'s models", issue[2])
+        self.assertIn("runs its engine's model; F2 picks another", issue[2])
+
+    def test_a_level_the_running_model_lacks_is_a_finding(self):
+        # Opus 4.5 takes low / medium / high — no max (Anthropic's effort page).
+        (issue,) = _stale_picks(AgentBuild(ai="claude", model="claude-opus-4-5-20251101", effort="max"), "x", "poet", REGISTRY)
+        self.assertEqual(issue[0], "stale_effort")
+        self.assertIn("effort max is not one its model takes", issue[2])
+
+    def test_beside_a_stale_model_only_the_model_is_reported(self):
+        # The pair falls back together (Instance.effort), so one finding.
+        issues = _stale_picks(AgentBuild(ai="claude", model="claude-opus-4-1", effort="max"), "x", "poet", REGISTRY)
+        self.assertEqual([kind for kind, _, _ in issues], ["stale_model"])
+
+    def test_live_picks_or_none_at_all_are_clean(self):
+        for build in (AgentBuild(ai="claude", model="claude-opus-5", effort="low"),
+                      AgentBuild(ai="claude", model="claude-haiku-4-5"),        # an alias
+                      AgentBuild(model="claude-opus-5"),                        # the default AI's
+                      AgentBuild(ai="claude", effort="high"),                   # a level the followed model takes
+                      AgentBuild(ai="claude")):
+            with self.subTest(build=build):
+                self.assertEqual(_stale_picks(build, "x", "poet", REGISTRY), [])
+
+    def test_an_unresolvable_ai_is_left_to_bad_tags(self):
+        self.assertEqual(_stale_picks(AgentBuild(ai="ghost", model="x"), "x", "poet", REGISTRY), [])
+        self.assertEqual(_stale_picks(AgentBuild(ai="claude", model="x"), "x", "poet", None), [])   # the tree did not scan
+
+    def test_store_entries_and_cluster_members_both_report_them(self):
+        with tempfile.TemporaryDirectory() as ws:
+            entries = {"poet__s": {**_entry(ws), "model": "claude-opus-4-1"}}
+            self.assertIn(("stale_model", "poet__s"),
+                          [(k, t) for k, t, _ in _store_entry_issues(entries, {"poet__s"}, REGISTRY)])
+        with tempfile.TemporaryDirectory() as state_root, patch.object(paths, "AGENTS_STATE", Path(state_root)):
+            from launch.cluster import state
+            from launch.cluster.member import Member
+            state.save(state.from_template("team", Path("/tmp/p"), (Member.of("golem", build=AgentBuild(
+                ai="claude", harness="claude-code", model="claude-opus-4-1")),)))
+            self.assertEqual([(k, t) for k, t, _ in _cluster_issues(REGISTRY)], [("stale_model", "team[golem]")])

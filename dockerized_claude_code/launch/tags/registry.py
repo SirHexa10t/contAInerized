@@ -20,7 +20,7 @@ from .ai import Ai
 from .engine import Engine
 from .harness import Harness
 from .lego import AgentBuild
-from .policy import Policy
+from .policy import Policy, PolicyFragment
 from .profession import Layer, Profession
 from .specialty import Combo, Specialty, scan_combos
 
@@ -244,7 +244,11 @@ class Registry:
                 name=kept_harness, axis="harness", kind=Harness.root, parentheses=Harness.parentheses,
                 reason="incompatible", actual_kind=None, options=self.harnesses_running(ai.name)))
             kept_harness = None
+        # The model and effort pass through VERBATIM: they are not tags, and a
+        # stale one is no TagProblem — those block the launch. `resolve_build`
+        # judges them against the kept AI (a pick that falls back, or runs).
         cleaned = AgentBuild(ai=kept_ai, harness=kept_harness, engine=kept_engine,
+                             model=build.model, effort=build.effort,
                              professions=tuple(kept["professions"]),
                              specialties=tuple(kept["specialties"]), policies=tuple(kept["policies"]))
         return cleaned, problems
@@ -269,7 +273,7 @@ def scan_all(agents_dir: Path) -> Registry:
     fragments = Policy.discover_fragments(agents_dir)
     reg = Registry(
         ais=_by_name(Ai.scan(agents_dir), "ai"),
-        harnesses=_by_name(Harness.scan(agents_dir), "harness"),
+        harnesses=_by_name(Harness.scan(agents_dir, layers), "harness"),
         engines=_by_name(Engine.scan(agents_dir), "engine"),
         professions=_by_name(Profession.scan(agents_dir), "profession"),
         specialties=_by_name(Specialty.scan(agents_dir, layers, fragments), "specialty"),
@@ -280,30 +284,40 @@ def scan_all(agents_dir: Path) -> Registry:
     return reg
 
 
-def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path],
+def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, PolicyFragment],
               agents_dir: Path) -> None:
     """Cross-cutting checks no single scanner can make (fail loud on the
     first fault):
       - names unique across ALL kinds (one namespace);
-      - every hidden layer / policy fragment is claimed by exactly one specialty;
+      - every hidden layer is claimed by exactly one specialty (same name) or
+        by one or more harnesses (their `layer` key), and every policy
+        fragment by exactly one specialty, its raw settings naming only
+        harness members;
       - `requires` (tree-derived) resolve to real tags of the right kind:
         professions require professions; specialties additionally require
         specialties (their own tree nests too — `{manager}` inside `cowork/`);
+        policies require policies (`<-gw>` inside `vcs-safe/`), and an
+        always-on one requires nothing;
       - `wants` and combo references resolve to real tags (any kind);
       - every declared command name resolves to a `commands/<name>.md` file;
-      - every engine's capability standard is one the AIs define;
+      - every engine names a capability standard, one the AIs define;
       - every AI's default harness is a member that runs it, every harness
         runs only AI members, and every `plan_harnesses` name is a harness
         that runs that AI;
       - a tag with a container-level mechanism (tag.docker's container
         fields, `workspace_readonly`) forbids `member`."""
-    # Every engine's standard is one the AIs answer (the shared file's
-    # quarters plus the ends) — a budget naming a quarter no efforts.tiers has
-    # a tier for would otherwise fail at render time, in a launch.
+    # Every engine names a standard (its own tag.budget or a parent's), and it
+    # is one the AIs answer (the shared file's quarters plus the ends) — the
+    # standard is what picks an instance's model, so an engine without one
+    # used to fail only at render time, in a launch (operator, 2026-09-29).
+    for engine in reg.engines.values():
+        if engine.budget.effort_tier is None:
+            raise TagError(f"{engine.path}: its budget names no effort_tier — every engine must name the capability "
+                           f"standard it asks for (in its tag.budget, or a parent engine's)")
     if reg.ais:
         defined = next(iter(reg.ais.values())).standards
         for engine in reg.engines.values():
-            if engine.budget.effort_tier is not None and engine.budget.effort_tier not in defined:
+            if engine.budget.effort_tier not in defined:
                 raise TagError(f"{engine.path}: effort_tier {engine.budget.effort_tier!r} is not one the AIs define "
                                f"({', '.join(defined)} — agents/ai/capability.standards)")
 
@@ -342,13 +356,26 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
                 raise TagError(f"tag name '{name}' used by both {seen[name]} and {kind} — names must be unique across kinds")
             seen[name] = kind
 
-    # Every hidden asset must be claimed by a same-named specialty.
+    # Every hidden layer must be claimed: by a same-named specialty (one
+    # claimant — the layer IS that specialty's image), or by the harnesses
+    # whose `layer` names it (many may share one — `_node` serves every
+    # npm-installed CLI). Never by both: a specialty's layer is built only
+    # when the specialty is active, a harness's whenever the harness is.
+    harness_claimed = {h.layer.name for h in reg.harnesses.values() if h.layer}
     for layer_name in layers:
-        if layer_name not in reg.specialties:
-            raise TagError(f"hidden layer '_{layer_name}' has no matching specialty '{layer_name}'")
-    for fragment_name in fragments:
+        if layer_name in reg.specialties and layer_name in harness_claimed:
+            raise TagError(f"hidden layer '_{layer_name}' is claimed by specialty '{layer_name}' AND by a "
+                           f"harness — one or the other decides when it is built")
+        if layer_name not in reg.specialties and layer_name not in harness_claimed:
+            raise TagError(f"hidden layer '_{layer_name}' has no matching specialty '{layer_name}' "
+                           f"and no harness names it as its layer")
+    for fragment_name, fragment in fragments.items():
         if fragment_name not in reg.specialties:
             raise TagError(f"hidden policy fragment 'policy/_{fragment_name}' has no matching specialty '{fragment_name}'")
+        for harness_key in fragment.raw_harnesses:
+            if harness_key not in reg.harnesses:
+                raise TagError(f"{fragment.path}/{harness_key}.json: raw settings for {harness_key!r}, which is not a "
+                               f"member of agents/harness/ (members: {', '.join(sorted(reg.harnesses)) or 'none'})")
 
     # requires resolve per kind. A profession's come only from its own tree
     # (professions nest under professions). A specialty's come from two
@@ -363,6 +390,16 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Path
             if req not in reg.professions and req not in reg.specialties:
                 raise TagError(f"{spec.path}: requires unknown tag '{req}' "
                                f"(not a profession or specialty)")
+    # A policy's come from its own tree only (policies nest under policies).
+    # An always-on policy applies to every instance, so it cannot require a
+    # parent that an instance need not carry.
+    for policy in reg.policies.values():
+        for req in policy.requires:
+            if req not in reg.policies:
+                raise TagError(f"{policy.path}: requires unknown policy '{req}'")
+        if policy.always_on and policy.requires:
+            raise TagError(f"{policy.path}: an always-on policy cannot nest under another "
+                           f"({', '.join(sorted(policy.requires))}) — move it to agents/policy/'s root")
 
     # A container-level mechanism is ONE setting for the one container a
     # cluster is, so its tag can be the cluster's but never a member's own,

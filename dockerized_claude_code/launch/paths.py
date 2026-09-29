@@ -13,9 +13,10 @@ listing is file-access work, not a path constant."""
 import os
 from pathlib import Path
 
+from .ai import active_adapter
 from .ai.adapter import Adapter
-from .ai.claude_code import CLAUDE_CODE as _HARNESS   # the in-project imports of this leaf: the config-root names (see that block) and the adapter type the credential builders take
-from typing import Callable, Iterator
+from .ai.claude_code import CLAUDE_CODE as _HARNESS   # the in-project imports of this leaf: the launcher-assets path (see that block) and the adapter type the credential builders take
+from typing import Callable
 
 
 # ============================================================
@@ -32,7 +33,6 @@ DOCKERIZED_CLAUDE_ROOT = Path(__file__).resolve().parent.parent   # repo root �
 AGENTS_DIR = DOCKERIZED_CLAUDE_ROOT / "agents"                    # agent .md / .lego + kind subtrees (engine/ profession/ specialty/ policy/)
 ENGINE_DIR = AGENTS_DIR / "engine"                                # engine tags — engine/<name>/{tag.info, <ai>.conf}: one budget file per supported AI, named by launch/ai/catalog.py (this leaf does not know which AI runs; the scan in tags/engine.py does)
 SETTINGS_DIR = DOCKERIZED_CLAUDE_ROOT / "settings"                # container-mounted scripts + Claude Code settings (statusline, bashrc, etc.); DOCKER_BASE_MOUNTS inlines each leaf
-BASE_SETTINGS_FILE = SETTINGS_DIR / "settings.json"                # shared Claude Code settings base — merged with each instance's policy fragments into <state>/settings.json (agents_crud.install_settings); NOT mounted directly
 SHARED_COMMANDS_DIR = DOCKERIZED_CLAUDE_ROOT / "custom_commands"   # slash commands EVERY instance gets; assembled into state_commands_dir per launch
 COMMANDS_DIR_NAME = "_commands"                                   # dirname under agents/ holding every TAG-granted slash command — split out because the registry validates against a parameterised tree root (scan_all(agents_dir)), so it needs the name, not the composed repo path. Underscore-prefixed to read as the project's established "internal asset, not a tag" marker (_muxer, _quickie) beside the four kind subtrees — and NOT "[commands]", which would wear a profession's punctuation while being no tag, and is a shell glob-class that mangles hand-typed paths
 AGENTS_COMMANDS_DIR = AGENTS_DIR / COMMANDS_DIR_NAME              # one file per command; a tag grants one by NAME (`commands = [...]` in its tag.info), so several tags can share a file and every specialized command is findable in one place. Sits safely beside the four kind subtrees: the scanners walk only engine/profession/specialty/policy
@@ -137,35 +137,53 @@ if not Path(DEFAULT_WORKSPACE).is_dir():
 # ============================================================
 # Where files appear *inside* the running container, plus the docker access-mode
 # suffix appended to target strings with `:`. CLAUDE_HOME_IN_CONTAINER is the
-# user's home directory in the container (mirrors `~` on the host conceptually);
-# CLAUDE_CONFIG_IN_CONTAINER is its `.claude` subdir (Claude Code's per-user
-# config root, where the agent state dir gets bind-mounted). Anything else that
-# lands under /home/claude/... downstream (BASE mounts, optional creds, cache
-# mounts) hangs off these. RO_MOUNT_OPTION is the only access mode this project
-# uses; others (z/Z, cached/delegated, propagation) would join here.
+# user's home directory in the container (mirrors `~` on the host conceptually).
+# Under it sit TWO different things that were one constant until 2026-09-25
+# (gate step4-start), because for Claude Code they are one path:
+#   - LAUNCHER_ASSETS_IN_CONTAINER — the launcher's OWN files, at one fixed
+#     path for every harness;
+#   - `container_config_root(adapter)` — a HARNESS's config root, which moves
+#     with the harness and is where the instance's state dir is mounted.
+# (A cluster member's relocated root is a third path again —
+# `cluster.launching.container_member_dir`.) RO_MOUNT_OPTION is the only
+# access mode this project uses; others (z/Z, cached/delegated, propagation)
+# would join here.
 
 CLAUDE_HOME_IN_CONTAINER = Path("/home/claude")
-# The config root and the files under it take the HARNESS's names from its
-# adapter record (launch/ai/claude_code.py) — one definition. Bound here at
-# import, so these constants are Claude-bound until the switch turns them into
-# functions of `active_adapter()` (plans/adding_an_ai.md, order of work step 2).
-CLAUDE_CONFIG_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / _HARNESS.config_dir_name
-SKILLS_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / _HARNESS.skills_dirname
+# The launcher's container assets: its shell helpers and the scripts they run,
+# the transcript parser those import, the muxer configs, help popups and
+# startup script. FIXED for every harness, because bashrc.sh, settings/tmux.conf,
+# settings/herdr.toml and agents/specialty/muxer/tag.docker all spell this path
+# literally, and none of these files is any harness's. It is Claude Code's
+# config root BY HISTORY — the launcher began as Claude-only — which is why it
+# is derived from that record on purpose and never from the running adapter.
+LAUNCHER_ASSETS_IN_CONTAINER = CLAUDE_HOME_IN_CONTAINER / _HARNESS.config_dir_name
+
+
+def container_config_root(adapter: Adapter | None = None) -> Path:
+    """A harness's DEFAULT config root in the container — where an instance's
+    state dir is mounted and where the CLI reads its settings, persona,
+    commands and skills: /home/claude/.claude for Claude Code,
+    /home/claude/.gemini for Gemini CLI. Call-time, from `adapter` (default:
+    the one running now, after `launch.ai.adopt`), never bound at import: a
+    module constant computed from it would keep Claude Code's name through a
+    Gemini launch, which is exactly why a second harness could not start."""
+    return CLAUDE_HOME_IN_CONTAINER / (adapter or active_adapter()).config_dir_name
 # The operator's tmux overrides (settings/tmux.conf) inside the container. The
 # generated muxer startup script sources this LAST — after the launcher's own
 # options — so a user's line wins over any default. Landmark rather than a
 # tmux-native path (~/.tmux.conf) on purpose: auto-loading would run BEFORE the
 # launcher's options and silently lose to them, the opposite of what an
 # override file promises.
-TMUX_CONF_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "tmux.conf"
+TMUX_CONF_IN_CONTAINER = LAUNCHER_ASSETS_IN_CONTAINER / "tmux.conf"
 # The curated help text `^b ?` pops up — a PLAIN file `cat` into the popup, so
 # editing it has no quoting rules at all (its printf-embedded ancestor forbade
 # apostrophes and doubled every %). settings/tmux.conf's help binding names
 # this path; the two ride the same mount set below.
-MUXER_HELP_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "muxer-help.txt"
+MUXER_HELP_IN_CONTAINER = LAUNCHER_ASSETS_IN_CONTAINER / "muxer-help.txt"
 # Its herdr twin, popped by alt+/ (settings/herdr.toml names this path) — one
 # help file per backend because the keys barely overlap.
-HERDR_HELP_IN_CONTAINER = CLAUDE_CONFIG_IN_CONTAINER / "herdr-help.txt"
+HERDR_HELP_IN_CONTAINER = LAUNCHER_ASSETS_IN_CONTAINER / "herdr-help.txt"
 # The herdr backend's config, at herdr's OWN default lookup path — mounting
 # there (rather than a launcher landmark + env) means zero plumbing: the
 # binary just finds it. The parent dir stays writable for herdr's logs and
@@ -184,9 +202,11 @@ HERDR_CONF_SOURCE = SETTINGS_DIR / "herdr.toml"
 # Host-side data, never mounted.
 UI_FORM = SETTINGS_DIR / "ui.form"
 # {cowork}'s per-instance group-hosting dir inside the container. Deliberately at
-# the root rather than under CLAUDE_CONFIG_IN_CONTAINER: that path is Claude Code's
-# own namespace (projects/, skills/, commands/, todos/), and the `_cowork` policy
-# fragment's Stop-hook command hardcodes this path — the two must agree.
+# the root rather than under a harness's config root: that is the CLI's own
+# namespace (projects/, skills/, commands/, todos/ for Claude Code), and the `_cowork`
+# fragment's Stop-hook command (policy/_cowork/claude-code.json) hardcodes this path —
+# the two must agree, and test_docker_config's test_stop_hook_writes_under_the_mount_target
+# holds them together.
 COWORK_IN_CONTAINER = Path("/cowork")
 WORKSPACE_IN_CONTAINER = Path("/workspace")                        # bind-mount target for the picked workspace — the project dir every agent sees
 WORKSPACES_IN_CONTAINER = Path("/workspaces")                      # cluster mode ONLY: the per-member worktrees dir. Plural because N cohabiting members share one container and so cannot each mount a different tree at /workspace — each gets /workspaces/<member-id> as its cwd instead.
@@ -223,30 +243,35 @@ INIT_FIREWALL_SH = AGENTS_DIR / "specialty" / "firewall" / "init-firewall.sh"   
 # staging.stage_instance's.
 
 DOCKER_BASE_MOUNTS = {
-    # The harness's auth files are NOT here: they depend on the instance's
-    # harness — `auth_file_mounts` stages them per launch (plans/credentials.md).
-    # Project-bundled sources — inlined since DOCKER_BASE_MOUNTS is their only consumer
+    # FIXED rows only: the launcher's own assets, at the same path whatever the
+    # harness. What depends on the harness — its skills dir and the files only
+    # that CLI reads — is `harness_base_mounts(adapter, config)`, and
+    # `base_mounts()` is the two together. The harness's auth files are not
+    # here either: `auth_file_mounts` stages them per launch
+    # (plans/credentials.md).
     # NOTE: custom_commands/ is deliberately NOT here. Commands are assembled per
     # instance (shared + every command the active tags declare) into
     # state_commands_dir and mounted from there by set_container_mounts — see
     # that builder's comment.
-    DOCKERIZED_CLAUDE_ROOT / "custom_skills":   f"{SKILLS_IN_CONTAINER}:{RO_MOUNT_OPTION}",                        # shared skill directory — each subdir is a skill
-    SETTINGS_DIR / "statusline.sh":             f"{CLAUDE_CONFIG_IN_CONTAINER}/statusline.sh:{RO_MOUNT_OPTION}",    # shared status-line script
     SETTINGS_DIR / "bashrc.sh":                 f"{BASHRC_IN_CONTAINER}:{RO_MOUNT_OPTION}",                         # sourced by every non-interactive bash via BASH_ENV
-    SETTINGS_DIR / "_summary.py":               f"{CLAUDE_CONFIG_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
-    SETTINGS_DIR / "_dump_last_msg.py":         f"{CLAUDE_CONFIG_IN_CONTAINER}/_dump_last_msg.py:{RO_MOUNT_OPTION}",# backs dump_last_msg in bashrc (reads the session transcript, writes the last reply to a .md)
-    SETTINGS_DIR / "_find_in_history.py":       f"{CLAUDE_CONFIG_IN_CONTAINER}/_find_in_history.py:{RO_MOUNT_OPTION}",# backs find_in_history in bashrc and the muxer's alt+f popup
+    SETTINGS_DIR / "_summary.py":               f"{LAUNCHER_ASSETS_IN_CONTAINER}/_summary.py:{RO_MOUNT_OPTION}",      # backs summary_diff / summary_save_manifest in bashrc
+    SETTINGS_DIR / "_dump_last_msg.py":         f"{LAUNCHER_ASSETS_IN_CONTAINER}/_dump_last_msg.py:{RO_MOUNT_OPTION}",# backs dump_last_msg in bashrc (reads the session transcript, writes the last reply to a .md)
+    SETTINGS_DIR / "_find_in_history.py":       f"{LAUNCHER_ASSETS_IN_CONTAINER}/_find_in_history.py:{RO_MOUNT_OPTION}",# backs find_in_history in bashrc and the muxer's alt+f popup
     # The launcher's OWN parser, mounted so the container's search reads a
     # transcript by the same rules `--find` does on the host. A copy living
     # in settings/ would be a second implementation of somebody else's
     # format, and it would drift quietly (gate history-find, 2026-09-19).
-    TRANSCRIPT_FORMAT_SOURCE:                   f"{CLAUDE_CONFIG_IN_CONTAINER}/_transcript_format.py:{RO_MOUNT_OPTION}",
-    SETTINGS_DIR / "keybindings.json":          f"{CLAUDE_CONFIG_IN_CONTAINER}/keybindings.json:{RO_MOUNT_OPTION}", # project-wide key bindings (Shift+Enter newline, etc.)
+    TRANSCRIPT_FORMAT_SOURCE:                   f"{LAUNCHER_ASSETS_IN_CONTAINER}/_transcript_format.py:{RO_MOUNT_OPTION}",
     SETTINGS_DIR / "tmux.conf":                 f"{TMUX_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                      # the muxer's KEY POLICY (quit/help/layout/mouse) + user overrides — sourced last by the generated startup script, so its lines win; inert without {muxer}
     SETTINGS_DIR / "muxer-help.txt":            f"{MUXER_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the `^b ?` popup body (tmux backend) — plain text, cat into the popup; inert without {muxer}
     SETTINGS_DIR / "herdr-help.txt":            f"{HERDR_HELP_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the alt+/ popup body (herdr backend) — same plain-text contract; inert without {muxer}
     HERDR_CONF_SOURCE:                          f"{HERDR_CONF_IN_CONTAINER}:{RO_MOUNT_OPTION}",                     # the herdr backend's key/theme/shell policy at herdr's default path — ONE file for solo and cluster alike; inert without {muxer}
 }
+
+# The shared skill directory — each subdir is a skill. Every harness the
+# launcher knows reads agent skills from its own root's skills dir, so this
+# follows the harness; the dir's name is the adapter's.
+BUNDLED_SKILLS_SOURCE = DOCKERIZED_CLAUDE_ROOT / "custom_skills"
 
 
 # ============================================================
@@ -401,11 +426,36 @@ def auth_file_mounts(adapter: Adapter, *, config: str, relocated: bool) -> list[
     return out
 
 
-def base_mounts() -> list[tuple[str, str]]:
-    """DOCKER_BASE_MOUNTS as `(host, target[:ro])` string pairs — the shape
-    both launch paths consume (the solo accumulator and the cluster's list),
-    so neither spells the iteration itself."""
-    return [(str(host), str(target)) for host, target in DOCKER_BASE_MOUNTS.items()]
+def harness_base_mounts(adapter: Adapter, config: str) -> list[tuple[str, str]]:
+    """The always-on mounts that belong to a HARNESS, inside `config` (the
+    config root of this launch shape): the bundled skills dir under the
+    adapter's skills dirname, and each launcher-authored file only that CLI
+    reads (`Adapter.config_files` — Claude Code's statusline script and key
+    bindings). A harness without such files gets none, rather than dead
+    copies of another CLI's (gate step4-start: fixed, harness-rooted, or
+    absent — three dispositions, not two)."""
+    out = [(str(BUNDLED_SKILLS_SOURCE), f"{config}/{adapter.skills_dirname}:{RO_MOUNT_OPTION}")]
+    out += [(str(SETTINGS_DIR / name), f"{config}/{name}:{RO_MOUNT_OPTION}") for name in adapter.config_files]
+    return out
+
+
+def base_mounts(adapter: Adapter | None = None) -> list[tuple[str, str]]:
+    """Every always-on mount as `(host, target[:ro])` string pairs — the fixed
+    DOCKER_BASE_MOUNTS rows plus `adapter`'s harness rows at its default
+    config root (default adapter: the one running now). The shape both launch
+    paths consume (the solo accumulator and the cluster's list), so neither
+    spells the iteration itself."""
+    adapter = adapter or active_adapter()
+    return ([(str(host), str(target)) for host, target in DOCKER_BASE_MOUNTS.items()]
+            + harness_base_mounts(adapter, str(container_config_root(adapter))))
+
+
+def base_settings_file(adapter: Adapter) -> Path | None:
+    """The launcher's shared base settings for `adapter`'s CLI — a file under
+    settings/ (`Adapter.settings_base`) that every policy's rendering merges
+    onto into <state>/settings.json (agents_crud.install_settings) — or None
+    for a CLI that has none yet. Never mounted directly."""
+    return SETTINGS_DIR / adapter.settings_base if adapter.settings_base else None
 
 
 def settings_mount(state_dir: Path, config: str) -> tuple[str, str]:
@@ -425,6 +475,17 @@ def commands_mount(state_dir: Path, config: str) -> tuple[str, str]:
     return (str(state_commands_dir(state_dir)), f"{state_commands_dir(Path(config))}:{RO_MOUNT_OPTION}")
 
 
+def policy_file_mount(state_dir: Path, config: str, relative: str) -> tuple[str, str]:
+    """The launcher-rendered policy rules file of a CLI that keeps its rules
+    in a file of their own (`Harness.policy_file`, relative to the config
+    root — Gemini CLI's), READ-ONLY over its own path inside `config`: the
+    same shadow as `settings_mount`, so the agent cannot rewrite the rules it
+    runs under through the state dir's rw view. The FILE, never its
+    directory: the CLI writes its own auto-saved policies beside it, through
+    a temp file and a rename (gate policy-tier, 2026-09-26)."""
+    return (str(state_dir / relative), f"{Path(config) / relative}:{RO_MOUNT_OPTION}")
+
+
 def auth_file_path(adapter: Adapter, role: str) -> Path | None:
     """The host path of the adapter's auth file playing `role`, or None."""
     f = adapter.auth_file(role)
@@ -435,22 +496,24 @@ def auth_file_path(adapter: Adapter, role: str) -> Path | None:
 # `state_domain_resolve_status_path` is the per-instance status file the
 # FIREWALL_NOTICE addendum points the agent at to classify a `ConnectionRefused`
 # (still resolving / failed / not listed) — accepts any base dir, including
-# CLAUDE_CONFIG_IN_CONTAINER for the in-container view.
-state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.persona_filename
-state_settings_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.settings_filename   # launcher-generated (base settings + policy fragments); RO-mounted over ~/.claude/settings.json
+# `container_config_root()` for the in-container view.
+#
+# The persona, settings and commands names follow the RUNNING adapter (they
+# are plain entries at the root for every harness: CLAUDE.md or GEMINI.md,
+# settings.json, commands/). The input log and the transcripts differ between
+# harnesses in SHAPE, not name — Gemini CLI keeps both per project under
+# tmp/<project-id>/ — so they are each adapter's layout globs, listed by
+# file_access, never a renamed path here.
+state_md_path:           Callable[[Path], Path]        = lambda state_dir: state_dir / active_adapter().persona_filename
+state_settings_path:     Callable[[Path], Path]        = lambda state_dir: state_dir / active_adapter().settings_filename   # launcher-generated (base settings + policy fragments); RO-mounted over the CLI's own settings file
 # The instance's slash-command dir, ASSEMBLED per launch from the shared
 # custom_commands/ plus every AGENTS_COMMANDS_DIR file the active tags declare,
 # then RO-mounted whole over ~/.claude/commands. It replaces a direct mount of
 # custom_commands/, because docker cannot create a mountpoint for a per-tag file
 # inside a read-only mount — `mount: read-only file system` at container start.
 # One assembled dir, one mount.
-state_commands_dir:      Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.commands_dirname
+state_commands_dir:      Callable[[Path], Path]        = lambda state_dir: state_dir / active_adapter().commands_dirname
 state_domain_resolve_status_path: Callable[[Path], Path] = lambda state_dir: state_dir / "domains_pending_resolve.yml"
-# Per-launch input log Claude Code writes directly under the state dir (sibling
-# of `projects/`, not nested with the session transcripts). `last_history_mtime`
-# uses its mtime as the "last launched" signal; audit's `no_history` check
-# treats absence as "instance never started".
-state_history_path:      Callable[[Path], Path]        = lambda state_dir: state_dir / _HARNESS.history_filename
 
 # {cowork} group-hosting builders. `group_hosting_dir` is the root: one subdir per
 # participating instance, each bind-mounted into that instance's container as
@@ -527,32 +590,16 @@ cluster_banner_path:     Callable[[str], Path]         = lambda session: cluster
 # further up) — provider names come from firewall/resolver.py's fetcher registry.
 cdn_ranges_cache_path:   Callable[[str], Path]         = lambda provider: FIREWALL_CACHE_DIR / f"{provider}.txt"
 
-# JSONLs Claude Code writes for the /workspace project — sits at the only
-# subdir Claude Code ever creates under projects/ inside this launcher
-# (workspace bind-mount target is always `/workspace` → URL-encoded to
-# `-workspace`). Returns the glob iterator directly; caller filters
-# history.jsonl out and checks per-file size. `Path.glob` on a missing dir
-# yields an empty iterator, so no existence-check needed at the call site.
-state_workspace_jsonls:  Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / _HARNESS.transcripts_dirname / "-workspace").glob("*.jsonl")   # "-workspace": Claude Code's cwd slug for /workspace — the transcript LAYOUT is the reader's (a later seam)
-
-# A SIBLING of the line above, never a widening of it: each sub-agent a
-# session spawns gets its own transcript one level down, at
-# `<session-uuid>/subagents/agent-<id>.jsonl` (with an `.jsonl`-less
-# `.meta.json` beside it naming the agent type and its task). Those files are
-# real conversation and `--find` reads them, but they are NOT resumable and
-# must stay out of `state_workspace_jsonls`, whose two callers mean exactly
-# "what `claude --continue` would load" (`has_continuable_jsonl`,
-# `continuable_jsonl_bytes`). Same reason `settings/_dump_last_msg.py` globs
-# one level only.
-state_workspace_subagent_jsonls: Callable[[Path], Iterator[Path]] = lambda state_dir: (state_dir / _HARNESS.transcripts_dirname / "-workspace").glob("*/subagents/*.jsonl")
-
 # Where a container's own transcripts sit, given the config dir that container
-# runs with: `/home/claude/.claude/projects` for a solo instance,
-# `/cluster/members/<id>/projects` for a member (its CLAUDE_CONFIG_DIR). The
-# harness owns the `projects` half, so a future CLI that names it differently
-# changes one adapter field and not the in-container scripts that read this
-# through AGENT_TRANSCRIPTS_DIR.
-container_transcripts_dir: Callable[[Path], Path] = lambda config_dir: config_dir / _HARNESS.transcripts_dirname
+# runs with and the harness running in it: `/home/claude/.claude/projects` for
+# a solo Claude Code instance, `/cluster/members/<id>/projects` for a member
+# (its relocated root). What the in-container helpers are pointed at through
+# AGENT_TRANSCRIPTS_DIR. Listing the files under a STATE dir is disk work and
+# lives in file_access (`transcript_files`, `subagent_transcript_files`,
+# `history_files`), from each adapter's layout globs.
+def container_transcripts_dir(config_dir: Path, adapter: Adapter) -> Path:
+    return config_dir / adapter.transcripts_dirname
+
 
 # Instances live under ~/.ai-agents/instances/ — their own subdir keeps the
 # AGENTS_STATE root uncluttered (cache/, firewall_cache/, user_extras/, the store

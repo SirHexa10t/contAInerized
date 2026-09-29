@@ -8,6 +8,12 @@ Public surface:
   - `Ai`, `Engine`, `Profession`, `Specialty`, `Policy` — the five kind classes,
     each with a `scan(agents_dir)` classmethod. `Profession.discover_layers`
     and `Specialty` also surface `Layer` / `Combo`.
+  - `Model`, `StaleModel`, `model_label` — one line of an AI's models.list,
+    a stored pick its AI no longer offers, and how a model reads in the
+    picker (`models`).
+  - `Rules` — a policy's rules in the launcher's words (`rules`), and
+    `PolicyRendering` — them in one harness's (`policy_mapping`,
+    `Harness.render_policy`); `PolicyFragment` — a specialty's hidden one.
   - `merge_fragments` — deep-merge of policy settings fragments.
   - `AgentBuild`, `load_lego` — the per-agent `.lego` build file.
   - `Registry`, `scan_all` — discover + validate the whole tree, then query.
@@ -29,17 +35,21 @@ from .identity import (
     load_agent, resolve_build,
 )
 from .lego import AgentBuild, load_lego
-from .policy import Policy, PolicyStance, merge_fragments
+from .models import Model, StaleModel, model_label
+from .policy import Policy, PolicyFragment, PolicyStance, merge_fragments
+from .policy_mapping import PolicyRendering
 from .profession import Layer, Profession, ToolkitEntry
 from .registry import Registry, TagProblem, scan_all
+from .rules import Rules
 from .specialty import Combo, Specialty, scan_combos
 from . import addendums, migrations, store, toolkit_profile
 
 __all__ = [
     "Tag", "DockerContribution", "TagError", "SCOPES", "is_scope", "scope_note",
-    "Ai", "Tier", "Standard", "Rendering", "Budget", "BEST", "CHEAPEST", "is_standard", "rank_of",
+    "Ai", "Tier", "Standard", "Model", "StaleModel", "model_label", "Rendering", "Budget", "BEST", "CHEAPEST",
+    "is_standard", "rank_of",
     "sorted_standards", "sorted_ais", "sorted_engines", "effort_tier_rank", "Harness", "sorted_harnesses",
-    "Engine", "Profession", "Specialty", "Policy", "PolicyStance",
+    "Engine", "Profession", "Specialty", "Policy", "PolicyStance", "PolicyFragment", "PolicyRendering", "Rules",
     "Layer", "Combo", "scan_combos", "merge_fragments", "ToolkitEntry",
     "AgentBuild", "load_lego",
     "Registry", "TagProblem", "scan_all",

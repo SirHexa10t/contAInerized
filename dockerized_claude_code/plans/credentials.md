@@ -240,7 +240,7 @@ with `auth_files: tuple[AuthFile, ...]` — host name under
 `credentials/<harness>/`, container path (a template over the harness's
 relocation variable), mode (rw / ro), scope (shared / per instance) — and
 give each AI's `tag.info` a `key_env` (the vendor's variable); a harness that
-reads another name (Codex's `CODEX_API_KEY`) maps it in its `knobs.mapping`
+reads another name (Codex's `CODEX_API_KEY`) maps it in its `engine.mapping`
 under an `[api_key]` purpose. `paths.py` stops binding the Claude pair at
 import (the last import-time residue): `ACCOUNT_FILE` / `CREDENTIALS_FILE`
 become functions of the instance's harness. The audit checks, per harness in

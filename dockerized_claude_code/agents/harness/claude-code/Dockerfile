@@ -46,6 +46,36 @@ USER claude
 RUN : "${SOFTWARE_STACK_REFRESH}" \
  && curl -fsSL https://claude.ai/install.sh | bash
 
+# The ALWAYS-ON policies' denies at this CLI's FIXED tier: a system path it
+# reads whatever config root or flags it is started with, so a second copy of
+# the CLI the agent starts itself still obeys them (gate fixed-tier; the path
+# is policy.mapping's [fixed], the content agents_crud.fixed_policy's). Written
+# as root and baked in, never mounted: the container's user can neither edit
+# nor replace it, and a bind-mounted dir would present its host owner, which
+# Gemini CLI refuses for its policies dir. FIXED_POLICY_B64 sits in this RUN's
+# cache key, which is what keeps the bake honest — a changed tag.rules changes
+# the arg and rebuilds this layer alone — and that holds because ensure_image
+# runs docker build on every launch (gate build-cache declined an image-exists
+# shortcut), so never turn the arg into a literal. No arg has a default and a
+# missing one FAILS the build (build_arg_flags skips an unstaged arg silently,
+# and 0 is a legitimate count). Two guarantees, two checks — trim neither: the
+# file EXISTING at its path (on Gemini CLI its .toml name alone nulls a
+# workspace's admin policy paths) and its CONTENT, the parsed rule count equal
+# to the one the launcher rendered ("non-empty and parses" would also pass a
+# file holding only comments). The dir must be root's alone.
+ARG FIXED_POLICY_PATH
+ARG FIXED_POLICY_B64
+ARG FIXED_POLICY_COUNT
+USER root
+RUN { [ -n "$FIXED_POLICY_PATH" ] && [ -n "$FIXED_POLICY_B64" ] && [ -n "$FIXED_POLICY_COUNT" ]; } \
+    || { echo "  ✗ no always-on policy was passed for the fixed tier (FIXED_POLICY_PATH / _B64 / _COUNT)" >&2; exit 1; } \
+ && install -d -m 0755 "$(dirname "$FIXED_POLICY_PATH")" \
+ && printf '%s' "$FIXED_POLICY_B64" | base64 -d > "$FIXED_POLICY_PATH" \
+ && chmod 0644 "$FIXED_POLICY_PATH" \
+ && [ "$(stat -c %u:%a "$(dirname "$FIXED_POLICY_PATH")")" = "0:755" ] \
+ && python3 -c 'import json, sys, tomllib; p, want = sys.argv[1], int(sys.argv[2]); n = lambda d: sum(map(n, d.values())) if isinstance(d, dict) else (len(d) if isinstance(d, list) else 0); doc = (json.load if p.endswith(".json") else tomllib.load)(open(p, "rb")); got = n(doc) if p.endswith(".json") else len(doc.get("rule", [])); sys.exit(0 if got == want else f"  ✗ {p} holds {got} rules; the launcher rendered {want}")' "$FIXED_POLICY_PATH" "$FIXED_POLICY_COUNT"
+USER claude
+
 # Updates come from the weekly rebuild above, never from inside a container;
 # non-essential traffic is the launch shape's decision (a cluster's entrypoint
 # UNSETS the kill-switch to enable sibling messaging — launching.py); the

@@ -12,6 +12,9 @@ form in sight.
                          field-driven tag colouring: a new tag never touches
                          UI code, because the colour is derived from the
                          tag's own fields (warn / stance / conf)
+  ai_chip                an INSTANCE's AI as rows and panes draw it — its
+                         label carrying the picked model, a stale pick in
+                         the alert style
   STYLE_AGENT_NAME / RICH_AGENT_NAME
                          the one blue every NAME wears (agent, instance,
                          cluster, member, a form field's value), in both
@@ -32,7 +35,7 @@ from typing import Callable, Iterable, cast
 
 from prompt_toolkit.formatted_text import AnyFormattedText
 
-from ..tags import Ai, Harness, PolicyStance, Tag
+from ..tags import Ai, Harness, Instance, PolicyStance, Tag
 
 # ============================================================
 # Shared style system (used by the form AND menu_picker)
@@ -153,6 +156,17 @@ def tag_style(tag: Tag) -> str:
     if hasattr(tag, "budget"):
         return STYLE_TAG_ENGINE
     return STYLE_TAG_SAFE
+
+
+def ai_chip(inst: Instance) -> tuple[str, str] | None:
+    """An instance's AI as its rows and panes draw it, as (style, label):
+    `Instance.ai_label` — ⟪Claude:Opus-5.5⟫ with a model picked — in the AI's
+    own colours, except a STALE pick, which wears the invalid-tag alert: the
+    launch drops it, so it must not read as what runs. None with no AI
+    resolved (a fixture tree)."""
+    if inst.ai is None:
+        return None
+    return (STYLE_TAG_INVALID if inst.stale_model else tag_style(inst.ai)), inst.ai_label
 
 
 def rich_style(style: str) -> str:

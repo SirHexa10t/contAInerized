@@ -54,6 +54,7 @@ from .paths import (
     optional_creds_service_path, optional_creds_token_path,
     quickie_communal_workspace, quickie_dir,
 )
+from .ai import ADAPTERS
 from .utils import shell_returncode
 
 # ============================================================
@@ -285,6 +286,43 @@ def is_symlink(path: Path | str) -> bool:
 
 
 # --- Listing + searching ---
+
+def transcript_files(state_dir: Path, adapter: Adapter) -> list[Path]:
+    """The session transcripts `adapter`'s CLI keeps under `state_dir`, from
+    the layout its record declares (`transcripts_dirname` +
+    `transcript_glob`) — what its resume would load. Sorted, so a scan is
+    repeatable; empty when the dir holds none. Sub-agent transcripts are a
+    separate listing on purpose: they are conversation, but not resumable."""
+    return sorted((state_dir / adapter.transcripts_dirname).glob(adapter.transcript_glob))
+
+
+def subagent_transcript_files(state_dir: Path, adapter: Adapter) -> list[Path]:
+    """The sub-agent transcripts beneath `adapter`'s session transcripts —
+    `--find` reads them; nothing that decides a resume may. Empty for a CLI
+    whose sub-agent layout is not verified yet."""
+    if adapter.subagent_transcript_glob is None:
+        return []
+    return sorted((state_dir / adapter.transcripts_dirname).glob(adapter.subagent_transcript_glob))
+
+
+def history_files(state_dir: Path, adapter: Adapter) -> list[Path]:
+    """The input log(s) `adapter`'s CLI writes under `state_dir` — one file at
+    the root for Claude Code, one per project for Gemini CLI — whose mtime is
+    the "last used" signal."""
+    return sorted(state_dir.glob(adapter.history_glob))
+
+
+def transcript_layouts(state_dir: Path) -> list[Adapter]:
+    """Every adapter whose layout has files under `state_dir` — which CLIs
+    wrote conversations here. Read off the files themselves, the way the
+    cowork hub reads a capture's root off its path: a state dir carries the
+    layout of whatever harness ran in it (two, if an instance was switched),
+    so a reader serving many instances — the picker, `--find`, the audit —
+    needs no instance record and no running adapter to know how to read one."""
+    return [adapter for adapter in ADAPTERS.values()
+            if transcript_files(state_dir, adapter) or subagent_transcript_files(state_dir, adapter)
+            or history_files(state_dir, adapter)]
+
 
 def iter_conversation_dirs() -> Iterator[Path]:
     """Every state dir on this host that can hold a conversation, in no

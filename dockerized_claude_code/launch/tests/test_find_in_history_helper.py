@@ -75,10 +75,21 @@ class TestTranscriptsRoot(_Container):
             self.assertEqual(HELPER.transcripts_root(),
                              Path("/cluster/members/x/projects"))
 
-    def test_without_the_env_it_falls_back_to_the_solo_default(self):
-        # Only reachable in a shell started outside a launcher container.
-        with patch.dict("os.environ", {}, clear=True):
+    def test_without_the_env_it_says_so_then_falls_back(self):
+        # Unset means outside a launcher container, or a CLI whose transcripts
+        # these helpers cannot read yet — both worth saying, since a silent
+        # fallback would report an unreadable history as an empty one.
+        err = io.StringIO()
+        with patch.dict("os.environ", {}, clear=True), patch("sys.stderr", err):
             self.assertEqual(HELPER.transcripts_root().name, "projects")
+        self.assertIn("AGENT_TRANSCRIPTS_DIR is not set", err.getvalue())
+        self.assertIn("cannot read yet", err.getvalue())
+
+    def test_a_staged_env_is_used_quietly(self):
+        err = io.StringIO()
+        with patch.dict("os.environ", {"AGENT_TRANSCRIPTS_DIR": "/x/projects"}), patch("sys.stderr", err):
+            HELPER.transcripts_root()
+        self.assertEqual(err.getvalue(), "")
 
 
 class TestSearchRoots(_Container):

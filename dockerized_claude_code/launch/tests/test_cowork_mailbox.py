@@ -141,6 +141,27 @@ class TestHostTranscriptPath(unittest.TestCase):
         # A host-run agent, or a layout change — better None than the wrong file.
         self.assertIsNone(host_transcript_path("poet__a", "/tmp/elsewhere.jsonl"))
 
+    def test_one_hub_serves_instances_of_different_harnesses(self):
+        # The hub is ONE long-lived process; whatever harness it last adopted
+        # says nothing about a capture. Each path names its own root, and both
+        # rebase onto their instance's state dir (strict-reviewer and
+        # bug-investigator, gate step4-start).
+        from launch.ai import set_active_harness
+        from launch.paths import instance_state_dir_path
+        try:
+            set_active_harness("gemini-cli")             # the hub's ambient harness: deliberately the "wrong" one
+            claude = host_transcript_path("poet__a", "/home/claude/.claude/projects/-workspace/s.jsonl")
+            gemini = host_transcript_path("golem__b", "/home/claude/.gemini/tmp/workspace/chats/session-x.jsonl")
+        finally:
+            set_active_harness(None)
+        self.assertEqual(claude, instance_state_dir_path("poet__a") / "projects/-workspace/s.jsonl")
+        self.assertEqual(gemini, instance_state_dir_path("golem__b") / "tmp/workspace/chats/session-x.jsonl")
+
+    def test_a_root_is_matched_as_a_directory_not_a_string_prefix(self):
+        # `/home/claude/.claudefoo/…` starts with Claude's root as a STRING but
+        # is not under it; a bare startswith would rebase it.
+        self.assertIsNone(host_transcript_path("poet__a", "/home/claude/.claudefoo/s.jsonl"))
+
 
 class TestCapturePayload(unittest.TestCase):
     def _payload(self, **over):

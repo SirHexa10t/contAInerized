@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 from launch.gui import forms
 from launch.gui.forms import (
-    _form_requires, _harness_warnings, _pairing_warnings, _tag_form_options, _tag_row,
-    _toolkit_form_options, prompt_tags,
+    _effort_key, _follow_key, _form_requires, _harness_warnings, _model_defaults, _model_key, _model_keys,
+    _pairing_warnings, _tag_form_options, _tag_row, _toolkit_form_options, prompt_tags,
 )
 from launch.gui.form_core import FormResult, active_warnings
 from launch.gui.styles import STYLE_UNDERLINE, _plain
@@ -31,26 +31,35 @@ class TestTagFormOptions(unittest.TestCase):
     the given build, with requires parentheticals and short descriptions."""
 
     def test_every_kind_member_appears_as_selectable_row(self):
-        keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if not o.header}
+        # Every tag is a row keyed by its name; every other row sits under an
+        # AI — its follow bullet, its model bullets, its effort row (their own
+        # tests below).
+        keys = {o.key for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
+                if not o.header and o.key not in _under_ai_keys()}
         expected = (set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines) | set(REGISTRY.professions)
                     | set(REGISTRY.specialties) | set(REGISTRY.policies))
         self.assertEqual(keys, expected)
 
     def test_one_header_per_kind_in_order(self):
         headers = [o.key for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo") if o.header]
-        self.assertEqual(headers, ["#ai", "#harness", "#engine", "#profession", "#specialty", "#policy"])
+        self.assertEqual(headers, ["#engine", "#ai", "#harness", "#profession", "#specialty", "#policy"])
 
-    def test_the_ai_section_leads_the_form_then_the_harness_then_the_engines(self):
-        # The AI decides what every engine standard below it means, so it is
-        # asked first; the harness — the CLI around it — second; between the
-        # headers sit exactly each kind's members.
+    def test_the_engine_leads_the_form_then_the_ai_then_the_harness(self):
+        # The engine is chosen first and the AI fine-tunes it (operator,
+        # 2026-09-28; the AI led until then): the engine's standard picks a
+        # model for whichever AI is dotted. The harness — the CLI around the
+        # AI — follows it. Between the headers sit exactly each kind's members.
         rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
-        self.assertEqual(rows[0].key, "#ai")
+        self.assertEqual(rows[0].key, "#engine")
         self.assertTrue(rows[0].header)
+        ai_header = next(i for i, o in enumerate(rows) if o.key == "#ai")
         harness_header = next(i for i, o in enumerate(rows) if o.key == "#harness")
-        engine_header = next(i for i, o in enumerate(rows) if o.key == "#engine")
-        self.assertEqual({o.key for o in rows[1:harness_header]}, set(REGISTRY.ais))
-        self.assertEqual({o.key for o in rows[harness_header + 1:engine_header]}, set(REGISTRY.harnesses))
+        profession_header = next(i for i, o in enumerate(rows) if o.key == "#profession")
+        self.assertEqual({o.key for o in rows[1:ai_header]}, set(REGISTRY.engines))
+        ai_section = rows[ai_header + 1:harness_header]
+        self.assertEqual({o.key for o in ai_section if o.group == "ai"}, set(REGISTRY.ais))
+        self.assertEqual({o.key for o in ai_section if o.group != "ai"}, _under_ai_keys())   # the rows under each AI, and nothing else
+        self.assertEqual({o.key for o in rows[harness_header + 1:profession_header]}, set(REGISTRY.harnesses))
 
     def test_harnesses_form_a_radio_group_dotted_from_the_build(self):
         rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini", harness="gemini-cli"), scope="solo")
@@ -69,6 +78,34 @@ class TestTagFormOptions(unittest.TestCase):
             with self.subTest(harness=option.key):
                 note = "runs " + " ".join(REGISTRY.ais[a].label for a in REGISTRY.harnesses[option.key].ais)
                 self.assertIn(note, _plain(option.label))
+
+    def test_every_harness_the_launcher_cannot_run_says_so_and_stays_selectable(self):
+        # A NOTE, not a lock (bug-investigator and agent-writer, gate
+        # gemini-adapter): describing an instance in a harness whose adapter
+        # is still coming is the design, and the launch refuses it with the
+        # way out. Grey would claim "never" for what is "not this month".
+        from launch.ai import readiness_note
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
+        for option in (o for o in rows if o.key in REGISTRY.harnesses):
+            with self.subTest(harness=option.key):
+                note = readiness_note(option.key)
+                text = _plain(option.label)
+                if note is None:
+                    self.assertNotIn("yet", text)
+                else:
+                    self.assertIn(note, text)
+                self.assertFalse(option.locked, "a roadmap state is not a lock")
+
+    def test_a_harness_that_cannot_start_yet_still_lands_in_the_build(self):
+        # The row is a real choice: the build stores it, and the launch is
+        # what refuses it — the promise the adapter registry's comment makes.
+        rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini", harness="gemini-cli"), scope="solo")
+        self.assertEqual({o.key for o in rows if o.key in REGISTRY.harnesses and o.checked}, {"gemini-cli"})
+        with patch.object(forms, "checkbox_form",
+                          return_value=FormResult(checked=["gemini", "gemini-cli"])):
+            build = prompt_tags(REGISTRY, AgentBuild(ai="gemini"),
+                                instance="poet__verse", workspace="/tmp/ws", scope="solo")
+        self.assertEqual(build.harness, "gemini-cli")
 
     def test_ais_form_a_radio_group_dotted_from_the_build(self):
         rows = _tag_form_options(REGISTRY, AgentBuild(ai="gemini"), scope="solo")
@@ -144,8 +181,11 @@ class TestTagFormOptions(unittest.TestCase):
         # standard, and at what effort, is the AI's business — the F8 legend,
         # the preview and the banner are where the model belongs, and they
         # still show it.
+        # Since 2026-09-28 the form also offers each AI's models, as bullets
+        # under it — an instance's own pick, not the engine's answer — so the
+        # pin is that no OTHER row names a tier's model.
         rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
-        labels = " ".join(text for o in rows for _, text in o.label)
+        labels = " ".join(text for o in rows if o.group != "model" for _, text in o.label)
         for ai in REGISTRY.ais.values():
             for standard, tier in ai.tiers:
                 with self.subTest(ai=ai.name, standard=standard):
@@ -166,7 +206,8 @@ class TestTagFormOptions(unittest.TestCase):
 
     def test_non_radio_rows_are_not_grouped(self):
         rows = _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
-        radios = set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines)
+        radios = (set(REGISTRY.ais) | set(REGISTRY.harnesses) | set(REGISTRY.engines) | set(_model_keys(REGISTRY))
+                  | {_follow_key(ai) for ai in REGISTRY.ais.values()})
         self.assertTrue(all(o.group is None for o in rows if not o.header and o.key not in radios))
 
     def test_build_prechecks_boxes(self):
@@ -235,7 +276,8 @@ class TestTagFormOptions(unittest.TestCase):
         self.assertNotIn("requires", _plain(code.label))
 
     def test_labels_carry_kind_punctuation(self):
-        labels = {o.key: _plain(o.label) for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo")}
+        labels = {o.key: _plain(o.label) for o in _tag_form_options(REGISTRY, AgentBuild(), scope="solo")
+                  if not callable(o.label)}                   # a follow bullet's words depend on the dotted engine
         self.assertIn("[code]", labels["code"])
         self.assertIn("{auto}", labels["auto"])
         self.assertIn("<+qry>", labels["web-research"])   # policies render their shortname
@@ -305,6 +347,64 @@ class TestPromptTags(unittest.TestCase):
     def test_ai_preserved_from_current(self):
         self.assertEqual(self._run([], current=AgentBuild(engine="poet", ai="grok")).ai, "grok")
 
+    # --- what the dotted rows store (gate model-picker-3): follow stores no
+    # model, a model bullet its id, the effort row's pick its level. poet's
+    # standard lands Claude on claude-sonnet-5 at medium. ---
+
+    def _run_with(self, checked, choices, current):
+        result = FormResult(checked=checked, choices=choices)
+        with patch.object(forms, "checkbox_form", return_value=result) as self.form:
+            return prompt_tags(REGISTRY, current, instance="poet__verse", workspace="/tmp/ws", scope="solo")
+
+    def test_follow_stores_no_model_and_a_default_effort_stores_none(self):
+        build = self._run_with(["poet", "claude", "claude:(follow)"], {"claude:(follow):(effort)": None},
+                               AgentBuild(engine="poet", ai="claude"))
+        self.assertEqual((build.model, build.effort), (None, None))
+
+    def test_a_model_bullet_pins_that_model_even_the_engines_current_one(self):
+        # A pin of today's engine model is now expressible (operator, 2026-09-29).
+        for model in ("claude-opus-5-5", "claude-sonnet-5"):
+            with self.subTest(model=model):
+                build = self._run_with(["poet", "claude", f"claude:{model}"], {f"claude:{model}:(effort)": None},
+                                       AgentBuild(engine="poet", ai="claude"))
+                self.assertEqual(build.model, model)
+
+    def test_the_pick_under_the_dotted_bullet_is_stored(self):
+        build = self._run_with(["poet", "claude", "claude:claude-opus-5-5"], {"claude:claude-opus-5-5:(effort)": "low"},
+                               AgentBuild(engine="poet", ai="claude"))
+        self.assertEqual((build.model, build.effort), ("claude-opus-5-5", "low"))
+
+    def test_only_the_dotted_bullets_effort_row_counts(self):
+        # Each bullet carries its own row (operator, 2026-09-29: "below the
+        # selected model"); a pick left under another bullet is not the answer.
+        build = self._run_with(["poet", "claude", "claude:(follow)"],
+                               {"claude:(follow):(effort)": None, "claude:claude-opus-5-5:(effort)": "low",
+                                "gemini:(follow):(effort)": "LOW"}, AgentBuild(engine="poet", ai="claude"))
+        self.assertIsNone(build.effort)
+
+    def test_stale_picks_are_replaced_and_the_form_said_so(self):
+        current = AgentBuild(engine="poet", ai="claude", model="claude-opus-4-1", effort="high")
+        build = self._run_with(["poet", "claude", "claude:(follow)"], {"claude:(follow):(effort)": None}, current)
+        self.assertEqual((build.model, build.effort), (None, None))
+        header, body = self.form.call_args.kwargs["warnings"][frozenset({"claude"})]
+        self.assertEqual(header, "Its model claude-opus-4-1 is not among ⟪Claude⟫'s models.")
+        self.assertEqual(body, ["Confirming stores what is dotted in their place."])
+
+    def test_an_effort_the_running_model_lacks_is_warned_about(self):
+        current = AgentBuild(engine="poet", ai="claude", model="claude-opus-4-5-20251101", effort="max")   # no max on Opus 4.5
+        self._run_with(["poet", "claude", "claude:claude-opus-4-5-20251101"], {"claude:claude-opus-4-5-20251101:(effort)": None}, current)
+        header, _ = self.form.call_args.kwargs["warnings"][frozenset({"claude"})]
+        self.assertEqual(header, "Its effort max is not one claude-opus-4-5-20251101 takes.")
+
+    def test_live_picks_raise_no_warning(self):
+        self._run_with(["poet", "claude", "claude:claude-opus-5"], {"claude:claude-opus-5:(effort)": "low"},
+                       AgentBuild(engine="poet", ai="claude", model="claude-opus-5", effort="low"))
+        self.assertNotIn(frozenset({"claude"}), self.form.call_args.kwargs["warnings"])
+
+    def test_the_form_is_given_the_model_defaults(self):
+        self._run([])
+        self.assertEqual(self.form.call_args.kwargs["defaults"], _model_defaults(REGISTRY))
+
     def test_picked_ai_overrides_current(self):
         self.assertEqual(self._run(["gemini"], current=AgentBuild(engine="poet", ai="grok")).ai, "gemini")
 
@@ -318,6 +418,217 @@ class TestPromptTags(unittest.TestCase):
         build = self._run([])
         self.assertEqual((build.ai, build.professions, build.specialties, build.policies),
                          (None, (), (), ()))     # ai None: "the default", as the store spells it
+
+
+def _bullets() -> set[str]:
+    """Every bullet under an AI: its follow bullet and its model bullets."""
+    return {*_model_keys(REGISTRY)} | {_follow_key(ai) for ai in REGISTRY.ais.values()}
+
+
+def _under_ai_keys() -> set[str]:
+    """Every row key under an AI: its bullets, and the effort row under each."""
+    return _bullets() | {_effort_key(bullet) for bullet in _bullets()}
+
+
+class TestModelRows(unittest.TestCase):
+    """What sits under each AI's row (operators' words, 2026-09-28 and 29):
+    FOLLOW THE ENGINE first, then its models.list as bullets that pin, then
+    its horizontal EFFORT pick. The bullets are one MANDATORY radio group —
+    exactly one, always — the engine's and the AI's dots returning it to
+    follow (`_model_defaults`); every row folds while its AI is not dotted,
+    and the effort row also while the dotted model takes no level."""
+
+    @staticmethod
+    def rows(build=AgentBuild()):
+        return _tag_form_options(REGISTRY, build, scope="solo")
+
+    @staticmethod
+    def text(option, dotted=frozenset()):
+        label = option.label(frozenset(dotted)) if callable(option.label) else option.label
+        return "".join(t for _, t in label)
+
+    def test_each_ai_has_follow_then_its_models_each_with_its_effort_row_beneath(self):
+        rows, keys = self.rows(), _model_keys(REGISTRY)
+        for ai in REGISTRY.ais.values():
+            with self.subTest(ai=ai.name):
+                bullets = [o for o in rows if o.attached_to == ai.name]
+                self.assertEqual(bullets[0].key, _follow_key(ai))
+                self.assertEqual([keys[o.key][1] for o in bullets[1:]], list(ai.models))
+                self.assertTrue(all(o.group == "model" and o.folds_with_anchor for o in bullets))
+                for bullet in bullets:
+                    (effort,) = [o for o in rows if o.attached_to == bullet.key]
+                    self.assertEqual(effort.key, _effort_key(bullet.key))
+                    self.assertTrue(effort.folds_with_anchor)
+                    self.assertIsNotNone(effort.choices)
+
+    def test_each_effort_row_sits_directly_below_its_bullet(self):
+        rows = self.rows()
+        for index, option in enumerate(rows):
+            if option.choices is not None:
+                with self.subTest(row=option.key):
+                    self.assertEqual(rows[index - 1].key, option.attached_to)
+
+    def test_the_follow_bullet_names_the_model_the_dotted_engine_means(self):
+        follow = next(o for o in self.rows() if o.key == "claude:(follow)")
+        self.assertIn("follow the engine", self.text(follow))
+        self.assertIn("Sonnet-5", self.text(follow, {"poet", "claude"}))          # poet → 2025Q3 → claude-sonnet-5
+        self.assertIn("Haiku-4.5", self.text(follow, {"golem", "claude"}))        # golem → the Haiku ALIAS, resolved
+        self.assertIn("Fable-5.1", self.text(follow, {"thinker", "claude"}))
+
+    def test_a_live_stored_pin_is_prefilled_by_id_or_alias(self):
+        for spelling in ("claude-haiku-4-5-20251001", "claude-haiku-4-5"):
+            with self.subTest(stored=spelling):
+                dotted = [o.key for o in self.rows(AgentBuild(ai="claude", model=spelling)) if o.group == "model" and o.checked]
+                self.assertEqual(dotted, ["claude:claude-haiku-4-5-20251001"])
+
+    def test_no_pin_a_stale_pin_or_another_ais_pin_prefills_nothing(self):
+        # The form's `defaults` then dot follow at open (the next tests).
+        for build in (AgentBuild(ai="claude"), AgentBuild(ai="claude", model="claude-opus-4-1"),
+                      AgentBuild(ai="gemini", model="claude-opus-5")):
+            with self.subTest(build=build):
+                self.assertEqual([o.key for o in self.rows(build) if o.group == "model" and o.checked], [])
+
+    def test_the_bullets_and_the_effort_rows_say_what_they_do(self):
+        rows = {o.key: "".join(t for _, t in o.body) for o in self.rows()}
+        self.assertIn("the tier moves, the instance moves with it", rows["claude:(follow)"])
+        self.assertIn("replacing the engine's rated pairing", rows["claude:claude-opus-5-5"])
+        self.assertIn("runs at the model's highest level", rows["claude:claude-opus-5-5"])
+        self.assertIn("The one marked (default) stores nothing", rows["claude:claude-opus-5-5:(effort)"])
+
+    def test_an_effort_row_offers_its_models_levels_with_the_default_tagged_not_added(self):
+        # No "default" position (operator, 2026-09-29): the levels alone, the
+        # default among them tagged — and pre-selected (choice_default).
+        rows = {o.key: o for o in self.rows()}
+        follow = rows["claude:(follow):(effort)"]
+        poet = frozenset({"poet", "claude", "claude:(follow)"})
+        self.assertEqual(follow.choices(poet), [("low", "low"), ("medium", "medium (default)"), ("high", "high"),
+                                                ("xhigh", "xhigh"), ("max", "max")])
+        self.assertEqual(follow.choice_default(poet), "medium")                  # poet's rated level
+        opus = rows["claude:claude-opus-4-6:(effort)"]
+        dotted = frozenset({"poet", "claude", "claude:claude-opus-4-6"})
+        self.assertEqual([value for value, _ in opus.choices(dotted)], ["low", "medium", "high", "max"])   # the gap, kept
+        self.assertEqual(opus.choice_default(dotted), "max")                     # a pin's default is its top
+
+    def test_the_default_tag_moves_with_the_dotted_bullet(self):
+        # bug-investigator, gate effort-row: a stale tag pointing at the old
+        # default is the failure a user would trust.
+        rows = {o.key: o for o in self.rows()}
+        def tagged(key, dotted):
+            return [value for value, text in rows[key].choices(frozenset(dotted)) if text.endswith("(default)")]
+        self.assertEqual(tagged("claude:(follow):(effort)", {"quick", "claude", "claude:(follow)"}), ["high"])
+        self.assertEqual(tagged("claude:(follow):(effort)", {"thinker", "claude", "claude:(follow)"}), ["max"])
+        self.assertEqual(tagged("claude:claude-sonnet-5:(effort)", {"quick", "claude", "claude:claude-sonnet-5"}), ["max"])
+
+    def test_the_effort_row_has_nothing_to_offer_for_a_model_that_takes_none(self):
+        # So the row folds (bug-investigator, gate model-picker-3) — for every
+        # shipped `efforts=-` model, all four AIs.
+        rows = {o.key: o for o in self.rows()}
+        for ai in REGISTRY.ais.values():
+            for model in ai.models:
+                if model.effortless:
+                    bullet = _model_key(ai, model)
+                    with self.subTest(ai=ai.name, model=model.id):
+                        self.assertEqual(rows[_effort_key(bullet)].choices(frozenset({"poet", ai.name, bullet})), [])
+
+    def test_a_stored_effort_starts_on_the_row_under_its_stored_bullet_only(self):
+        follows = {o.key: o.choice for o in self.rows(AgentBuild(ai="claude", effort="low")) if o.choices is not None}
+        self.assertEqual(follows["claude:(follow):(effort)"], "low")
+        self.assertIsNone(follows["claude:claude-opus-5:(effort)"])
+        pinned = {o.key: o.choice for o in self.rows(AgentBuild(ai="claude", model="claude-opus-5", effort="low"))
+                  if o.choices is not None}
+        self.assertEqual((pinned["claude:claude-opus-5:(effort)"], pinned["claude:(follow):(effort)"]), ("low", None))
+
+    def test_an_ais_ids_line_up_down_its_bullets(self):
+        rows, keys = self.rows(), _model_keys(REGISTRY)
+        for ai in REGISTRY.ais.values():
+            starts = {self.text(o).index(keys[o.key][1].id) for o in rows if o.key in keys and o.attached_to == ai.name}
+            with self.subTest(ai=ai.name):
+                self.assertEqual(len(starts), 1)
+
+    def test_every_bullet_requires_its_ai_and_no_mandatory_radio_requires_anything(self):
+        requires = _form_requires(REGISTRY)
+        for key, (ai, _) in _model_keys(REGISTRY).items():
+            with self.subTest(bullet=key):
+                self.assertEqual(requires[key], frozenset({ai.name}))
+        for ai in REGISTRY.ais.values():
+            self.assertEqual(requires[_follow_key(ai)], frozenset({ai.name}))
+        for name in (*REGISTRY.ais, *REGISTRY.harnesses, *REGISTRY.engines):
+            self.assertNotIn(name, requires)
+
+    def test_the_cluster_form_has_nothing_under_an_ai(self):
+        rows = _tag_form_options(REGISTRY, AgentBuild(), scope="cluster", engines=False)
+        self.assertFalse([o for o in rows if o.attached_to is not None])
+
+    def test_the_defaults_send_every_engine_and_ai_to_that_ais_follow_bullet(self):
+        defaults = _model_defaults(REGISTRY)
+        self.assertEqual(len(defaults), len(REGISTRY.engines) * len(REGISTRY.ais))    # TOTAL (bug-investigator)
+        for engine in REGISTRY.engines.values():
+            for ai in REGISTRY.ais.values():
+                self.assertEqual(defaults[frozenset({engine.name, ai.name})], _follow_key(ai))
+
+    def _drive(self, build, keys):
+        """The REAL checkbox_form over the tag form's rows, keystrokes
+        through a pipe, then prompt_tags' reading of what it returned."""
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from launch.gui import form_core
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            pipe.send_text(keys + "\x03\x03")
+            result = form_core.checkbox_form("t", self.rows(build), requires=_form_requires(REGISTRY),
+                                             defaults=_model_defaults(REGISTRY))
+        self.assertIsNotNone(result)
+        with patch.object(forms, "checkbox_form", return_value=result):
+            return prompt_tags(REGISTRY, build, instance="poet__verse", workspace="/tmp/ws", scope="solo")
+
+    def _to(self, build, key):
+        """The downs that reach the row keyed `key`, counting only the rows
+        the form shows at open (by KEY: labels repeat words — the default
+        engine's "baseline max-effort" holds "effort")."""
+        rows = [o for o in form_core_order(self.rows(build)) if not o.header and _shown_at_open(o, build)]
+        return "\x1b[B" * next(i for i, o in enumerate(rows) if o.key == key)
+
+    def test_an_untouched_confirm_keeps_a_stored_effort_that_is_not_the_default(self):
+        # strict-reviewer's baseline trap: the at-open fill must not reset it.
+        build = self._drive(AgentBuild(engine="poet", ai="claude", effort="low"), "\r")
+        self.assertEqual((build.model, build.effort), (None, "low"))
+
+    def test_choosing_another_engine_returns_the_effort_to_its_default(self):
+        # The engine selects the model AND its default level: start on poet
+        # with low pinned under follow, dot quick, confirm — no effort stored.
+        start = AgentBuild(engine="poet", ai="claude", effort="low")
+        build = self._drive(start, self._to(start, "quick") + " \r")
+        self.assertEqual((build.engine, build.model, build.effort), ("quick", None, None))
+
+    def test_landing_back_on_the_default_level_stores_nothing(self):
+        start = AgentBuild(engine="poet", ai="claude")
+        down = self._to(start, "claude:(follow):(effort)")
+        build = self._drive(start, down + "\x1b[D\x1b[C\r")                    # medium (default) → low → medium
+        self.assertIsNone(build.effort)
+        build = self._drive(start, down + "\x1b[C\r")                           # medium → high: a pin
+        self.assertEqual(build.effort, "high")
+
+    def test_the_form_opens_with_exactly_one_bullet_dotted(self):
+        # strict-reviewer's opening cases, through the real checkbox_form,
+        # whose `defaults` fill at open.
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from launch.gui import form_core
+        cases = {
+            "no pin": (AgentBuild(engine="poet", ai="claude"), "claude:(follow)"),
+            "a live pin": (AgentBuild(engine="poet", ai="claude", model="claude-opus-5-5"), "claude:claude-opus-5-5"),
+            "a stale pin": (AgentBuild(engine="poet", ai="claude", model="claude-opus-4-1"), "claude:(follow)"),
+            "another AI's pin": (AgentBuild(engine="golem", ai="gemini", model="claude-opus-5"), "gemini:(follow)"),
+        }
+        bullets = {*_model_keys(REGISTRY), *(_follow_key(ai) for ai in REGISTRY.ais.values())}
+        for label, (build, expected) in cases.items():
+            with self.subTest(case=label), create_pipe_input() as pipe, \
+                    create_app_session(input=pipe, output=DummyOutput()):
+                pipe.send_text("\r\x03\x03")
+                result = form_core.checkbox_form("t", self.rows(build), requires=_form_requires(REGISTRY),
+                                                 defaults=_model_defaults(REGISTRY))
+                self.assertEqual([key for key in result.checked if key in bullets], [expected])
 
 
 class TestFormRequires(unittest.TestCase):
@@ -683,3 +994,21 @@ class TestPlanWarnings(unittest.TestCase):
         # one message silently. Disjoint by construction — one covers pairs
         # that cannot run at all, the other pairs that can.
         self.assertEqual(set(_pairing_warnings(REGISTRY)) & set(_harness_warnings(REGISTRY)), set())
+
+
+def form_core_order(options):
+    from launch.gui.form_core import ordered_form_options
+    return ordered_form_options(options)
+
+
+def _shown_at_open(option, build):
+    """Whether a row shows when the tag form opens on `build` with no pin:
+    everything not under an AI, the dotted AI's follow bullet and bullets,
+    and the effort row under follow — the stops ↓ walks through."""
+    if option.attached_to is None:
+        return True
+    ai = REGISTRY.ai_for(build)
+    if option.attached_to == ai.name:
+        return True
+    return option.attached_to == _follow_key(ai) and _effort_key(_follow_key(ai)) == option.key
+

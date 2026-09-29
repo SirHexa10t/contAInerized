@@ -5,6 +5,7 @@ full_description  = "Anthropic's Claude line (Fable, Opus, Sonnet, Haiku). Known
 vendor            = "Anthropic"
 harness           = "claude-code"      # its default harness — an agents/harness/ member (launch/ai/claude_code.py is that one's adapter)
 key_env           = "ANTHROPIC_API_KEY"     # the vendor's API-key variable: credentials/keys/claude.env defines it — Claude Code, OpenCode, Hermes, OpenClaw read it; Claude Code also takes ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN
+model_prefix      = "claude-"             # every id in models.list starts so; the picker label drops it (⟪Claude:Opus-5.5⟫)
 default           = true               # the AI an instance runs when its build names none (exactly one member may say so)
 # Where a Claude PLAN (Pro / Max) may be spent — the picker warns when a build
 # pairs ⟪Claude⟫ with any other harness, because that pairing bills per token

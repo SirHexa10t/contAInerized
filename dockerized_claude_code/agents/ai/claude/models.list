@@ -1,0 +1,29 @@
+# Claude's MODELS — what the tag form offers as an instance's model, one line
+# per model, and each one's EFFORT RANGE — what the form's effort row offers
+# for it (launch/tags/models.py documents the columns). No `model` in an
+# instance's mapping means its engine's (at the engine's rated level); a pinned
+# model with no `effort` runs at its top level.
+# A pinned model replaces the one this AI's efforts.tiers pins for the
+# instance's engine; the engine's switches stay.
+# Order is the form's: strongest family first — Fable, Opus, Sonnet, Haiku —
+# and newest version first within it.
+# Ids and effort ranges verified 2026-09-28 against platform.claude.com's
+# models overview, model-deprecations and effort pages (the effort page's
+# supportedModels list; `ai_project-update-models`): every id below is Active.
+# Beside each, Anthropic's tentative retirement floor ("not sooner than") —
+# a floor, not a date: retirement follows a deprecation notice, 60+ days out.
+# Left out: the Mythos family, offered by invitation only.
+
+claude-fable-5-1             efforts=low,medium,high,xhigh,max                      # not sooner than 2027-09-01
+claude-fable-5               efforts=low,medium,high,xhigh,max                      # 2027-06-09
+claude-opus-5-5              efforts=low,medium,high,xhigh,max                      # 2027-09-22 — available, not yet a tier: unrated (efforts.tiers)
+claude-opus-5                efforts=low,medium,high,xhigh,max                      # 2027-07-24
+claude-opus-4-8              efforts=low,medium,high,xhigh,max                      # 2027-05-28
+claude-opus-4-7              efforts=low,medium,high,xhigh,max                      # 2027-04-16
+claude-opus-4-6              efforts=low,medium,high,max                            # 2027-02-05 — takes max but NOT xhigh (Anthropic's effort page)
+claude-opus-4-5-20251101     efforts=low,medium,high                                # 2026-11-24
+claude-sonnet-5-5            efforts=low,medium,high,xhigh,max                      # 2027-09-28 — released 2026-09-28; available, not yet a tier: unrated
+claude-sonnet-5              efforts=low,medium,high,xhigh,max                      # 2027-06-30
+claude-sonnet-4-6            efforts=low,medium,high,max                            # 2027-02-17 — takes max but NOT xhigh
+claude-sonnet-4-5-20250929   efforts=-                                              # 2026-09-29 — the floor has passed, still Active (no notice); takes no effort level (absent from Anthropic's effort page)
+claude-haiku-4-5-20251001    alias=claude-haiku-4-5  efforts=-                      # 2026-10-15 — Anthropic: "Default effort: Not supported"; its thinking switch is the knob

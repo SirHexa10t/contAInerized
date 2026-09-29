@@ -210,5 +210,61 @@ class TestFindTurns(unittest.TestCase):
         self.assertEqual(transcripts.find_turns(bare, "widget"), [])
 
 
+class TestLayoutsPerHarness(unittest.TestCase):
+    """The transcript layout is each adapter's, and the two questions asked of
+    it want different answers about WHICH layout counts: resuming asks of the
+    harness the instance runs now; showing and searching read whatever is
+    present and readable, and say so when it is not (gate step4-start)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.state = Path(self.tmpdir.name)
+
+    def write(self, relative, events):
+        path = self.state / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    def claude_session(self):
+        self.write("projects/-workspace/s.jsonl", [
+            {"type": "user", "message": {"role": "user", "content": "claude-era question"},
+             "timestamp": "2026-01-01T00:00:00.000Z"}])
+
+    def gemini_session(self):
+        self.write("tmp/workspace/chats/session-x.jsonl", [{"type": "user", "content": "gemini-era"}])
+
+    def test_resume_is_asked_of_the_harness_the_instance_runs_now(self):
+        # Switched from Claude Code to Gemini CLI: the Claude transcript is
+        # still in the dir, and Gemini cannot continue it.
+        from launch.ai import CLAUDE_CODE, GEMINI_CLI
+        self.claude_session()
+        self.assertTrue(transcripts.has_continuable_jsonl(self.state, CLAUDE_CODE))
+        self.assertFalse(transcripts.has_continuable_jsonl(self.state, GEMINI_CLI))
+        self.gemini_session()
+        self.assertTrue(transcripts.has_continuable_jsonl(self.state, GEMINI_CLI))
+
+    def test_a_layout_the_parser_cannot_read_is_found_and_named(self):
+        self.gemini_session()
+        self.assertEqual(transcripts.unreadable_layout(self.state), "Gemini CLI")
+        self.assertIsNone(transcripts.last_prompt_in_state(self.state))   # never parsed as Claude's shape
+        self.assertEqual(transcripts.find_turns(self.state, "gemini"), [])
+
+    def test_a_readable_layout_is_not_flagged(self):
+        self.claude_session()
+        self.assertIsNone(transcripts.unreadable_layout(self.state))
+        prompt, _ = transcripts.last_prompt_in_state(self.state)
+        self.assertEqual(prompt, "claude-era question")
+
+    def test_last_used_is_any_layouts_newest_input_log(self):
+        # A display question: used under either CLI is used.
+        self.write("history.jsonl", [{}])
+        self.write("tmp/workspace/logs.json", [{}])
+        import os
+        os.utime(self.state / "history.jsonl", (100, 100))
+        os.utime(self.state / "tmp/workspace/logs.json", (200, 200))
+        self.assertEqual(transcripts.last_history_mtime(self.state), 200)
+
+
 if __name__ == "__main__":
     unittest.main()

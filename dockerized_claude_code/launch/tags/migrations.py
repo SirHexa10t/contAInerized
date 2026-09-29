@@ -25,6 +25,12 @@ And the pre-tags two-map format:
 doesn't exist but either legacy map does, the maps fold into the store and
 the originals are renamed `*.pre-rewrite.bak`. Every later launch (store
 present) and every fresh install (no maps) is a no-op.
+
+And one retired TREE format, refused rather than converted: a policy's
+`policy.json`, the Claude Code settings fragment its `tag.rules` replaced
+(2026-09-26). The policy scanner asks `refuse_retired_policy_file` of every
+policy dir, so a stale fragment — a custom policy, an old branch — stops the
+scan with the way out instead of being read by nothing.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from ..ai import CLAUDE_CODE
 from ..file_access import ensure_dir, is_dir, is_file, login_state, make_private, move_path, path_exists, read_text
 from ..paths import AGENTS_DIR, AGENTS_STATE, INSTANCES_FILE
 from . import store
+from .base import TagError
 from .lego import load_lego
 
 AGENT_WORKSPACE_MAP_FILE = AGENTS_STATE / "agent_workspace_map.json"
@@ -56,9 +63,22 @@ _MODE_TRANSLATION: dict[str, list[tuple[str, str]]] = {
 }
 
 
+RETIRED_POLICY_FILE = "policy.json"         # a policy's rules as one CLI's settings fragment, until 2026-09-26
 RETIRED_STATE_DIR_NAME = ".claude-agents"   # the state dir's name until 2026-09-14
 SUPERSEDED_SUFFIX = ".superseded.bak"       # an old-location login file outranked by a newer one at the new place
 REPLACED_SUFFIX = ".replaced.bak"           # a new-place file that recorded no login, set aside when the real one moved in
+
+
+def refuse_retired_policy_file(tag_dir: Path) -> None:
+    """Stop the scan when `tag_dir` (a policy, or a hidden fragment) still
+    holds a `policy.json`. Refused, not converted: whether a command is a
+    WORD or a STEM is a decision the fragment only implied, so the rewrite
+    is an author's. Loud, because a file nothing reads is a policy that
+    silently stopped applying."""
+    if is_file(tag_dir / RETIRED_POLICY_FILE):
+        raise TagError(f"{tag_dir}/{RETIRED_POLICY_FILE}: retired on 2026-09-26 — write the rules in the launcher's "
+                       f"words as tag.rules (launch/tags/rules.py); settings no word can say go in a hidden "
+                       f"fragment's <harness>.json")
 
 
 def relocate_state_dir() -> None:

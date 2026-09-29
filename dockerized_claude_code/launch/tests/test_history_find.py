@@ -141,6 +141,34 @@ class TestFindInHistory(_StateRoot):
         self.assertEqual(len(find_in_history("WIDGET")), 1)
 
 
+class TestUnsearched(_StateRoot):
+    """A conversation kept in a layout the launcher cannot read yet is FOUND
+    and named, never silently skipped: a skipped one would read as one that
+    never said the term (strict-reviewer, gate step4-start)."""
+
+    def gemini_chat(self, state_dir):
+        path = state_dir / "tmp" / "workspace" / "chats" / "session-x.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"type": "gemini"}\n')
+
+    def test_a_gemini_conversation_is_counted_not_searched(self):
+        self.gemini_chat(self.instance("golem__gem"))
+        self.write(self.instance("poet__claude"), "s.jsonl",
+                   [_turn("user", "widget", "2026-09-10T09:00:00Z")])
+        self.assertEqual(history_find.unsearched_counts(), {"Gemini CLI": 1})
+
+    def test_the_note_is_printed_whether_or_not_anything_was_found(self):
+        self.gemini_chat(self.instance("golem__gem"))
+        unsearched = history_find.unsearched_counts()
+        with patch("sys.stdout", new_callable=StringIO) as out:
+            print_findings("widget", [], unsearched)
+        self.assertIn("No conversation mentions", out.getvalue())
+        self.assertIn("Not searched: 1 conversation in Gemini CLI", out.getvalue())
+
+    def test_nothing_unreadable_means_no_note(self):
+        self.assertIsNone(history_find.unsearched_note({}))
+
+
 class TestQuote(unittest.TestCase):
     """What a result row shows of a long turn."""
 

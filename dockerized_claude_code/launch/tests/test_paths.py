@@ -58,15 +58,70 @@ class TestRepoDerivedConstants(unittest.TestCase):
         self.assertEqual(paths.TEMPLATE_FILES_DIR, paths.DOCKERIZED_CLAUDE_ROOT / "launch" / "template_files")
 
 
+class TestHarnessMounts(unittest.TestCase):
+    """The always-on mounts, split by who owns them: FIXED launcher assets at
+    one path for every harness, the harness's own rows under its root, and
+    nothing at all where a harness lacks the concept (gate step4-start)."""
+
+    def test_the_fixed_rows_are_identical_whatever_the_harness(self):
+        from launch.ai import CLAUDE_CODE, GEMINI_CLI
+        fixed = [pair for pair in paths.base_mounts(CLAUDE_CODE)
+                 if pair not in paths.harness_base_mounts(CLAUDE_CODE, str(paths.container_config_root(CLAUDE_CODE)))]
+        for pair in fixed:
+            with self.subTest(target=pair[1]):
+                self.assertIn(pair, paths.base_mounts(GEMINI_CLI))
+
+    def test_skills_land_under_each_harness_own_root(self):
+        from launch.ai import CLAUDE_CODE, GEMINI_CLI
+        for adapter, root in ((CLAUDE_CODE, "/home/claude/.claude"), (GEMINI_CLI, "/home/claude/.gemini")):
+            with self.subTest(harness=adapter.key):
+                targets = [t for _, t in paths.harness_base_mounts(adapter, root)]
+                self.assertIn(f"{root}/skills:ro", targets)
+
+    def test_a_harness_gets_no_dead_copies_of_another_clis_files(self):
+        # Claude Code's statusline script and key bindings mean nothing to
+        # Gemini CLI: absent, not relocated.
+        from launch.ai import CLAUDE_CODE, GEMINI_CLI
+        claude = {Path(s).name for s, _ in paths.harness_base_mounts(CLAUDE_CODE, "/c")}
+        gemini = {Path(s).name for s, _ in paths.harness_base_mounts(GEMINI_CLI, "/g")}
+        self.assertLessEqual({"statusline.sh", "keybindings.json"}, claude)
+        self.assertEqual(gemini & {"statusline.sh", "keybindings.json"}, set())
+
+    def test_no_fixed_row_lands_under_a_moving_root_other_than_by_history(self):
+        # Every fixed target is either HOME-level (bashrc, herdr's own path)
+        # or the launcher-assets path — never Gemini's root, so nothing in the
+        # fixed table silently depends on which harness runs.
+        for _, target in paths.DOCKER_BASE_MOUNTS.items():
+            with self.subTest(target=target):
+                self.assertNotIn("/.gemini", target)
+
+
 class TestContainerConstants(unittest.TestCase):
     def test_claude_home_in_container(self):
         self.assertEqual(paths.CLAUDE_HOME_IN_CONTAINER, Path("/home/claude"))
 
-    def test_claude_config_in_container(self):
-        self.assertEqual(paths.CLAUDE_CONFIG_IN_CONTAINER, Path("/home/claude/.claude"))
+    def test_the_launcher_assets_path_is_fixed_whatever_the_harness(self):
+        # bashrc.sh, the muxer configs and {muxer}'s tag.docker spell it
+        # literally; it is Claude Code's root only by history.
+        self.assertEqual(paths.LAUNCHER_ASSETS_IN_CONTAINER, Path("/home/claude/.claude"))
 
-    def test_skills_in_container(self):
-        self.assertEqual(paths.SKILLS_IN_CONTAINER, Path("/home/claude/.claude/skills"))
+    def test_a_harness_config_root_follows_its_adapter(self):
+        # Two things that were one constant until gate step4-start: for
+        # Claude Code they coincide, for Gemini CLI they do not.
+        from launch.ai import CLAUDE_CODE, GEMINI_CLI
+        self.assertEqual(paths.container_config_root(CLAUDE_CODE), Path("/home/claude/.claude"))
+        self.assertEqual(paths.container_config_root(GEMINI_CLI), Path("/home/claude/.gemini"))
+
+    def test_the_config_root_defaults_to_the_running_adapter_at_call_time(self):
+        # A module constant here was the reason a second harness could not
+        # start: it kept Claude Code's name after a Gemini instance adopted.
+        from launch.ai import set_active_harness
+        try:
+            set_active_harness("gemini-cli")
+            self.assertEqual(paths.container_config_root(), Path("/home/claude/.gemini"))
+        finally:
+            set_active_harness(None)
+        self.assertEqual(paths.container_config_root(), Path("/home/claude/.claude"))
 
     def test_claude_summary_in_container(self):
         self.assertEqual(paths.CLAUDE_SUMMARY_IN_CONTAINER, Path("/workspace/.claude_summary"))
@@ -133,35 +188,11 @@ class TestOptionalCredsTokenEnvVars(unittest.TestCase):
 
 
 class TestPathBuilderLambdas(unittest.TestCase):
-    def test_state_workspace_jsonls_missing_dir_yields_empty(self):
-        # Documented behaviour: glob on a missing dir returns an empty iterator,
-        # which is what lets has_continuable_jsonl skip the is_dir() guard.
-        self.assertEqual(list(paths.state_workspace_jsonls(Path("/tmp/definitely-missing"))), [])
-
-    def test_state_workspace_jsonls_yields_jsonls_under_workspace_subdir(self):
-        # Concrete-path assertion: the lambda must look under projects/-workspace/
-        # specifically (not just projects/, and not the state dir root where
-        # history.jsonl actually lives), and must filter by `.jsonl` extension.
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            state = Path(tmp)
-            target = state / "projects" / "-workspace"
-            target.mkdir(parents=True)
-            (target / "abc-uuid.jsonl").touch()
-            (target / "def-uuid.jsonl").touch()
-            (target / "ignore.txt").touch()
-            (state / "history.jsonl").touch()                              # actual location — must NOT be picked up
-            (state / "projects" / "other-project").mkdir()
-            (state / "projects" / "other-project" / "sneaky.jsonl").touch() # different project — must NOT be picked up
-
-            found = {p.name for p in paths.state_workspace_jsonls(state)}
-            self.assertEqual(found, {"abc-uuid.jsonl", "def-uuid.jsonl"})
-
     def test_state_domain_resolve_status_for_container_path(self):
         # Same lambda works for the in-container claude-config dir; this is
         # how memory_addendums builds the in-container status file path.
         self.assertEqual(
-            paths.state_domain_resolve_status_path(paths.CLAUDE_CONFIG_IN_CONTAINER),
+            paths.state_domain_resolve_status_path(paths.container_config_root()),
             Path("/home/claude/.claude/domains_pending_resolve.yml"),
         )
 
@@ -262,7 +293,9 @@ class TestGroupHostingPaths(unittest.TestCase):
         # The design decision, not the spelling: the group dir must not squat
         # Claude Code's own ~/.claude namespace (projects/, skills/, todos/).
         self.assertTrue(paths.COWORK_IN_CONTAINER.is_absolute())
-        self.assertNotIn(str(paths.CLAUDE_CONFIG_IN_CONTAINER), str(paths.COWORK_IN_CONTAINER))
+        from launch.ai import ADAPTERS
+        for adapter in ADAPTERS.values():
+            self.assertNotIn(str(paths.container_config_root(adapter)), str(paths.COWORK_IN_CONTAINER))
 
 
 if __name__ == "__main__":

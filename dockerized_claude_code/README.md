@@ -87,7 +87,7 @@ isolated Docker container with persistent per-instance state.
     `⟦GeminiCLI⟧`, `⟦CodexCLI⟧`, `⟦GrokBuild⟧`, and the open multi-model
     `⟦OpenCode⟧`, `⟦OpenClaw⟧`, `⟦Hermes⟧`. A member dir names the vendor, the AIs
     the CLI runs, its binary and its package, and carries the launcher's budget
-    words in that CLI's settings (`knobs.mapping`); an instance runs in its
+    words in that CLI's settings (`engine.mapping`); an instance runs in its
     AI's default harness unless it picks another that runs that AI. Only `⟦ClaudeCode⟧` has
     an adapter in the launcher today, so instances in the other harnesses can
     be described and stored, not yet launched. Picking a harness the AI's
@@ -107,7 +107,22 @@ isolated Docker container with persistent per-instance state.
   - `(engine)` — how hard it thinks: a `tag.budget` in the launcher's OWN
     words (a step such as `high`, switches such as `memory = false`, amounts
     such as `max_output_tokens = 36000`) — no AI's key names; the instance's
-    AI translates it.
+    AI translates it. The tag form asks for the engine FIRST, then the AI;
+    under the dotted AI sit "follow the engine" and its models
+    (`agents/ai/<name>/models.list`), with a horizontal effort pick under
+    whichever is dotted, its default level tagged `(default)` — dotting that
+    one stores no level. Exactly one bullet is always dotted, and choosing
+    an engine or an AI returns it to "follow": the instance then runs the
+    engine's rated pair — the model and level its standard rates for that
+    AI — stores neither, and moves with the engine as we re-rate its tier.
+    Dotting a model pins it, even the engine's current one, replacing the
+    engine's rated pairing (the capability standard no longer vouches for
+    it) and running it at its highest level unless a level is pinned too;
+    the engine's switches stay. A pinned level the model does not take runs
+    as the nearest level at or below it. The picker's AI tag always names
+    the model that runs (`⟪Claude:Fable-5.1⟫`); a pick the vendor has since
+    retired shows red and runs the engine's pair with a notice, and is never
+    a reason to refuse the launch.
   - `[profession]` — tools it can use: a Dockerfile image layer (`[code]`
     adds Rust + Node + uv; `[webdev]` adds the playwright CLI and the site
     toolbox — `dig`, `whois`, `openssl`).
@@ -115,17 +130,17 @@ isolated Docker container with persistent per-instance state.
     permission prompts, `{firewall}` applies an iptables outbound whitelist,
     `{dood}` bind-mounts the host's Docker socket, `{ro}` mounts the
     workspace read-only (and denies the edit tools) for reviewers.
-  - `<policy>` — what it's permitted to do: a Claude Code settings fragment
-    (`<+qry>` allows WebSearch/WebFetch, `<-su>` denies sudo, `<!plan>`
-    mandates plan mode), merged and mounted read-only so the agent can't
-    redefine its limits. Colored by stance: orange grants, blue denies,
+  - `<policy>` — what it's permitted to do, in the launcher's own words, which
+    each harness renders into its own permission rules (`<+qry>` allows web
+    search and fetch, `<-su>` denies sudo, `<!plan>` mandates plan mode),
+    mounted read-only so the agent can't redefine its limits. Colored by stance: orange grants, blue denies,
     white demands. A policy marked `always_on = true` in its tag.info is a
     STATIC tag — applied to every instance unconditionally, shown grayed and
     locked in the form, and never listed in `.lego` files or
     `instances.toml` (`<-su>` ships that way: sudo is denied everywhere).
 
   Adding a member is a folder with a `tag.info` (and optionally a
-  `tag.budget` / `Dockerfile` / `tag.docker` / `policy.json`) — no launcher code. Tree
+  `tag.budget` / `Dockerfile` / `tag.docker` / `tag.rules`) — no launcher code. Tree
   position encodes requirements: `profession/code/webdev/` means `[webdev]`
   requires `[code]`. Selections are made in a kind-sectioned form at
   create/modify time — the AI, then the engines, as radio groups up top,
@@ -502,7 +517,7 @@ wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
    switches (`thinking`, `memory`, `background_agents`, `telemetry`,
    `tool_search`) and amounts (`max_output_tokens`, `tool_output_tokens`,
    `compact_at_percent`). Every `agents/ai/*/efforts.tiers` says which model
-   and effort meet that tier on that AI, and the harness's `knobs.mapping`
+   and effort meet that tier on that AI, and the harness's `engine.mapping`
    translates the rest into that CLI's settings. Nested
    engine folders overlay their parent's budget key-by-key.
 4. Re-run `python3 run.py` — the new agent appears in the picker, grouped by
@@ -514,18 +529,27 @@ wrong. It's read-only. `python3 -m launch.audit -h` prints the full check list.
 Every tag kind is discovered from the tree — a new member is a folder, not
 launcher code:
 
-- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers}` — `tag.info`
+- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers, models.list}` — `tag.info`
   adds `vendor`, `harness` (the key of its default `agents/harness/` member),
-  `default` (exactly one member says true) and the tag's own colours `fg` /
-  `bg` as hex; `efforts.tiers`
+  `default` (exactly one member says true), `model_prefix` (what every model
+  id starts with — the picker's label drops it) and the tag's own colours
+  `fg` / `bg` as hex; `efforts.tiers`
   answers every capability standard (`[cheapest]`, each dated quarter of
   `agents/ai/capability.standards`, `[best]` — a `model` and an `effort` each,
   the AI's `[scale]` of effort words) with the Artificial Analysis index and
-  the token cost as comments.
-- **Harness**: `agents/harness/<name>/{tag.info, knobs.mapping}` — `tag.info`
+  the token cost as comments; `models.list` names every model the tag form
+  may offer, one per line, strongest family first and newest version first —
+  the id, its `efforts=` range (required: the levels it takes, in the AI's
+  `[scale]` words, or `-` for none), then any `alias=` or `display=`
+  (`launch/tags/models.py`), and a `verified YYYY-MM-DD` line. A model the
+  vendor retires is deleted. Every tier must pin a listed model (by id or
+  alias) at a level it takes, omitting the level exactly when its model
+  takes none. A `.lego` never names a model or an effort: those are an
+  instance's picks, and the key is refused.
+- **Harness**: `agents/harness/<name>/{tag.info, engine.mapping}` — `tag.info`
   adds `vendor`, `ais` (the AI members the CLI runs: an AI's default harness
   must list it, and an instance pairing a harness with an AI it cannot run
-  falls back to the AI's own), `binary` and `package`; `knobs.mapping` maps the
+  falls back to the AI's own), `binary` and `package`; `engine.mapping` maps the
   budget purposes (`[model]`, `[effort]`, `[thinking.on]`, `[memory.off]`,
   `[max_output_tokens]` …) to that CLI's native settings as `{value}` templates,
   with `{value/100}` and `{value*4}` for unit conversions and `{provider}` (from
@@ -550,10 +574,38 @@ launcher code:
   container config (mounts, `cap_add`, `entrypoint`, env forwards) goes in
   `tag.docker`; `agents/specialty/combos.info` holds warnings for risky
   multi-tag combinations.
-- **Policy**: `agents/policy/<name>/{tag.info, policy.json}` — the JSON is a
-  Claude Code settings fragment. Fragments merge (lists concatenate; a
-  scalar conflict aborts the launch naming both policies) on top of
-  `settings/settings.json`, and the result is mounted read-only.
+- **Policy**: `agents/policy/<name>/{tag.info, tag.rules}` — the rules in the
+  launcher's own words, never one CLI's tool names:
+
+  ```toml
+  [deny]
+  tools = ["web"]            # capabilities: shell, web, read, write, subagents
+  shell = ["curl", "wget"]   # command WORDS: curl and curl anything, never curlie
+  # shell_stems = ["git push"]   STEMS: also git pushall
+  # [allow] all = true           every tool the harness maps
+  # [demand] mode = "plan"
+  ```
+
+  The table must be the one the policy's `stance` names. Each harness's
+  `agents/harness/<name>/policy.mapping` renders the words: for Claude Code,
+  permission rules in `settings.json` (merged on top of
+  `settings/settings.json`: lists concatenate, a scalar conflict aborts the
+  launch naming both); for Gemini CLI, a rules file for its Policy Engine,
+  passed as `--policy`. Both are mounted read-only. A deny or demand the
+  harness cannot express refuses the launch, naming the policy and the word;
+  an allow it cannot express is a note.
+
+  **What a policy guarantees, and against whom.** Every rule is enforced by
+  the CLI the launcher starts. An agent with a shell (`<+all>`, `<+bash>`)
+  can start a second copy of that CLI itself, pointed at a config of its own,
+  and per-instance rules do not follow it there — they are guardrails against
+  drift and accident, not a fence against an agent that is trying; the
+  container is the sandbox. The exception is the ALWAYS-ON policies (today
+  `<-su>`): identical for every instance, they are also baked into the image
+  as root at each CLI's fixed tier — Claude Code's managed settings, Gemini
+  CLI's system policies dir — which a second copy reads too (`[fixed]` in
+  each `policy.mapping`). An always-on policy must therefore be a deny: at a
+  fixed tier an allow would outrank every per-instance deny.
 
 **Where a tag may not go — `forbid_on`.** A build lives in one of three
 scopes: a **solo** instance (an agent's `.lego` is its defaults), a
@@ -594,7 +646,7 @@ how `{dood}` claims its `_dood` image layer).
 `instances.toml`.
 Point your editor at the TOML grammar for those extensions/filenames to get
 syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
-"toml", "*.info": "toml", "*.docker": "toml"}`). An engine's `tag.budget`, an AI's `efforts.tiers` and a harness's `knobs.mapping` are TOML too (map `*.budget`, `*.tiers` and `*.mapping` to `toml` as well).json` is JSON.
+"toml", "*.info": "toml", "*.docker": "toml"}`). An engine's `tag.budget`, an AI's `efforts.tiers` and a harness's `engine.mapping` are TOML too (map `*.budget`, `*.tiers` and `*.mapping` to `toml` as well).json` is JSON.
 
 ## Persistent State Layout
 
@@ -618,7 +670,8 @@ syntax highlighting (e.g. in VS Code, `"files.associations": {"*.lego":
   instances/                         # all instance state dirs live here (keeps the root uncluttered)
     <agent>__<session>/              # one per instance
       CLAUDE.md                      # rewritten each launch: source agent .md + active-tag addendums (project summary pointer, privacy rules, credentials notice, {firewall} guidance — composed by tags/addendums.py)
-      settings.json                  # rewritten each launch: settings/settings.json + the instance's policy fragments; mounted READ-ONLY over ~/.claude/settings.json in-container
+      settings.json                  # rewritten each launch: settings/settings.json + the instance's policies as rendered for its harness; mounted READ-ONLY over ~/.claude/settings.json in-container
+      policies/launcher.toml         # a Gemini CLI instance's policies as Policy Engine rules, rewritten each launch; mounted READ-ONLY (the file, never the dir — the CLI saves its own beside it) and passed as --policy, its whole user tier
       projects/-workspace/memory/MEMORY.md   # Claude Code's auto-memory file, agent-owned (the launcher doesn't touch it)
       projects/-workspace/...        # claude's per-project state, incl. history.jsonl
 ```
@@ -766,9 +819,9 @@ cluster.py                           # entry point for CLUSTER mode (PoC) — N 
 check.sh                             # the quality gate — see "Quality gate" below
 .github/workflows/ci.yml             # CI — sets up an environment and calls check.sh
 launch/
-  paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER, CLAUDE_CONFIG_IN_CONTAINER, SKILLS_IN_CONTAINER), bind-mount dicts (DOCKER_BASE_MOUNTS, CACHE_MOUNTS), path-builder lambdas. Import root: zero internal deps.
+  paths.py                           # centralised path constants — host (AGENTS_STATE, INSTANCES_FILE, USER_EXTRAS_DIR, OPTIONAL_CREDS_MOUNTS, OPTIONAL_CREDS_TOKEN_ENV_VARS, DEFAULTING_DIRS), container (CLAUDE_HOME_IN_CONTAINER; LAUNCHER_ASSETS_IN_CONTAINER, the launcher's own files at one fixed path for every harness; container_config_root(adapter), a harness's config root, call-time), bind-mount dicts (DOCKER_BASE_MOUNTS holds the FIXED rows; harness_base_mounts(adapter, config) the harness's own; base_mounts() both), path-builder lambdas. Import root: zero internal deps.
   utils.py                           # domain-neutral helpers — plural, relative_time, ordering_index_or_end, split_host_port, prompt_keypress, call_or_exit. No disk access. Leaf module.
-  ai/                                # the code half of "which harness runs" — LEAF package: catalog.py (DEFAULT_HARNESS_KEY + the call-time active_harness_key() / set_active_harness()), adapter.py (Adapter: an agent CLI's names — binary, flags, config-root files, env vars, hosts, and its AuthFile list: the login files under credentials/<harness>/, each with its container anchor and mount mode), claude_code.py (the one adapter), __init__ (ADAPTERS keyed by the harness member, adapter_for / active_adapter — a LookupError for a harness without one — refusal_for, adopt)
+  ai/                                # the code half of "which harness runs" — LEAF package: catalog.py (DEFAULT_HARNESS_KEY + the call-time active_harness_key() / set_active_harness()), adapter.py (Adapter: an agent CLI's names — binary, flags, config-root files, env vars, hosts, and its AuthFile list: the login files under credentials/<harness>/, each with its container anchor and mount mode), claude_code.py and gemini_cli.py (the adapters; Gemini CLI's is registered but not yet `startable` — its image builds, its container does not start), __init__ (ADAPTERS keyed by the harness member, adapter_for / active_adapter — a LookupError for a harness without one — readiness_note, the ONE "can this harness run" predicate the launch refusal, the form and the audit share, refusal_for, adopt)
   file_access.py                     # every disk-touching call routes through here — agent_md_index, atomic write_text, force_remove (sudo + `sudo -k` fallback), per-instance state-dir probes, optional-creds discovery, iter_conversation_dirs (every state dir that can hold a conversation: instances, cluster members, quickie threads).
   transcripts.py                     # reading Claude Code's session records out of a state dir — is there anything --continue could load and how big, when was it last used, what was said last, and find_turns (every spoken turn containing a term, sub-agent transcripts included).
   transcript_format.py               # ONE transcript LINE, parsed — pure, stdlib-only, no intra-package imports, because this same FILE is RO-mounted into containers as `_transcript_format.py` so the in-container search (`alt+f`) reads a transcript by exactly the rules the host's `--find` does.
@@ -776,11 +829,14 @@ launch/
   tags/                              # the tag system — kinds as classes, members discovered from agents/
     base.py                          #   Tag record + DockerContribution + tag.info/tag.docker parsing + the STRICT tree rule + TagError
     ai.py, engine.py, profession.py, #   the five kind classes, each with its own scanner; ai renders an engine's budget in its settings
-    specialty.py, policy.py          #   (Ai.render); profession discovers hidden `_<name>` layers; specialty adds combos.info; policy adds merge_fragments
-    budget.py                        #   the engine budget vocabulary — Budget (tag.budget), the capability-standard spelling and order (cheapest < YYYYQn < best), the switches and amounts every AI's knobs.mapping translates
+    specialty.py, policy.py          #   (Ai.render); profession discovers hidden `_<name>` layers; specialty adds combos.info; policy adds merge_fragments and the hidden fragments specialties claim
+    rules.py                         #   the policy words — Rules (tag.rules): capabilities, shell words and stems, all, modes; what every harness's policy.mapping translates
+    policy_mapping.py                #   a harness's policy.mapping, parsed and rendered — `settings` format (Claude Code's permission lists) or `policy-engine` (Gemini CLI's rules file); Harness.render_policy
+    budget.py                        #   the engine budget vocabulary — Budget (tag.budget), the capability-standard spelling and order (cheapest < YYYYQn < best), the switches and amounts every AI's engine.mapping translates
+    models.py                        #   an AI's models.list — Model (id, aliases, display, efforts; effort_for: a stored pin's level, falling back by direction), StaleModel (a stored pick its AI's list does not carry), model_label (⟪Claude:Opus-5.5⟫'s Opus-5.5)
     registry.py                      #   scan_all(agents_dir) → Registry: discover + cross-validate + look up
     lego.py                          #   AgentBuild + `.lego` loading (an agent's default tag selections)
-    identity.py                      #   Agent (pickable) + Instance (fully-resolved launch: ai, chain, build_steps, docker_contributions, conf = the engine's budget rendered by the AI, model, effort, claude_args, unmet_wants)
+    identity.py                      #   Agent (pickable) + Instance (fully-resolved launch: ai, chain, build_steps, docker_contributions, conf = the engine's budget rendered by the AI, picked_model / stale_model, picked_effort / stale_effort, model, effort, ai_label, claude_args, unmet_wants)
     store.py                         #   instances.toml load/save (stdlib tomllib in; small TOML emitter out)
     toolkit_profile.py               #   per-profession <profession>_profile.toml — "(Edit Preferences)" install toggles ([code]); same tomllib-in / emitter-out shape as store
     migrations.py                    #   ISOLATED one-shot conversions from retired on-disk formats (legacy two-map JSON → instances.toml)
@@ -805,15 +861,16 @@ launch/
 agents/                              # agent definitions + the tag tree
   <name>.md, <name>.lego             #   persona + default tag selections, per agent
   ai/capability.standards            #   the dated CAPABILITY STANDARDS every AI answers — a quarter whose frontier model raised the record, its index, its setter; the ends cheapest / best are each AI's own
-  ai/<name>/                         #   ⟪AI⟫ members — tag.info (vendor, default harness, default, fg/bg) + efforts.tiers (this AI's tier — model + effort — per standard)
-  harness/<name>/                    #   ⟦Harness⟧ members — tag.info (vendor, the AIs it runs, binary, package) + knobs.mapping (budget words → this CLI's native settings; {provider} slugs for a multi-model CLI); an adapter in launch/ai/ keyed by the member's name makes it launchable
+  ai/<name>/                         #   ⟪AI⟫ members — tag.info (vendor, default harness, default, model_prefix, fg/bg) + efforts.tiers (this AI's tier — model + effort — per standard) + models.list (every model the tag form offers as an instance's default model)
+  harness/<name>/                    #   ⟦Harness⟧ members — tag.info (vendor, the AIs it runs, binary, package) + engine.mapping (budget words → this CLI's native settings; {provider} slugs for a multi-model CLI) + policy.mapping (policy words → this CLI's permission rules; optional); an adapter in launch/ai/ keyed by the member's name makes it launchable
   engine/<name>/                     #   (engine) members — tag.info + tag.budget (effort_tier + switches + amounts, AI-neutral; nested folders overlay the parent's)
   profession/code/                   #   [code] — tag.info + Dockerfile + tag.docker; webdev/ nests inside (requires code); _dood/ is {dood}'s hidden image layer
   specialty/{auto,dood,firewall,read-only}/   #   {specialty} members — tag.info (+ tag.docker, scripts); combos.info holds multi-tag warnings
   specialty/cowork/manager/          #   {manager} nests inside {cowork} — nesting IS the requires mechanism, so ticking the inner tag brings the outer one
   specialty/muxer/cluster/           #   {clstr} nests inside {mux} (a cluster is multiplexing); {mux} claims the hidden profession/_muxer layer that installs both backends (herdr — the default — and tmux)
+  profession/_node/                  #   the shared Node.js layer, claimed by a HARNESS (`layer = "node"` in its tag.info) rather than a specialty: built directly beneath every npm-installed CLI's own layer, stable-keyed, fail-hard, and a no-op when [code] already put Node on the image
   <name>.legoset                     #   a CLUSTER template — which agents, how many of each, default roles (agents/devteam.legoset)
-  policy/{web-research,no-sudo,plan-first,…}/ #   <policy> members — tag.info + policy.json settings fragment (also no-net, no-git, vcs-safe, free-bash, all-actions, hidden _read-only)
+  policy/{web-research,no-sudo,plan-first,…}/ #   <policy> members — tag.info + tag.rules (the rules in launcher words; also no-net, no-git, vcs-safe with vcs-safe/no-git-write nested — nesting is requires —, free-bash, all-actions); hidden _read-only (tag.rules), _cowork / _cluster-cowork (claude-code.json: hooks no word can say yet) are claimed by same-named specialties
 custom_commands/                     # launcher-bundled slash commands (mounted into every container)
 custom_skills/                       # launcher-bundled skills (mounted into every container)
 .claude/commands/                    # workspace-local slash commands for THIS project — auto-discovered when launched here; no mount.
@@ -832,6 +889,13 @@ bash check.sh
 
 Exit 0 means the tree passes. CI (`.github/workflows/ci.yml`) runs the same
 script; what exactly it checks and why is documented in the script's own header.
+
+One test runs the launcher's rendered policy rules through Gemini CLI's own
+policy engine (`launch/tests/test_gemini_policy_engine.py`) and needs that
+CLI's bundle, named by `LAUNCHER_TEST_GEMINI_BUNDLE`: the `[self]` image and
+CI provide it, at the version pinned in `launch/tests/probes/gemini-cli.version`.
+Without the variable the test skips and `check.sh` warns that it did; with it
+set, a missing bundle fails.
 
 To smoke-test a launch without starting a container:
 `python3 run.py <instance> --dry-run` walks every stage up to (but not

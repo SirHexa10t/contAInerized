@@ -45,8 +45,20 @@ HITS_SHOWN = 3         # per conversation; the rest are counted
 
 
 def transcripts_root() -> Path:
-    """This container's own `projects/` dir."""
-    return Path(os.environ.get(TRANSCRIPTS_ENV) or FALLBACK_TRANSCRIPTS)
+    """This container's own transcripts dir, as the launcher staged it.
+
+    The launcher stages it for every container whose CLI's transcripts these
+    helpers can read, so an unset variable means something specific, and it
+    is SAID before falling back — silently reading a default dir that does
+    not exist would report a history nobody could read as an empty one
+    (strict-reviewer, gate step4-start)."""
+    staged = os.environ.get(TRANSCRIPTS_ENV)
+    if staged:
+        return Path(staged)
+    print(f"note: {TRANSCRIPTS_ENV} is not set: this shell is outside a launcher container, "
+          f"or this container's CLI keeps transcripts the launcher cannot read yet "
+          f"— trying {FALLBACK_TRANSCRIPTS}", file=sys.stderr)
+    return FALLBACK_TRANSCRIPTS
 
 
 def search_roots(root: Path) -> list[tuple[str, Path]]:

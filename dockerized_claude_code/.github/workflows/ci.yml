@@ -53,5 +53,21 @@ jobs:
           # build. Bumping these is a one-line edit, made on purpose.
           uv pip install --system ruff==0.16.2 mypy==2.3.0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the policy engine one test drives
+        run: |
+          # A LIBRARY for launch/tests/test_gemini_policy_engine.py, not a
+          # checker: Gemini CLI's own policy engine, at the version pinned in
+          # launch/tests/probes/gemini-cli.version (the one policy.mapping was
+          # verified against; the [self] image bakes the same). Setting the
+          # variable is what makes a missing bundle FAIL that test rather than
+          # skip it.
+          npm install --prefix "$RUNNER_TEMP/gemini-cli" --no-audit --no-fund \
+            "@google/gemini-cli@$(cat launch/tests/probes/gemini-cli.version)"
+          echo "LAUNCHER_TEST_GEMINI_BUNDLE=$RUNNER_TEMP/gemini-cli/node_modules/@google/gemini-cli/bundle" >> "$GITHUB_ENV"
+
       - name: Quality gate
         run: bash check.sh

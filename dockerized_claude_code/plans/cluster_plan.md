@@ -341,7 +341,9 @@ socket API" than we would build.
 ## The `{clstr}` tag
 
 A specialty, shipped like `{cowork}`: `agents/specialty/clstr/` with a
-`tag.info` (its addendum) and a `policy.json` fragment.
+`tag.info` (its addendum) and a `policy.json` fragment. (Since 2026-09-26 a
+specialty's claimed fragment is a `tag.rules` in the launcher's words and/or
+raw `<harness>.json` settings — `.claude_dev_guidelines`, Policy.)
 
 - **Forced and non-removable on every member.** There is no existing
   "irremovable tag" mechanism — the nearest is `{manager}` auto-ticking

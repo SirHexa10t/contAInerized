@@ -1,0 +1,43 @@
+# Nested inside vcs-safe/, so <-gw> requires <-gpush> (the form brings it
+# along): every write <-gpush> denies, this denies too, and more.
+#
+# Every git subcommand that can write — the repository, its index, its working
+# tree, its config or a remote — as a STEM, so a longer name that starts with
+# one is caught too (commit-tree and commit-graph, update-ref, checkout-index,
+# an alias like pushall). FETCHING AND PULLING stay allowed (operator,
+# 2026-09-28): fetch, pull, `remote update`, `lfs fetch` and `lfs pull` are
+# not denied, so remote and lfs are denied by their write verbs rather than
+# whole. `git merge` is a WORD because merge-base and merge-tree only read;
+# the merge-* plumbing that writes is listed by name. Subcommands that read OR
+# write by their arguments (branch, tag, stash, config, worktree, notes,
+# reflog, submodule, symbolic-ref, hash-object) are denied whole: a prefix
+# cannot tell `git branch` from `git branch -D x`, and this policy fails
+# closed. `git -` denies every global option before the subcommand (-C, -c,
+# --git-dir, --work-tree, --no-pager …), because `git -C dir commit` would
+# otherwise walk past `git commit`.
+[deny]
+shell = ["git merge"]
+shell_stems = [
+  "git -",
+  "git add", "git am", "git apply", "git archimport", "git bisect", "git branch",
+  "git bundle", "git checkout", "git cherry-pick", "git citool", "git clean",
+  "git clone", "git commit", "git config", "git credential", "git cvsimport",
+  "git fast-import", "git filter-branch", "git filter-repo", "git gc", "git gui",
+  "git hash-object", "git http-push", "git index-pack", "git init",
+  "git lfs checkout", "git lfs dedup", "git lfs install", "git lfs lock",
+  "git lfs migrate", "git lfs prune", "git lfs push", "git lfs track",
+  "git lfs uninstall", "git lfs unlock", "git lfs untrack", "git lfs update",
+  "git maintenance", "git merge-file", "git merge-index", "git merge-octopus",
+  "git merge-one-file", "git merge-ours", "git merge-recursive", "git merge-resolve",
+  "git merge-subtree", "git mergetool", "git mktag", "git mktree",
+  "git multi-pack-index", "git mv", "git notes", "git p4", "git pack-objects",
+  "git pack-refs", "git prune", "git push", "git quiltimport", "git read-tree",
+  "git rebase", "git receive-pack", "git reflog", "git remote add",
+  "git remote prune", "git remote remove", "git remote rename", "git remote rm",
+  "git remote set-branches", "git remote set-head", "git remote set-url",
+  "git repack", "git replace", "git replay", "git rerere", "git reset",
+  "git restore", "git revert", "git rm", "git send-email", "git send-pack",
+  "git sparse-checkout", "git stage", "git stash", "git submodule", "git subtree",
+  "git svn", "git switch", "git symbolic-ref", "git tag", "git unpack-objects",
+  "git update", "git worktree", "git write-tree",
+]

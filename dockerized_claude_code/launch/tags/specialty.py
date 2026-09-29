@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .base import Tag, TagError, common_fields, read_toml, walk_tag_tree
-from .policy import POLICY_FILE, read_fragment
+from .policy import PolicyFragment
 from .profession import Layer
 
 COMBOS_FILE = "combos.info"
@@ -48,18 +48,11 @@ class Specialty(Tag):
     claude_args: tuple[str, ...] = ()
     workspace_readonly: bool = False   # mount /workspace read-only (docker_config.set_container_mounts honors it via Instance.workspace_readonly)
     layer: Layer | None = None
-    policy_dir: Path | None = None     # a claimed policy/_<name>/ hidden fragment — merged into settings.json alongside the selected policies
-
-    def load_fragment(self) -> dict[str, Any]:
-        """The settings fragment this specialty owns via a claimed
-        `policy/_<name>/policy.json`, or `{}` when it claims none. Same shape
-        as `Policy.load_fragment` so `install_settings` merges both uniformly
-        (that's how `{ro}` contributes its Write/Edit/NotebookEdit deny)."""
-        return read_fragment(self.policy_dir / POLICY_FILE) if self.policy_dir else {}
+    fragment: PolicyFragment | None = None   # a claimed policy/_<name>/ hidden fragment — its rules render beside the selected policies' (that's how `{ro}` contributes its write-tool deny), its raw settings merge on their own harness
 
     @classmethod
     def scan(cls, agents_dir: Path, layers: dict[str, Layer],
-             policy_fragments: dict[str, Path]) -> list["Specialty"]:
+             policy_fragments: dict[str, PolicyFragment]) -> list["Specialty"]:
         """Discover every specialty (a tag dir under `agents/specialty/`,
         `_`-dirs excluded), nested like professions: a specialty inside another
         specialty's dir requires its ancestors (`{manager}` inside `cowork/`
@@ -72,7 +65,7 @@ class Specialty(Tag):
         `workspace_readonly` (bool — mount the workspace `:ro`). A specialty
         named the same as a discovered hidden layer claims that layer; one named
         the same as a hidden policy fragment (`policy/_<name>/`) claims that
-        settings fragment."""
+        fragment."""
         out: list[Specialty] = []
         for tag_dir, ancestors in walk_tag_tree(agents_dir / cls.root):
             fields = common_fields(tag_dir)
@@ -85,7 +78,7 @@ class Specialty(Tag):
                 claude_args=tuple(info.get("claude_args", [])),
                 workspace_readonly=bool(info.get("workspace_readonly", False)),
                 layer=layer,
-                policy_dir=policy_fragments.get(tag_dir.name),
+                fragment=policy_fragments.get(tag_dir.name),
             ))
         return out
 

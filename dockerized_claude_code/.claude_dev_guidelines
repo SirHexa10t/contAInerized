@@ -17,10 +17,10 @@ Grouped by layer, top of the dependency graph last.
 - `launch/startup.py` — `open_launcher()`: `tags/migrations.ensure_migrated()` then `scan_all()`. THE RULE: every entry that reads or writes the state dir opens through it, first, before any verb (`run.py`, the quickie, `cluster.py`, `cowork.py` — `test_startup` pins the root scripts against the real entry functions, so a new one fails until mapped). The one exception is the audit, which is read-only and must never migrate — it REPORTS what a launch would move (`unmigrated` findings). One function so no entry can skip a step: on 2026-09-15 the cluster CLI launched without the migrations and mounted blank login files.
 - `launch/paths.py` — every host + container path the launcher knows; the *only* place paths get defined. Constants + path-builder lambdas only — no disk listings (those are file_access work). Its ONE in-project import is the Claude adapter record (`launch/ai/claude_code.py`), for the config root's dir and file names — bound at import, so paths stay Claude-bound until the switch turns them into functions of `active_harness()`. Credentials are two call-time builders, not constants (plans/credentials.md, 2026-09-15): `credentials_dir(harness)` / `key_file(ai)` under `AGENTS_STATE/credentials/`, and `auth_file_mounts(adapter, config=, relocated=)` turns an adapter's `AuthFile`s into `(host, container[:ro])` pairs per launch shape — the `account` anchor is Claude Code's probed rule (HOME by default, the config dir once relocated). `base_mounts()` and `settings_mount(state_dir, config)` are the shared spellings of the always-on mount set and the read-only settings shadow — the solo accumulator and the cluster's pair list both consume them; a mount both shapes need is written once, here.
 - `launch/template_code/` — pure data, no logic: docker-side strings (`docker_prompts.py`), the curated firewall domain list (`firewall_domains.py` — CDN provider ranges are NOT data here or anywhere in source; the firewall resolver fetches them live).
-- `launch/toml_emit.py` — rendering the TOML the launcher writes by hand: key quoting, basic-string escaping, the `axis = [...]` line. Reading TOML is `tomllib`'s job; both hand-written stores (`tags/store.py`, `cluster/state.py`) take their escaping from here while each still owns its own shape.
+- `launch/toml_emit.py` — rendering the TOML the launcher writes by hand: key quoting, basic-string escaping, the `axis = [...]` line, and `value()` for a policy rule's strings, integers, booleans and string lists. Reading TOML is `tomllib`'s job; every hand-written TOML file (the stores `tags/store.py` and `cluster/state.py`, and Gemini CLI's policy rules file from `tags/policy_mapping.py`) takes its escaping from here while each still owns its own shape.
 - `launch/container_probe.py` — one named, LIVE container: how it is addressed (`CONTAINER_NAME_PREFIX`) and how to interrogate it (probe, wait, read its tty size, exec as root). Fleet-wide "what is running" queries stay in `docker_config`.
 - `launch/container_inject.py` — the write-side twin: typing a prompt into a live session's TTY (`docker_attach_inject`, the `{cowork}` doorbell). Owns the pty/termios plumbing nothing else in the tree needs.
-- `launch/ai/` — the CODE half of "which harness runs": `catalog.py` (`DEFAULT_HARNESS_KEY`, the call-time `active_harness_key()` / `set_active_harness()` every consumer reads — never a module constant computed from it, the import-time trap) and the adapters' data half (`adapter.py` — `Adapter`, the record of an agent CLI's names: binary, flags, config-root files, env vars, critical hosts, and `auth_files` — the `AuthFile`s (name, role, anchor, mode, blank, scope) that are its login state under `credentials/<harness>/`; `claude_code.py` — the one instance; `ADAPTERS` keyed by the harness member's name, `adapter_for()` / `active_adapter()` in `__init__` — a LookupError for a harness without an adapter, never Claude Code's names borrowed; `refusal_for()` / `adopt()` for the launch paths). The AIs and the harnesses themselves are TAG MEMBERS (`agents/ai/<key>/`, `tags/ai.py`; `agents/harness/<key>/`, `tags/harness.py`): vendor, colours, the tiers per capability standard, the AIs each CLI runs and each CLI's settings vocabulary (`knobs.mapping`) are tree data. A leaf on purpose: `paths.py` derives the container's config-root names from the Claude Code adapter; a test forbids any production module outside `ai/` spelling those names.
+- `launch/ai/` — the CODE half of "which harness runs": `catalog.py` (`DEFAULT_HARNESS_KEY`, the call-time `active_harness_key()` / `set_active_harness()` every consumer reads — never a module constant computed from it, the import-time trap) and the adapters' data half (`adapter.py` — `Adapter`, the record of an agent CLI's names: binary, flags, config-root files, env vars, critical hosts, and `auth_files` — the `AuthFile`s (name, role, anchor, mode, blank, scope) that are its login state under `credentials/<harness>/`; `claude_code.py` and `gemini_cli.py` — one instance per harness; `ADAPTERS` keyed by the harness member's name, `adapter_for()` / `active_adapter()` in `__init__` — a LookupError for a harness without an adapter, never Claude Code's names borrowed; `readiness_note()`, the ONE predicate for "can this harness run" — no adapter, or an adapter whose record says `startable=False` (its image builds, its container cannot start yet) — read by `refusal_for()` for the three launch paths, by the form's harness-row notes, by the quickie's `--ai` help and by the audit's `unstartable_harness` finding; never test `key in ADAPTERS` to mean "runnable"; `adopt()` for the launch paths). The AIs and the harnesses themselves are TAG MEMBERS (`agents/ai/<key>/`, `tags/ai.py`; `agents/harness/<key>/`, `tags/harness.py`): vendor, colours, the tiers per capability standard, the AIs each CLI runs and each CLI's settings vocabulary (`engine.mapping`) are tree data. A leaf on purpose: `paths.py` derives the container's config-root names from the Claude Code adapter; a test forbids any production module outside `ai/` spelling those names.
 
 ### Disk — depends only on leaves
 
@@ -28,7 +28,7 @@ Grouped by layer, top of the dependency graph last.
 
 ### Disk consumers — depend on file_access + leaves
 
-- `launch/transcripts.py` — reading Claude Code's own session records: is there anything `--continue` could load and how big is it, when was this instance last used, what was said last and by whom, and `find_turns` (every spoken turn containing a term, sub-agent transcripts included — `--find`'s per-dir half). Encodes the SHAPE of a format that is not ours (which turn types count, that a `tool_result` is typed "user" without being a human prompt, that sidechains belong to somebody else) — and degrades every parse to None rather than raising, so an upstream schema change shows up as an empty preview, not a failed launch.
+- `launch/transcripts.py` — reading the CLIs' session records out of a state dir: is there anything a resume could load and how big is it (asked of the instance's OWN adapter — a switched instance holds the other CLI's files), when was it last used, what was said last and by whom, and `find_turns` (every spoken turn containing a term, sub-agent transcripts included — `--find`'s per-dir half). The LAYOUT is each adapter's globs, listed by `file_access` (`transcript_files`, `history_files`, `transcript_layouts` — which CLIs wrote here, read off the files); only an adapter whose `transcript_format` is `READABLE_FORMAT` is parsed, and `unreadable_layout` is what a reader prints instead of an empty result. Encodes the SHAPE of a format that is not ours (which turn types count, that a `tool_result` is typed "user" without being a human prompt, that sidechains belong to somebody else) — and degrades every parse to None rather than raising, so an upstream schema change shows up as an empty preview, not a failed launch.
 
 ### The tag system — `launch/tags/`, depends on disk + leaves
 
@@ -36,10 +36,12 @@ Grouped by layer, top of the dependency graph last.
 - `launch/history_find.py` — `--find TERM` and the picker's alt+f: label each conversation dir, group the hits, rank by newest MATCH, print. Sits above `agents_crud` and owns no disk walk of its own (`file_access.iter_conversation_dirs`) and no format knowledge (`transcripts.find_turns`).
 - `tags/base.py` — the `Tag` record, `DockerContribution`, `tag.info`/`tag.docker` parsing, the STRICT tree rule, `TagError`.
 - `tags/ai.py`, `tags/harness.py`, `tags/engine.py`, `tags/profession.py`, `tags/specialty.py`, `tags/policy.py` — the six kind classes, each with its own `scan(agents_dir)`. `tags/budget.py` is the engine budget vocabulary (`Budget` from `tag.budget` — its `effort_tier` field, renamed from `standard` on 2026-09-17, names the tier of effort an engine asks for; the VALUE is still a capability standard, whose spelling and order live here — `is_standard` / `rank_of`: `cheapest`, dated `YYYYQn` quarters, `best`; the switches and amounts) both `ai.py` and `engine.py` import: an engine states its budget in the launcher's words, `Harness.render(budget, ai)` turns it, with the AI's tier, into one CLI's native settings (the adapter boundary for settings), and `Instance.conf` is that rendering for the instance's harness and AI. Engine ORDER is the budget's effort-tier rank (`effort_tier_rank`, `sorted_engines`) — AI-neutral; the Claude-shaped family heuristic retired 2026-09-13. `tags/engine.py` once also owned the model-family sort keys (`engine_sort_key`), profession discovers hidden `_<name>` image layers, specialty adds `combos.info`, policy adds `merge_fragments`.
+- `tags/rules.py` — the policy vocabulary (`Rules` from `tag.rules`: `CAPABILITIES`, shell words and stems, `all`, `MODES`), a leaf like `budget.py`; `tags/policy_mapping.py` — a harness's `policy.mapping` parsed and rendered (`PolicyMapping.render` → `PolicyRendering`: a settings fragment, rules-file records, and every `Unmapped` word), in two formats — `settings` (Claude Code) and `policy-engine` (Gemini CLI, whose rules file it writes through `launch/toml_emit.py`). `Harness.render_policy` is the entry point; `agents_crud.install_settings` is the one caller that installs the result.
+- `tags/models.py` — an AI's `models.list`: `Model` (one line — id, aliases, `display=`, and the REQUIRED `efforts=` range, `-` for none; `effort_for`, the ONE rule for which level a stored pin runs at — the pin, else the nearest level at or below it, else the lowest; no pin, the top), `StaleModel` (a stored pick its AI's list does not carry — a vendor-retired id is deleted from the list) and `model_label` (the ⟪Claude:Opus-5.5⟫ label); a leaf like `budget.py`. `tags/ai.py` holds a list to its member at scan (`_models`: the prefix, unique labels, levels in the AI's scale, every tier pin listed at a level its model takes, omitting the level exactly when the model takes none); `Ai.stale(spelling)` is the ONE "can this pick run" test — `identity.resolve_build` (`picked_model` / `stale_model`, `picked_effort` / `stale_effort`), the picker's chip, the staging notices and the audit's `stale_model` / `stale_effort` all read it. `Instance.effort` is the ONE rule for what level runs: a follower runs its tier's pair, a pinned model its top unless a level is pinned, and a stale model takes its effort pin down with it (the engine's whole pair runs). A stale pick is NEVER a `TagProblem`: those block (`Instance.is_startable`), a vendor's retirement must not.
 - `tags/registry.py` — `scan_all(agents_dir)` → `Registry`: discover, cross-validate (fail loud), look up.
-- `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections). Shipped `.lego` files are validated with the RAISING `Registry.validate_build`; user-editable `instances.toml` entries use the NON-raising `Registry.resolve_store_build` (keeps valid tags, returns `TagProblem`s for the rest) so a stale/typo'd stored tag becomes a blocked, flagged instance rather than a crash.
+- `tags/lego.py` — `AgentBuild` + `.lego` loading (an agent's default tag selections). `load_lego` refuses every key outside `LEGO_KEYS`, and `model` / `effort` by name: they are an instance's picks, stored in `instances.toml` / `cluster.toml` only. Shipped `.lego` files are validated with the RAISING `Registry.validate_build`; user-editable `instances.toml` entries use the NON-raising `Registry.resolve_store_build` (keeps valid tags, returns `TagProblem`s for the rest) so a stale/typo'd stored tag becomes a blocked, flagged instance rather than a crash.
 - `tags/toolkit_profile.py` — per-profession `~/.ai-agents/<profession>_profile.toml` load/generate/save (install toggles for a profession's optional `template.form` entries); depends on `tags/profession.py`'s `ToolkitEntry`.
-- `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `claude_args`, `unmet_wants`); and `label_error`, the ONE legality rule every name a person types is held to (an instance's session, a cluster's session, a member's role) — returned in the form validator's shape so the field shows it live, and wrapped by `cluster.member.valid_label` / `cowork.group._legal_label` in their own exceptions.
+- `tags/identity.py` — `Agent` (pickable) and `Instance` (fully-resolved launch: `chain`, `build_steps`, `docker_contributions`, `conf`, `picked_model` / `stale_model`, `model` / `engine_model` / `effort`, `ai_label`, `claude_args`, `unmet_wants`); `resolve_build` returns EVERY build-derived field, None included — the picker's F2 edit spreads it over the old instance with `dataclasses.replace`, where an omitted key would keep what the form just cleared; and `label_error`, the ONE legality rule every name a person types is held to (an instance's session, a cluster's session, a member's role) — returned in the form validator's shape so the field shows it live, and wrapped by `cluster.member.valid_label` / `cowork.group._legal_label` in their own exceptions.
 - `tags/store.py` — `instances.toml` load/save (stdlib `tomllib` in; a small fixed-schema TOML emitter out).
 - `tags/migrations.py` — ISOLATED one-shot conversions from retired on-disk formats; the only module allowed to know retired formats exist.
 - `tags/addendums.py` — the CLAUDE.md addendum composer: universal BASE_ADDENDUMS, the placeholder registry, and `compose(active_tags)`; per-tag copy lives in each tag.info's `[addendum]` table.
@@ -73,8 +75,8 @@ inside is strictly one-way: `styles` → `form_core` → {`forms`,
 `picker_widget`} → `menu_picker`.
 
 - `gui/styles.py` — the style system every surface draws with: the `UiClass` CSS classes, the tag colours (`tag_style` — per kind, and per MEMBER for AIs, whose tag.info paints them; `squashed_tag_style`; `RICH_BY_STYLE` + `rich_style`, the prompt_toolkit → rich conversion that keeps a tag one colour in rows and panes), the display coercers, and the chrome heights (`TITLE_HEIGHT` / `STATUS_HEIGHT`) forms and picker both reserve.
-- `gui/form_core.py` — the generic form: `FormOption`, `TextField`, the shared confirm/really-done? gate (`ConfirmGate` + `confirm_gate`), and `run_form` + `FormBody` — the ONE scaffold every full-screen form runs on (text fields, cursor, key map, warning window, layout), with `checkbox_form` as the multi-select row model on it. No form may restate any of it: the two forms drifted twice while each had its own copy (plans/ISSUES.md, testing technique).
-- `gui/forms.py` — what the launcher ASKS: the instance tag form (`prompt_tags` — the ⟪AI⟫ and ⟦harness⟧ radio groups first, then the engines, then the checkbox kinds; `_harness_warnings` lights the red zone for a pair that cannot run together, and the build then falls back to the AI's own harness), its cluster-wide sibling (none of the radio groups: all three are per member), the merged preferences form (`edit_profiles_menu`).
+- `gui/form_core.py` — the generic form: `FormOption` (a `group` makes radios, never optional; `attached_to` tucks a row under another, drawn as a ●/○ bullet when it is a radio; `folds_with_anchor` shows it only while that anchor is checked; a `label` may be a function of the checked keys; `choices` makes a HORIZONTAL pick, its value in `FormResult.choices`, hidden when it has nothing to offer — no "default" position: `choice_default` names the value None stands for, drawn dotted and where ←/→ start, and landing back on it returns the pick to None; attachments nest, so a row may sit under a row under a row, and `ordered_form_options` refuses a cycle), `TextField`, the shared confirm/really-done? gate (`ConfirmGate` + `confirm_gate`), and `run_form` + `FormBody` — the ONE scaffold every full-screen form runs on (text fields, cursor, key map, warning window, layout), with `checkbox_form` as the multi-select row model on it — whose `set_checked` is the ONE way a row changes: radios take part in the requires-cascade, the member a moved dot leaves cascades too, and `defaults` ({key set: radio row}, non-reentrant — validated) dots a set's row when a check completes it, and fills an empty target group at open; a default that fires resets the picks under its target. That is how the tag form keeps exactly one model dotted. `FormBody.visible` makes a row come and go: `run_form` draws no line for it, moves no cursor onto it, counts only shown rows in `cursor_pos`, and moves a cursor whose row folds to the stop above. `FormBody.choose` gives ←/→ to the ROW's kind before any action of the form's (a field keeps them for its caret first), so a form whose ← removes something can never do so on a pick. No form may restate any of it: the two forms drifted twice while each had its own copy (plans/ISSUES.md, testing technique).
+- `gui/forms.py` — what the launcher ASKS: the instance tag form (`prompt_tags` — the engines first, then the ⟪AI⟫ radio group with the dotted AI's models as bullets under it (`_model_keys` — read the result back through it, never by splitting a key; the others fold), then the ⟦harness⟧ group, then the checkbox kinds; under each AI: "follow the engine" (its label names the dotted engine's model through `_engine_model`, which resolves an aliased tier pin), the model bullets, and under EACH bullet its effort row (`_effort_row`, a `choices` row folding with its bullet, that bullet's model's levels with the default tagged "(default)" — the tier's while following, the model's top once pinned); `_model_defaults` returns the dot to follow whenever the engine or the AI moves; follow stores no model, a bullet its id, the effort row's pick its level; `_form_requires` covers the checkbox kinds' nesting and each bullet's AI, and no mandatory radio that nothing would refill; `_harness_warnings` lights the red zone for a pair that cannot run together, and the build then falls back to the AI's own harness), its cluster-wide sibling (none of the radio groups: all three are per member), the merged preferences form (`edit_profiles_menu`).
 - `gui/cluster_form.py` — the membership form: its agent rows, its add/remove ROW actions (picking an agent adds ANOTHER) and the members panel, declared as a `FormBody` on `run_form`; its pick algebra comes from `cluster.legoset`.
 - `gui/picker_previews.py` — `session_preview`, the ONE pane instances, cluster members and clusters render through (a fact block, the optional `Last prompt`, the expanded tag list — the AI first, its harness second), the creation rows' panes (the Create pane shows the persona only — an AI is chosen per instance, not per agent), and the child-process transcript read that keeps a huge transcript off the UI thread.
 - `gui/picker_prompts.py` — the non-fullscreen bits both the picker and its flows need: line prompts (workspace, session suffix), inline dialogs, field builders, and the confirm wording every one of them shares.
@@ -124,10 +126,10 @@ intra-package imports only, because in the container there is no `launch/`.
 ### Other directories
 
 - `launch/template_files/` — source-side files `file_access.copy_file` plants to `user_extras/` on first launch.
-- `launch/tests/` — unittest suite (`python3 -m unittest discover -s launch/tests` from project root).
+- `launch/tests/` — unittest suite (`python3 -m unittest discover -s launch/tests` from project root). `probes/` holds the node driver `test_gemini_policy_engine.py` runs Gemini CLI's own policy engine through, and the pinned Gemini CLI version; the bundle comes from `LAUNCHER_TEST_GEMINI_BUNDLE` (baked by the `[self]` image under /opt, installed by CI), and with it set a missing bundle FAILS rather than skips.
 - `agents/` — agent personas (`<name>.md` + `<name>.lego`) and the tag tree (`engine/`, `profession/`, `specialty/`, `policy/`).
 - `Dockerfile` (repo root) — the base image, CLI-less; per-layer Dockerfiles live in the tag tree next to their tags, and the harness's (`agents/harness/<name>/Dockerfile`: the CLI, its env switches, the ENTRYPOINT, the weekly OS upgrade) is the LAST step of every chain (`Instance.build_steps`) so the weekly `SOFTWARE_STACK_REFRESH` rebuilds one layer — no other Dockerfile may reference that buster (`test_essential_files`), and no profession/specialty layer may set an ENTRYPOINT (the tail's wins).
-- `settings/` — in-container bashrc + status line + manifest helpers + base Claude settings/keybindings (bind-mounted via `DOCKER_BASE_MOUNTS`; `settings.json` is merged with policy fragments per instance rather than mounted directly).
+- `settings/` — in-container bashrc + status line + manifest helpers + base Claude settings/keybindings (bind-mounted via `DOCKER_BASE_MOUNTS`; `settings.json` — Claude Code's `Adapter.settings_base`, found by `paths.base_settings_file` — has the policies' rendered settings merged onto it per instance rather than being mounted directly).
 - `custom_commands/` — launcher-bundled slash commands (bind-mounted into every container).
 - `custom_skills/` — launcher-bundled skills (bind-mounted as a single dir; each `<name>/SKILL.md` becomes a `/<name>` skill).
 
@@ -212,10 +214,12 @@ For each common addition, place it where the rest of the project would expect.
 
 → a folder in the `agents/` tree — no launcher code:
 
-- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers}` — the manifest adds
+- **AI**: `agents/ai/<name>/{tag.info, efforts.tiers, models.list}` — the manifest adds
   `vendor`, `harness` (the key of its default `agents/harness/` member — the
   registry checks it exists and runs this AI), `default` (exactly one member),
-  hex colours `fg` / `bg`, and `plan_harnesses` (the harness members this
+  `model_prefix` (what every id in its models.list starts with — `gpt-` for
+  ChatGPT, not the AI's key; the picker label drops it), hex colours `fg` /
+  `bg`, and `plan_harnesses` (the harness members this
   vendor lets its SUBSCRIPTION run in — each must run this AI, the registry
   checks; the form warns on any other runnable pairing, since a plan's quota
   does not reach there and the work falls to metered API billing. Empty or
@@ -235,22 +239,47 @@ For each common addition, place it where the rest of the project would expect.
   `agents/ai/capability.standards` (`YYYYQn`: the quarter a model raised the
   frontier's AA index; `set_by`, `index`, `estimated`; indices must rise),
   `best` — with this AI's `model` + `effort` (with `[scale]`, the AI's effort
-  words). Members do not nest; both files are required.
-- **Harness**: `agents/harness/<name>/{tag.info, knobs.mapping, Dockerfile + tag.docker}` — the manifest
+  words); `models.list` (`tags/models.py`) lists every model an instance may
+  pin — bullets under the AI's row, after "follow the engine" — each with its
+  REQUIRED `efforts=` range (the form's effort row), strongest family first,
+  newest version first, with a `verified YYYY-MM-DD` line that
+  `ai_project-update-models` refreshes, ranges included. Members do not nest;
+  all three files are required.
+- **Harness**: `agents/harness/<name>/{tag.info, engine.mapping, policy.mapping, Dockerfile + tag.docker}` — the manifest
   adds `vendor`, `ais` (the AI members this CLI runs — a build pairing it with
   another AI is refused for a `.lego`, and dropped with an `incompatible`
-  TagProblem for a stored instance), `binary` and `package`; `knobs.mapping`
+  TagProblem for a stored instance), `binary` and `package`; `engine.mapping`
   maps each budget purpose to the CLI's native settings as `{value}` templates
   (`{value/100}`, `{value*4}` convert units once; `{provider}` — in keys too —
   is the CLI's slug for the instance's AI from a `[providers]` table, which
   must cover every AI the CLI runs once a template uses it). A purpose the CLI
   cannot express is left out and reported as unmapped at render time
   (`Harness.render(budget, ai)`; the mapping lived in the AI's dir until
-  2026-09-14). Members do not nest. An instance's harness resolves to its
+  2026-09-14). `policy.mapping` (optional; `tags/policy_mapping.py`) is its
+  permissions twin: which tools make up each capability, how a shell word or
+  stem becomes a rule, where the rules land — format `settings` (strings in
+  settings lists: Claude Code) or `policy-engine` (records in a TOML file of
+  their own, named by CLI args: Gemini CLI, `--admin-policy`). A harness
+  without one maps no policy word, so every deny refuses on it
+  (`Harness.render_policy`). Every `policy.mapping` must state its FIXED tier —
+  `[fixed] path`, a system location the CLI reads whatever config root or
+  flags it runs with, or `[fixed] none` with the reason — where each harness
+  Dockerfile bakes the ALWAYS-ON denies as root (`agents_crud.fixed_policy` →
+  `container_env`'s FIXED_POLICY_PATH / _B64 / _COUNT build args, no defaults,
+  build fails on a missing arg or a rule count other than the rendered one);
+  a policy-engine mapping's per-instance flag must follow that key (`path` →
+  `--policy`, `none` → `--admin-policy`; the parser refuses both mismatches).
+  `test_fixed_tier.py` pins every piece. Members do not nest. An instance's harness resolves to its
   build's, else its AI's default (`Registry.harness_for`). Seven members: the
   vendors' CLIs, one AI each, and OpenCode / OpenClaw / Hermes, which run all
-  four. Only `claude-code` has an adapter in `launch/ai/`, so instances in the
-  others describe, not launch.
+  four. Only `claude-code` runs; `gemini-cli` has an adapter whose image builds
+  but whose container cannot start yet (`startable=False`), so instances in
+  every other harness describe, not launch. A harness whose CLI installs from
+  npm names `layer = "node"` in its tag.info, claiming the shared hidden
+  `agents/profession/_node` layer, which `build_steps` puts directly beneath
+  the harness's own; a hidden layer is claimed by ONE same-named specialty or
+  by one or more harnesses, never both, and a harness's layer must sit at the
+  profession tree's root.
 - **Engine**: `agents/engine/<name>/{tag.info, tag.budget}` — the budget in the
   launcher's own words: `effort_tier` (`cheapest`, `best`, or a quarter the AIs
   answer — the registry checks), the switches and the amounts
@@ -281,16 +310,32 @@ For each common addition, place it where the rest of the project would expect.
   layers (cluster-wide in effect via the union image, not impossible per
   member) and a harness's Dockerfile ENTRYPOINT (an image fact). May claim two hidden same-named assets: a `_<name>` image
   layer in the profession tree (→ `requires` + Dockerfile) and/or a
-  `policy/_<name>/policy.json` settings fragment (merged like a policy). See
+  `policy/_<name>/` fragment — a `tag.rules` (rendered like a policy's) and/or
+  raw settings for one harness as `<harness>.json` (what no word can say yet:
+  `{cowork}`'s Stop hook), which refuses on any other harness. See
   `{ro}` for both-flavored (mount + fragment); `{dood}` for the layer. Image layer, if any: a hidden
   `_<name>/Dockerfile` under the profession it depends on. Static container
   config (mounts, `cap_add`, `entrypoint`, `env_forward`) goes in `tag.docker`.
   Multi-tag warnings go in `agents/specialty/combos.info`.
-- **Policy**: `agents/policy/<name>/{tag.info, policy.json}` — a Claude Code
-  settings fragment, merged per instance and mounted read-only; `always_on
-  = true` makes it STATIC (merged into every instance by
-  agents_crud.install_settings, locked in the form, rejected in .lego /
-  silently dropped from store entries). `stance`
+- **Policy**: `agents/policy/<name>/{tag.info, tag.rules}` — nesting like
+  specialties, where a nested policy requires the one it sits in
+  (`vcs-safe/no-git-write/`: `<-gw>` requires `<-gpush>`; an always-on
+  policy cannot nest) — the rules in the
+  launcher's OWN words (`tags/rules.py`): `[allow]` / `[deny]` name
+  capabilities (`tools = ["web"]`; shell, web, read, write, subagents), shell
+  command WORDS (`shell = ["git"]`: git and git anything, never gitk) and
+  STEMS (`shell_stems = ["git push"]`: also git pushall); `[allow] all =
+  true` grants every tool a harness maps; `[demand] mode = "plan"`. Never a
+  CLI's tool names — each harness's `policy.mapping` renders the words, and
+  `agents_crud.install_settings` refuses a deny or demand the harness cannot
+  express (an allow it cannot express is a note). The one table must be the
+  one the `stance` names (the scan checks). A `policy.json` — the Claude Code
+  fragment this replaced on 2026-09-26 — is refused with the way out
+  (`tags/migrations.py`). `always_on = true` makes it STATIC (applied to every
+  instance by agents_crud.install_settings and baked into each image's fixed
+  tier, locked in the form, rejected in .lego / silently dropped from store
+  entries) and requires `stance = "deny"`: at a fixed tier an allow would
+  outrank every per-instance deny. `stance`
   (`allow`/`deny`/`demand`) drives the orange/blue/white coloring; the
   shortname convention mirrors it (`+` grants, `-` restricts, `!` demands).
 

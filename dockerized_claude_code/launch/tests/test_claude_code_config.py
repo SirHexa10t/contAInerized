@@ -9,10 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import contextlib
+import io
+
 from launch.ai import active_adapter
 from launch import claude_code_config, paths
 from launch.claude_code_config import SQUASH_AT, colored_tag_chain
-from launch.tags import Instance, PolicyStance
+from launch.tags import Instance, PolicyStance, resolve_build
+from launch.tests.fixtures import REGISTRY, make_inst
 
 
 def _inst() -> Instance:
@@ -269,3 +273,30 @@ class TestCredentialsNotice(unittest.TestCase):
 
     def test_no_ai_means_no_notice(self):
         self.assertIsNone(claude_code_config.credentials_notice(self.adapter, None))
+
+
+class TestLaunchBanner(unittest.TestCase):
+    """print_launch_banner — the pre-build summary. The Engine line names the
+    ENGINE's model; a picked model gets a line of its own under it, so the
+    banner never credits the engine with a model it did not choose."""
+
+    def _banner(self, model):
+        inst = make_inst("golem", "s")
+        inst = dataclasses.replace(inst, md_path=paths.AGENTS_DIR / "golem.md",
+                                   **resolve_build(dataclasses.replace(inst.build, model=model), "golem", REGISTRY))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            claude_code_config.print_launch_banner(inst, [])
+        return inst, out.getvalue()
+
+    def test_a_pick_gets_its_own_line_under_the_engine(self):
+        inst, text = self._banner("claude-opus-5-5")
+        self.assertIn(f"Engine:           {inst.engine.label} {inst.engine_model} —", text)
+        self.assertIn("Model:            claude-opus-5-5 (picked — runs instead of the engine's)", text)
+        self.assertLess(text.index("Engine:"), text.index("Model:"))
+
+    def test_without_a_pick_there_is_no_model_line(self):
+        inst, text = self._banner(None)
+        self.assertIn(f"{inst.engine.label} {inst.engine_model} —", text)
+        self.assertNotIn("Model:", text)
+

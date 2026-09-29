@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
+from ..ai import ADAPTERS
+from ..ai.adapter import Adapter
 from ..container_probe import CONTAINER_NAME_CHARS
 from ..file_access import agent_md_index
 from ..transcripts import (
@@ -29,10 +31,11 @@ from ..transcripts import (
 )
 from ..paths import INBOX_SEPARATOR, instance_state_dir_path, state_md_path
 from .base import DockerContribution, Tag
-from .ai import Ai
+from .ai import Ai, Tier
 from .harness import Harness, Rendering
 from .engine import Engine
 from .lego import AgentBuild
+from .models import Model, StaleModel
 from .policy import Policy
 from .profession import Profession
 from .registry import Registry, TagProblem
@@ -228,6 +231,10 @@ class Instance:
     ai: Ai | None = None                        # the AI this instance runs on (resolved: its build's, else the tree's default); None only in fixture trees without an ai/ shelf
     harness: Harness | None = None              # the agent CLI it runs in (resolved: its build's, else its AI's default harness); None likewise
     invalid_tags: tuple[TagProblem, ...] = ()   # store names that no longer resolve (see resolve_store_build); block start, flagged in the picker
+    picked_model: Model | None = None           # the model pinned for it, one its AI lists; None → follow its engine's tier model
+    stale_model: StaleModel | None = None       # a stored pick its AI no longer lists: dropped for the launch (the engine's model runs), never blocking — flagged in the picker and kept in the store until re-picked
+    picked_effort: str | None = None            # the effort level pinned for it, one its running model takes; None → that model's highest
+    stale_effort: str | None = None             # a stored level its running model does not take: replaced for the launch preserving direction (Model.effort_for), never blocking — kept in the store until re-picked
     state_dir_override: Path | None = None      # when set, the state dir lives HERE instead of under instances/ — quickie parks its throwaway threads under quickie/ (default None = the normal instances/ home)
 
     @property
@@ -267,6 +274,11 @@ class Instance:
             ai=self.ai.name if self.ai else None,
             harness=self.harness.name if self.harness else None,
             engine=self.engine.name if self.engine else None,
+            # A stale pick round-trips verbatim, so saving the store keeps
+            # it flagged until someone picks again.
+            model=(self.picked_model.id if self.picked_model
+                   else self.stale_model.spelling if self.stale_model else None),
+            effort=self.picked_effort or self.stale_effort,
             professions=tuple(p.name for p in self.professions),
             specialties=tuple(s.name for s in self.specialties),
             policies=tuple(p.name for p in self.policies),
@@ -276,13 +288,17 @@ class Instance:
     def build_steps(self) -> list[tuple[str, Path, DockerContribution | None]]:
         """(name, dockerfile, contribution) per image layer in chain order
         (`_ordered_groups`): professions, then layer-bearing specialties
-        (dood's `_dood` dir), then — LAST — the harness's own layer, the CLI
-        the agent runs in (`Harness.dockerfile`). Last so the CLI's weekly
-        refresh rebuilds one layer and nothing beneath it; a harness without a
-        layer (none the launcher can run yet) adds no step. The contribution
-        supplies the layer's `[build] arg_forward`. Run-only specialties
-        (auto, firewall) don't appear: they contribute container config, not
-        image content. A bare agent builds base + its harness layer."""
+        (dood's `_dood` dir), then the hidden layer the harness claims, if
+        any (`Harness.layer` — `_node` for an npm-installed CLI), then — LAST
+        — the harness's own layer, the CLI the agent runs in
+        (`Harness.dockerfile`). Last so the CLI's weekly refresh rebuilds one
+        layer and nothing beneath it; the claimed layer goes directly beneath
+        it and is keyed on a stable buster, so that refresh never rebuilds
+        it. A harness without a Dockerfile adds neither step. The
+        contribution supplies each layer's `[build] arg_forward`. Run-only
+        specialties (auto, firewall) don't appear: they contribute container
+        config, not image content. A bare agent builds base + its harness's
+        steps."""
         profs, specs = _ordered_groups(self.professions, self.specialties)
         out: list[tuple[str, Path, DockerContribution | None]] = [
             (p.name, p.path / "Dockerfile", p.docker) for p in profs
@@ -290,6 +306,8 @@ class Instance:
         out += [(s.name, s.layer.path / "Dockerfile", s.layer.docker)
                 for s in specs if s.layer]
         if self.harness is not None and self.harness.dockerfile is not None:
+            if (layer := self.harness.layer) is not None:
+                out.append((layer.name, layer.path / "Dockerfile", layer.docker))
             out.append((self.harness.name, self.harness.dockerfile, self.harness.docker))
         return out
 
@@ -324,9 +342,10 @@ class Instance:
     @property
     def rendering(self) -> "Rendering | None":
         """The engine's budget in this instance's harness's settings, for its
-        AI's tier — None when any side is missing (a fixture tree)."""
-        return (self.harness.render(self.engine.budget, self.ai)
-                if self.engine and self.ai and self.harness else None)
+        AI's tier with the picked model in the tier's place — None when any
+        side is missing (a fixture tree)."""
+        return (self.harness.render(self.engine.budget, self.ai, model=self.model, effort=self.effort)
+                if self.engine and self.ai and self.harness and self.model else None)
 
     @property
     def conf(self) -> dict[str, str]:
@@ -336,15 +355,72 @@ class Instance:
         return rendering.map if rendering else {}
 
     @property
+    def _tier(self) -> Tier | None:
+        """Its AI's tier for its engine's standard — None when either side is
+        missing (a fixture tree) or the engine names no standard."""
+        return self.ai.tier(self.engine.budget.effort_tier) if self.engine and self.ai and self.engine.budget.effort_tier else None
+
+    @property
     def model(self) -> str:
-        """The model id the instance's AI runs for its engine's standard, or ""."""
-        return self.ai.tier(self.engine.budget.effort_tier).model if self.engine and self.ai and self.engine.budget.effort_tier else ""
+        """The model id the instance runs: its picked model, else the one its
+        AI's tier pins for its engine's standard; "" when neither resolves."""
+        if self.picked_model is not None:
+            return self.picked_model.id
+        return self.engine_model
+
+    @property
+    def engine_model(self) -> str:
+        """The model its engine alone would run — the tier's — whatever was
+        picked; "" when it does not resolve. What a live pick replaces, and
+        what a stale one falls back to."""
+        return self._tier.model if self._tier else ""
+
+    @property
+    def running_model(self) -> Model | None:
+        """The listed model the instance runs: its pin, else its engine's
+        (resolved through its AI's list, id or alias); None only when no
+        engine standard resolves (a fixture tree)."""
+        if self.picked_model is not None:
+            return self.picked_model
+        return self.ai.model(self.engine_model) if self.ai is not None and self.engine_model else None
 
     @property
     def effort(self) -> str | None:
-        """The effort word the instance's AI uses for its engine's standard (the
-        `--effort` flag's value on Claude Code), or None."""
-        return self.ai.tier(self.engine.budget.effort_tier).effort if self.engine and self.ai and self.engine.budget.effort_tier else None
+        """The effort word it runs at (the `--effort` flag's value on Claude
+        Code). Its pinned level wins; a stored level the model does not take
+        falls back preserving direction (`Model.effort_for`). Without one: an
+        instance that FOLLOWS its engine runs the engine's rated pair, so the
+        tier's level (the scan holds it to the model's range), and one with a
+        PINNED model — which no standard rated — that model's highest
+        (operator, 2026-09-29, over "the highest for every instance", once the
+        team showed it slowing `q` and pricing golem up). None for a model
+        that takes no effort — never the vendors' `none` level."""
+        model = self.running_model
+        if model is None or self.ai is None:
+            return None
+        pin = self.picked_effort or self.stale_effort
+        if self.stale_model is not None or (pin is None and self.picked_model is None):
+            # Following the engine — or falling back to it: a stale model pick
+            # takes its effort pin down with it, so the instance runs the
+            # engine's whole rated pair, never the engine's model at a level
+            # chosen for another one (bug-investigator, gate model-picker-3).
+            return self._tier.effort if self._tier else None
+        return model.effort_for(pin, self.ai.scale)
+
+    @property
+    def ai_label(self) -> str:
+        """The instance's AI as its chip reads, carrying the model it runs:
+        its pick — ⟪Claude:Opus-5.5⟫ — else its engine's, derived afresh at
+        every read and never written back, so an instance with no pick keeps
+        following the tier as it moves (operator, 2026-09-28). A stale pick
+        shows its OWN label, which the picker paints as an alert: what went
+        stale, not what replaced it. The plain ⟪Claude⟫ only when no model
+        resolves (an engine without a standard); "" with no AI (a fixture)."""
+        if self.ai is None:
+            return ""
+        if self.stale_model is not None:
+            return self.ai.label_with(self.stale_model.shown)
+        return self.ai.label_with(self.picked_model or (self.ai.model(self.engine_model) if self.engine_model else None))
 
     @property
     def is_muxer(self) -> bool:
@@ -402,16 +478,32 @@ class Instance:
     def is_startable(self) -> bool:
         """False when the store entry named tags that no longer resolve
         (`invalid_tags`) — the launch is blocked with a fix-it report; F2 in
-        the picker re-picks against the current tag set."""
+        the picker re-picks against the current tag set. A `stale_model` is
+        deliberately NOT a reason: a vendor retires models on its own
+        calendar, and the engine's model is a rated fallback a missing tag
+        has no equivalent of (gate model-picker)."""
         return not self.invalid_tags
 
     @property
     def has_continuable_history(self) -> bool:
-        return has_continuable_jsonl(self.state_dir)
+        # Asked of THIS instance's harness: a dir switched from one CLI to
+        # another still holds the first one's transcripts, which the second
+        # cannot resume. A harness with no adapter keeps no layout the
+        # launcher knows, so nothing is continuable.
+        adapter = self._adapter
+        return adapter is not None and has_continuable_jsonl(self.state_dir, adapter)
 
     @property
     def continuable_history_bytes(self) -> int:
-        return continuable_jsonl_bytes(self.state_dir)
+        adapter = self._adapter
+        return continuable_jsonl_bytes(self.state_dir, adapter) if adapter is not None else 0
+
+    @property
+    def _adapter(self) -> "Adapter | None":
+        """The adapter for this instance's harness, or None when it has none
+        (or no harness resolved) — never the process's running adapter,
+        which in the picker is whatever the last launch adopted."""
+        return ADAPTERS.get(self.harness.name) if self.harness is not None else None
 
     @property
     def last_used_mtime(self) -> float | None:
@@ -433,14 +525,50 @@ def resolve_build(build: AgentBuild, agent: str, registry: Registry) -> dict:
     (`Registry.validate_build`); a missing one surfaces as a KeyError, which
     the caller has validated away upstream."""
     engine = registry.engines.get(effective_engine_name(build, agent, registry))
+    ai = registry.ai_for(build)
+    models = _resolve_model(build.model, ai)
+    running = models["picked_model"] or (
+        ai.model(ai.tier(engine.budget.effort_tier).model) if ai and engine and engine.budget.effort_tier else None)
     return {
-        "ai": registry.ai_for(build),
+        "ai": ai,
         "harness": registry.harness_for(build),
         "engine": engine,
         "professions": tuple(registry.professions[n] for n in build.professions),
         "specialties": tuple(registry.specialties[n] for n in build.specialties),
         "policies": tuple(registry.policies[n] for n in build.policies),
+        **models,
+        **_resolve_effort(build.effort, running, model_stale=models["stale_model"] is not None),
     }
+
+
+def _resolve_model(spelling: str | None, ai: Ai | None) -> dict:
+    """A build's `model` as Instance kwargs: `picked_model` when the AI still
+    offers it (by id or alias), else `stale_model` — retired by the vendor,
+    or never one of this AI's. Resolved here and not in
+    `Registry.resolve_store_build`, because a stale model is not a
+    TagProblem: those block the launch (`Instance.is_startable`), and this
+    only falls back to the engine's model. BOTH keys, always — None for no
+    pick, or no AI (a fixture tree without the shelf) — like every other
+    field `resolve_build` returns: the picker's F2 edit spreads it over the
+    OLD instance (`dataclasses.replace`), where an omitted key would keep a
+    pick the form just cleared."""
+    if spelling is None or ai is None:
+        return {"picked_model": None, "stale_model": None}
+    stale = ai.stale(spelling)
+    return {"picked_model": None if stale is not None else ai.model(spelling), "stale_model": stale}
+
+
+def _resolve_effort(level: str | None, model: Model | None, *, model_stale: bool) -> dict:
+    """A build's `effort` as Instance kwargs, against the model it will run:
+    `picked_effort` when that model takes the level, else `stale_effort` —
+    kept verbatim so the store keeps it, replaced for the launch
+    (`Instance.effort`). A level pinned beside a STALE model is stale with
+    it, whatever the fallback model takes: the two were picked as a pair.
+    Both keys always, like `_resolve_model`."""
+    if level is None:
+        return {"picked_effort": None, "stale_effort": None}
+    taken = model is not None and level in model.efforts and not model_stale
+    return {"picked_effort": level if taken else None, "stale_effort": None if taken else level}
 
 
 def agent_md_path(agent: str) -> Path | None:

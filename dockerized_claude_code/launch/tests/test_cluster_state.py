@@ -110,6 +110,13 @@ class TestClusterTags(ClusterTmp):
             tags=AgentBuild(engine="thinker", specialties=("muxer", "cluster")))
         self.assertIsNone(cluster.tags.engine)
 
+    def test_a_cluster_model_or_effort_is_refused_silently_too(self):
+        # Both belong to a member's AI, which the cluster has none of.
+        cluster = state.Cluster(
+            session="poc", project=Path("/tmp/p"), members=(Member.of("golem"),),
+            tags=AgentBuild(model="claude-opus-5", effort="low", specialties=("muxer", "cluster")))
+        self.assertEqual((cluster.tags.model, cluster.tags.effort), (None, None))
+
     def test_members_store_only_their_OWN_tags(self):
         member = Member.of("feature-identifier", build=AgentBuild(
             specialties=("auto", "muxer")))       # muxer is the cluster's
@@ -160,6 +167,20 @@ class TestClusterTags(ClusterTmp):
         self.assertEqual((loaded.members[0].build.ai, loaded.members[0].build.harness), ("grok", "grok-build"))
         self.assertEqual((loaded.member_build(loaded.members[0]).ai, loaded.member_build(loaded.members[0]).harness), ("grok", "grok-build"))
         self.assertIsNone(loaded.tags.harness)
+
+    def test_a_members_model_is_a_scalar_of_its_own_table(self):
+        cluster = state.from_template(
+            "poc", Path("/tmp/p"), (Member("researcher", "alien", build=AgentBuild(ai="grok", model="grok-4.6", effort="low")),))
+        text = state.dumps(cluster)
+        self.assertIn('model = "grok-4.6"', text)
+        self.assertIn('effort = "low"', text)
+        self.assertEqual(state.loads("poc", text).member_build(state.loads("poc", text).members[0]).effort, "low")
+        self.assertLess(text.index('ai = "grok"'), text.index('model = "grok-4.6"'))
+        loaded = state.loads("poc", text)
+        self.assertEqual(loaded.members[0].build.model, "grok-4.6")
+        self.assertEqual(loaded.member_build(loaded.members[0]).model, "grok-4.6")   # the union keeps the member's
+        self.assertEqual(loaded.with_build("researcher__alien", AgentBuild(ai="grok", model="grok-4.3"))
+                         .members[0].build.model, "grok-4.3")                      # and an F2 edit stores the new pick
 
     def test_a_legacy_file_without_cluster_tags_still_loads(self):
         # Pre-2026-09-02 files repeat the forced pair in every member table
@@ -219,6 +240,18 @@ class TestMemberInstance(ClusterTmp):
         self.assertEqual([s.name for s in inst.specialties],
                          ["muxer", "cluster", "cluster-cowork", "auto"])
 
+    def test_a_members_pick_runs_and_a_stale_one_falls_back_without_blocking(self):
+        picked = state.from_template("poc", Path("/tmp/p"), (Member.of("poet", build=AgentBuild(
+            ai="claude", model="claude-opus-5-5")),))
+        inst = picked.member_instance(picked.members[0], self.registry)
+        self.assertEqual((inst.model, inst.picked_model.id), ("claude-opus-5-5", "claude-opus-5-5"))
+        stale = state.from_template("poc", Path("/tmp/p"), (Member.of("poet", build=AgentBuild(
+            ai="claude", model="claude-opus-4-1")),))
+        inst = stale.member_instance(stale.members[0], self.registry)
+        self.assertEqual(inst.stale_model.spelling, "claude-opus-4-1")
+        self.assertEqual(inst.model, inst.engine_model)
+        self.assertTrue(inst.is_startable)
+
     def test_a_stale_tag_lands_on_invalid_tags_instead_of_raising(self):
         member = Member.of("poet", build=AgentBuild(specialties=("ghost-tag",)))
         cluster = state.from_template("poc", Path("/tmp/p"), (member,))
@@ -275,7 +308,8 @@ class TestLastUsed(ClusterTmp):
 
     def _touch_history(self, member_id: str, mtime: float) -> None:
         import os
-        history = paths.state_history_path(paths.cluster_member_dir("poc", member_id))
+        from launch.ai import CLAUDE_CODE
+        history = paths.cluster_member_dir("poc", member_id) / CLAUDE_CODE.history_glob
         history.parent.mkdir(parents=True, exist_ok=True)
         history.write_text("{}\n")
         os.utime(history, (mtime, mtime))

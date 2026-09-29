@@ -9,6 +9,8 @@ import fcntl
 import importlib
 import io
 import os
+import re
+import shlex
 import sys
 import tempfile
 import threading
@@ -288,7 +290,11 @@ class TestGates(GateFixture):
         self.reply("security")
         report = gates.check_gate(self.queue, self.config, iteration="g1",
                                   members_dir=self.members_dir)
-        self.assertEqual(self.pinged("reminder"), [("tester",)])
+        # Matched on "reminder" until 2026-09-29; the straggler line now
+        # reports an observation instead of instructing a reply (see
+        # TestEveryAdvertisedCommandParses), so match what it is FOR — only
+        # the member who has not replied is pinged.
+        self.assertEqual(self.pinged("had no reply"), [("tester",)])
         self.assertTrue(any("nudged 1" in line for line in report))
 
     def test_check_gate_after_the_deadline_records_timeouts_idempotently(self):
@@ -563,6 +569,259 @@ class TestStandaloneConstraint(unittest.TestCase):
         module = importlib.import_module("cluster_work_protocol")
         self.addCleanup(sys.modules.pop, "cluster_work_protocol", None)
         self.assertTrue(hasattr(module, "Queue"))
+
+
+class TestEveryAdvertisedCommandParses(GateFixture):
+    """Every `cluster-chat …` the protocol TELLS a member to run must parse.
+
+    Filed 2026-09-09, re-observed twice, unfixed for twenty days: the pings
+    advertised `read --new` (no such flag) and a positional `post stance
+    <0-10>` (the number is an option). Four members tripped over it in one
+    evening. The old guard asserted those phrases were PRESENT in the
+    addendum, so it passed throughout — it checked the text existed, not
+    that it worked.
+
+    This drives the real composers and parses what they RETURN, rather than
+    grepping our own source for backticks, which would be a second parser of
+    it (refactorer, gate ping-syntax). A ninth emitter therefore arrives
+    already covered. The placeholder table is the one hand-written part, and
+    an unknown placeholder FAILS rather than being skipped — the curated
+    list is exactly what failed here twice, in the tracker entry and in the
+    gate's own first draft.
+
+    This method covers the COMPOSED half. The tree-data half — every
+    `[addendum]` body, which becomes a member's CLAUDE.md — is the sibling
+    test below, through the same extractor.
+    """
+
+    BACKTICKED = re.compile(r"`([^`]+)`")
+    PLACEHOLDER = re.compile(r"<[^>]+>")
+    NUMERIC = re.compile(r"^<\d+-\d+>$")       # a range, e.g. <0-10>, wants an int
+
+    # One command of every advertised SHAPE, plus prose that must not count.
+    # The extractor is run over this before it is trusted over the tree —
+    # see test_the_extractor_is_not_blind.
+    PROBE = ('prefixed `cluster-chat post nop --gate g1`; bare verb '
+             '`post stance --stance 7 --gate g1 "why"`; placeholders '
+             '`cluster-chat close <id> "<resolution>"`; and prose `--peek` '
+             'with `a phrase` that is not a command at all')
+    PROBE_EXPECTS = 3
+
+    @staticmethod
+    def verbs() -> frozenset[str]:
+        """The CLI's own subcommand names, read off the parser rather than
+        listed here — a curated list is the thing that failed twice in this
+        defect's history."""
+        import argparse
+
+        from launch.cluster_work_protocol.cli import _parser
+        return frozenset(
+            choice
+            for action in _parser()._actions          # argparse exposes subcommands no other way
+            if isinstance(action, argparse._SubParsersAction)
+            for choice in action.choices)
+
+    def advertised(self, text: str) -> list[str]:
+        """Every backticked COMMAND in one emitted line, with placeholders
+        substituted. A span counts as a command when its first word is a
+        real subcommand — with or without the `cluster-chat` prefix, because
+        the defect this guards against wrote the bare form (`post stance
+        <0-10> …`) and a prefix-anchored matcher skips exactly those. Found
+        by mutation: the prefix-only version passed while the original
+        defect was reinstated.
+
+        Placeholders are filled BY SHAPE — a numeric range becomes a number,
+        anything else a word. The gate asked for a lookup table that fails
+        on an unknown token, so that a new placeholder could not be silently
+        skipped; substituting by shape serves that requirement more
+        completely, because nothing is skipped at all. A table would also
+        have needed nine entries for the wordings the tree already carries
+        (`<short-id>`, `<the decision, judgeable in one read>`, …) and one
+        more for every rephrasing after that — a curated list, which is what
+        failed twice in this defect's own history.
+        """
+        return [command for command, _prefixed in self._commands(text)]
+
+    def _commands(self, text: str) -> list[tuple[str, bool]]:
+        """(command, carried the tool name) for every command-shaped span."""
+        out = []
+        for span in self.BACKTICKED.findall(text):
+            words = span.split()
+            prefixed = bool(words) and words[0] == "cluster-chat"
+            if prefixed:
+                words = words[1:]
+            if not words or words[0] not in self.verbs():
+                continue                       # prose in backticks, not a command
+            # The verb check comes FIRST and the prefix question after it:
+            # six of the seven subcommands (read, open, close, post, scale,
+            # brief) are ordinary English, so judging the prefix before
+            # knowing the span is command-shaped would fail a correct file
+            # the day someone writes `read` in prose (agent-writer, gate
+            # ping-syntax). No such span exists today — which is exactly the
+            # green-by-content property that hid the prefix blind spot.
+            command = self.PLACEHOLDER.sub(
+                lambda m: "7" if self.NUMERIC.match(m.group()) else "sample",
+                " ".join(words))
+            out.append((command, prefixed))
+        return out
+
+    def fragments(self, text: str) -> list[str]:
+        """Command-shaped spans advertised WITHOUT the tool name.
+
+        The extractor must ACCEPT those — a prefix-anchored matcher skips
+        the bare `post stance <0-10>` form, which is the shape the original
+        defect wrote, and that is what blinded three separate extractors on
+        2026-09-29. But a member copies what is in the backticks, and
+        `post nop --gate g1` pasted into a shell is not a command. So:
+        accept when detecting, reject when validating (researcher, gate
+        ping-syntax). Not applied to PROBE, which carries a bare form on
+        purpose to prove the extractor reads that shape at all."""
+        return [c for c, prefixed in self._commands(text) if not prefixed]
+
+    def parses(self, command: str) -> None:
+        from launch.cluster_work_protocol.cli import _parser
+        argv = shlex.split(command)
+        try:
+            _parser().parse_args(argv)
+        except SystemExit as exit_code:        # argparse's way of saying no
+            self.fail(f"advertised command does not parse: {command} "
+                      f"(argparse exit {exit_code.code})")
+
+    def emitted_lines(self) -> list[str]:
+        """Every line the protocol pings or prints at a member, from the
+        real composers: the gate-open ping, the completion ping, the
+        straggler reminder, a mention ping, and brief's YOU OWE block."""
+        gates.open_gate(self.queue, self.config, iteration="g1",
+                        body="adopt plan X?", opener="golem",
+                        members_dir=self.members_dir,
+                        config_path=SEEDED_CONFIG, timers=False)
+        gates.check_gate(self.queue, self.config, iteration="g1",
+                         members_dir=self.members_dir)          # the reminder
+        base = ["--root", str(self.root), "--config", str(SEEDED_CONFIG),
+                "--members-dir", str(self.members_dir)]
+        printed = io.StringIO()
+        # brief BEFORE the replies land, or nothing is owed and its YOU OWE
+        # block — which carried two of the eight defective lines — never
+        # renders. Ordering found by mutation: with the replies first this
+        # method returned no owed block and the positional stance form
+        # slipped through unparsed.
+        with patch.dict(os.environ, {"CLUSTER_MEMBER": "security"}), \
+                contextlib.redirect_stdout(printed):
+            cli_main(base + ["brief"])                          # YOU OWE block
+        for member in ("security", "tester"):
+            gates.post_reply(self.queue, self.config, member=member,
+                             kind="nop", body="", iteration="g1", stance=None,
+                             members_dir=self.members_dir)      # completion
+        with patch.dict(os.environ, {"CLUSTER_MEMBER": "security"}), \
+                contextlib.redirect_stdout(printed):
+            cli_main(base + ["post", "free", "@tester see this"])  # mention
+        lines = [text for _members, text in self.pings]
+        return lines + [printed.getvalue()]
+
+    def test_the_extractor_is_not_blind(self):
+        """The instrument checks ITSELF before it is trusted to report clean.
+
+        Every other test in this class reports "no bad commands found", and
+        an extractor that finds nothing reports exactly the same thing. On
+        2026-09-29 three members independently wrote this extractor anchored
+        on the `cluster-chat ` prefix, so all three silently skipped the bare
+        `post stance <0-10>` form — the very shape the defect wrote — and all
+        three reported clean. The rule that would have caught it ("check the
+        instrument against something already known") was already filed in
+        plans/ISSUES.md with five worked examples, three days earlier, some
+        of them by the people who then missed it. A remembered discipline
+        lost to the artefact's obvious handle; this is that discipline made
+        structural, so a blind extractor FAILS here instead of proceeding to
+        certify the tree (bug-investigator's proposal, gate ping-syntax).
+        """
+        found = self.advertised(self.PROBE)
+        self.assertEqual(
+            len(found), self.PROBE_EXPECTS,
+            f"extractor is blind: it found {len(found)} of "
+            f"{self.PROBE_EXPECTS} known-present commands in its own probe "
+            f"({found}) — every 'clean' result from this class is worthless "
+            f"until it reads all of them")
+
+    def test_every_line_the_protocol_tells_a_member_to_run_is_a_real_command(self):
+        lines = self.emitted_lines()
+        commands = [c for line in lines for c in self.advertised(line)]
+        self.assertTrue(commands, "no advertised commands found — the "
+                                  "extraction broke, not the protocol")
+        self.assertEqual([f for line in lines for f in self.fragments(line)], [],
+                         "a ping advertises a command without `cluster-chat` — "
+                         "a member pastes what is in the backticks")
+        for command in commands:
+            with self.subTest(command=command):
+                self.parses(command)
+
+    def test_every_command_advertised_in_the_tag_tree_parses_too(self):
+        """The other half of the eight, and the half a composer-driven test
+        structurally cannot reach: `agents/**/tag.info` [addendum] bodies
+        become a member's CLAUDE.md at session start, so they teach the
+        command BEFORE any ping exists — which is why they were the worst of
+        the eight (bug-investigator, gate ping-syntax).
+
+        Driven from the tree rather than a file list, so a second tag that
+        advertises a command is covered on arrival. Load-time enforcement
+        would be stronger, but it needs this parser inside `launch/tags`,
+        and the protocol package is deliberately importable without its
+        launch/ parent; CI is the honest home for it.
+        """
+        from launch.paths import AGENTS_DIR
+        from launch.tags import scan_all
+        from launch.tags.addendums import BASE_ADDENDUMS
+        # Tag bodies AND the launcher-universal ones. compose() prepends
+        # BASE_ADDENDUMS into every member's CLAUDE.md, so they advertise to
+        # a member exactly as a tag body does while not being one — a walk
+        # over tags alone cannot see them. They carry no command today; the
+        # point is that the day one is added it is already covered, rather
+        # than the gap being recorded and waited on (researcher, #435).
+        bodies = [tag.addendum[1] for tag in scan_all(AGENTS_DIR).get_all()
+                  if tag.addendum is not None]
+        bodies += [a.body for a in BASE_ADDENDUMS if a.body]
+        commands = [c for body in bodies for c in self.advertised(body)]
+        self.assertTrue(commands, "no tag advertises a cluster-chat command — "
+                                  "the extraction broke, not the tree")
+        self.assertEqual([f for body in bodies for f in self.fragments(body)], [],
+                         "a tag advertises a command without `cluster-chat`")
+        for command in commands:
+            with self.subTest(command=command):
+                self.parses(command)
+
+    def test_the_mention_ping_names_the_message_not_only_its_author(self):
+        # A ping naming only the author leaves one affordance, read the tail
+        # — wrong when the mention sits behind the reader's cursor, and wrong
+        # again when the tail holds someone else's post. Two members
+        # misattributed that way on 2026-09-29.
+        with patch.dict(os.environ, {"CLUSTER_MEMBER": "security"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--root", str(self.root), "--config", str(SEEDED_CONFIG),
+                      "--members-dir", str(self.members_dir), "post", "free",
+                      "@tester look"])
+        mention = [t for members, t in self.pings if "tester" in members]
+        self.assertTrue(mention, "no mention ping was composed")
+        self.assertRegex(mention[0], r"#\d+",
+                         "the mention ping must name the message id")
+        self.assertRegex(mention[0], r"--since \d+",
+                         "and the way back to it when the cursor is past it")
+
+    def test_the_straggler_reminder_reports_rather_than_instructs(self):
+        # It is composed only for members who have not replied, but DELIVERY
+        # is asynchronous (wake types it into a pane), so it can land after
+        # the reply or mid-work. An imperative arriving then tells a
+        # compliant member to post a second reply and break the
+        # one-reply-per-gate rule the tally rests on.
+        gates.open_gate(self.queue, self.config, iteration="g2",
+                        body="adopt plan Y?", opener="golem",
+                        members_dir=self.members_dir,
+                        config_path=SEEDED_CONFIG, timers=False)
+        gates.check_gate(self.queue, self.config, iteration="g2",
+                         members_dir=self.members_dir)
+        reminder = [t for t in (text for _m, text in self.pings)
+                    if "had no reply" in t]
+        self.assertTrue(reminder, "the reminder no longer reports an observation")
+        self.assertIn("stale, not a second request", reminder[0])
+        self.assertNotIn("still needs your ONE reply", reminder[0])
 
 
 if __name__ == "__main__":

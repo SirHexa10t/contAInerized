@@ -21,13 +21,13 @@ CLI that runs it (Claude Code, Gemini CLI, Codex CLI, Grok Build).
 |---|---|---|---|
 | Which credentials file for which AI / harness | done 2026-09-15 — `plans/credentials.md`: API keys per AI (`~/.ai-agents/credentials/keys/<ai>.env`, `--env-file`, the AI's `key_env`; docker-grammar preflight + audit), login files per harness (`Adapter.auth_files` → `paths.auth_file_mounts` per launch shape; private blanks; a per-file migration of the old pair); `paths.py` no longer binds the Claude pair at import. Residue in ISSUES.md (per-solo-instance `.claude.json`, key-vs-login exclusivity, Codex's key-through-login, two probes) | `plans/credentials.md`, `launch/ai/adapter.py`, `paths.py`, `file_access.py`, `docker_config.py`, `cluster/launching.py`, `tags/migrations.py`, `audit.py` | `test_ai`, `test_file_access`, `test_docker_config.TestKeyEnvFiles`, `test_cluster_launching`, `test_tags.TestCredentialsRelocation`, `test_audit.TestCredentialFiles` |
 | The HARNESS as a TAG KIND | done 2026-09-14 — `agents/harness/<key>/tag.info` (vendor, `ais` it runs, binary, package; `⟦ClaudeCode⟧` `⟦GeminiCLI⟧` `⟦CodexCLI⟧` `⟦GrokBuild⟧`, `launch/tags/harness.py`); an AI's `harness` field is the key of its default; a per-instance axis like the AI (`.lego`, `instances.toml`, cluster tables, `Instance.harness`, resolved to the build's else the AI's default; a pair the harness cannot run is refused in a `.lego` and dropped-and-flagged from the store); the form's second radio group, the picker's runtime column after the AI, second in every pane, a Harnesses legend section. The code half is keyed by it: `launch/ai/adapter.py` (`Adapter`), `ADAPTERS`, `adapter_for`, `active_adapter`, `DEFAULT_HARNESS_KEY`; refusal and adoption by the instance's harness | `test_tags.TestHarnessKind`, `test_ai.TestHarnessMembers` / `TestAdapterRecord` / `TestRefusal`, `test_forms`, `test_menu_picker`, `test_essential_files` |
-| The AI as a TAG KIND (was: the catalog enum) | done 2026-09-13 — `agents/ai/<key>/` with `tag.info` (vendor, harness, `default`, colours) and `efforts.tiers` (`knobs.mapping` moved to the harness 2026-09-14); `launch/tags/ai.py` (`Ai`, scan + validation, `render`); an `ai` axis in `AgentBuild`, `.lego`, `instances.toml`, cluster tables and `Instance`; `launch/ai/catalog.py` keeps only `DEFAULT_AI_KEY` + the call-time `active_ai_key()` / `set_active_ai()` | `test_tags.TestAiKind`, `test_ai.TestAiMembers` |
+| The AI as a TAG KIND (was: the catalog enum) | done 2026-09-13 — `agents/ai/<key>/` with `tag.info` (vendor, harness, `default`, colours) and `efforts.tiers` (`engine.mapping` moved to the harness 2026-09-14); `launch/tags/ai.py` (`Ai`, scan + validation, `render`); an `ai` axis in `AgentBuild`, `.lego`, `instances.toml`, cluster tables and `Instance`; `launch/ai/catalog.py` keeps only `DEFAULT_AI_KEY` + the call-time `active_ai_key()` / `set_active_ai()` | `test_tags.TestAiKind`, `test_ai.TestAiMembers` |
 | Model equivalence across AIs | done 2026-09-13 as DATA, re-cut 2026-09-14 into CAPABILITY STANDARDS — `agents/ai/capability.standards` lists the dated standards (the quarter a model raised the frontier's AA index: 2025Q1 … 2026Q3 today, setter and index recorded, estimates flagged) and each `agents/ai/<key>/efforts.tiers` answers every standard plus `cheapest` / `best` with that AI's model + effort — the cheapest configuration meeting it, else its best, flagged; the standard's date IS the order, and the registry checks every engine names a standard the AIs answer | `test_ai.TestAiMembers` (every standard, rising indices, efforts within scale), `TestEngineOrder`, `test_tags.TestStandardVocabulary` |
 | §8 — the engine budget FILE | done 2026-09-13 — ONE `agents/engine/<tag>/tag.budget` per engine in the launcher's own words (step, switches, amounts — `tags/budget.py`); the 24 per-AI `<ai>.conf` files are gone | `test_tags.TestEngine`, `test_essential_files` |
-| §8 — the budget's KEYS per harness | done 2026-09-13, moved 2026-09-14 — `agents/harness/<key>/knobs.mapping` (the settings surface is the CLI's, not the model's; `{provider}` slugs for a multi-model CLI) translates each budget purpose into that AI's native settings (`{value}` templates, unit conversions once); a purpose an AI cannot express is absent and reported as unmapped by `Ai.render`; the sourced reference blocks of the former default confs live there as comments | `test_ai.TestRendering` (Claude renders exactly the former env files; unmapped purposes reported; conversions) |
+| §8 — the budget's KEYS per harness | done 2026-09-13, moved 2026-09-14 — `agents/harness/<key>/engine.mapping` (the settings surface is the CLI's, not the model's; `{provider}` slugs for a multi-model CLI) translates each budget purpose into that AI's native settings (`{value}` templates, unit conversions once); a purpose an AI cannot express is absent and reported as unmapped by `Ai.render`; the sourced reference blocks of the former default confs live there as comments | `test_ai.TestRendering` (Claude renders exactly the former env files; unmapped purposes reported; conversions) |
 | §8 — the launcher READING those keys (model sort, effort flag, rendering into settings.json / config.toml) | mostly — `Instance.conf` is the engine's budget rendered by the instance's AI; engine order is the AI-neutral step rank; `effort_args` takes `Instance.effort`; only `-e KEY=VALUE` forwarding exists, so writing Gemini's settings.json / Codex's config.toml / Grok's config.toml from the rendering is the split half | `tags/ai.py`, `tags/engine.py`, `docker_config.py` | `test_ai.py` — no production module spells a harness word |
 | §10 / §14 — the CLI's name in strings a user reads | done 2026-09-12 for the live strings — `Ai.cli_name` ("Claude Code" / "Gemini CLI" / "Codex CLI"); the terminal title and the firewall abort read it through `active_ai()` (the abort's hosts come from the same adapter record — §13). The §14 renames (paths, module names, `claude_args`, the container user) stay open | `launch/ai/catalog.py`, `claude_code_config.set_terminal_title`, `firewall/resolver.py` | `test_ai.py`, `test_claude_code_config.py` |
-| §1 image and entrypoint | partly, 2026-09-12 — the binary and herdr's agent kind are adapter data (`Harness.binary`, `.herdr_agent_kind`), read by `docker_config`, `cluster/launch_plan`, `cluster/herdr`, `cluster/launching`; the image's install line, env switches and ENTRYPOINT moved into the harness's own layer, `agents/harness/claude-code/Dockerfile`, built last (2026-09-16) — another harness adds its own | `launch/ai/claude_code.py`, `agents/harness/<key>/Dockerfile` | `test_ai.py` (consumers read the record; no production module spells `"claude"`) |
+| §1 image and entrypoint | done for a second harness 2026-09-25 — the binary and herdr's agent kind are adapter data (`Harness.binary`, `.herdr_agent_kind`), read by `docker_config`, `cluster/launch_plan`, `cluster/herdr`, `cluster/launching`; each harness owns its last-built layer (`agents/harness/<key>/Dockerfile`: claude-code since 2026-09-16, gemini-cli since 2026-09-25), and an npm-installed CLI claims the shared Node layer beneath it (`agents/profession/_node`, `layer = "node"` in the harness's tag.info; `Instance.build_steps` inserts it directly before the harness's own). The image build itself is unverified until run on a host with docker | `launch/ai/{claude_code,gemini_cli}.py`, `agents/harness/<key>/Dockerfile`, `agents/profession/_node/`, `launch/tags/harness.py`, `launch/tags/identity.py` | `test_ai.py`, `test_essential_files` (every adapted harness's layer; every npm harness claims Node; the Node layer stable, fail-hard, prefix on PATH; the chain order), `test_tags.TestHarnessKind`, `test_env_coverage` |
 | §2 CLI flags | partly, 2026-09-12 — the flags the launcher emits are adapter data (`print_flag`, `continue_flag`, `effort_flag`, `stream_args`); the flag MAP for another harness and the stream parser are the split half | `launch/ai/claude_code.py`; `docker_config`, `agents_crud`, `quickie/ask` | `test_ai.py` |
 | §3 config-dir layout and mounts | partly, 2026-09-12 — the config root's dir and file names (`.claude`, `settings.json`, `CLAUDE.md`, `commands`, `skills`, `history.jsonl`, `projects`) and the relocation / session env vars are adapter data; `paths.py` derives its constants from the Claude record at IMPORT — the residue the switch (step 2) must turn into functions of `active_harness()` | `launch/ai/claude_code.py`, `paths.py` | `test_ai.py` (paths carry the record's names) |
 | §4 persona file and injected copy | not yet | — | — |
@@ -40,7 +40,7 @@ CLI that runs it (Claude Code, Gemini CLI, Codex CLI, Grok Build).
 | §12 cluster | not yet | — | — |
 | §13 firewall hosts | done 2026-09-12 — the critical hosts are adapter data (`Harness.critical_hosts`); `firewall/resolver._critical_hosts()` reads them at call time and the abort message names `active_ai().vendor` / `.cli_name` from the same record, so hosts and words move together. The widening block for Anthropic's registered space stays a resolver fact until another harness documents one | `launch/ai/claude_code.py`, `firewall/resolver.py` | `test_ai.py` |
 | §14 names | not yet | — | — |
-| Switching the AI an instance runs | done 2026-09-13 — `ai` is a per-instance axis (`instances.toml`, `.lego`, cluster tables), resolved to the tree's default member when unset; `Instance.conf` / `.model` / `.effort` follow it. Offered as the ⟪⟫ radio group atop every instance and member form; shown as a column between the tags and the name, first in every pane, and in an AIs section of the F8 legend. Each solo launch path (`run.py`, the quickie) refuses an AI without a harness adapter before persist and build (`launch/ai.refusal_for`) and then ADOPTS the instance's AI (`launch/ai.adopt`) before the first harness word is read; the cluster launch refuses per member and resolves the harness per member for the pane env and mounts, but adopts none — its settings install and title still read the default's names (residue, with `paths.py`'s import-time constants) | `launch/tags/*`, `launch/ai/catalog.py`, `gui/forms.py`, `gui/menu_picker.py` | `test_forms`, `test_menu_picker`, `test_picker_previews`, `test_styles`, `test_run`, `test_docker_config`, `test_cluster_launching`, `test_ai.TestRefusal` |
+| Switching the AI an instance runs | done 2026-09-13 — `ai` is a per-instance axis (`instances.toml`, `.lego`, cluster tables), resolved to the tree's default member when unset; `Instance.conf` / `.model` / `.effort` follow it. Offered as the ⟪⟫ radio group atop every instance and member form; shown as a column between the tags and the name, first in every pane, and in an AIs section of the F8 legend. Each solo launch path (`run.py`, the quickie) refuses an AI whose harness cannot start — no adapter, or an adapter not yet `startable` — before persist and build (`launch/ai.refusal_for`, over the one predicate `readiness_note` that the form's harness rows and the audit's `unstartable_harness` finding also read) and then ADOPTS the instance's AI (`launch/ai.adopt`) before the first harness word is read; the cluster launch refuses per member and resolves the harness per member for the pane env and mounts, but adopts none — its settings install and title still read the default's names (residue, with `paths.py`'s import-time constants) | `launch/tags/*`, `launch/ai/catalog.py`, `gui/forms.py`, `gui/menu_picker.py` | `test_forms`, `test_menu_picker`, `test_picker_previews`, `test_styles`, `test_run`, `test_docker_config`, `test_cluster_launching`, `test_ai.TestRefusal` |
 | Switching: what an instance can CARRY across AIs | researched 2026-09-12 — "Moving an instance between AIs" below: skills, MCP definitions and the persona file move as-is or by pointer; commands, policies, hooks and memory move with conversion and stated losses; transcripts do not move at all | the section below; Claude Code's own `/import` for the way back | the probe list below, once a binary is in an image |
 
 ## Requirements for a new AI (grows with the table above)
@@ -73,7 +73,7 @@ launch):
   that cannot meet it answers with its best, flagged as falling short. The
   ends are each AI's own cheapest and strongest. Inline comments carry the
   index and the token cost. `tags/ai.py` validates the file at scan.
-- **`knobs.mapping`** — since 2026-09-14 a HARNESS file (`agents/harness/<key>/`),
+- **`engine.mapping`** — since 2026-09-14 a HARNESS file (`agents/harness/<key>/`),
   not the AI's: the launcher's budget purposes → that CLI's native settings
   (`Harness.render(budget, ai)`), with `{provider}` slugs where a multi-model
   CLI spells `anthropic/<model>`. See the harness kind's row above.
@@ -107,7 +107,12 @@ env vars, critical hosts; `launch/ai/adapter.py`) registered in
 `adapter_for(key)` raises and the
 launcher refuses to launch an instance on that AI (`refusal_for`, checked in
 `run.py` before persist and build, and per member by the cluster launch — the
-picker still describes such an instance; F2 switches it back). The behaviour half — rendering the settings into the harness's
+picker still describes such an instance; F2 switches it back). Register the
+record with `startable=False` while its image builds but its container
+cannot start: the launch keeps refusing, with a sentence saying so, and the
+form notes the harness row instead of hiding it. Flip it to True in the
+change that makes the container start, and nowhere else. An npm-installed
+CLI also names `layer = "node"` in its tag.info. The behaviour half — rendering the settings into the harness's
 file, parsing its transcripts and event stream, composing the persona — comes
 seam by seam (order of work below).
 
@@ -261,11 +266,85 @@ adapter per harness:
    section, picker column, preview line, legend section, `adopt()` at each
    solo launch path and the no-adapter refusal (solo and per cluster member).
 3. §1: an image layer per CLI, selected by the instance's AI, the way
-   professions are layers. Unblocks every probe in the list below.
+   professions are layers. Unblocks every probe in the list below. **Done
+   for Gemini CLI 2026-09-25, data half:** `agents/harness/gemini-cli/`
+   (Dockerfile, tag.docker, `layer = "node"`), the shared
+   `agents/profession/_node/` layer, `launch/ai/gemini_cli.py` registered with
+   `startable=False`, and the Adapter contract widened where the CLIs differ
+   in shape (`continue_args`, an Optional `effort_flag`,
+   `config_dir_env_parent`, `startable`). Settled by running the real CLI,
+   v0.61.0, not from docs: `--resume` takes a value (`latest` or an index);
+   there is no effort flag; GEMINI_CLI_HOME stands in for HOME and `.gemini`
+   is created inside it; transcripts are
+   `.gemini/tmp/<project-id>/chats/session-<time>-<id8>.jsonl`, one record per
+   line, turns typed `user` and `gemini`, with `<project-id>` from the CLI's
+   own `projects.json` registry and the input log `logs.json` beside them;
+   commands and skills live in `.gemini/commands` and `.gemini/skills`; herdr
+   has a `gemini` agent kind. Still to verify: the image build on a host with
+   docker, and the probes below that need an authenticated backend.
 4. §3, §4, §9: config directory, persona file, credentials — a plain-mode
-   container starts.
+   container starts. **In progress for Gemini CLI (gate step4-start,
+   2026-09-25).** Done: the conflated container path is split into THREE
+   roots — `LAUNCHER_ASSETS_IN_CONTAINER` (fixed for every harness: bashrc,
+   its scripts, the parser, the muxer configs, popups and startup script),
+   `container_config_root(adapter)` (a harness's default root, call-time;
+   the state dir mounts there, the persona, settings and commands names
+   follow the running adapter) and a cluster member's relocated root; the
+   always-on mounts are fixed, harness-rooted, or ABSENT per adapter
+   (`Adapter.config_files`); the muxer startup script is a launcher asset
+   with its own file mount; the cowork hub reads a capture's root off the
+   recorded path, never the process's adapter. The transcript and input-log
+   LAYOUT is each adapter's globs (`history_glob`, `transcript_glob`,
+   `subagent_transcript_glob`) plus `transcript_format` — the line shape the
+   launcher's parser reads, None for Gemini CLI: its files are FOUND, so
+   resume detection is honest (asked of the instance's own harness, since a
+   switched instance still holds the other CLI's transcripts), but never
+   parsed as Claude's; the preview, `--find`, alt+f and the in-container
+   helpers all say "not read yet" instead of an empty history. Remaining, in
+   order:
+   - Gemini's settings.json: a per-harness base plus the engine's knobs
+     rendering (dotted keys to nested JSON), `general.enableAutoUpdate`
+     false, and `--skip-trust` so the chosen workspace does not prompt —
+     which does not skip trust but GRANTS it for the session
+     (`GEMINI_CLI_TRUST_WORKSPACE=true`), and trust is what makes the
+     workspace's `.gemini/settings.json` effective, `adminPolicyPaths`
+     included (union-merged, admin tier). Gemini's `[fixed]` tier is what
+     keeps that harmless: a .toml in the system policies dir nulls those
+     paths (gate fixed-tier; `launch/tags/policy_mapping.py`);
+   - specialty `claude_args` as per-harness data (`{auto}` has no Gemini
+     spelling yet: refused, never passed through);
+   - policies on a harness that cannot enforce them: DONE by step 6's build
+     (2026-09-26), per WORD rather than per policy — a deny or demand word
+     the harness's policy.mapping cannot express refuses the launch naming
+     the policy and the word, an allow word is a note. No by-name exemption
+     was needed: no-sudo is mapped on both runnable harnesses, and a harness
+     WITHOUT a policy.mapping refuses every launch (the always-on no-sudo is
+     a deny), so a new harness's adapter arrives with its mapping;
+   - an addendum scan rule: bodies name capabilities, never one harness's
+     tool or product names ({firewall} names WebFetch, {cowork} Claude Code);
+   - bashrc's `man` helper: Claude-shaped beyond its paths (markdown
+     commands, Claude's built-in roster), so it moves with Gemini's command
+     format rather than by path alone;
+   - then `startable=True` for Gemini CLI, in the change that makes the
+     container start, and the image built and started on a host with docker.
 5. §2, §7: flags and the stream parser — quickie works.
-6. §5: policies as per-harness data files beside `policy.json`.
+6. §5: policies. **DONE 2026-09-26, and not as per-harness copies** (gates
+   policy-mapping and policy-tier): a policy's rules are launcher words
+   (`tag.rules` — capabilities, shell words and stems, modes;
+   `launch/tags/rules.py`) and each harness's `policy.mapping` renders them
+   (`launch/tags/policy_mapping.py`), the engine budget's pattern. Claude
+   Code: permission lists in settings.json, pinned against every former
+   fragment with no exemption. Gemini CLI: Policy Engine rules in
+   `<config>/policies/launcher.toml`, RO-mounted as a file and passed as
+   `--policy` (its whole user tier: argv beats every settings file), run
+   through the CLI's own engine by `launch/tests/test_gemini_policy_engine.py`.
+   The ALWAYS-ON denies are also baked into each image as root at the CLI's
+   fixed tier (gate fixed-tier: `[fixed]` in each policy.mapping, the harness
+   Dockerfiles), so a second copy of the CLI the agent starts still obeys
+   them; a new harness's mapping must state its `[fixed]` tier, a path or
+   `none` with the reason. Raw settings no word can say yet (`{cowork}`'s Stop
+   hook, `{cc}`'s prompt hook) stay as `<harness>.json` in the hidden fragment
+   and refuse elsewhere — step 7's.
 7. §6, §11, §12: transcripts, cowork hooks, cluster hooks, per the capability
    matrix.
 8. §14: the renames, last.
@@ -464,13 +543,13 @@ the hook payload and blocking-exit contract for Gemini and Codex.
   env keys, with nothing failing loudly. The switch therefore needs call-time
   reads (an `active_ai()` function every consumer calls) or must be settled
   before `launch.tags.engine` is imported.
-- **The model-bump command covers only Claude** —
-  `agents/_commands/ai_project-update-models.md` reads Anthropic's pages and
-  bumps `agents/ai/claude/efforts.tiers`. The Gemini / ChatGPT / Grok
-  `efforts.tiers` ids (one a `-preview` id; the CLI's own `pro` alias points
-  at a model that died within months) age silently, and nothing launches
-  them until an adapter exists. Before any adapter ships, extend the bump to every catalog member
-  (each file's header carries the date its ids were verified).
+- **The model-bump command covers every AI — settled 2026-09-25.**
+  `agents/_commands/ai_project-update-models.md` reads each vendor's pages,
+  and the Gemini CLI's own alias tables, for every `agents/ai/<key>/efforts.tiers`,
+  and refreshes each file's verified-on line on every run. It defers to
+  `capability.standards` on which configuration is a tier: an unrated
+  successor is recorded as available, never pinned (plans/ISSUES.md has the
+  first run's findings).
 - **Codex's effort ceiling** — the config reference's enum stops at `xhigh`,
   while the models page shows the CLI's own selector offering Max and Ultra
   and the API pages list `max` as a real `reasoning.effort` value for every

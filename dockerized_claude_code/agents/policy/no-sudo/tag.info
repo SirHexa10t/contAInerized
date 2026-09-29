@@ -1,5 +1,5 @@
 shortname             = "-su"
 short_description     = "deny sudo"
-full_description      = "Deny sudo via the Bash tool. ALWAYS ON — applied to every instance regardless of selections (the container's user has no sudo password anyway; this turns the OS-level dead end into a clean, instant harness refusal). Not listed in .lego files or instances.toml."
+full_description      = "Deny sudo via the Bash tool. ALWAYS ON — applied to every instance regardless of selections (the container's user has no sudo password anyway; this turns the OS-level dead end into a clean, instant harness refusal). Because it is identical for every instance, it is also baked into the harness image as a root-owned file in that CLI's own system-wide policy tier, so it holds for a harness the agent starts itself, not only for the one the launcher configures. Not listed in .lego files or instances.toml."
 stance                = "deny"
 always_on             = true

@@ -1,0 +1,29 @@
+# Gemini's MODELS — what the tag form offers as an instance's model, one line
+# per model, and each one's EFFORT RANGE — what the form's effort row offers
+# for it (launch/tags/models.py documents the columns). No `model` in an
+# instance's mapping means its engine's (at the engine's rated level); a pinned
+# model with no `effort` runs at its top level.
+# Order is the form's: strongest family first — Pro, Flash, Flash-Lite — and
+# newest version first within it.
+# Ids and effort ranges (thinking levels) verified 2026-09-28 against
+# ai.google.dev's models, deprecations and thinking pages, and Google Cloud's
+# page for 3.1 Flash-Lite (`ai_project-update-models`). Left out:
+# gemini-3-pro-preview, shut down 2026-03-09, although the CLI still
+# resolves `pro` / `auto` to it.
+# `-` on the 2.5 line is the LAUNCHER's choice, not a vendor limit: Gemini
+# 2.5 takes thinking levels LOW / MEDIUM / HIGH, but this AI's effort row
+# sets the level on the Gemini 3 preset (chat-base-3, agents/harness/
+# gemini-cli/engine.mapping), so the launcher sends a 2.5 model no level and
+# it thinks at its own default — until Gemini's settings are rendered.
+
+gemini-3.1-pro-preview   efforts=LOW,MEDIUM,HIGH              # the CLI re-resolves it to 2.5 Pro without preview access (efforts.tiers)
+gemini-2.5-pro           efforts=-                            # vendor: LOW, MEDIUM, HIGH — the launcher sends none (header)
+gemini-3.8-flash         efforts=LOW,MEDIUM,HIGH              # no MINIMAL
+gemini-3.7-flash         efforts=LOW,MEDIUM,HIGH              # no MINIMAL
+gemini-3.6-flash         efforts=MINIMAL,LOW,MEDIUM,HIGH
+gemini-3.5-flash         efforts=MINIMAL,LOW,MEDIUM,HIGH
+gemini-3-flash-preview   efforts=MINIMAL,LOW,MEDIUM,HIGH
+gemini-2.5-flash         efforts=-                            # vendor: LOW, MEDIUM, HIGH — the launcher sends none (header)
+gemini-3.5-flash-lite    efforts=MINIMAL,LOW,MEDIUM,HIGH
+gemini-3.1-flash-lite    efforts=MINIMAL,LOW,MEDIUM,HIGH      # released 2026-05-07; shuts down 2027-05-07, replaced by gemini-3.5-flash-lite
+gemini-2.5-flash-lite    efforts=-                            # vendor: LOW, MEDIUM, HIGH, thinking off by default — the launcher sends none (header)

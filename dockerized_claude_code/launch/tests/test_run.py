@@ -230,6 +230,21 @@ class TestLaunchOrchestrator(unittest.TestCase):
         mocks["ensure_image"].assert_not_called()
         mocks["run_container"].assert_not_called()
 
+    def test_a_harness_that_builds_but_cannot_start_exits_before_persist_and_build(self):
+        # Gemini CLI is in the adapter registry; that alone used to let this
+        # launch through to ensure_image, which is where the operator would
+        # have paid for a full image build before the missing config dir
+        # bit. ensure_image patched AND asserted not called: pinning the
+        # message alone would pass even if the refusal moved below the build.
+        mocks = self._mock_pipeline(dry_run=False)
+        mocks["resolve_target"].return_value.harness = SimpleNamespace(name="gemini-cli", label="⟦GeminiCLI⟧")
+        with self.assertRaises(SystemExit) as caught:
+            run.launch()
+        self.assertIn("does not start yet", str(caught.exception))
+        mocks["persist_instance"].assert_not_called()
+        mocks["ensure_image"].assert_not_called()
+        mocks["run_container"].assert_not_called()
+
     def test_manager_launch_ensures_the_cowork_hub(self):
         mocks = self._mock_pipeline(dry_run=False, is_manager=True)
         run.launch()
@@ -385,6 +400,7 @@ class TestFindHistory(unittest.TestCase):
     def test_the_handler_announces_the_scan_then_prints_the_result(self):
         order = []
         with patch.object(run, "iter_conversation_dirs", return_value=[Path("/a"), Path("/b")]), \
+             patch.object(run, "unsearched_counts", return_value={}), \
              patch.object(run, "find_in_history", return_value=[]) as search, \
              patch.object(run, "print_findings",
                           side_effect=lambda *a: order.append("printed")), \

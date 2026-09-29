@@ -39,8 +39,19 @@ FALLBACK_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
 def projects_dir() -> Path:
-    """The transcripts root for THIS container, from the launcher's env."""
-    return Path(os.environ.get(TRANSCRIPTS_ENV) or FALLBACK_PROJECTS_DIR)
+    """The transcripts root for THIS container, from the launcher's env.
+
+    Unset means something specific — outside a launcher container, or a CLI
+    whose transcripts this helper cannot read yet — and it is SAID before
+    falling back, rather than reading a default that may not exist and
+    reporting "no transcript" as if there were none (gate step4-start)."""
+    staged = os.environ.get(TRANSCRIPTS_ENV)
+    if staged:
+        return Path(staged)
+    print(f"note: {TRANSCRIPTS_ENV} is not set: this shell is outside a launcher container, "
+          f"or this container's CLI keeps transcripts the launcher cannot read yet "
+          f"— trying {FALLBACK_PROJECTS_DIR}", file=sys.stderr)
+    return FALLBACK_PROJECTS_DIR
 
 
 def newest_transcript(root: Path | None = None) -> Path | None:

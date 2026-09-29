@@ -462,7 +462,12 @@ In clusters, save `shell` (tab's) history, and reload it on next launch
 Set default (starting) AI model (engine part) explicitly in the forms
 
 
-
+Write in README about the collaborative AI:
+    Not a good idea, as it is / yet
+        The group members' responses clutter up the memory, which is a major bottleneck
+            Option 1: Wait for the future, when memory would be sufficient not to cut-off the workflow
+            Option 2: Change the protocol, so that there'd be one AI or script that manages the protocol and relieves the code-manager
+            Option 3: Throw away the memory after fewer requests, or more of them. There's a tradeoff in price per request from memory, and from having to regenerate the context into memory.
 
 
 

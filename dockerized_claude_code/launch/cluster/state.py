@@ -116,12 +116,14 @@ class Cluster:
         # can exist whose members would not know they are members. `engine`
         # is deliberately NOT part of this: how hard a member thinks is a
         # per-member choice, and the cluster form omits that section — as
-        # are the AI and the harness that wraps it.
+        # are the AI and the harness that wraps it, and the model and effort
+        # it runs.
         missing = tuple(name for name in LOCKED_SPECIALTIES
                         if name not in self.tags.specialties)
-        if missing or self.tags.engine is not None or self.tags.ai is not None or self.tags.harness is not None:
+        if (missing or self.tags.engine is not None or self.tags.ai is not None or self.tags.harness is not None
+                or self.tags.model is not None or self.tags.effort is not None):
             object.__setattr__(self, "tags", replace(
-                self.tags, engine=None, ai=None, harness=None,
+                self.tags, engine=None, ai=None, harness=None, model=None, effort=None,
                 specialties=tuple(self.tags.specialties) + missing))
         if not self.members:
             raise ClusterError(
@@ -191,6 +193,8 @@ class Cluster:
             ai=build.ai,
             harness=build.harness,
             engine=build.engine,
+            model=build.model,
+            effort=build.effort,
             professions=tuple(n for n in build.professions
                               if n not in self.tags.professions),
             specialties=tuple(n for n in build.specialties
@@ -293,7 +297,7 @@ def dumps(cluster: Cluster) -> str:
         # up top, not repeated N times.
         entry = build_entry(cluster.own_build(member.build), workspace=None)
         table = [f"[{toml_emit.key(member.id)}]"]
-        for scalar in ("ai", "harness", "engine"):
+        for scalar in ("ai", "model", "effort", "harness", "engine"):
             if entry.get(scalar) is not None:
                 table.append(f"{scalar} = {toml_emit.string(entry[scalar])}")
         for axis in _AXES:
@@ -451,12 +455,13 @@ def destroy(cluster: Cluster) -> None:
 
 def _union(shared: AgentBuild, own: AgentBuild) -> AgentBuild:
     """The cluster's shared tags plus a member's own, order-preserving and
-    deduped, the member's AI / harness / engine kept (the cluster has none)
-    — the one definition behind `member_build` and `member_instance`."""
+    deduped, the member's AI / harness / engine / model / effort kept (the
+    cluster has none) — the one definition behind `member_build` and
+    `member_instance`."""
     def join(a: tuple[str, ...], b: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(a) + tuple(n for n in b if n not in a)
     return AgentBuild(
-        ai=own.ai, harness=own.harness, engine=own.engine,
+        ai=own.ai, harness=own.harness, engine=own.engine, model=own.model, effort=own.effort,
         professions=join(shared.professions, own.professions),
         specialties=join(shared.specialties, own.specialties),
         policies=join(shared.policies, own.policies))

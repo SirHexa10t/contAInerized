@@ -8,6 +8,7 @@ conf inheritance, policy-fragment merge rules, `.lego` parsing/validation,
 manifest parsing edge cases, and the registry's cross-cutting validation.
 """
 
+import dataclasses
 import textwrap
 import contextlib
 import io
@@ -26,6 +27,7 @@ from launch.tags import (
 )
 from launch.tags.harness import sorted_harnesses
 from launch.tags.ai import Ai
+from launch.tags.rules import Actions, Rules
 from launch.tags.identity import FORBIDDEN_IN_LABELS, label_error, suggested_label
 
 
@@ -84,32 +86,40 @@ FIXTURE_STANDARDS_FILE = (
 # A complete, valid AI member for fixture trees: a tier for every fixture
 # standard on one test model and a two-word scale. The shared standards file
 # rides along (one per tree; two members merge to the same key), and so does
-# the member's default harness, whose knobs render an engine's budget.
-FIXTURE_KNOBS = (
+# the member's default harness, whose engine.mapping renders an engine's budget.
+FIXTURE_ENGINE_MAPPING = (
     '[model]\nMODEL = "{value}"\n[effort]\nEFFORT = "{value}"\n'
     '[thinking.on]\nTHINK = "1"\n[thinking.off]\nTHINK = "0"\n'
     '[max_output_tokens]\nOUT = "{value}"\n[compact_at_percent]\nPCT = "{value/100}"\n'
     '[tool_output_tokens]\nCHARS = "{value*4}"\n')
 
 
-def harness_member(name="claude-cli", *, ais=("claude",), binary="claude", knobs=FIXTURE_KNOBS):
+def harness_member(name="claude-cli", *, ais=("claude",), binary="claude", engine_mapping=FIXTURE_ENGINE_MAPPING):
     """A complete, valid harness member for fixture trees: the CLI around the
-    AIs it names, with knobs enough to render an engine's budget."""
+    AIs it names, with an engine.mapping enough to render an engine's budget."""
     ais_list = ", ".join(f'"{a}"' for a in ais)
     return {f"harness/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\n'
                                          f'ais = [{ais_list}]\nbinary = "{binary}"\npackage = "npm {name}"\n'),
-            f"harness/{name}/knobs.mapping": knobs}
+            f"harness/{name}/engine.mapping": engine_mapping}
 
 
-def ai_member(name="claude", *, default=True, model="claude-test", fg="#ff8700", bg="#3a3a3a"):
+def ai_member(name="claude", *, default=True, model="claude-test", fg="#ff8700", bg="#3a3a3a",
+              models=None):
+    """A complete, valid AI member: its tiers all pin `model`, and its
+    models.list offers `models` (default: that one model, under the prefix
+    the fixture's ids share — the part before the first dash)."""
     tiers = "".join(f'[{s}]\nmodel = "{model}"\neffort = "{"low" if s == "cheapest" else "high"}"\n' for s in FIXTURE_KEYS)
+    prefix = model.split("-")[0] + "-"
+    listed = "".join(f"{line}\n" if "efforts=" in line else f"{line}  efforts=low,high\n"
+                     for line in (models if models is not None else (model,)))
     return {
         "ai/capability.standards": FIXTURE_STANDARDS_FILE,
         **harness_member(f"{name}-cli", ais=(name,), binary=name),        # its default harness rides along — the registry insists on one
         f"ai/{name}/tag.info": (f'full_description = "{name} by Vendor"\nvendor = "Vendor"\nharness = "{name}-cli"\n'
-                                f'key_env = "{name.upper()}_API_KEY"\n'
+                                f'key_env = "{name.upper()}_API_KEY"\nmodel_prefix = "{prefix}"\n'
                                 f'default = {str(default).lower()}\nfg = "{fg}"\nbg = "{bg}"\n'),
         f"ai/{name}/efforts.tiers": '[scale]\nefforts = ["low", "high"]\n' + tiers,
+        f"ai/{name}/models.list": "# Ids verified 2026-01-01 against the fixture\n" + listed,
     }
 
 
@@ -151,8 +161,8 @@ class TagTreeTestCase(unittest.TestCase):
             "specialty/dood/tag.info": 'full_description = "host docker"\nwarn = true\n',
             "specialty/firewall/tag.info": 'full_description = "whitelist"\n',
             "specialty/combos.info": '[warnings]\n"dood + auto" = "both = danger"\n',
-            "policy/no-sudo/tag.info": 'full_description = "no sudo"\nshortname = "-su"\n',
-            "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
+            "policy/no-sudo/tag.info": 'full_description = "no sudo"\nshortname = "-su"\nstance = "deny"\n',
+            "policy/no-sudo/tag.rules": '[deny]\nshell = ["sudo"]\n',
         }
 
 
@@ -233,10 +243,35 @@ class TestHarnessKind(TagTreeTestCase):
         (cli,) = Harness.scan(self.tree({**harness_member(), "harness/claude-cli/Dockerfile": 'FROM x\nENTRYPOINT ["claude"]\n'}))
         self.assertEqual(cli.dockerfile, cli.path / "Dockerfile")
 
-    def test_scan_reads_the_knobs(self):
+    # --- a harness's claim on a shared hidden layer (`layer = "node"`) ---
+
+    def _claiming(self, layer_dir="profession/_node/Dockerfile", **extra):
+        spec = {**harness_member(), layer_dir: "FROM x\n", **extra}
+        spec["harness/claude-cli/tag.info"] += 'layer = "node"\n'
+        root = self.tree(spec)
+        return root, Profession.discover_layers(root)
+
+    def test_a_named_layer_resolves_to_the_hidden_dir(self):
+        root, layers = self._claiming()
+        (cli,) = Harness.scan(root, layers)
+        self.assertEqual(cli.layer, layers["node"])
+
+    def test_a_layer_no_hidden_dir_carries_fails_the_scan(self):
+        root, _ = self._claiming()
+        with self.assertRaisesRegex(TagError, "not a hidden layer"):
+            Harness.scan(root, {})
+
+    def test_a_layer_nested_under_a_profession_is_refused(self):
+        # Claiming it would force that profession on every instance in the CLI.
+        root, layers = self._claiming("profession/code/_node/Dockerfile",
+                                      **{"profession/code/tag.info": 'full_description = "code"\n'})
+        with self.assertRaisesRegex(TagError, "must be at agents/profession/'s root"):
+            Harness.scan(root, layers)
+
+    def test_scan_reads_the_engine_mapping(self):
         (cli,) = Harness.scan(self.tree(harness_member()))
-        self.assertEqual(cli.knob("model"), (("MODEL", "{value}"),))
-        self.assertIsNone(cli.knob("telemetry.off"))
+        self.assertEqual(cli.engine_templates("model"), (("MODEL", "{value}"),))
+        self.assertIsNone(cli.engine_templates("telemetry.off"))
         self.assertEqual(cli.providers, ())
         self.assertFalse(cli.needs_providers)
 
@@ -249,38 +284,49 @@ class TestHarnessKind(TagTreeTestCase):
     def test_render_fills_templates_and_converts_units(self):
         claude, harnesses = self._pair()
         rendering = harnesses["claude-cli"].render(Budget(effort_tier="best", thinking=True, max_output_tokens=1000,
-                                                          compact_at_percent=60, tool_output_tokens=100), claude)
+                                                          compact_at_percent=60, tool_output_tokens=100), claude,
+                                                   model="claude-test", effort="high")
         self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high", "THINK": "1",
                                          "OUT": "1000", "CHARS": "400", "PCT": "0.6"})
         self.assertEqual(rendering.unmapped, ())
 
     def test_render_reports_what_the_cli_cannot_say(self):
         claude, harnesses = self._pair()
-        rendering = harnesses["claude-cli"].render(Budget(effort_tier="2025Q1", memory=False, telemetry=False), claude)
+        rendering = harnesses["claude-cli"].render(Budget(effort_tier="2025Q1", memory=False, telemetry=False), claude,
+                                                   model="claude-test", effort="high")
         self.assertEqual(rendering.unmapped, ("memory.off", "telemetry.off"))
         self.assertEqual(rendering.map, {"MODEL": "claude-test", "EFFORT": "high"})
 
-    def test_render_needs_a_standard(self):
+    def test_render_sends_exactly_the_model_and_effort_it_is_given(self):
+        # Which model and level run is the INSTANCE's decision (its picks,
+        # else its engine's tier); the harness only spells them.
         claude, harnesses = self._pair()
-        with self.assertRaises(TagError):
-            harnesses["claude-cli"].render(Budget(), claude)
+        rendering = harnesses["claude-cli"].render(Budget(effort_tier="best", thinking=True), claude,
+                                                   model="claude-big-2", effort="low")
+        self.assertEqual(rendering.map, {"MODEL": "claude-big-2", "EFFORT": "low", "THINK": "1"})   # the engine's switches stay
+
+    def test_no_effort_renders_no_effort_row(self):
+        claude, harnesses = self._pair()
+        rendering = harnesses["claude-cli"].render(Budget(effort_tier="best"), claude, model="claude-lite-1", effort=None)
+        self.assertEqual(rendering.map, {"MODEL": "claude-lite-1"})
 
     def test_a_multi_ai_cli_spells_the_model_with_its_provider_slug(self):
         # `{provider}` in a value or a key resolves through [providers] by the
         # AI's member name — the way OpenCode or OpenClaw write anthropic/<id>.
-        knobs = ('[providers]\nclaude = "anthropic"\n'
-                 '[model]\nmodel = "{provider}/{value}"\n'
-                 '[max_output_tokens]\n"models.{provider}.maxTokens" = "{value}"\n')
-        claude, harnesses = self._pair(harness_member("multi-cli", ais=("claude",), binary="multi", knobs=knobs))
+        engine_mapping = ('[providers]\nclaude = "anthropic"\n'
+                          '[model]\nmodel = "{provider}/{value}"\n'
+                          '[max_output_tokens]\n"models.{provider}.maxTokens" = "{value}"\n')
+        claude, harnesses = self._pair(harness_member("multi-cli", ais=("claude",), binary="multi",
+                                                      engine_mapping=engine_mapping))
         multi = harnesses["multi-cli"]
         self.assertTrue(multi.needs_providers)
-        rendering = multi.render(Budget(effort_tier="best", max_output_tokens=500), claude)
+        rendering = multi.render(Budget(effort_tier="best", max_output_tokens=500), claude, model="claude-test", effort=None)
         self.assertEqual(rendering.map, {"model": "anthropic/claude-test", "models.anthropic.maxTokens": "500"})
 
     def test_knob_faults_fail_loudly(self):
         base = harness_member()
         info_path = next(p for p in base if p.endswith("tag.info"))
-        knobs_path = next(p for p in base if p.endswith("knobs.mapping"))
+        knobs_path = next(p for p in base if p.endswith("engine.mapping"))
         info, knobs = base[info_path], base[knobs_path]
         faults = {
             "unknown purpose": knobs + '[colour]\nX = "1"\n',
@@ -401,6 +447,110 @@ class TestAiKind(TagTreeTestCase):
         spec = {**ai_member(), "ai/claude/mini/tag.info": 'full_description = "nested"\n'}
         with self.assertRaises(TagError):
             Ai.scan(self.tree(spec))
+
+
+class TestAiModels(TagTreeTestCase):
+    """An AI's models.list as the scan holds it to the rest of the member:
+    the options the tag form offers, the prefix its label drops, and the
+    tiers — which stay the engines' rated answers, each naming a listed
+    model at an effort it takes, omitting the effort exactly when the model
+    takes none (gates model-picker, model-picker-3)."""
+
+    def scan_one(self, models=("claude-test", "claude-other-2"), **kw):
+        (ai,) = Ai.scan(self.tree(ai_member(models=models, **kw)))
+        return ai
+
+    def assertRefused(self, spec_change: dict, message: str) -> None:
+        spec = {**ai_member(), **spec_change}
+        with self.assertRaisesRegex(TagError, message):
+            Ai.scan(self.tree(spec))
+
+    def test_the_list_is_read_in_order_with_its_ranges(self):
+        ai = self.scan_one()
+        self.assertEqual([m.id for m in ai.models], ["claude-test", "claude-other-2"])
+        self.assertEqual(ai.models[0].efforts, ("low", "high"))      # the fixture's scale, in its order
+        self.assertEqual(ai.model_prefix, "claude-")
+
+    def test_a_model_is_found_by_id_or_alias(self):
+        ai = self.scan_one(models=("claude-test", "claude-b-1-20250101  alias=claude-b-1"))
+        self.assertEqual(ai.model("claude-b-1").id, "claude-b-1-20250101")
+        self.assertIsNone(ai.model("claude-nope"))
+
+    def test_stale_names_a_pick_the_list_does_not_carry_and_nothing_else(self):
+        # A vendor-retired id is deleted from the list (operator, 2026-09-29),
+        # so a retired pick and a typo meet the same answer.
+        ai = self.scan_one()
+        self.assertIsNone(ai.stale("claude-other-2"))
+        gone = ai.stale("gpt-6-astra")
+        self.assertEqual((gone.spelling, gone.why(ai.label)), ("gpt-6-astra", "not among ⟪claude⟫'s models"))
+
+    def test_label_with_carries_the_model_and_none_keeps_the_plain_label(self):
+        ai = self.scan_one()
+        self.assertEqual(ai.label_with(ai.model("claude-other-2")), "⟪claude:Other-2⟫")
+        self.assertEqual(ai.label_with(None), ai.label)
+
+    def test_a_member_without_a_list(self):
+        spec = ai_member()
+        spec.pop("ai/claude/models.list")
+        with self.assertRaisesRegex(TagError, "missing models.list"):
+            Ai.scan(self.tree(spec))
+
+    def test_a_member_without_a_prefix(self):
+        info = ai_member()["ai/claude/tag.info"]
+        self.assertRefused({"ai/claude/tag.info": info.replace('model_prefix = "claude-"\n', "")}, "model_prefix must be")
+        self.assertRefused({"ai/claude/tag.info": info.replace('model_prefix = "claude-"', 'model_prefix = ""')}, "model_prefix must be")
+
+    def test_an_id_outside_the_prefix(self):
+        self.assertRefused({"ai/claude/models.list": "# verified 2026-01-01\nclaude-test  efforts=low,high\ngpt-6-astra  efforts=low\n"},
+                           "gpt-6-astra does not start with the AI's model_prefix")
+
+    def test_a_range_word_outside_the_ais_scale(self):
+        self.assertRefused({"ai/claude/models.list": "# verified 2026-01-01\nclaude-test  efforts=low,high,max\n"},
+                           "efforts= max — not in this AI's scale")
+
+    def test_two_models_the_picker_could_not_tell_apart(self):
+        self.assertRefused({"ai/claude/models.list": "# verified 2026-01-01\nclaude-test  efforts=low,high\n"
+                                                      "claude-a-1  efforts=low\nclaude-a-1-20250101  efforts=low\n"},
+                           "would both read 'A-1' in the picker — give one a display=")
+
+    def test_a_display_tells_them_apart_again(self):
+        ai = self.scan_one(models=("claude-test", "claude-a-1", "claude-a-1-20250101  display=A-1-Snapshot"))
+        self.assertEqual(len(ai.models), 3)
+
+    def test_every_tier_pin_must_be_listed_but_an_alias_will_do(self):
+        self.assertRefused({"ai/claude/models.list": "# verified 2026-01-01\nclaude-other  efforts=low,high\n"},
+                           r"\[cheapest\] pins claude-test, which models.list does not list")
+        ai = self.scan_one(models=("claude-test-20250101  alias=claude-test",))    # the tiers pin the alias
+        self.assertEqual(ai.tier("best").model, "claude-test")
+
+    def test_a_tier_effort_its_model_does_not_take(self):
+        self.assertRefused({"ai/claude/models.list": "# verified 2026-01-01\nclaude-test  efforts=high\n"},
+                           r"\[cheapest\] pins claude-test at effort 'low', which claude-test does not take")
+
+    def test_a_tier_omits_its_effort_exactly_when_its_model_takes_none(self):
+        # Total both ways (bug-investigator, gate model-picker-3): omission on
+        # a TIER means "the model takes none", so it may never sit on a model
+        # that has levels, nor may a level sit on one that has none.
+        base = ai_member()
+        tiers = base["ai/claude/efforts.tiers"].replace('effort = "low"\n', "", 1)   # [cheapest] loses its effort
+        self.assertRefused({"ai/claude/efforts.tiers": tiers}, r"\[cheapest\] pins claude-test without an effort, but claude-test takes low, high")
+        self.assertRefused({"ai/claude/models.list": "# verified 2026-01-01\nclaude-test  efforts=-\n"},
+                           r"at effort 'low', which claude-test does not take \(it takes none\)")
+        spec = {**base, "ai/claude/efforts.tiers": tiers.replace('model = "claude-test"', 'model = "claude-lite"', 1),
+                "ai/claude/models.list": "# verified 2026-01-01\nclaude-test  efforts=low,high\nclaude-lite  efforts=-\n"}
+        (ai,) = Ai.scan(self.tree(spec))
+        self.assertIsNone(ai.tier("cheapest").effort)
+        self.assertTrue(ai.model("claude-lite").effortless)
+
+    def test_every_shipped_ai_carries_a_list_its_tiers_agree_with(self):
+        # The scan's rules, run over the real tree: every member has a list,
+        # every pin is on it, and the effort invariant holds (else the
+        # registry would not load).
+        for ai in scan_all(_REAL_AGENTS_DIR()).ais.values():
+            with self.subTest(ai=ai.name):
+                self.assertTrue(ai.models)
+                for _, tier in ai.tiers:
+                    self.assertIsNotNone(ai.model(tier.model))
 
     def test_missing_ai_root_yields_nothing(self):
         self.assertEqual(Ai.scan(self.tree({"profession/code/tag.info": 'full_description="c"\n'})), [])
@@ -631,10 +781,11 @@ class TestAlwaysOnPolicy(TagTreeTestCase):
     def _tree_with_static(self):
         return self.tree({
             "engine/default/tag.info": 'full_description = "d"\n',
+            "engine/default/tag.budget": 'effort_tier = "best"\n',   # every engine names a standard (registry)
             "policy/no-sudo/tag.info": 'full_description = "no sudo"\nstance = "deny"\nalways_on = true\n',
-            "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
+            "policy/no-sudo/tag.rules": '[deny]\nshell = ["sudo"]\n',
             "policy/open/tag.info": 'full_description = "o"\n',
-            "policy/open/policy.json": "{}",
+            "policy/open/tag.rules": '[allow]\ntools = ["read"]\n',
         })
 
     def test_scan_parses_always_on(self):
@@ -733,19 +884,19 @@ class TestSpecialty(TagTreeTestCase):
 # ============================================================
 
 class TestPolicy(TagTreeTestCase):
-    def test_fields_and_fragment(self):
+    def test_fields_and_rules(self):
         (p,) = Policy.scan(self.tree({
             "policy/web-research/tag.info": 'full_description = "no ask"\nshortname = "+query"\nstance = "allow"\n',
-            "policy/web-research/policy.json": '{"permissions": {"allow": ["WebSearch"]}}',
+            "policy/web-research/tag.rules": '[allow]\ntools = ["web"]\n',
         }))
         self.assertEqual(p.label, "<+query>")
         self.assertIs(p.stance, PolicyStance.ALLOW)
-        self.assertEqual(p.load_fragment(), {"permissions": {"allow": ["WebSearch"]}})
+        self.assertEqual(p.rules, Rules(allow=Actions(tools=("web",))))
 
     def test_stance_parsed(self):
         (p,) = Policy.scan(self.tree({
             "policy/no-sudo/tag.info": 'full_description = "deny sudo"\nstance = "deny"\n',
-            "policy/no-sudo/policy.json": '{"permissions": {"deny": ["Bash(sudo *)"]}}',
+            "policy/no-sudo/tag.rules": '[deny]\nshell = ["sudo"]\n',
         }))
         self.assertIs(p.stance, PolicyStance.DENY)
 
@@ -753,40 +904,85 @@ class TestPolicy(TagTreeTestCase):
         with self.assertRaisesRegex(TagError, "stance must be one of"):
             Policy.scan(self.tree({
                 "policy/x/tag.info": 'full_description = "x"\nstance = "sideways"\n',
-                "policy/x/policy.json": '{}',
+                "policy/x/tag.rules": '[allow]\ntools = ["read"]\n',
             }))
 
     def test_stance_defaults_to_allow(self):
         (p,) = Policy.scan(self.tree({
             "policy/x/tag.info": 'full_description = "x"\n',
-            "policy/x/policy.json": '{}',
+            "policy/x/tag.rules": '[allow]\ntools = ["read"]\n',
         }))
         self.assertIs(p.stance, PolicyStance.ALLOW)
 
-    def test_missing_json_raises(self):
-        with self.assertRaisesRegex(TagError, "missing policy.json"):
+    def test_missing_rules_raises(self):
+        with self.assertRaisesRegex(TagError, "missing tag.rules"):
             Policy.scan(self.tree({"policy/x/tag.info": 'full_description="x"\n'}))
 
-    def test_non_object_fragment_raises(self):
-        with self.assertRaisesRegex(TagError, "must be a JSON object"):
+    def test_rules_must_be_the_table_the_stance_names(self):
+        # The stance colours the tag everywhere; rules doing something else
+        # would be coloured wrong, so the scan refuses the mismatch.
+        with self.assertRaisesRegex(TagError, r"must be exactly the \[deny\] table"):
             Policy.scan(self.tree({
-                "policy/x/tag.info": 'full_description="x"\n',
-                "policy/x/policy.json": '["not", "an", "object"]',
+                "policy/x/tag.info": 'full_description="x"\nstance = "deny"\n',
+                "policy/x/tag.rules": '[allow]\ntools = ["web"]\n',
             }))
 
-    def test_bad_json_raises(self):
-        with self.assertRaisesRegex(TagError, "invalid JSON"):
+    def test_a_second_table_beside_the_stances_is_refused(self):
+        with self.assertRaisesRegex(TagError, r"must be exactly the \[deny\] table"):
+            Policy.scan(self.tree({
+                "policy/x/tag.info": 'full_description="x"\nstance = "deny"\n',
+                "policy/x/tag.rules": '[deny]\nshell = ["git"]\n[demand]\nmode = "plan"\n',
+            }))
+
+    def test_a_retired_policy_json_is_refused_with_the_way_out(self):
+        # Left beside a tag.rules it would be read by nothing — a policy that
+        # silently stopped applying; the refusal names what replaced it.
+        with self.assertRaisesRegex(TagError, r"policy\.json: retired.*tag\.rules"):
             Policy.scan(self.tree({
                 "policy/x/tag.info": 'full_description="x"\n',
-                "policy/x/policy.json": '{not valid',
+                "policy/x/tag.rules": '[allow]\ntools = ["read"]\n',
+                "policy/x/policy.json": '{"permissions": {}}',
             }))
+
+    def test_broken_rules_fail_the_scan_naming_the_file(self):
+        with self.assertRaisesRegex(TagError, r"x/tag\.rules: \[allow\] tools names 'files'"):
+            Policy.scan(self.tree({
+                "policy/x/tag.info": 'full_description="x"\n',
+                "policy/x/tag.rules": '[allow]\ntools = ["files"]\n',
+            }))
+
+    def test_a_nested_policy_requires_the_one_it_sits_in(self):
+        # Like a nested specialty: the form's cascade brings the parent along
+        # (`vcs-safe/no-git-write/` — operator, 2026-09-28).
+        policies = {p.name: p for p in Policy.scan(self.tree({
+            "policy/outer/tag.info": 'full_description = "o"\nstance = "deny"\n',
+            "policy/outer/tag.rules": '[deny]\nshell = ["git push"]\n',
+            "policy/outer/inner/tag.info": 'full_description = "i"\nstance = "deny"\n',
+            "policy/outer/inner/tag.rules": '[deny]\nshell = ["git commit"]\n',
+        }))}
+        self.assertEqual(policies["inner"].requires, frozenset({"outer"}))
+        self.assertEqual(policies["outer"].requires, frozenset())
+
+    def test_an_always_on_policy_cannot_nest(self):
+        # It applies to every instance, so it cannot depend on a parent an
+        # instance need not carry.
+        agents = self.tree({
+            "engine/default/tag.info": 'full_description = "d"\n',
+            "engine/default/tag.budget": 'effort_tier = "best"\n',
+            "policy/outer/tag.info": 'full_description = "o"\nstance = "deny"\n',
+            "policy/outer/tag.rules": '[deny]\nshell = ["git push"]\n',
+            "policy/outer/inner/tag.info": 'full_description = "i"\nstance = "deny"\nalways_on = true\n',
+            "policy/outer/inner/tag.rules": '[deny]\nshell = ["sudo"]\n',
+        })
+        with self.assertRaisesRegex(TagError, "an always-on policy cannot nest"):
+            scan_all(agents)
 
     def test_stray_dir_under_policy_raises(self):
         # STRICT applies to every kind subtree, not just professions.
         with self.assertRaisesRegex(TagError, r"needs tag\.info"):
             Policy.scan(self.tree({
                 "policy/real/tag.info": 'full_description = "r"\n',
-                "policy/real/policy.json": "{}",
+                "policy/real/tag.rules": '[allow]\ntools = ["read"]\n',
                 "policy/junk/readme.txt": "notes\n",
             }))
 
@@ -852,6 +1048,30 @@ class TestLego(TagTreeTestCase):
         root = self.tree({"x.lego": 'harness = "claude-cli"\n'})
         self.assertEqual(load_lego(root / "x.lego").harness, "claude-cli")
         self.assertIn("claude-cli", load_lego(root / "x.lego").selected())
+
+    def test_a_lego_cannot_pin_a_model_or_an_effort(self):
+        # Both are an instance's picks: a shipped pin would turn a vendor's
+        # retirement into a red tree for every clone (agent-writer, gate
+        # model-picker), and an agent names the level it needs through its
+        # engine, whose tier a follower runs.
+        for key, value in (("model", '"claude-test"'), ("effort", '"high"')):
+            with self.subTest(key=key):
+                root = self.tree({"x.lego": f'ai = "claude"\n{key} = {value}\n'})
+                with self.assertRaisesRegex(TagError, f"a .lego cannot pin a {key}"):
+                    load_lego(root / "x.lego")
+
+    def test_a_lego_refuses_every_unknown_key(self):
+        # operator, 2026-09-29: a typo'd key would otherwise do nothing, silently.
+        for key in ("engin", "profession", "workspace"):
+            with self.subTest(key=key):
+                root = self.tree({"x.lego": f'{key} = "x"\n'})
+                with self.assertRaisesRegex(TagError, f"unknown key\\(s\\) {key} — a .lego takes only ai, harness, engine"):
+                    load_lego(root / "x.lego")
+
+    def test_no_shipped_lego_pins_a_model(self):
+        for path in sorted(_REAL_AGENTS_DIR().glob("*.lego")):
+            with self.subTest(lego=path.name):
+                self.assertIsNone(load_lego(path).model)   # load_lego refuses the key outright; this names the file that did
 
     def test_engine_must_be_string(self):
         root = self.tree({"x.lego": 'engine = ["nope"]\n'})
@@ -954,6 +1174,15 @@ class TestManifestParsing(TagTreeTestCase):
 # ============================================================
 
 class TestRegistryValidation(TagTreeTestCase):
+    def test_every_engine_must_name_a_standard(self):
+        # operator, 2026-09-29: the standard picks an instance's model, so an
+        # engine without one failed only at launch before.
+        spec = {**self.full_tree_spec(), "engine/bare/tag.info": 'full_description = "no budget"\n'}
+        with self.assertRaisesRegex(TagError, "engine/bare: its budget names no effort_tier"):
+            scan_all(self.tree(spec))
+        spec["engine/bare/tag.budget"] = 'effort_tier = "cheapest"\n'
+        self.assertIn("bare", scan_all(self.tree(spec)).engines)
+
     def test_full_tree_scans_clean(self):
         reg = scan_all(self.full_tree())
         self.assertIsInstance(reg, Registry)
@@ -1072,7 +1301,7 @@ class TestTagCommands(TagTreeTestCase):
             "profession/ops/tag.info": 'full_description="o"\ncommands = ["deploy", "audit"]\n',
             "profession/ops/Dockerfile": "x\n",
             "policy/guarded/tag.info": 'full_description="g"\ncommands = ["audit"]\n',
-            "policy/guarded/policy.json": '{"permissions": {}}',
+            "policy/guarded/tag.rules": '[allow]\ntools = ["read"]\n',
         })
         reg = scan_all(root)
         # Sorted at parse time, so assembly and legend order never depend on
@@ -1204,6 +1433,7 @@ class TestInstance(TagTreeTestCase):
         i = self._inst(specialties=(self.reg.specialties["auto"],))
         self.assertIn("--dangerously-skip-permissions", i.claude_args)
 
+
     def test_is_cowork_and_is_manager_match_by_name(self):
         # The two launcher-recognised specialties; both matched by NAME (see
         # identity.py's constants for why), so a fixture with those names is
@@ -1222,6 +1452,86 @@ class TestInstance(TagTreeTestCase):
         self.assertTrue(manager.is_cowork and manager.is_manager)
 
 
+class TestInstanceModel(TagTreeTestCase):
+    """What an instance runs (operator, 2026-09-29). FOLLOWING its engine (no
+    model pin) it runs the tier's pair, model and level. A PINNED model runs
+    at its highest level unless a level is pinned too. A pinned level wins,
+    falling back by direction when its model lacks it. A stale model drops
+    for the launch, taking its effort pin with it, so the engine's whole
+    rated pair runs — never blocking, and both kept for the store. The
+    fixture's `cheap` engine rates Claude at `low`, so following and pinning
+    part ways there."""
+
+    def setUp(self):
+        self.reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member(
+            models=("claude-test", "claude-big-2", "claude-slow-1  efforts=low", "claude-lite-1  efforts=-")),
+            "engine/cheap/tag.info": 'full_description = "cheap"\n',
+            "engine/cheap/tag.budget": 'effort_tier = "cheapest"\n'}))
+
+    def _inst(self, build: AgentBuild, **kw) -> Instance:
+        return Instance(agent="researcher", md_path=Path("/x/researcher.md"), session="proj", workspace="/tmp/ws",
+                        is_brand_new=False, **resolve_build(build, "researcher", self.reg), **kw)
+
+    def test_a_follower_runs_its_tiers_pair_and_shows_its_model(self):
+        # Shown, not stored (operator, 2026-09-28): the chip carries the
+        # engine's model while the build keeps none, so the instance follows
+        # the tier when we move it.
+        i = self._inst(AgentBuild(engine="cheap"))
+        self.assertEqual((i.model, i.engine_model, i.effort, i.ai_label), ("claude-test", "claude-test", "low", "⟪claude:Test⟫"))
+        self.assertEqual((i.build.model, i.build.effort), (None, None))
+
+    def test_a_pinned_model_runs_at_its_highest_unless_a_level_is_pinned(self):
+        pinned = self._inst(AgentBuild(engine="cheap", model="claude-big-2"))
+        self.assertEqual((pinned.model, pinned.effort), ("claude-big-2", "high"))     # its top, not the tier's low
+        self.assertEqual((pinned.conf["MODEL"], pinned.conf["EFFORT"]), ("claude-big-2", "high"))
+        self.assertEqual(pinned.ai_label, "⟪claude:Big-2⟫")
+        both = self._inst(AgentBuild(engine="cheap", model="claude-big-2", effort="low"))
+        self.assertEqual((both.effort, both.build.effort), ("low", "low"))
+
+    def test_a_pinned_level_on_a_follower_wins_over_the_tiers(self):
+        i = self._inst(AgentBuild(engine="default", effort="low"))
+        self.assertEqual((i.model, i.effort, i.picked_effort), ("claude-test", "low", "low"))
+
+    def test_a_pinned_level_its_model_lacks_falls_back_by_direction_and_is_kept(self):
+        i = self._inst(AgentBuild(engine="default", model="claude-slow-1", effort="high"))
+        self.assertEqual((i.effort, i.stale_effort, i.picked_effort), ("low", "high", None))   # the nearest at or below
+        self.assertEqual(i.build.effort, "high")                                           # verbatim for the store
+        self.assertTrue(i.is_startable)
+
+    def test_a_model_that_takes_no_effort_sends_none_on_every_path(self):
+        # researcher's gap, gate model-picker-3: no pin, and a pin it cannot take.
+        for effort in (None, "high"):
+            with self.subTest(effort=effort):
+                i = self._inst(AgentBuild(engine="default", model="claude-lite-1", effort=effort))
+                self.assertIsNone(i.effort)
+                self.assertNotIn("EFFORT", i.conf)
+
+    def test_a_stale_model_is_startable_a_stale_tag_is_not(self):
+        # Pinned by name (strict-reviewer, gate model-picker): a stale model
+        # must never land in invalid_tags, whose presence blocks the launch.
+        stale = self._inst(AgentBuild(engine="default", model="claude-gone-1"))
+        self.assertTrue(stale.is_startable)
+        self.assertEqual(stale.invalid_tags, ())
+        clean, problems = self.reg.resolve_store_build(AgentBuild(professions=("ghost",)), scope="solo")
+        self.assertFalse(self._inst(clean, invalid_tags=tuple(problems)).is_startable)
+
+    def test_a_stale_model_falls_back_to_the_engines_whole_pair_and_both_picks_are_kept(self):
+        # bug-investigator's mirror case: the level was pinned WITH the model,
+        # so it drops with it — never the engine's model at a level chosen
+        # for another one.
+        i = self._inst(AgentBuild(engine="cheap", model="claude-gone-1", effort="high"))
+        self.assertIsNone(i.picked_model)
+        self.assertEqual((i.model, i.effort, i.conf["MODEL"]), ("claude-test", "low", "claude-test"))
+        self.assertEqual((i.stale_effort, i.picked_effort), ("high", None))
+        self.assertEqual((i.build.model, i.build.effort), ("claude-gone-1", "high"))   # verbatim, so the next save keeps the flags
+        self.assertEqual(i.ai_label, "⟪claude:Gone-1⟫")                                  # the picker shows WHAT went stale
+
+    def test_a_model_of_another_ai_is_stale_on_this_one(self):
+        i = self._inst(AgentBuild(engine="default", model="gpt-6-astra"))
+        self.assertEqual((i.stale_model.spelling, i.model), ("gpt-6-astra", "claude-test"))
+        self.assertEqual(i.ai_label, "⟪claude:Gpt-6-Astra⟫")     # no prefix of this AI's to drop
+
+
 class TestResolveBuild(TagTreeTestCase):
     def setUp(self):
         self.reg = scan_all(self.full_tree())
@@ -1237,6 +1547,32 @@ class TestResolveBuild(TagTreeTestCase):
         # no engine named, agent name isn't an engine either → default
         kw = resolve_build(AgentBuild(), "poet", self.reg)
         self.assertIs(kw["engine"], self.reg.engines["default"])
+
+    def test_a_model_resolves_against_its_ais_list(self):
+        reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member(
+            models=("claude-test", "claude-b-1-20250101  alias=claude-b-1"))}))
+        by_id = resolve_build(AgentBuild(model="claude-test"), "poet", reg)
+        self.assertEqual((by_id["picked_model"].id, by_id["stale_model"]), ("claude-test", None))
+        by_alias = resolve_build(AgentBuild(model="claude-b-1"), "poet", reg)
+        self.assertEqual(by_alias["picked_model"].id, "claude-b-1-20250101")      # an alias is that model
+        unknown = resolve_build(AgentBuild(model="gpt-6-astra"), "poet", reg)
+        self.assertEqual((unknown["stale_model"].spelling, unknown["picked_model"]), ("gpt-6-astra", None))
+        none = resolve_build(AgentBuild(), "poet", reg)
+        self.assertEqual((none["picked_model"], none["stale_model"], none["picked_effort"], none["stale_effort"]),
+                         (None, None, None, None))
+
+    def test_spreading_a_new_build_over_an_old_instance_forgets_its_old_pick(self):
+        # The picker's F2 edit does exactly this (`dataclasses.replace(old,
+        # **resolve_build(new))`), so every build-derived field must come back
+        # — an omitted key would keep the pick the form just cleared.
+        reg = scan_all(self.tree({**self.full_tree_spec(), **ai_member(models=("claude-test", "claude-big-2"))}))
+        old = Instance(agent="poet", md_path=Path("/fake/poet.md"), session="s", workspace="/w", is_brand_new=False,
+                       **resolve_build(AgentBuild(model="claude-big-2"), "poet", reg))
+        cleared = dataclasses.replace(old, **resolve_build(AgentBuild(), "poet", reg))
+        self.assertEqual((cleared.picked_model, cleared.stale_model, cleared.build.model), (None, None, None))
+        stale = dataclasses.replace(old, **resolve_build(AgentBuild(model="claude-gone"), "poet", reg))
+        repicked = dataclasses.replace(stale, **resolve_build(AgentBuild(model="claude-test"), "poet", reg))
+        self.assertEqual((repicked.picked_model.id, repicked.stale_model), ("claude-test", None))
 
     def test_ai_falls_back_to_the_trees_default_member(self):
         self.assertIs(resolve_build(AgentBuild(), "poet", self.reg)["ai"], self.reg.default_ai)
@@ -1424,6 +1760,20 @@ class TestStore(TagTreeTestCase):
         self.assertEqual(store.entry_to_build({"harness": "gemini-cli"}).harness, "gemini-cli")
         self.assertNotIn("harness =", store.dumps({"y__s": store.build_entry(AgentBuild(), "/w")}))
 
+    def test_effort_is_a_scalar_field_beside_the_model_omitted_when_unset(self):
+        text = store.dumps({"x__s": store.build_entry(AgentBuild(ai="claude", model="claude-opus-5", effort="low"), "/w")})
+        self.assertIn('effort = "low"', text)
+        self.assertLess(text.index('model = "claude-opus-5"'), text.index('effort = "low"'))
+        self.assertEqual(store.entry_to_build({"effort": "low"}).effort, "low")
+        self.assertNotIn("effort =", store.dumps({"y__s": store.build_entry(AgentBuild(), "/w")}))
+
+    def test_model_is_a_scalar_field_omitted_when_unset(self):
+        text = store.dumps({"x__s": store.build_entry(AgentBuild(ai="claude", model="claude-opus-5", engine="quick"), "/w")})
+        self.assertIn('model = "claude-opus-5"', text)
+        self.assertLess(text.index('ai = "claude"'), text.index('model = "claude-opus-5"'))   # beside the AI whose model it is
+        self.assertEqual(store.entry_to_build({"model": "claude-opus-5"}).model, "claude-opus-5")
+        self.assertNotIn("model =", store.dumps({"y__s": store.build_entry(AgentBuild(), "/w")}))
+
     def test_load_missing_is_empty(self):
         self.assertEqual(store.load(Path("/nonexistent/instances.toml")), {})
 
@@ -1590,59 +1940,85 @@ def _REAL_AGENTS_DIR():
 
 
 class TestPolicyFragments(TagTreeTestCase):
-    """Hidden `policy/_<name>` fragments — a settings fragment a same-named
-    specialty claims (the policy-tree twin of `_<name>` image layers). How
-    `{ro}` bundles its Write/Edit deny."""
+    """Hidden `policy/_<name>` fragments — rules a same-named specialty
+    claims (the policy-tree twin of `_<name>` image layers), in the
+    launcher's words and/or as raw settings for one harness. How `{ro}`
+    bundles its write-tool deny, and how `{cowork}` carries a hook."""
+
+    READ_ONLY = {"policy/_read-only/tag.rules": '[deny]\ntools = ["write"]\n'}
 
     def test_discover_finds_underscore_fragments(self):
-        agents = self.tree({"policy/_read-only/policy.json": '{"permissions": {"deny": ["Write"]}}'})
-        frags = Policy.discover_fragments(agents)
+        frags = Policy.discover_fragments(self.tree(self.READ_ONLY))
         self.assertEqual(set(frags), {"read-only"})
+        self.assertEqual(frags["read-only"].rules, Rules(deny=Actions(tools=("write",))))
+        self.assertEqual(frags["read-only"].raw_harnesses, ())
 
     def test_offered_policies_exclude_underscore_dirs(self):
-        agents = self.tree({"policy/_read-only/policy.json": '{"permissions": {"deny": ["Write"]}}'})
-        self.assertEqual(Policy.scan(agents), [])   # hidden — not offered
+        self.assertEqual(Policy.scan(self.tree(self.READ_ONLY)), [])   # hidden — not offered
 
     def test_fragment_with_tag_info_raises(self):
-        agents = self.tree({
-            "policy/_bad/policy.json": "{}",
-            "policy/_bad/tag.info": 'full_description = "no"\n',
-        })
+        agents = self.tree({**self.READ_ONLY, "policy/_read-only/tag.info": 'full_description = "no"\n'})
         with self.assertRaisesRegex(TagError, "must not contain tag.info"):
             Policy.discover_fragments(agents)
 
-    def test_fragment_missing_json_raises(self):
+    def test_fragment_holds_only_rules_and_raw_settings(self):
         agents = self.tree({"policy/_bad/placeholder": ""})
-        with self.assertRaisesRegex(TagError, "missing policy.json"):
+        with self.assertRaisesRegex(TagError, r"holds only tag\.rules and <harness>\.json"):
             Policy.discover_fragments(agents)
+
+    def test_raw_settings_belong_to_one_harness(self):
+        # What no word can say yet (a hook, a mode the vocabulary lacks)
+        # rides as that harness's own settings, readable on it alone.
+        agents = self.tree({"policy/_cowork/claude-code.json": '{"hooks": {"Stop": []}}'})
+        fragment = Policy.discover_fragments(agents)["cowork"]
+        self.assertIsNone(fragment.rules)
+        self.assertEqual(fragment.raw_harnesses, ("claude-code",))
+        self.assertEqual(fragment.raw_fragment("claude-code"), {"hooks": {"Stop": []}})
+        self.assertIsNone(fragment.raw_fragment("gemini-cli"))
+
+    def test_raw_settings_must_be_a_json_object(self):
+        for text, message in (('["not", "an", "object"]', "must be a JSON object"), ("{not valid", "invalid JSON")):
+            with self.subTest(text=text), self.assertRaisesRegex(TagError, message):
+                Policy.discover_fragments(self.tree({"policy/_x/claude-code.json": text}))
+
+    def test_raw_settings_for_an_unknown_harness_fail_the_scan(self):
+        agents = self.tree({
+            "specialty/x/tag.info": 'full_description = "x"\n',
+            "policy/_x/nope.json": "{}",
+        })
+        with self.assertRaisesRegex(TagError, "raw settings for 'nope', which is not a member"):
+            scan_all(agents)
+
+    def test_a_retired_policy_json_in_a_fragment_is_refused(self):
+        with self.assertRaisesRegex(TagError, r"policy\.json: retired"):
+            Policy.discover_fragments(self.tree({**self.READ_ONLY, "policy/_read-only/policy.json": "{}"}))
 
     def test_specialty_claims_same_named_fragment(self):
         agents = self.tree({
             "specialty/read-only/tag.info": 'full_description = "ro"\nworkspace_readonly = true\nforbid_on = ["member"]\n',
-            "policy/_read-only/policy.json": '{"permissions": {"deny": ["Write", "Edit"]}}',
+            **self.READ_ONLY,
         })
-        reg = scan_all(agents)
-        ro = reg.specialties["read-only"]
-        self.assertEqual(ro.policy_dir.name, "_read-only")
-        self.assertEqual(ro.load_fragment(), {"permissions": {"deny": ["Write", "Edit"]}})
+        ro = scan_all(agents).specialties["read-only"]
+        self.assertEqual(ro.fragment.path.name, "_read-only")
+        self.assertEqual(ro.fragment.rules.deny.tools, ("write",))
 
     def test_unclaimed_fragment_fails_scan(self):
-        agents = self.tree({"policy/_orphan/policy.json": "{}"})   # no specialty 'orphan'
+        agents = self.tree({"policy/_orphan/tag.rules": '[deny]\ntools = ["write"]\n'})   # no specialty 'orphan'
         with self.assertRaisesRegex(TagError, "no matching specialty"):
             scan_all(agents)
 
-    def test_specialty_without_fragment_loads_empty(self):
+    def test_specialty_without_fragment_claims_none(self):
         agents = self.tree({"specialty/auto/tag.info": 'full_description = "a"\n'})
         (s,) = Specialty.scan(agents, {}, Policy.discover_fragments(agents))
-        self.assertEqual(s.load_fragment(), {})
+        self.assertIsNone(s.fragment)
 
     def test_real_tree_read_only_bundles_both(self):
         # The shipped {ro} specialty mounts :ro AND claims the _read-only
-        # fragment that denies the edit tools — one tag, defense in depth.
+        # fragment that denies the write tools — one tag, defense in depth.
         reg = scan_all(_REAL_AGENTS_DIR())
         ro = reg.specialties["read-only"]
         self.assertTrue(ro.workspace_readonly)
-        self.assertEqual(ro.load_fragment(), {"permissions": {"deny": ["Write", "Edit", "NotebookEdit"]}})
+        self.assertEqual(ro.fragment.rules, Rules(deny=Actions(tools=("write",))))
         self.assertNotIn("read-only", reg.policies)   # the fragment is not an offered policy
 
 

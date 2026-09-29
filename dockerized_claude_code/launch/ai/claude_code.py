@@ -15,16 +15,25 @@ CLAUDE_CODE = Adapter(
     key="claude-code",
     name="Claude Code",
     binary="claude",
+    startable=True,
     herdr_agent_kind="claude",
     config_dir_name=".claude",
     config_dir_env="CLAUDE_CONFIG_DIR",
+    config_dir_env_parent=False,     # CLAUDE_CONFIG_DIR is the config root itself
     session_name_env="CLAUDE_CODE_SESSION_NAME",
     settings_filename="settings.json",
+    settings_base="settings.json",   # settings/settings.json: what every Claude Code instance shares beneath its policies (the status line among it)
+    config_files=("statusline.sh", "keybindings.json"),   # the status line settings.json runs, and Claude Code's own key-bindings file
     persona_filename="CLAUDE.md",
     commands_dirname="commands",
     skills_dirname="skills",
-    history_filename="history.jsonl",
+    history_glob="history.jsonl",
     transcripts_dirname="projects",
+    # `-workspace` is the CLI's slug for the container's cwd, /workspace: the
+    # transcripts `--continue` would load, and no other project's.
+    transcript_glob="-workspace/*.jsonl",
+    subagent_transcript_glob="-workspace/*/subagents/*.jsonl",
+    transcript_format="claude-code",
     # Both refreshed in place by the CLI (rw). `.credentials.json` sits in the
     # config root; `.claude.json` — account identity plus trust decisions, MCP
     # servers and UI state — beside the config root at HOME by default, INSIDE
@@ -37,7 +46,7 @@ CLAUDE_CODE = Adapter(
     auth_files=(AuthFile(".credentials.json", role="credentials", anchor="config", login_key="claudeAiOauth"),
                 AuthFile(".claude.json", role="account", anchor="account", login_key="oauthAccount")),
     print_flag="-p",
-    continue_flag="--continue",
+    continue_args=("--continue",),
     effort_flag="--effort",
     # The full stream-json event stream (needs --verbose) with token-level
     # deltas (--include-partial-messages), which quickie's render_stream turns

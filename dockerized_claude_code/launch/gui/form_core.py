@@ -59,11 +59,14 @@ from .styles import (
 # ============================================================
 
 FORM_HINT_TEXT      = "↑↓ navigate  •  Space toggle  •  Enter confirm  •  Esc cancel"
+FORM_CHOICE_HINT    = "↑↓ navigate  •  Space toggle  •  ←→ choose  •  Enter confirm  •  Esc cancel"   # a form with a choices row
 FORM_CONFIRM_LABEL  = "[ Confirm ]"
 CHECKBOX_ON         = "[x] "
 CHECKBOX_OFF        = "[ ] "
 RADIO_ON            = "(•) "         # radio-group rows (`FormOption.group`) render round
 RADIO_OFF           = "( ) "
+BULLET_ON           = "● "           # a radio ATTACHED under another row — a sub-choice, like an AI's models — renders as a bullet
+BULLET_OFF          = "○ "
 ATTACHED_CONNECTOR  = "  └─ "        # prefix for options rendered attached beneath their anchor
 TITLE_TAGS_FORM     = "Configure instance tags  (Space to toggle):"
 # Shown dim under the toolkit form's title — sizes are ballpark and
@@ -106,6 +109,7 @@ class FormResult:
     of the text typed into them."""
     checked: list[str]
     field_values: dict[str, str] = field(default_factory=dict)
+    choices: dict[str, str | None] = field(default_factory=dict)   # each choices row's pick, by key (None: its first, unset position)
 
 
 @dataclass
@@ -117,12 +121,32 @@ class FormOption:
     fragments (text may contain newlines). `attached_to` names another
     option's key this row renders directly beneath, with a connector line —
     visual proximity for related options. Purely layout: no dependency
-    logic — the user can check either, neither, or both.
+    logic — the user can check either, neither, or both. `folds_with_anchor`
+    adds one visibility rule to it: the row renders, and takes the cursor,
+    only while that anchor row is checked — the dotted AI's models open under
+    it, every other AI's fold away.
 
     `header=True` makes the row a non-focusable section header — skipped by
     navigation, never checked, never returned. `group` puts the row in a
     radio group: checking it unchecks the group's other members, and a
-    checked radio can't be unchecked directly (pick another instead).
+    checked radio can't be unchecked directly (pick another instead). A group
+    is never optional: the one this form had (an AI's models, 2026-09-28)
+    became "exactly one, always" the same week, at the operator's word — a
+    group that may be empty is a checkbox's job. An attached radio draws as
+    a bullet (●/○), a sub-choice under its anchor.
+
+    `label` may be a FUNCTION of the checked keys, for a row whose words
+    follow the form's state (the follow-the-engine bullet names the model the
+    dotted engine means). `choices` makes the row a HORIZONTAL pick instead
+    of a box: a function of the checked keys returning (value, text) pairs,
+    drawn side by side as bullets, `choice` the picked value — None until
+    ←/→ moves it, and again whenever the picked value leaves the list.
+    `choice_default` (a function of the checked keys) names the value None
+    stands for: it is drawn dotted then, ←/→ start from it, and landing back
+    on it returns the pick to None — no separate "default" position
+    (operator, 2026-09-29). Such a row is never checked; its pick comes back
+    in `FormResult.choices`. With no pairs it is not shown at all, so a pick
+    with nothing to pick never takes the cursor.
 
     `locked=True` makes the row informational: still focusable (its `body`
     shows) and still counted in the result by its fixed `checked` state, but
@@ -130,28 +154,53 @@ class FormOption:
     on, but can't change it. For a mandatory-and-always-present item shown so
     the user knows it's included regardless of their choices."""
     key: str
-    label: str | list[tuple[str, str]]
+    label: str | list[tuple[str, str]] | Callable[[frozenset[str]], list[tuple[str, str]]]
     body: list[tuple[str, str]] = field(default_factory=list)
     checked: bool = False
     attached_to: str | None = None
     header: bool = False
     group: str | None = None
+    folds_with_anchor: bool = False
     locked: bool = False
+    choices: Callable[[frozenset[str]], list[tuple[str | None, str]]] | None = None
+    choice: str | None = None
+    choice_default: Callable[[frozenset[str]], str | None] | None = None
 
 
 def ordered_form_options(options: list[FormOption]) -> list[FormOption]:
     """Display order for form rows: anchor options keep their given order;
-    each attached option is re-inserted directly after its anchor (several
-    attachments to one anchor keep their given relative order). Options
-    attached to an unknown key are appended at the end unattached-style —
-    better a detached row than a vanished one."""
-    anchors = [o for o in options if o.attached_to is None]
-    known = {o.key for o in anchors}
+    each attached option is re-inserted directly after its anchor, and ITS
+    attachments after it, recursively (several attachments to one anchor
+    keep their given relative order) — an AI, its model bullets, the effort
+    row under a bullet. Options attached to an unknown key are appended at
+    the end unattached-style — better a detached row than a vanished one —
+    with their own attachments after them, as under any anchor. A
+    CYCLE of attachments is a ValueError: the rows are code, so a loop is a
+    programming error, and it must not reach a render (bug-investigator,
+    gate effort-row)."""
+    by_key = {o.key: o for o in options}
+    for option in options:
+        seen = {option.key}
+        anchor = option.attached_to
+        while anchor is not None and anchor in by_key:
+            if anchor in seen:
+                raise ValueError(f"form rows attached in a cycle through {option.key!r}")
+            seen.add(anchor)
+            anchor = by_key[anchor].attached_to
     out: list[FormOption] = []
-    for anchor in anchors:
-        out.append(anchor)
-        out.extend(o for o in options if o.attached_to == anchor.key)
-    out.extend(o for o in options if o.attached_to is not None and o.attached_to not in known)
+
+    def place(option: FormOption) -> None:
+        out.append(option)
+        for child in options:
+            if child.attached_to == option.key:
+                place(child)
+
+    for option in options:
+        if option.attached_to is None:
+            place(option)
+    for option in options:
+        if option.attached_to is not None and option.attached_to not in by_key:
+            place(option)
     return out
 
 
@@ -495,6 +544,13 @@ class FormBody:
       snapshot   everything the user can change in the rows (the scaffold adds
                  the field values) — the really-done? baseline
       ready      an extra confirm gate beyond "no field is invalid"
+      visible    whether row i renders NOW: a hidden row draws no line and
+                 takes no cursor (a row folded under an unchecked anchor)
+      choose     ←/→ on row i: True when the ROW took the key (a horizontal
+                 pick moved), and then no action of the form's runs — the
+                 row's kind decides before the form's own map, so a form
+                 whose ← removes something can never do so on a pick
+                 (strict-reviewer, gate model-picker-3)
     """
     rows: Callable[[], list[list[tuple[str, str]]]]
     stops: Sequence[int]
@@ -505,6 +561,12 @@ class FormBody:
     hint: str
     snapshot: Callable[[], Any]
     ready: Callable[[], bool] = lambda: True
+    visible: Callable[[int], bool] = lambda index: True
+    choose: Callable[[int, int], bool] = lambda index, delta: False
+
+
+# ←/→ as a row's own keys (FormBody.choose): the step each moves a pick by.
+_CHOOSE_KEYS = {"left": -1, "right": 1}
 
 
 def run_form(title: str, preamble: list[str] | None, fields: list[TextField] | None,
@@ -536,6 +598,21 @@ def run_form(title: str, preamble: list[str] | None, fields: list[TextField] | N
              + [confirm_index])
     state: dict[str, Any] = {"cursor": stops[0]}
 
+    def shown(stop: int) -> bool:
+        """Whether a stop is on screen now: a field and the button always
+        are, a row while `body.visible` says so."""
+        return not fields_at <= stop < confirm_index or body.visible(stop - fields_at)
+
+    def reconcile() -> None:
+        """Keep the cursor on a shown stop. One whose row just folded away —
+        a model bullet, when its AI's dot moved — goes to the nearest shown
+        stop above it, which for an attached row is its anchor."""
+        if shown(state["cursor"]):
+            return
+        position = stops.index(state["cursor"])
+        state["cursor"] = next((s for s in reversed(stops[:position]) if shown(s)),
+                               next(s for s in stops if shown(s)))
+
     def focused_field() -> TextField | None:
         if state["cursor"] < fields_at:
             return field_rows[state["cursor"]]
@@ -554,6 +631,8 @@ def run_form(title: str, preamble: list[str] | None, fields: list[TextField] | N
         if field_rows:
             out.append(("", "\n"))    # one blank line between fields and rows — cursor_pos counts it
         for i, frags in enumerate(body.rows()):
+            if not body.visible(i):
+                continue                   # folded: no line at all
             if i + fields_at == state["cursor"]:
                 frags = [(f"{UiClass.CURSOR.css} {style}".strip(), text)
                          for style, text in frags]
@@ -581,14 +660,28 @@ def run_form(title: str, preamble: list[str] | None, fields: list[TextField] | N
     hint = (FIELDS_HINT_PREFIX if field_rows else "") + body.hint
 
     def cursor_pos() -> Point:
-        # Field rows render one line each, then the blank separator, then the rows.
-        line = state["cursor"] + (1 if field_rows and state["cursor"] >= fields_at else 0)
-        last = fields_at + (1 if field_rows else 0) + row_count - 1
-        return Point(0, min(line, last))
+        # COUNTED as option_fragments renders: a line per field, the blank
+        # separator after them, then a line per SHOWN row. Arithmetic on the
+        # cursor's index was right only while every row drew one line — gate
+        # gui-dedup's off-by-one was that same offset, one separator short —
+        # and a folded row draws none.
+        head = fields_at + (1 if field_rows else 0)
+        shown_rows = [i for i in range(row_count) if body.visible(i)]
+        cursor = state["cursor"]
+        line = cursor if cursor < fields_at else head + sum(1 for i in shown_rows if i < cursor - fields_at)
+        last = head + len(shown_rows) - 1
+        return Point(0, max(0, min(line, last)))
 
     def move(delta: int) -> None:
-        state["cursor"] = stops[(stops.index(state["cursor"]) + delta) % len(stops)]
+        """The next SHOWN stop in `delta`'s direction, wrapping."""
+        position = stops.index(state["cursor"])
+        for step in range(1, len(stops) + 1):
+            candidate = stops[(position + delta * step) % len(stops)]
+            if shown(candidate):
+                state["cursor"] = candidate
+                return
 
+    reconcile()                 # the first stop may be a folded row
     refresh_auto(field_rows)    # the initial derivation, before any keystroke
     # Built AFTER that derivation so the baseline includes the auto-filled
     # values. Only forms WITH fields ask: a fieldless form's Enter is
@@ -616,9 +709,13 @@ def run_form(title: str, preamble: list[str] | None, fields: list[TextField] | N
                 if key == " ":
                     gate.confirm(event)
                 return
+            row = focused_row()
+            if key in _CHOOSE_KEYS and row is not None and body.choose(row, _CHOOSE_KEYS[key]):
+                return             # the row's kind took it: a pick moved
             action = body.actions.get(key)
-            if action is not None and (row := focused_row()) is not None:
+            if action is not None and row is not None:
                 action(row)
+                reconcile()        # the action may have folded the cursor's own row away
         return handler
 
     def type_char(event: KeyPressEvent) -> None:
@@ -685,6 +782,7 @@ def checkbox_form(title: str, options: list[FormOption],
                   labels: dict[str, str] | None = None,
                   preamble: list[str] | None = None,
                   fields: list[TextField] | None = None,
+                  defaults: dict[frozenset[str], str] | None = None,
                   ) -> FormResult | None:
     """The multi-select form on `run_form`'s scaffold (keys, fields, confirm
     rules and layout are all documented there). What this form adds: Space
@@ -697,7 +795,25 @@ def checkbox_form(title: str, options: list[FormOption],
     live check-cascade: checking a box also checks its transitive
     prerequisites; unchecking a box that others depend on unchecks those
     dependents. No disabling or indentation — every row stays freely
-    toggleable, the cascade just keeps the set consistent.
+    toggleable, the cascade just keeps the set consistent. Radios take part
+    too (`set_checked`): a prerequisite in a group is checked by moving its
+    group's dot, and a member a moved dot leaves behind drops ITS
+    dependents — so a model row requiring ⟪Claude⟫ clears when the AI dot
+    moves to ⟪Gemini⟫. A group whose rows carry requires can be emptied by
+    that cascade, so it needs `defaults` to fill it again.
+
+    `defaults` maps a SET of keys to the radio row that set selects. When a
+    row becomes checked and completes a set (every key in it checked), that
+    set's row is dotted: the tag form keys each (engine, AI) pair to the
+    model the engine's standard rates for that AI, so dotting either moves
+    the model's dot — over a pick, since choosing the engine is what the
+    pick fine-tunes. At open, a target group the options left EMPTY takes
+    its complete set's row, so the group starts with one dot; a prefilled
+    dot is kept. Non-reentrant by rule: a target may not appear in any set,
+    and its own prerequisites must lie inside its set — so dotting it
+    triggers no further default, and cannot chain (ValueError otherwise).
+    All of it runs inside one `set_checked` call, which nothing observes
+    midway: the group may be empty between its steps, never after.
 
     `wants` maps option keys to their (wanted-key, message) requests — purely
     advisory (see wants_warnings). `labels` maps keys to the display form
@@ -710,8 +826,9 @@ def checkbox_form(title: str, options: list[FormOption],
 
     Rows with `header=True` render but are skipped by navigation; rows with
     a `group` behave as radios; rows with `locked=True` render grayed and
-    ignore Space (see FormOption). `fields` (TextField rows) render ABOVE the
-    options.
+    ignore Space; rows that `folds_with_anchor` render only while their
+    anchor is checked (see FormOption). `fields` (TextField rows) render
+    ABOVE the options.
 
     Returns a `FormResult` (the checked keys in display order, plus any
     field values), or None on cancel."""
@@ -721,53 +838,159 @@ def checkbox_form(title: str, options: list[FormOption],
     warning_map = warnings or {}
     req_map = requires or {}
     wants_map = wants or {}
+    defaults_map = defaults or {}
     by_key = {o.key: o for o in rows if not o.header}
+    for combo, target in defaults_map.items():
+        if target not in by_key or by_key[target].group is None:
+            raise ValueError(f"defaults: {target!r} is not a radio row — a set selects a group's member")
+        if any(target in other for other in defaults_map):
+            raise ValueError(f"defaults: {target!r} is a target AND in a set — defaults would chain")
+        if not requires_closure(target, req_map) <= combo:
+            raise ValueError(f"defaults: {target!r} requires {sorted(requires_closure(target, req_map) - combo)}, "
+                             f"outside its set {sorted(combo)} — dotting it could fire another default")
 
-    def cascade(toggled: FormOption) -> None:
-        """Keep the checked set requires-consistent after `toggled` flips.
-        Locked rows are never flipped by the cascade — their state is fixed."""
-        if toggled.checked:
-            for key in requires_closure(toggled.key, req_map):
-                if key in by_key and not by_key[key].locked:
-                    by_key[key].checked = True
+    def set_checked(opt: FormOption, value: bool) -> None:
+        """Set one row, keeping the checked set requires-consistent — the ONE
+        way a row changes, by Space or by a cascade. A radio that becomes
+        checked unchecks the rest of its group, each through here; then the
+        row cascades: checked, it checks its transitive prerequisites;
+        unchecked, it unchecks every row depending on it. Because a member
+        the dot left is unchecked HERE too, its dependents follow it out —
+        which a cascade run only for the newly-dotted member would miss
+        (strict-reviewer, gate model-picker). Locked rows never change."""
+        if opt.locked or opt.checked == value:
+            return
+        opt.checked = value
+        if value:
+            if opt.group is not None:
+                for other in rows:
+                    if other is not opt and other.group == opt.group:
+                        set_checked(other, False)
+            for key in requires_closure(opt.key, req_map):
+                if key in by_key:
+                    set_checked(by_key[key], True)
+            for combo, target in defaults_map.items():
+                if opt.key in combo and combo <= checked_keys():
+                    set_checked(by_key[target], True)
+                    # A fired default re-selects its target's sub-picks too:
+                    # choosing an engine selects the model AND its default
+                    # level. Only rows under the TARGET — a pick made under
+                    # another bullet is not this default's to clear
+                    # (researcher, gate effort-row). The at-open fill below
+                    # is its own loop, so a stored pick survives opening.
+                    for row in rows:
+                        if row.attached_to == target and row.choices is not None:
+                            row.choice = None
         else:
-            for opt in rows:
-                if opt.checked and not opt.locked and toggled.key in requires_closure(opt.key, req_map):
-                    opt.checked = False
+            for other in rows:
+                if other.checked and opt.key in requires_closure(other.key, req_map):
+                    set_checked(other, False)
 
     def toggle(index: int) -> None:
-        """Space on a row: plain rows flip (with requires-cascade); radio rows
-        check-and-exclude their group (a checked radio stays checked — pick a
-        different member to move the dot). Locked rows are inert."""
+        """Space on a row: a checkbox flips; a radio checks-and-excludes its
+        group, and a checked radio stays checked — pick a different member
+        to move the dot. The cascades run through `set_checked`; locked rows
+        are inert."""
         opt = rows[index]
-        if opt.locked:
-            return
-        if opt.group is not None:
-            if not opt.checked:
-                for other in rows:
-                    if other.group == opt.group:
-                        other.checked = other is opt
-            return
-        opt.checked = not opt.checked
-        cascade(opt)
+        if opt.choices is not None or (opt.group is not None and opt.checked):
+            return                     # a choices row moves with ←/→; a dotted radio stays
+        set_checked(opt, not opt.checked)
+        reconcile_choices()
 
     def checked_keys() -> set[str]:
         return {o.key for o in rows if o.checked and not o.header}
+
+    def options_of(opt: FormOption) -> list[tuple[str | None, str]]:
+        return opt.choices(frozenset(checked_keys())) if opt.choices is not None else []
+
+    def reconcile_choices() -> None:
+        """Every choices row back on a value its list still offers: a pick
+        that left the list — a model that lacks the picked level got
+        dotted — returns to None, its `choice_default`. None itself is never
+        "not offered": it is the default wherever the default now lies."""
+        for opt in rows:
+            values = [value for value, _ in options_of(opt)]
+            if opt.choices is not None and opt.choice is not None and opt.choice not in values:
+                opt.choice = None
+
+    def shift(index: int, delta: int) -> bool:
+        """←/→ on a row (`FormBody.choose`): a choices row moves its pick one
+        place, stopping at the ends, and says it took the key; ANY other row
+        does not, and has no ←/→ action here either — a fallback could only
+        move a pick the cursor is not on (gate model-picker-3). On a text
+        field the scaffold never gets here: the field keeps the keys for its
+        caret."""
+        opt = rows[index]
+        values = [value for value, _ in options_of(opt)]
+        if opt.choices is None or opt.locked or not values:
+            return False
+        default = default_of(opt)
+        current = opt.choice if opt.choice is not None else default
+        position = values.index(current) if current in values else 0
+        picked = values[max(0, min(len(values) - 1, position + delta))]
+        opt.choice = None if picked == default else picked
+        return True
+
+    def default_of(opt: FormOption) -> str | None:
+        return opt.choice_default(frozenset(checked_keys())) if opt.choice_default is not None else None
+
+    def connector(opt: FormOption) -> str:
+        """The attached-row connector, indented one step per level of
+        attachment (an effort row sits under a bullet under an AI)."""
+        depth, anchor, seen = 0, opt.attached_to, {opt.key}
+        while anchor is not None and anchor in by_key and anchor not in seen:
+            depth, seen, anchor = depth + 1, seen | {anchor}, by_key[anchor].attached_to
+        return "  " * max(depth, 1) + ATTACHED_CONNECTOR.lstrip()
+
+    def label_of(opt: FormOption) -> list[tuple[str, str]]:
+        return opt.label(frozenset(checked_keys())) if callable(opt.label) else _normalize(opt.label)
+
+    def visible(index: int) -> bool:
+        """Folded under an unchecked anchor — or under a folded one, up the
+        chain — or a choices row with nothing to choose (an effort row under
+        a model that takes none): not drawn, no stop. An unknown anchor, or
+        a loop the ordering let through: better shown than vanished."""
+        return shown(rows[index], set())
+
+    def shown(opt: FormOption, seen: set[str]) -> bool:
+        if opt.choices is not None and not options_of(opt):
+            return False
+        if not opt.folds_with_anchor:
+            return True
+        anchor = by_key.get(opt.attached_to) if opt.attached_to is not None else None
+        if anchor is None or anchor.key in seen:
+            return True
+        return anchor.checked and shown(anchor, seen | {opt.key})
+
+    for combo, target in defaults_map.items():      # at open: an empty target group takes its default
+        group = by_key[target].group
+        if combo <= checked_keys() and not any(o.checked for o in rows if o.group == group):
+            set_checked(by_key[target], True)
+    reconcile_choices()                              # at open: a stored pick the list no longer offers
 
     def row_fragments() -> list[list[tuple[str, str]]]:
         out: list[list[tuple[str, str]]] = []
         for opt in rows:
             frags: list[tuple[str, str]] = []
             if opt.header:
-                frags.extend(_normalize(opt.label))
+                frags.extend(label_of(opt))
+            elif opt.choices is not None:
+                if opt.attached_to is not None:
+                    frags.append((UiClass.STATUS.css, connector(opt)))
+                frags.extend(label_of(opt))
+                dotted = opt.choice if opt.choice is not None else default_of(opt)
+                for value, text in options_of(opt):
+                    frags.append(("", f"  {BULLET_ON if value == dotted else BULLET_OFF}{text}"))
             else:
                 if opt.attached_to is not None:
-                    frags.append((UiClass.STATUS.css, ATTACHED_CONNECTOR))
-                if opt.group is not None:
+                    frags.append((UiClass.STATUS.css, connector(opt)))
+                if opt.group is not None and opt.attached_to is not None:
+                    frags.append(("", BULLET_ON if opt.checked else BULLET_OFF))
+                elif opt.group is not None:
                     frags.append(("", RADIO_ON if opt.checked else RADIO_OFF))
                 else:
                     frags.append(("", CHECKBOX_ON if opt.checked else CHECKBOX_OFF))
-                frags.extend(_normalize(opt.label))
+                frags.extend(label_of(opt))
             if opt.locked:   # gray the whole row — a fixed, un-toggleable entry
                 frags = [(STYLE_LOCKED, text) for _, text in frags]
             out.append(frags)
@@ -793,10 +1016,13 @@ def checkbox_form(title: str, options: list[FormOption],
         filler=body_fragments,
         warnings=warning_lines,
         confirm_label=FORM_CONFIRM_LABEL,
-        hint=FORM_HINT_TEXT,
-        snapshot=lambda: tuple(o.checked for o in rows),
+        hint=FORM_CHOICE_HINT if any(o.choices is not None for o in rows) else FORM_HINT_TEXT,
+        snapshot=lambda: (tuple(o.checked for o in rows), tuple(o.choice for o in rows)),
+        visible=visible,
+        choose=shift,
     ))
     if values is None:
         return None
     return FormResult(checked=[o.key for o in rows if o.checked],
-                      field_values=values)
+                      field_values=values,
+                      choices={o.key: o.choice for o in rows if o.choices is not None})

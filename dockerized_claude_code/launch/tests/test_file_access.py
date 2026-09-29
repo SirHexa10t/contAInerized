@@ -66,6 +66,73 @@ class TestAgentMdIndex(unittest.TestCase):
 # ============================================================
 
 
+class TestTranscriptLayouts(unittest.TestCase):
+    """Each CLI's transcript layout, from its adapter's globs — a SHAPE
+    difference, not a name: Claude Code keeps one project's sessions under
+    projects/-workspace/, Gemini CLI keeps chats per project under
+    tmp/<project-id>/chats/ (gate step4-start)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name)
+
+    def touch(self, relative):
+        path = self.state / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        return path
+
+    def test_a_missing_dir_lists_nothing(self):
+        # glob on a missing dir is empty, which is what lets the resume check
+        # skip an is_dir() guard.
+        missing = Path("/tmp/definitely-missing")
+        self.assertEqual(file_access.transcript_files(missing, CLAUDE_CODE), [])
+
+    def test_claude_code_lists_only_the_workspace_projects_sessions(self):
+        # Not projects/ as a whole (another cwd's sessions are not what
+        # --continue loads), not the root (history.jsonl lives there), and
+        # .jsonl only.
+        self.touch("projects/-workspace/abc.jsonl")
+        self.touch("projects/-workspace/def.jsonl")
+        self.touch("projects/-workspace/ignore.txt")
+        self.touch("history.jsonl")
+        self.touch("projects/other-project/sneaky.jsonl")
+        found = {p.name for p in file_access.transcript_files(self.state, CLAUDE_CODE)}
+        self.assertEqual(found, {"abc.jsonl", "def.jsonl"})
+
+    def test_gemini_cli_lists_its_chats_per_project(self):
+        from launch.ai import GEMINI_CLI
+        self.touch("tmp/workspace/chats/session-2026-09-25T10-00-3a20cafc.jsonl")
+        self.touch("tmp/workspace/logs.json")
+        self.touch("projects/-workspace/claude-left-behind.jsonl")     # another CLI's file: not Gemini's
+        self.assertEqual([p.name for p in file_access.transcript_files(self.state, GEMINI_CLI)],
+                         ["session-2026-09-25T10-00-3a20cafc.jsonl"])
+        self.assertEqual([p.name for p in file_access.history_files(self.state, GEMINI_CLI)], ["logs.json"])
+
+    def test_sub_agents_are_their_own_listing(self):
+        # Conversation, so --find reads them; not resumable, so the resume
+        # check must not see them.
+        self.touch("projects/-workspace/s.jsonl")
+        self.touch("projects/-workspace/s/subagents/agent-1.jsonl")
+        self.assertEqual([p.name for p in file_access.transcript_files(self.state, CLAUDE_CODE)], ["s.jsonl"])
+        self.assertEqual([p.name for p in file_access.subagent_transcript_files(self.state, CLAUDE_CODE)],
+                         ["agent-1.jsonl"])
+
+    def test_the_layouts_present_are_read_off_the_files(self):
+        # A dir switched between CLIs carries both; a fresh one, neither.
+        from launch.ai import GEMINI_CLI
+        self.assertEqual(file_access.transcript_layouts(self.state), [])
+        self.touch("history.jsonl")
+        self.touch("tmp/workspace/chats/session-x.jsonl")
+        self.assertEqual({a.key for a in file_access.transcript_layouts(self.state)},
+                         {CLAUDE_CODE.key, GEMINI_CLI.key})
+
+    def test_a_sub_agent_file_alone_still_identifies_its_layout(self):
+        self.touch("projects/-workspace/s/subagents/agent-1.jsonl")
+        self.assertEqual([a.key for a in file_access.transcript_layouts(self.state)], [CLAUDE_CODE.key])
+
+
 class TestWriteTextAtomic(unittest.TestCase):
     """write_text goes through a same-directory temp file + os.replace so an
     interrupt mid-write can never truncate existing state (the JSON maps were

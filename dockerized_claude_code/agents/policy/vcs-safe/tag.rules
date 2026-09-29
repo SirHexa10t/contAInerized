@@ -1,0 +1,5 @@
+# STEMS, not words: `git push` also denies `git pushall` and any other alias
+# that starts with it, which the hand-written rules this file replaced did on
+# purpose (gate policy-mapping, 2026-09-26).
+[deny]
+shell_stems = ["git push", "git reset --hard"]

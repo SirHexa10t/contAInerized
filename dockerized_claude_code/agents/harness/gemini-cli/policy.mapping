@@ -1,0 +1,77 @@
+# The launcher's POLICY WORDS (agents/policy/*/tag.rules, launch/tags/rules.py)
+# in Gemini CLI's own: rules for its Policy Engine, in a TOML file the launcher
+# writes per instance and passes to the CLI as its ONLY user-tier policy file,
+# plus the always-on denies baked into the image at the admin tier (shape and
+# rules: harness/claude-code/policy.mapping). Sources, read 2026-09-26 in the
+# v0.61.0 bundle: the rule schema and loader (packages/core/src/policy/
+# toml-loader.ts, config.ts, policy-engine.ts), the argv handling
+# (packages/cli/src/config/config.ts), and the default policies shipped beside
+# the CLI (bundle/policies/*.toml). Gates policy-mapping and policy-tier on
+# the cluster queue, 2026-09-26, weighed the choices recorded below; gate
+# fixed-tier moved the always-on denies to the admin tier and, with them, this
+# file from --admin-policy to --policy.
+#
+# A capability means exactly the tools listed under it here: a tool this file
+# does not list is outside every rule, allow or deny (plans/ISSUES.md, "a
+# capability is only as wide as its mapping").
+
+format = "policy-engine"     # rules are [[rule]] records in a TOML file of their own
+
+[tools]                      # capability → Gemini CLI tool names (its *_TOOL_NAME constants)
+shell     = ["run_shell_command"]
+web       = ["web_fetch", "google_web_search"]
+read      = ["read_file", "read_many_files", "glob", "grep_search", "list_directory"]
+write     = ["write_file", "replace"]
+subagents = ["invoke_agent"]
+
+# A command WORD becomes a `commandPrefix`, which the engine matches at a word
+# boundary (`git` never matches `gitk`); a STEM becomes a `commandRegex`,
+# escaped, matched from the command's start (`git push` also matches `git
+# pushall`). The engine splits compound commands and unwraps `bash -c`, and a
+# deny on any part denies the whole.
+[shell]
+tool = "run_shell_command"
+
+[file]
+# Inside the config root, in the CLI's own user-policies dir
+# (Storage.getUserPoliciesDir), so the rules still load if the flag below is
+# ever dropped — beside auto-saved.toml, see the deny priority.
+path = "policies/launcher.toml"
+# The USER tier, and nothing else in it: `--policy` REPLACES the default user
+# policies dir (config.ts: "these REPLACE the default user policies
+# directory") where `--admin-policy` would only SUPPLEMENT the system one —
+# one word apart, opposite semantics. So a policy file the agent plants beside
+# ours is never loaded, and argv beats every settings file (`argv.policy ??
+# settings.policyPaths`), so a workspace setting cannot swap ours out.
+# Stated consequence: Gemini's own "always allow" still WRITES auto-saved.toml
+# into that dir and is never read back — an in-container relaxation cannot
+# outlive the session (first symptom: "Gemini forgot my always-allow"). Not
+# --admin-policy: Gemini ignores that flag once the system dir below holds a
+# .toml, which [fixed] makes it do. `{path}` is THIS table's path above (the
+# instance's file, inside the container's config root), never [fixed]'s.
+args = ["--policy", "{path}"]
+
+# Priority: the engine ranks a rule at TIER + priority/1000 and takes the
+# highest match (ADMIN_POLICY_TIER = 5, USER_POLICY_TIER = 4; the schema caps
+# priority at 999; toml-loader.ts's comment still describes an older
+# three-tier layout, and the constants are what runs).
+[rules.deny]
+priority = 999               # 4.999, the top of the user tier; only the admin tier outranks it, and ours there holds denies alone. Load-bearing if --policy is ever dropped: the default dir then loads beside auto-saved.toml, whose allows sit at 4.950
+denyMessage = "The launcher's {policy} policy denies this."
+
+[rules.allow]
+priority = 100               # below every deny: an allow only spares a prompt
+modes = ["default", "autoEdit", "yolo"]   # never plan: plan mode's limits are default-tier rules (plan.toml's catch-all deny at 40), which an allow ranked above them would lift; Gemini scopes its own allows the same way (nonPlanModes)
+
+[mode.plan]
+"general.defaultApprovalMode" = "plan"
+
+# The fixed tier: the system policies dir, a constant in v0.61.0
+# (Storage.getSystemPoliciesDir — no environment variable, unlike the system
+# settings path beside it), loaded at the ADMIN tier whatever home or flags
+# the CLI is started with. The image writes the always-on policies' denies
+# there as root (the harness Dockerfile): the CLI SKIPS that dir unless root
+# owns it and neither group nor others can write it (checkPosixStatsSecurity),
+# which a bind mount of a host file's dir would fail.
+[fixed]
+path = "/etc/gemini-cli/policies/launcher-always-on.toml"

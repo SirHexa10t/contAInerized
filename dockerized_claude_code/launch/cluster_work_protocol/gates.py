@@ -190,10 +190,11 @@ def open_gate(queue: Queue, config: ProtocolConfig, *, iteration: str,
     required = tuple(m for m in members if m != opener)
     report = ping_members(
         required,
-        f"gate {iteration} is open — {body} | catch up: `cluster-chat read "
-        f"--new`, then reply EXACTLY once: `cluster-chat post nop --gate "
-        f"{iteration}` (the fold) or `post stance <0-10> \"<reasons>\" "
-        f"--gate {iteration}` or `post hold \"<why>\" --gate {iteration}`")
+        f"gate {iteration} is open — {body} | catch up: `cluster-chat read`, "
+        f"then reply EXACTLY once: `cluster-chat post nop --gate "
+        f"{iteration}` (the fold) or `cluster-chat post stance --stance <0-10> "
+        f"--gate {iteration} \"<reasons>\"` or `cluster-chat post hold "
+        f"--gate {iteration} \"<why>\"`")
     if timers:
         command = _check_gate_command(iteration, queue.root, config_path,
                                       members_dir)
@@ -206,7 +207,7 @@ def open_gate(queue: Queue, config: ProtocolConfig, *, iteration: str,
 
 
 _COMPLETION_PING = ("gate {iteration}: all replies are in — `cluster-chat "
-                    "read --new`, then close with the resolution: "
+                    "read`, then close with the resolution: "
                     "`cluster-chat close {iteration} \"<resolution>\"`")
 
 
@@ -274,12 +275,26 @@ def check_gate(queue: Queue, config: ProtocolConfig, *, iteration: str,
         return report + [f"gate {iteration} is complete — opener pinged"]
     deadline = (datetime.fromisoformat(gate.opened_ts)
                 + timedelta(seconds=config.close_after_seconds))
-    if datetime.now(timezone.utc) < deadline:
+    now = datetime.now(timezone.utc)
+    if now < deadline:
+        # A STATEMENT OF WHAT WAS OBSERVED, NOT AN INSTRUCTION. This branch
+        # already pings only `gate.stragglers`, derived from the journal at
+        # fire time, so it is never composed for a member who has replied.
+        # The staleness is entirely in DELIVERY: wake.py types the line into
+        # the member's pane, where it surfaces at their next boundary — after
+        # their reply has landed, or mid-work before it. An imperative that
+        # arrives then tells a compliant member to post a SECOND reply, which
+        # breaks the one-reply-per-gate rule the tally rests on; four members
+        # reported that on 2026-09-29, and only their own vigilance prevented
+        # the double-post. Reporting the observation and its time stays true
+        # whenever it lands, and leaves the member to check rather than act.
         report = ping_members(
             gate.stragglers,
-            f"reminder — gate {iteration} still needs your ONE reply: "
-            f"`cluster-chat read --new`, then post nop/stance/hold --gate "
-            f"{iteration}")
+            f"as of {now.strftime('%H:%M:%S')}Z gate {iteration} had no reply "
+            f"from you — if that is still true, fold with `cluster-chat post "
+            f"nop --gate {iteration}`, or post a stance or a hold instead "
+            f"(cluster-chat post -h). If you have already replied, nothing "
+            f"is owed and this line is stale, not a second request")
         return report + [f"nudged {len(gate.stragglers)} straggler(s) on "
                          f"gate {iteration}"]
     for straggler in gate.stragglers:
