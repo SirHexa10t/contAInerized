@@ -110,8 +110,10 @@ isolated Docker container with persistent per-instance state.
     AI translates it. The tag form asks for the engine FIRST, then the AI;
     under the dotted AI sit "follow the engine" and its models
     (`agents/ai/<name>/models.list`), with a horizontal effort pick under
-    whichever is dotted, its default level tagged `(default)` — dotting that
-    one stores no level. Exactly one bullet is always dotted, and choosing
+    whichever is dotted, its default level tagged `(default)`. Under "follow
+    the engine" dotting that one stores no level, so the instance keeps the
+    engine's; under a pinned model the dotted level is always stored, so a
+    pin is a whole pair. Exactly one bullet is always dotted, and choosing
     an engine or an AI returns it to "follow": the instance then runs the
     engine's rated pair — the model and level its standard rates for that
     AI — stores neither, and moves with the engine as we re-rate its tier.
@@ -120,7 +122,7 @@ isolated Docker container with persistent per-instance state.
     it) and running it at its highest level unless a level is pinned too;
     the engine's switches stay. A pinned level the model does not take runs
     as the nearest level at or below it. The picker's AI tag always names
-    the model that runs (`⟪Claude:Fable-5.1⟫`); a pick the vendor has since
+    the model that runs (`⟪Claude:Opus-5.5⟫`); a pick the vendor has since
     retired shows red and runs the engine's pair with a notice, and is never
     a reason to refuse the launch.
   - `[profession]` — tools it can use: a Dockerfile image layer (`[code]`
@@ -631,8 +633,8 @@ body panel — rendered after the tag's underlined `fullname`, which defaults
 to the folder name and exists for expansions like dood →
 `Docker-outside-of-Docker`), an optional `shortname` (what renders inside the kind's
 punctuation — `firewall` displays as `{frwl}`, `web-research` as
-`<+qry>`), and an optional `[addendum]` table (`title` + `body`) injected
-into CLAUDE.md while the tag is active — bodies may use the launcher
+`<+qry>`), and optional `[[addendum]]` tables (`title` + `body`; a tag
+may carry several, each its own section) injected into CLAUDE.md while the tag is active — bodies may use the launcher
 placeholders published in `launch/tags/addendums.py`. Policies also carry
 `stance` (`"allow"` / `"deny"` / `"demand"` → orange / blue / white);
 specialties carry `warn`, `claude_args`, and `workspace_readonly` (the

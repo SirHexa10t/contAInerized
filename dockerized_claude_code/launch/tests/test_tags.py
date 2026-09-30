@@ -1843,12 +1843,78 @@ class TestStore(TagTreeTestCase):
 # ============================================================
 
 
-def _tag_with_addendum(title, body):
-    """Stand-in for compose() input — it only reads `.addendum`."""
-    return SimpleNamespace(addendum=(title, body))
+def _tag_with_addendum(title, body, *more):
+    """Stand-in for compose() input — it only reads `.addendums`; `more` are
+    further (title, body) pairs on the same tag."""
+    return SimpleNamespace(addendums=tuple(addendums.Addendum(*pair) for pair in ((title, body), *more)))
 
 
-_NO_ADDENDUM = SimpleNamespace(addendum=None)
+_NO_ADDENDUM = SimpleNamespace(addendums=())
+
+
+class TestAddendumDeclaration(TagTreeTestCase):
+    """How a tag.info declares its addendums (gate addenda, 2026-09-30): one
+    spelling, `[[addendum]]`, repeatable — [code] carries two — each entry a
+    table with a non-empty `title` and `body`, titles unique within the tag."""
+
+    def addendums_of(self, info: str):
+        (tag,) = Specialty.scan(self.tree({"specialty/x/tag.info": 'full_description = "x"\n' + info}), {}, {})
+        return tag.addendums
+
+    def test_several_addendums_parse_in_file_order(self):
+        found = self.addendums_of('[[addendum]]\ntitle = "One"\nbody = "first"\n'
+                                  '[[addendum]]\ntitle = "Two"\nbody = "second"\n')
+        self.assertEqual([(a.title, a.body) for a in found], [("One", "first"), ("Two", "second")])
+
+    def test_a_tag_without_one_has_none(self):
+        self.assertEqual(self.addendums_of(""), ())
+
+    def test_the_single_table_spelling_is_refused_with_the_fix(self):
+        with self.assertRaisesRegex(TagError, r"write \[\[addendum\]\], not \[addendum\]"):
+            self.addendums_of('[addendum]\ntitle = "One"\nbody = "first"\n')
+
+    def test_each_entry_needs_a_title_and_a_body_and_a_unique_title(self):
+        cases = {
+            "no title": ('[[addendum]]\nbody = "b"\n', r"#1 needs a non-empty string `title`"),
+            "blank title": ('[[addendum]]\ntitle = "  "\nbody = "b"\n', r"#1 needs a non-empty string `title`"),
+            "blank body": ('[[addendum]]\ntitle = "T"\nbody = "  "\n', r"#1 needs a non-empty string `body`"),
+            "second entry bad": ('[[addendum]]\ntitle = "T"\nbody = "b"\n[[addendum]]\ntitle = "U"\n',
+                                 r"#2 needs a non-empty string `body`"),
+            "repeated title": ('[[addendum]]\ntitle = "T"\nbody = "b"\n[[addendum]]\ntitle = "T"\nbody = "c"\n',
+                               r"#2 repeats the title 'T'"),
+            "not a table": ('addendum = ["T"]\n', r"#1 must be a table"),
+        }
+        for label, (info, message) in cases.items():
+            with self.subTest(case=label), self.assertRaisesRegex(TagError, message):
+                self.addendums_of(info)
+
+    def test_a_body_that_cannot_render_fails_the_scan_naming_the_file(self):
+        # A bare `{}` names no field, so the name check alone passed it and
+        # launch raised; a lone brace did not even parse (strict-reviewer).
+        # Doubled braces are the literal spelling and render.
+        for label, body, ok in (("empty field", 'println!("{}", x)', False),
+                                ("lone brace", "a { b", False),
+                                ("doubled braces", "a map {{ k: v }}", True),
+                                ("a known placeholder", "status: {domain_resolve_status}", True)):
+            spec = self.full_tree_spec()
+            spec["specialty/firewall/tag.info"] = ('full_description = "whitelist"\n'
+                                                  f'[[addendum]]\ntitle = "Rust"\nbody = \'{body}\'\n')
+            with self.subTest(case=label):
+                if ok:
+                    scan_all(self.tree(spec))
+                else:
+                    with self.assertRaisesRegex(TagError, r"firewall.*\[\[addendum\]\] 'Rust' body cannot be rendered"):
+                        scan_all(self.tree(spec))
+
+    def test_every_addendum_is_checked_for_unknown_placeholders(self):
+        # The registry's check runs per addendum, so a typo in a tag's SECOND
+        # addendum fails the scan as the first one's would.
+        spec = self.full_tree_spec()
+        spec["specialty/firewall/tag.info"] = ('full_description = "whitelist"\n'
+                                              '[[addendum]]\ntitle = "Fine"\nbody = "no fields"\n'
+                                              '[[addendum]]\ntitle = "Typo"\nbody = "tools: {cred_cils}"\n')
+        with self.assertRaisesRegex(TagError, r"\[\[addendum\]\] 'Typo' body references unknown placeholder"):
+            scan_all(self.tree(spec))
 
 
 class TestAddendums(unittest.TestCase):
@@ -1884,6 +1950,21 @@ class TestAddendums(unittest.TestCase):
             out = addendums.compose([_tag_with_addendum("Credentials", "tools: {cred_clis}")])
         self.assertIn("tools: gh jira", out)
 
+    def test_a_tag_may_carry_several_addendums_each_its_own_section_in_order(self):
+        out = addendums.compose([_tag_with_addendum("Credentials", "one", ("Rust builds", "two"))])
+        self.assertIn("### Credentials\n\none", out)
+        self.assertIn("### Rust builds\n\ntwo", out)
+        self.assertLess(out.index("### Credentials"), out.index("### Rust builds"))
+
+    def test_an_empty_placeholder_drops_that_addendum_alone(self):
+        # The Credentials case with a sibling on the same tag: no creds on the
+        # host drops the credentials section and keeps the other (gate addenda).
+        with patch("launch.tags.addendums.installed_cred_clis", return_value=""):
+            out = addendums.compose([_tag_with_addendum("Credentials", "tools: {cred_clis}",
+                                                        ("Rust builds", "stay off target/"))])
+        self.assertNotIn("Credentials", out)
+        self.assertIn("### Rust builds\n\nstay off target/", out)
+
     def test_nothing_active_renders_empty(self):
         with patch.object(addendums, "BASE_ADDENDUMS", []):
             self.assertEqual(addendums.compose([]), "")
@@ -1893,10 +1974,10 @@ class TestAddendums(unittest.TestCase):
         # webdev → Headless browser, firewall → Firewall; auto has none.
         from launch.paths import AGENTS_DIR
         reg = scan_all(AGENTS_DIR)
-        self.assertEqual(reg.professions["code"].addendum[0], "Credentials")
-        self.assertEqual(reg.professions["webdev"].addendum[0], "Headless browser")
-        self.assertEqual(reg.specialties["firewall"].addendum[0], "Firewall")
-        self.assertIsNone(reg.specialties["auto"].addendum)
+        self.assertEqual(reg.professions["code"].addendums[0].title, "Credentials")
+        self.assertEqual(reg.professions["webdev"].addendums[0].title, "Headless browser")
+        self.assertEqual(reg.specialties["firewall"].addendums[0].title, "Firewall")
+        self.assertEqual(reg.specialties["auto"].addendums, ())
 
 
 class TestWorkspaceReadonly(TagTreeTestCase):

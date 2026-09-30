@@ -644,7 +644,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # The protocol is prompt-level (the cowork lesson: agents follow
         # addenda to the letter), so the addendum must carry the liturgy:
         # the verbs, the fold's meaning, the scale pointer, the gate flag.
-        _, body = self.reg.specialties["cluster"].addendum
+        body = self.reg.specialties["cluster"].addendums[0].body
         for phrase in ("cluster-chat", "post nop", "post stance",
                        "cluster-chat scale", "--gate", "fold"):
             with self.subTest(phrase=phrase):
@@ -691,7 +691,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # 3.4 GB build tree (plans/ISSUES.md, 2026-09-02). Approving a plan
         # that names a library is not approval of its cost, so the addendum
         # must gate dependencies separately AND demand a measured footprint.
-        _, body = self.reg.specialties["cluster-cowork"].addendum
+        body = self.reg.specialties["cluster-cowork"].addendums[0].body
         self.assertIn("DEPENDENCIES ARE GATED SEPARATELY", body)
         self.assertIn("FOOTPRINT", body)
         self.assertIn("transitive", body)
@@ -703,7 +703,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # naming the moment a gate is obliged. Capability text is not a
         # protocol; the trigger must be stated as a rule, with the kinds of
         # decision that fire it.
-        _, body = self.reg.specialties["cluster"].addendum
+        body = self.reg.specialties["cluster"].addendums[0].body
         self.assertIn("OPEN A GATE BEFORE", body)
         for trigger in ("PLAN", "architecture", "schema", "rewrite"):
             with self.subTest(trigger=trigger):
@@ -714,7 +714,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
     def test_cluster_addendum_teaches_the_member_its_own_identity(self):
         # A member shares its persona with any sibling built from the same agent,
         # so the env vars are the only way it can tell which one it is.
-        _, body = self.reg.specialties["cluster"].addendum
+        body = self.reg.specialties["cluster"].addendums[0].body
         for var in ("CLUSTER_MEMBER", "CLUSTER_ROLE", "CLUSTER_SESSION"):
             self.assertIn(var, body)
         # And the trust rule cowork learned the hard way.
@@ -726,7 +726,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # per operator), so it must teach both probes — and warn off the herdr verb that ends
         # the container mid-turn, since that side has no scratch-server net
         # (tmux got its socket split after exactly that accident, twice).
-        _, body = self.reg.specialties["muxer"].addendum
+        body = self.reg.specialties["muxer"].addendums[0].body
         self.assertIn("installed", body)
         self.assertIn("list-sessions", body)
         self.assertIn("herdr status server", body)
@@ -781,7 +781,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # incrementally loses everything but its closing chunk, silently, and
         # neither side can tell. Observed live; the addendum bullet is the only
         # mitigation, so it must not be edited away.
-        _, body = self.reg.specialties["cowork"].addendum
+        body = self.reg.specialties["cowork"].addendums[0].body
         self.assertIn("one final message", body.lower())
         self.assertIn("silently lost", body)
 
@@ -909,7 +909,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
         # baked toolchain stated as AVAILABLE, with the why (runtime installs
         # don't survive) — so a session neither reinstalls out of habit nor
         # wonders why the image carries what it carries.
-        _, body = self.reg.professions["self"].addendum
+        body = self.reg.professions["self"].addendums[0].body
         self.assertIn("check.sh", body)
         self.assertIn("ISSUES.md", body)
         self.assertIn("already available", body)
@@ -1005,9 +1005,9 @@ class TestTagTreeDiscovery(unittest.TestCase):
         from launch.cowork.control import (
             CONTROL_SUBDIR, QUIET_FLAG, REPLIES_SUBDIR, _VERBS,
         )
-        addendum = self.reg.specialties["manager"].addendum
-        self.assertIsNotNone(addendum)
-        _, body = addendum
+        addendums = self.reg.specialties["manager"].addendums
+        self.assertTrue(addendums)
+        body = addendums[0].body
         self.assertIn(f"/cowork/{CONTROL_SUBDIR}/", body)
         self.assertIn(f"{CONTROL_SUBDIR}/{REPLIES_SUBDIR}/", body)
         self.assertIn(QUIET_FLAG, body)
@@ -1032,7 +1032,7 @@ class TestTagTreeDiscovery(unittest.TestCase):
 
     def test_the_web_layer_installs_the_site_toolbox_it_promises(self):
         dockerfile = (self.reg.professions["webdev"].path / "Dockerfile").read_text()
-        title, body = self.reg.professions["webdev"].addendum
+        title, body = self.reg.professions["webdev"].addendums[0].title, self.reg.professions["webdev"].addendums[0].body
         for package, command in self.WEB_TOOLBOX.items():
             with self.subTest(tool=command):
                 self.assertIn(f"\n    {package} \\", dockerfile)   # an apt list entry, not a word in a comment

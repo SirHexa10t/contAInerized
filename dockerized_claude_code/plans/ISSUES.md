@@ -597,7 +597,7 @@ everything it does not cover.
   tree data, so "fix the pings, add the test, watch it pass" was a green
   build over five defective lines. What actually closed it: both halves
   parsed — `TestEveryAdvertisedCommandParses` drives the real composers and
-  renders every tag's `[addendum]`, extracts each backticked command
+  renders every tag's `[[addendum]]`, extracts each backticked command
   (prefix optional: the defect wrote the bare `post stance …` form, which a
   `cluster-chat`-anchored matcher skips — found by mutation), and feeds it
   to `cli._parser()`. Five mutations were each caught. Load-time enforcement
@@ -670,6 +670,18 @@ everything it does not cover.
   source, and prove a mutation REACHED the artefact before reading the
   suite's colour. Checking that the suite went red is checking the world;
   checking that your edit arrived is checking the instrument.
+  **And one false positive that cannot be reproduced by whoever got it.**
+  Two members, minutes apart, grepped `cluster-chat brief` for the
+  owed-reply phrase and got a hit with no gate open: the brief prints
+  UNREAD messages in full, and the unread ones were discussing the
+  owed-reply block, so the instrument matched the queue talking about the
+  obligation. Investigating consumed the cause — reading those messages
+  marks them read, so the follow-up grep returns nothing and the false
+  positive is gone before it can be diagnosed. Every other instance here
+  is reproducible once someone looks; this one only while the messages are
+  still unread, which is the same moment nobody stops to check. Nor is it
+  answered by "parse rendered output, not source": the rendered output
+  held quoted copies of itself, because the queue's subject was the queue.
   **The one mode no guard reaches: two members deferring until the record
   is wrong.** Every other failure here now has a mechanical answer — a
   blind extractor caught by a probe, a no-op mutation by proving the edit
@@ -1037,18 +1049,18 @@ open, deliberately:
   `high` to `max`. The effort row sits under the dotted bullet and tags the
   level None stands for — "high (default)" while following, "max (default)"
   once pinned (operator, 2026-09-29) — so the change shows at the moment it
-  happens. The team's alternative is pending the operator: a pin that
-  stores the level that was running, so a pin carries its effort
-  (strict-reviewer, researcher).
-- **The level tagged (default) stores nothing.** Dotting it writes no
-  `effort` key, which is what keeps a follower following a re-rated tier
-  and a pinned model on its top when its range grows. The cost: a NEW pin
-  equal to today's default cannot be written from the form — a person who
-  wants `high` held on `quick` whatever the tier becomes gets "follow"
-  instead. A stored pin that equals the default survives a confirm; it goes
-  only if the dot leaves it and comes back. A hand edit of the store is the
-  one way to write it fresh. The pending "pin carries its effort" ruling
-  above would settle it for pinned models.
+  happens. Settled (operator, 2026-09-29): the default stays the model's
+  top, and the form STORES the dotted level, (default) included, so a pin
+  is a whole pair and a model that later gains a level does not move it.
+  The team's other half — starting a pin on the level that was running
+  (strict-reviewer, researcher) — was not taken.
+- **Under follow, the level tagged (default) stores nothing.** Dotting it
+  writes no `effort` key, which is what keeps a follower following a
+  re-rated tier. The cost: a NEW follow pin equal to today's default cannot
+  be written from the form — a person who wants `high` held on `quick`
+  whatever the tier becomes pins the model too (which stores its level) or
+  edits the store by hand. A stored pin that equals the default survives a
+  confirm; it goes only if the dot leaves it and comes back.
 - **A pin voids the engine's capability standard, by design.** The engine
   row still shows its standard (`2026Q2`). The pin's help text and README say
   the rated pairing is replaced; nothing re-rates the new pair.
@@ -1089,8 +1101,210 @@ open, deliberately:
   `xhigh`, neither its top `max`. Latent until the Codex adapter ships;
   re-read those descriptions then.
 
+### The tiers' re-derivation of 2026-09-29: what it left open — OPEN
+
+The five models rated since 2026-09-14 (Opus 5.5, Sonnet 5.5, GPT-6 Sol,
+GPT-6 Luna, Grok 4.7) went through capability.standards' rule on today's
+Artificial Analysis records (gate tiers-0929, with the operator's rulings of
+the day). On Claude, `best` and 2026Q1 – 2026Q3 moved to Opus 5.5. On ChatGPT,
+the Luna rungs moved to GPT-6 Luna and 2026Q1 – 2026Q2 to GPT-6.1 Sol. On Grok,
+2026Q1 moved to 4.6 medium and the top three to 4.7. The 2026Q3 bar rose to
+57.62. What it left open:
+
+- **Held, each to re-derive when it clears.**
+  - Sonnet 5.5: rated on 7 of 13 evaluations. At its price it would take
+    Claude's 2026Q1 (medium) and 2026Q2 (xhigh).
+  - Grok Build 0.1: an estimate only, and AA rates its vendor alias
+    grok-code-fast-1 as a separate model 13 points lower. It would undercut
+    Grok up to 2025Q3.
+  - Astra at max: whether Codex accepts `max` is still a probe.
+  - Gemini 2.5: its thinking is a token budget the launcher cannot set yet —
+    the Gemini-settings iteration.
+- **2026Q3 closes on 2026-09-30.** The 57.62 was read a day early.
+  Re-check once the quarter is over; that is 2026Q3's LAST change, and a later
+  frontier-raiser is 2026Q4 (strict-reviewer).
+- **Live indices against frozen bars.** AA re-measures (13 of 16 spot-checks
+  had drifted, by up to 0.48), and a bar never moves once its quarter closes,
+  so a pin can fall below its bar with nothing changed. Fable 5.1 fell 0.02
+  below the bar it had set itself; Grok 4.5 fell 0.17 below its bar. Thin
+  today:
+  - Claude 2026Q3: Opus 5.5 meets its own bar by identity, so it can only
+    break.
+  - Grok 2025Q3: grok-4.3 high sits exactly at 24.88.
+  - Gemini 2026Q1: a 0.08 margin.
+
+  Re-derive on every re-read of the records, not only when a model arrives.
+- **Six pins rest on facts the tree cannot state — and one is live.** A
+  mechanical re-derivation over models.list reproduces only 30 of the 36 pins.
+  Six hold because of an exclusion that exists only as English, and they are
+  three kinds (researcher__primary):
+  - gpt-6-sol: AVAILABILITY. It is live on the API but not on Codex's page.
+    The fact is durable.
+  - claude-sonnet-5-5: DATA SUFFICIENCY, an operator hold meant to expire.
+  - grok-build-0.1: DATA QUALITY, an estimate only.
+
+  models.list has no field for any of them (`_KEYS` is alias, display,
+  efforts). Five of the six are latent: Claude and ChatGPT 2026Q1 are named by
+  no engine, and Grok cannot build. They go live on an unrelated change — an
+  engine adopting 2026Q1, or a Dockerfile for grok-build. The LIVE one is
+  Claude 2026Q2, `reliable`. When the Sonnet 5.5 hold lifts, 2026Q2 correctly
+  re-derives to sonnet-5-5 xhigh, and reliable's model changes with nobody
+  told: an unnoticed correct change, not a waiting wrong one
+  (strict-reviewer). Two separate fixes, neither a substitute for the other:
+  - A reasoned exclusion field in models.list, carrying WHY, so a
+    re-derivation REPRODUCES today's pins and can tell a durable exclusion
+    from a hold.
+  - An engine-impact diff in the re-derivation, per changed standard ("2026Q2:
+    opus-5-5 medium → sonnet-5-5 xhigh — affects reliable"). The derivation
+    already holds the before and the after (bug-investigator,
+    researcher__primary). Run over 2026-09-29's landing, it reproduces the
+    gate's hand-written "what runs differently": 5 of 8 engines moved.
+
+  Both want the derivation IN the tree (see "applied outside the tree"
+  below). ChatGPT 2026Q1's comment now names Terra, the price-decided runner-up
+  it had omitted. The three headers that cited only AA for prices now record
+  the 2026-09-29 vendor check: all eleven pinned prices agree.
+- **One id answers four standards.** claude-opus-5-5 carries the top four
+  Claude standards: `reliable` and the four `best` engines. Its deprecation
+  would move five engines at once (bug-investigator).
+- **reliable no longer does its job on Claude — pending the operator.** It runs
+  the top tier's own model at medium. That is a cheaper rung, not "a second,
+  dependable answer from another model", and the rule has no notion of
+  "another family" (agent-writer). Either its standard gains a constraint the
+  rule cannot express today, or the engine is renamed and re-described. Its
+  "max-effort" is false as well. The description guard never saw it: it
+  matches spaced phrases only, and reliable's text is hyphenated
+  (strict-reviewer, bug-investigator).
+- **golem's "thinking off" is real on one harness — latent.** The budget
+  word `thinking` sets DEPTH on Claude Code (`CLAUDE_CODE_ENABLE_THINKING=0`,
+  `MAX_THINKING_TOKENS=0`) but only VISIBILITY on hermes, openclaw, codex,
+  gemini-cli and grok-build, and opencode cannot express it at all. So
+  Claude's `[cheapest]` rating (15.41, thinking off) holds only on Claude
+  Code. Every other harness that runs Claude is unrunnable today (no
+  Dockerfile), so no real launch is affected. The trigger is one of them
+  gaining a Dockerfile — a harness change that nobody would read as a reason
+  to re-check a rating in `agents/ai/claude/efforts.tiers`. Nothing would
+  catch it either: the engine-side `unmapped` list (harness.py) has no
+  production reader, and a row that maps to a different purpose reports
+  success (strict-reviewer, bug-investigator). This belongs in the
+  engine.mapping redesign now before the operator: split depth from
+  visibility, surface unmapped engine words the way policy words are, and
+  flag a mapped-but-different row. Established since, from Claude Code's own
+  docs (code.claude.com model-config, env-vars and costs, read 2026-09-29):
+  - Thinking can't be turned off on Opus 5.5, Sonnet 5.5 or the Fable models;
+    `MAX_THINKING_TOKENS=0` "has no effect there". So golem PINNED to one of
+    them silently thinks, at max effort unless a lower level is dotted (max is
+    the pin's default, not forced). Nothing errors, and the rendering
+    reports success, since both rows exist (strict-reviewer). Opus 5 above
+    `high` is the other silent shape: "Claude Code sends effort `high` instead
+    of a higher level to models it knows don't accept that combination, such
+    as Opus 5" — a pin at max quietly runs at high. Through this harness no
+    shape errors. The API's 400s are its contract for direct callers only.
+    All of this assumes the ANTHROPIC API as the endpoint. On a third-party
+    provider (Bedrock, Vertex, Foundry) Claude Code omits the `thinking`
+    parameter instead, so adaptive models — Sonnet 5, Opus 5 and 4.x too —
+    may keep thinking. No provider is configured anywhere today, but adding
+    one would flip those rows without touching this tree (researcher__primary).
+  - A re-derivation that moved Claude's `cheapest` onto such a model would do
+    the same to every golem instance, and no check would notice. The fix
+    proposed: models.list marks the models that always think, a scan rule
+    requires an engine with `thinking = false` to resolve to a model that
+    can turn it off, and the form and the launch notice warn on a pin that
+    cannot (bug-investigator). Two call sites for one predicate over the
+    (model, effort) pair: the SCAN over the tiers (the re-derivation trigger),
+    and the RESOLVED instance (the pin trigger, live today) — the latter as
+    one more Issue kind beside `stale_model` in audit's `_stale_picks`, and a
+    staging notice beside the stale-pick lines (strict-reviewer). The notice
+    is the one that matters: nothing runs the audit on a launch path
+    (bug-investigator). THE DATUM, as the team settled it: a REQUIRED
+    per-row field in models.list, like `efforts=`, stating at which effort
+    levels thinking off is honoured, with an explicit value for "all" and for
+    "never". Not a sparse mark where absence means honoured: that default is 7
+    for 7 on the pre-5 Claude line and 1 for 6 on the 5-series, so the next
+    model added would inherit a wrong answer silently (researcher__primary).
+    Keyed by level, not by model, because Opus 5 honours it at low, medium and
+    high only; a model-level mark would misfire on 3 of its 5 pins
+    (strict-reviewer's 53 / 22 / 31 count). And the file's `verified` line
+    widens to name the new field, or it inherits a check never made on it
+    (strict-reviewer). Claude's 13 rows are known (Anthropic's thinking table,
+    2026-09-29); the other three AIs' need their own vendor read.
+  - `CLAUDE_CODE_ENABLE_THINKING` — the only key [thinking.on] sets, and one
+    of the two [thinking.off] sets — appears in none of the four pages. The
+    mapping loader checks the launcher's half (purposes, placeholders) and
+    never the vendor's native keys, which is the half that drifts
+    (strict-reviewer). Undocumented is not proven dead; a probe decides it.
+- **The rule is applied outside the tree — and the outside does not last.**
+  The derivation script and the AA dump it read were gone by the next
+  morning, along with every agent's other scratch files; the session
+  directories remained, emptied (strict-reviewer, researcher__primary). So
+  nothing a re-derivation needs may live anywhere but the tree. A scratch
+  script ran the rule over
+  AA's records and reproduced every unchanged pin, which checked the script.
+  But the tier files keep their figures as comments, so no test re-checks a pin
+  against its figures. Two tests also hard-code today's pins (test_ai's
+  claude rendering, test_forms' follow label), so every re-derivation edits
+  them too.
+  The precedent for the fix is next door: capability.standards stores a
+  bar's index as DATA, checked positive and climbing, while a tier's index is
+  a comment. The rule compares two numbers that sit on opposite sides of the
+  parse boundary, so the scan can prove the bars climb and cannot check that a
+  tier meets its bar. A tier that carried its measured `index` (and price)
+  would let the scan hold every pin to the rule (strict-reviewer,
+  bug-investigator) — and it would carry `estimated` as the bars do: typed on
+  the 5 standards that are estimates, English on the 6 tier rows that are, so a
+  figure changing STATUS reads like ordinary drift. ITS LIMIT, which must travel
+  with it: this is an INTERNAL check. It makes derivation errors and typos
+  impossible and does nothing about drift. This morning's broken 2026Q3 was
+  self-consistent (53.37 against 53.37) and wrong because AA re-measured.
+  Drift stays a dated re-read, which is what the verified line is for
+  (researcher__primary, strict-reviewer). Two rows no mechanical transcription
+  fills, both `cheapest`, for different reasons:
+  - Claude's has two AA records for the one Haiku id: 15.41 est., not
+    thinking, and 16.88 measured, thinking. The rule that settles it is that a
+    tier records the model's DEFAULT configuration, and Haiku does not think
+    unless asked. No engine enters into it. So its annotation no longer credits
+    golem, which asked for a state the model was already in. It is also the
+    one rung whose index is an estimate.
+  - Gemini's is pinned at MINIMAL, which AA does not rate at all. The field
+    needs an explicit "unrated" value, not a zero and not an absence
+    (researcher__primary, strict-reviewer).
+
+  And a rider for the tests beside it: test_ai's rendering-parity test
+    asserts literal tier ids (`render("default")` expects claude-opus-5-5).
+    When a re-derivation goes wrong, the fix edits the literal to match, and
+    the test that should have caught the regression has learned it instead.
+    Assert `claude.tier("best").model` / `.effort` instead. Keep the keys and
+    golem's full block literal for shape, and leave catching a wrong
+    derivation to the check that decision 8 adds (strict-reviewer). Separately, the files' `verified` pattern matches only
+  the ids line: the figures' own "re-read 2026-09-29" provenance is correct
+  in all four headers but invisible to it. Widen the pattern rather than
+  rewrite the headers (researcher__primary).
+  And the headers' price SOURCE differs. capability.standards makes the
+  vendor's list price authoritative and AA's the cross-check, but the Claude,
+  ChatGPT and Gemini headers name only an AA page as their price source; Grok's
+  names docs.x.ai. So a vendor/AA disagreement — which the rule anticipates,
+  and Grok's cheapest documents — is invisible in three files. Every pin that
+  moved on 2026-09-29 is priced at a vendor-confirmed figure: the five new
+  models matched the vendor prices exactly, and gpt-6.1-sol was read at
+  developers.openai.com. The verified line should carry a date AND a source
+  per externally sourced field (strict-reviewer).
+
 ## Known issues — testing technique
 
+- **A composed-addendum check run inside a container is blind to every
+  addendum whose placeholder is computed from HOST state** (gate addenda,
+  2026-09-30). Today that is only `{cred_clis}`. firewall's two placeholders
+  are container paths and always render (agent-writer). `{cred_clis}`
+  is read from a HOST directory that is never mounted in a container, so
+  `installed_cred_clis()` returns "" in every in-container run. compose()
+  then drops [code]'s Credentials whole, and a before/after hash of composed
+  output cannot see it. Two members' checks were blind this way while
+  claiming coverage of it. Either hash the PARSED pairs, which never resolve
+  a placeholder (tomllib over every tag.info), or patch the placeholder's
+  source so the section renders. An unpatched compose() hash from in here is
+  never sufficient alone (strict-reviewer, bug-investigator). The next
+  addendum to reference a host-derived value will be invisible the same
+  silent way.
 - **Check the instrument against something already known before trusting a
   negative.** One cluster thread (2026-09-26, the policy gates) had five
   near-misses, each caught the same way: a regex character class that

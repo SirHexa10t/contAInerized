@@ -3,28 +3,35 @@
 # standards are and how a tier is chosen (the cheapest live, rated
 # configuration that meets the standard, else the AI's best, flagged). Index
 # v4.3 (est. = AA's estimate) and prices in USD per 1M tokens in / out, read
-# 2026-09-14 from an AA model page's embedded records.
+# 2026-09-14 from an AA model page's embedded records; every figure below
+# re-read 2026-09-29.
+# Prices checked 2026-09-29 against the vendor's own pricing pages, since the
+# vendor's list price is what capability.standards makes decisive (AA's is the
+# cross-check); every pinned price agrees with AA's.
 #
 # Codex's scale is model_reasoning_effort low / medium / high / xhigh / max:
 # the config reference (read 2026-09-28) documents it as a string the model
 # advertises, "such as low, medium, high, xhigh, max, or ultra" — `minimal`
 # is gone from it and `max` is in. Not every slug takes `max` (gpt-5.5 tops
 # out at xhigh; models.list holds each one's range), and no tier uses it:
-# the rated pairs below were chosen before the reference listed it. Slugs from
-# learn.chatgpt.com/docs/models as it read until the GPT-6 rollout:
-# gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. Luna's page lists no
-# `minimal`, so low is its floor.
+# whether Codex accepts it is still a probe (plans/adding_an_ai.md), so
+# Astra's `best` stays at xhigh until it is shown (operator, 2026-09-29). The
+# harness's own list — learn.chatgpt.com/docs/models, read 2026-09-29 — is
+# gpt-6-astra, gpt-6.1-sol, gpt-6-luna and gpt-5.5, and a tier pins only
+# those: LAUNCHABLE. gpt-6-sol is live on the API but not on it, so it is no
+# tier (operator, 2026-09-29); the 5.6 line "remain[s] available during the
+# rollout" and no longer answers any standard. Luna lists no `minimal`, so
+# low is its floor.
 # Ids verified 2026-09-25 against learn.chatgpt.com/docs/models and
 # developers.openai.com's model, pricing and deprecation pages
 # (`ai_project-update-models`): every pin is live on the API, none deprecated.
-# AVAILABLE, NOT YET TIERS: gpt-6-sol (2 / 10) and gpt-6-luna (0.10 / 0.50),
-# released 2026-09-22, both without an Artificial Analysis index at this read
-# — a tier must be RATED (agents/ai/capability.standards), so the Luna and Sol
-# rungs stay on 5.6 until they are. WATCH, the one that can bite: Codex's own
-# model page no longer lists any gpt-5.6-* slug, saying only that the 5.6 line
-# "remain[s] available during the rollout". Nothing launches Codex yet; the
-# Codex adapter (plans/adding_an_ai.md) must re-check this before it ships.
-# Terra has no GPT-6 successor.
+# gpt-6.1-sol verified 2026-09-29 at developers.openai.com (live, 2 / 10, low –
+# max, no retirement) and on Codex's model page, which recommends it over
+# GPT-6 Sol; AA dates it 2026-09-29, the vendor page gives no date. Rated
+# 2026-09-29: gpt-6-luna (0.10 / 0.50, released 2026-09-22) answers cheapest
+# through 2025Q4, gpt-6.1-sol 2026Q1 and 2026Q2. Nothing launches Codex yet;
+# the Codex adapter (plans/adding_an_ai.md) must re-check its model page
+# before it ships. Terra has no GPT-6 successor.
 # WHAT A LAUNCH RUNS (2026-09-29): an instance that FOLLOWS its engine runs its
 # tier's pair below, model AND effort. One that PINS a model runs that model
 # at its highest level unless it pins a level too (agents/ai/<ai>/models.list,
@@ -34,45 +41,50 @@
 [scale]
 efforts = ["low", "medium", "high", "xhigh", "max"]
 
-[cheapest]                       # 21.55 · 0.2 / 1.2 — the cheapest model at its lowest effort
-model  = "gpt-5.6-luna"
+[cheapest]                       # 20.92 · 0.1 / 0.5 — the cheapest model at its lowest effort
+model  = "gpt-6-luna"
 effort = "low"
 
-[2025Q1]                         # 21.55 · 0.2 / 1.2 — meets 17.71
-model  = "gpt-5.6-luna"
+[2025Q1]                         # 20.92 · 0.1 / 0.5 — meets 17.71
+model  = "gpt-6-luna"
 effort = "low"
 
-[2025Q2]                         # 25.48 · 0.2 / 1.2 — low (21.55) misses 21.87 by 0.32
-model  = "gpt-5.6-luna"
+[2025Q2]                         # 29.46 · 0.1 / 0.5 — low (20.92) misses 21.87 by 0.95
+model  = "gpt-6-luna"
 effort = "medium"
 
-[2025Q3]                         # 25.48 · 0.2 / 1.2 — meets 24.88
-model  = "gpt-5.6-luna"
+[2025Q3]                         # 29.46 · 0.1 / 0.5 — meets 24.88
+model  = "gpt-6-luna"
 effort = "medium"
 
-[2025Q4]                         # 32.41 · 0.2 / 1.2 — meets 30.45 (Terra medium 30.42 misses by 0.03 at ten times the price)
-model  = "gpt-5.6-luna"
+[2025Q4]                         # 32.15 · 0.1 / 0.5 — meets 30.45
+model  = "gpt-6-luna"
 effort = "high"
 
-[2026Q1]                         # 39.48 · 4 / 20 — Luna tops out at 34.77 (xhigh), Terra at 38.19; Sol at medium is the cheapest past 38.98
-model  = "gpt-5.6-sol"
-effort = "medium"
+[2026Q1]                         # 42.08 · 2 / 10 — Luna tops out at 37.26 (max); 6.1 Sol at low is the cheapest past 38.98 (Terra at max, 42.08 at 2 / 12, is dearer; GPT-6 Sol at medium, 39.78 at the same price, is not on Codex's list)
+model  = "gpt-6.1-sol"
+effort = "low"
 
-[2026Q2]                         # 51.05 · 10 / 50 — Astra at medium (49.67) misses 49.70 by 0.03
-model  = "gpt-6-astra"
+[2026Q2]                         # 50.24 · 2 / 10 — medium (47.78) misses 49.70; Astra at high (50.92) meets it at five times the price
+model  = "gpt-6.1-sol"
 effort = "high"
 
-[2026Q3]                         # FALLS SHORT of 53.37: Codex's best, 52.51 (52.81 at `max`, still short)
+[2026Q3]                         # FALLS SHORT of 57.62: Codex's best, 52.39 (52.67 at `max`, still short)
 model  = "gpt-6-astra"
 effort = "xhigh"
 
-[best]                           # 52.51 (52.81 at `max`, once the config is shown to accept it) · 10 / 50
+[best]                           # 52.39 (52.67 at `max`, once Codex is shown to accept it) · 10 / 50
 model  = "gpt-6-astra"
 effort = "xhigh"
 
-# Also rated: Astra max 52.81 / medium 49.67 / low 45.99; Sol max 47.06 / xhigh
-# 44.14 / high 42.50 / low 33.80 / non-reasoning 28.33 est.; Terra max 42.25 /
-# xhigh 38.19 / high 34.49 / medium 30.42 / low 27.92 / non-reasoning 22.30
-# est.; Luna max 37.50 / xhigh 34.77 / non-reasoning 16.76 est.; GPT-5.5 xhigh
-# 38.63 (leaves ChatGPT and Codex 2026-10-14, stays on the API; OpenAI points
-# to GPT-6 Sol). gpt-5.3-codex-spark is not rated.
+# Also rated: Astra max 52.67 / high 50.92 / medium 49.57 / low 45.78; 6.1 Sol
+# max 51.83 / xhigh 51.04 / medium 47.78; GPT-6 Sol (not on Codex's list) max
+# 47.53 / xhigh 44.10 / high 42.82 / medium 39.78 / low 33.90 / non-reasoning
+# 28.09; 5.6 Sol max 46.97 / xhigh 44.01 / high 42.35 / medium 39.24 / low
+# 33.47 / non-reasoning 28.33 est.; Terra max 42.08 / xhigh 37.95 / high 34.24
+# / medium 30.09 / low 27.50 / non-reasoning 20.78; GPT-6 Luna max 37.26 /
+# xhigh 33.88 / non-reasoning 18.26; 5.6 Luna max 37.32 / xhigh 34.56 / high
+# 32.12 / medium 25.04 / low 21.01 / non-reasoning 15.53; GPT-5.5 xhigh 38.36 /
+# high 36.98 / medium 33.80 / low 30.71 est. (leaves ChatGPT and Codex
+# 2026-10-14, stays on the API; OpenAI points to GPT-6 Sol).
+# gpt-5.3-codex-spark is not rated.

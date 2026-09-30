@@ -13,7 +13,7 @@
 # reasoning, which is not the same as sending no level. Left out: the image,
 # video and voice models.
 
-grok-4.7                      efforts=low,medium,high,xhigh                                           # available, not yet a tier: unrated (efforts.tiers)
+grok-4.7                      efforts=low,medium,high,xhigh                                           # low and medium not yet rated (efforts.tiers)
 grok-4.6                      efforts=low,medium,high,xhigh
 grok-4.5                      alias=grok-4.5-latest  alias=grok-build-latest  efforts=low,medium,high,xhigh
 grok-4.3                      alias=grok-4.3-latest  efforts=low,medium,high,xhigh

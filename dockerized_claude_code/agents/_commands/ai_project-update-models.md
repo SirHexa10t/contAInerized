@@ -1,5 +1,5 @@
 ---
-description: Bring every AI's model ids up to date — each `agents/ai/<key>/efforts.tiers` (each rung keeps its family and its effort) and each `agents/ai/<key>/models.list` (the models an instance may pick), against that vendor's official model pages. Refreshes each file's verified-on line and reports before → after per file.
+description: Bring every AI's model ids up to date — each `agents/ai/<key>/efforts.tiers` (each rung keeps its family and its effort) and each `agents/ai/<key>/models.list` (the models an instance may pick), against that vendor's official model pages. Refreshes each file's verified-on line and reports before → after per file, and per engine whose tier moved.
 ---
 
 ## What this command maintains
@@ -68,7 +68,9 @@ vendor's effort / thinking / reasoning page (Anthropic's effort page and its
   in the same run (the rules below), or the scan fails the tree.
 - **Engines and cluster templates name no model**, so they need no edit: an
   engine names a capability standard (`tag.budget`), a `.legoset` names
-  agents, and a `.lego` may not pin a model at all.
+  agents, and a `.lego` may not pin a model at all. No edit is not no change:
+  every engine naming a standard whose pin moved now runs something else,
+  and the report says which (Report shape).
 - **Refresh the verified-on line** on every run, changed or not, exactly as
   for the tiers.
 
@@ -174,3 +176,14 @@ that moved, and anything you could not verify (name the page that was
 unreachable). Where a model id carries a date suffix or you know its
 release confidently, give approximate release timing; acknowledge uncertainty
 otherwise.
+
+Per ENGINE, derived rather than remembered: every standard whose pin changed
+on any AI, with the engines that name it and each one's `before → after`
+(model, effort) per AI. The engines' own files never change, so this is the
+only line that shows an engine now runs a different model (2026-09-29: five
+of eight moved and none of their files changed; the golem paragraph above is
+one instance of this). Read the map off the RESOLVED budgets, never by grepping
+the files: a nested engine may inherit its tier, and a grep would drop it
+silently. Check the count:
+
+    python3 -c "from pathlib import Path; from launch.tags.registry import scan_all; r = scan_all(Path('agents')); [print(f'{e.budget.effort_tier:<10} {n}') for n, e in sorted(r.engines.items())]; print(len(r.engines), 'engines')"

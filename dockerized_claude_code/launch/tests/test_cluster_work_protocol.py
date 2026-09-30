@@ -776,8 +776,7 @@ class TestEveryAdvertisedCommandParses(GateFixture):
         # over tags alone cannot see them. They carry no command today; the
         # point is that the day one is added it is already covered, rather
         # than the gap being recorded and waited on (researcher, #435).
-        bodies = [tag.addendum[1] for tag in scan_all(AGENTS_DIR).get_all()
-                  if tag.addendum is not None]
+        bodies = [addendum.body for tag in scan_all(AGENTS_DIR).get_all() for addendum in tag.addendums]
         bodies += [a.body for a in BASE_ADDENDUMS if a.body]
         commands = [c for body in bodies for c in self.advertised(body)]
         self.assertTrue(commands, "no tag advertises a cluster-chat command — "

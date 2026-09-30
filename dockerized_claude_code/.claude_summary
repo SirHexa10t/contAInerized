@@ -14,7 +14,7 @@ Docker launcher for pre-made AI-agent personas. A persona is `agents/<name>.md` 
 
 ### The tag system
 
-Six kinds (classes in `launch/tags/`); members are folders under `agents/<kind>/`, each with a TOML `tag.info` (descriptions, `shortname`, optional `[addendum]` for CLAUDE.md, kind fields). `scan_all(AGENTS_DIR)` → `Registry`, validated fail-loud at startup (so `check.sh` covers tree edits).
+Six kinds (classes in `launch/tags/`); members are folders under `agents/<kind>/`, each with a TOML `tag.info` (descriptions, `shortname`, optional `[[addendum]]` tables for CLAUDE.md, several per tag, kind fields). `scan_all(AGENTS_DIR)` → `Registry`, validated fail-loud at startup (so `check.sh` covers tree edits).
 
 | Kind | | Member files | Shipped |
 |---|---|---|---|
@@ -68,7 +68,7 @@ plans/              ISSUES.md (live tracker), adding_an_ai.md (multi-AI roadmap)
 `python3 run.py [target]` → `launch()`:
 
 1. `startup.open_launcher` (migrations, `scan_all`) → args → docker check → picker.
-2. Resolve the target: a new instance via workspace → session → tag form → `resolve_build`; a continued one from `instances.toml`. `ai.adopt` makes its harness's adapter the active one. The form asks for the engine first, then the AI; under it sit "follow the engine" and the AI's models, the dotted one carrying an effort pick with its default tagged "(default)" (the undotted AIs' folded). A follower runs its tier's rated pair; a pin (`AgentBuild.model` / `.effort`, never in a `.lego`) replaces it — a pinned model at its top level unless a level is pinned too. Nothing a follower runs is stored, so it follows the tier; the picker's AI tag names the model that runs. A pick its list no longer carries is a `stale_model`, dropped with its effort for the engine's pair, with a notice — never blocking.
+2. Resolve the target: a new instance via workspace → session → tag form → `resolve_build`; a continued one from `instances.toml`. `ai.adopt` makes its harness's adapter the active one. The form asks for the engine first, then the AI; under it sit "follow the engine" and the AI's models, the dotted one carrying an effort pick with its default tagged "(default)" (the undotted AIs' folded). A follower runs its tier's rated pair; a pin (`AgentBuild.model` / `.effort`, never in a `.lego`) replaces it — a pinned model at its top level unless a level is pinned too, and the form stores a pin's level even at its default (a pin is a whole pair). Nothing a follower runs is stored, so it follows the tier; the picker's AI tag names the model that runs. A pick its list no longer carries is a `stale_model`, dropped with its effort for the engine's pair, with a notice — never blocking.
 3. `persist_instance`, `apply_tags` (tag.docker mounts, `_apply_*` handlers).
 4. `setup_state`: `staging.stage_instance` writes the persona file (source `.md` + addendums), runs `install_settings`, assembles commands, stages login files; `set_container_env(inst, registry)` stages build args (incl. `FIXED_POLICY_*`) and env.
 5. `ensure_image`: base, then `build_steps` (professions, specialty layers, harness layer last) → `run_container`: binary + effort args + policy args + resume + specialty args.

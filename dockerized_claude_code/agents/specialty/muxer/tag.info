@@ -25,7 +25,7 @@ full_description  = "Runs a terminal multiplexer inside the container, so one wi
 # require renaming a tag that users have in their .lego files. That is why this
 # is `{muxer}` and not `{tmux}`.
 
-[addendum]
+[[addendum]]
 title = "Extra terminals"
 body  = """A terminal multiplexer is installed in this container (two backends ship: herdr — the default — and tmux, the operator's persisted preference chosen at launch), so the operator can hold several shells here and detach without stopping the work. Which one is actually running depends on how this instance was started: `herdr status server` and `tmux -L muxer list-sessions` tell you, and the bullets below are grouped by backend.
 

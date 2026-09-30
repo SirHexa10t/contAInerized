@@ -5,8 +5,9 @@ appended to the agent's source `.md` at install time. Two sources, in order:
 
   1. BASE_ADDENDUMS — launcher-universal notices (project summary, privacy).
      These belong to no tag, so they live here rather than in a tag.info.
-  2. Each active tag's `[addendum]` table from its own `tag.info`, in chain
-     order (professions → specialties → policies).
+  2. Each active tag's `[[addendum]]` tables from its own `tag.info`, in chain
+     order (professions → specialties → policies) and, within a tag, in file
+     order — a tag may carry several.
 
 Tag addendum bodies may use `{placeholder}` fields from PLACEHOLDERS below —
 launcher-known values a static tag.info can't carry (in-container paths,
@@ -17,22 +18,13 @@ rejects unknown placeholder names at scan time (KNOWN_PLACEHOLDERS).
 """
 
 from string import Formatter
-from typing import NamedTuple
 
 from ..file_access import installed_cred_clis
 from ..paths import (
     CLAUDE_SUMMARY_IN_CONTAINER, container_config_root,
     FIREWALL_WHITELIST_FILE, state_domain_resolve_status_path,
 )
-from .base import Tag
-
-
-class Addendum(NamedTuple):
-    """One addendum: a `title` (rendered `### <title>`) and a markdown `body`
-    (verbatim underneath). An empty `body` means inactive this launch —
-    filtered out before rendering."""
-    title: str
-    body: str
+from .base import Addendum, Tag
 
 
 ADDENDUM_SECTION_TITLE = "Launch-time addendums"
@@ -91,24 +83,23 @@ def _tag_addendums(tags: list[Tag]) -> list[Addendum]:
     """The active tags' addendums, formatted. An addendum referencing a
     placeholder whose value is empty THIS launch is dropped whole — the
     notice would be describing something absent (no creds → no Credentials
-    section)."""
+    section) — and alone: its tag's other addendums stand."""
     values = _placeholder_values()
     out: list[Addendum] = []
     for tag in tags:
-        if tag.addendum is None:
-            continue
-        title, body = tag.addendum
-        referenced = referenced_placeholders(body)
-        if any(not values[name] for name in referenced):
-            continue
-        out.append(Addendum(title, body.format(**values)))
+        for title, body in tag.addendums:
+            referenced = referenced_placeholders(body)
+            if any(not values[name] for name in referenced):
+                continue
+            out.append(Addendum(title, body.format(**values)))
     return out
 
 
 def compose(tags: list[Tag]) -> str:
     """Render the `## Launch-time addendums` section for an instance's active
     tags (chain order — professions, specialties, policies). Base notices
-    first, then one `### <title>` sub-section per tag addendum. Returns `""`
+    first, then one `### <title>` sub-section per tag addendum (a tag may
+    carry several). Returns `""`
     when nothing is active — the caller then appends nothing and the
     state-dir CLAUDE.md matches the source `.md` byte-for-byte."""
     active = [a for a in (*BASE_ADDENDUMS, *_tag_addendums(tags)) if a.body]

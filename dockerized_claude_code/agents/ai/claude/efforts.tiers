@@ -5,24 +5,36 @@
 # tag.budget names an effort_tier and never a model or an effort of any AI.
 # Inline: the Artificial Analysis Intelligence Index v4.3 (est. = AA's
 # estimate) and the price in USD per 1M tokens, input / output. Read
-# 2026-09-14 from the records embedded in an AA model page.
+# 2026-09-14 from the records embedded in an AA model page; every figure below
+# re-read 2026-09-29 — AA re-measures, and most had drifted a little since.
+# Prices checked 2026-09-29 against the vendor's own pricing pages, since the
+# vendor's list price is what capability.standards makes decisive (AA's is the
+# cross-check); every pinned price agrees with AA's.
 #
 # Claude's scale: effort low / medium / high / xhigh / max
 # (CLAUDE_CODE_EFFORT_LEVEL), plus a separate thinking switch (an engine's
 # `thinking` knob). Ids from platform.claude.com's models overview:
-# claude-fable-5-1, claude-opus-5, claude-sonnet-5, claude-haiku-4-5 (alias of
-# the dated snapshot). Superseded lines (Fable 5, Opus 4.8, Sonnet 4.6 —
-# Anthropic's "legacy, still available") are not tiers.
+# claude-opus-5-5, claude-sonnet-5, claude-haiku-4-5 (alias of the dated
+# snapshot). A superseded line stays a tier while it is live and the rule's
+# answer: Sonnet 5 went "legacy, still available" when Sonnet 5.5 shipped and
+# still answers the four lowest dated standards. Fable 5, Opus 4.8, Sonnet 4.6
+# and now Fable 5.1 and Opus 5 answer none.
 # Ids verified 2026-09-25 against platform.claude.com's models overview and
 # model-deprecations pages (`ai_project-update-models`): every pin is live.
-# AVAILABLE, NOT YET A TIER: claude-opus-5-5 (released 2026-09-22, 4 / 20,
-# default effort medium, adaptive thinking always on). It moved Opus 5 to
-# "legacy, still available" (Active, retirement not sooner than 2027-07-24),
-# but it has no Artificial Analysis index yet, and a tier must be RATED
-# (agents/ai/capability.standards) — re-derive the two Opus tiers once it is.
-# AVAILABLE, NOT YET A TIER: claude-sonnet-5-5 (released 2026-09-28, 2 / 10,
-# default effort high, adaptive thinking), which moved Sonnet 5 to legacy
-# (still Active, floor 2027-06-30); unrated, like Opus 5.5.
+# claude-opus-5-5 (released 2026-09-22, 4 / 20, default effort medium,
+# adaptive thinking always on) is rated since 2026-09-29: the strongest Claude
+# and cheaper than Fable 5.1 (10 / 50), so it is `best` — by the index, over
+# the family order (operator, 2026-09-29) — and answers 2026Q1 – 2026Q3 too. It
+# moved Opus 5 to "legacy, still available" (Active, retirement not sooner
+# than 2027-07-24). CONCENTRATION, new with it: one id now answers the top
+# four standards — reliable and the four `best` engines — so its deprecation
+# would move five engines at once (bug-investigator, gate tiers-0929).
+# RATED, HELD: claude-sonnet-5-5 (released 2026-09-28, 2 / 10, default effort
+# high, adaptive thinking), which moved Sonnet 5 to legacy (still Active,
+# floor 2027-06-30). AA rates it on 7 of 13 evaluations a day after release, so
+# it is no tier until that coverage fills in (operator, 2026-09-29). At its
+# price it would answer 2026Q1 (medium, 40.74) and 2026Q2 (xhigh, 51.85):
+# re-derive those two then.
 # Retirement floors to watch: claude-haiku-4-5 not sooner than 2026-10-15
 # (no deprecation announced at this read). A floor is not a date: Anthropic
 # retires only after a deprecation notice, "at least 60 days" ahead.
@@ -35,43 +47,46 @@
 [scale]
 efforts = ["low", "medium", "high", "xhigh", "max"]
 
-[cheapest]                       # 15.41 est. with thinking off (17.59 with it on) · 1 / 5 — Claude's cheapest model; Haiku 4.5 takes NO effort level (Anthropic: "Default effort: Not supported"), its thinking switch is the knob
+[cheapest]                       # 15.41 est. · 1 / 5 — Haiku 4.5 does not think unless asked (Anthropic's thinking table), so this is its default configuration. 16.88 is measured with extended thinking enabled, an API capability that needs a token budget; no engine.mapping row sets a positive one, so whether this harness can request it is unprobed — Claude's cheapest model; Haiku 4.5 takes NO effort level (Anthropic: "Default effort: Not supported"), its thinking switch is the knob
 model  = "claude-haiku-4-5"
 
-[2025Q1]                         # 24.74 · 2 / 10 — Haiku with thinking (17.59) falls 0.12 short of 17.71; Sonnet 5 at low is the next cheapest
+[2025Q1]                         # 24.26 · 2 / 10 — Haiku with thinking (16.88) falls 0.83 short of 17.71; Sonnet 5 at low is the next cheapest
 model  = "claude-sonnet-5"
 effort = "low"
 
-[2025Q2]                         # 24.74 · 2 / 10 — the same tier meets 21.87
+[2025Q2]                         # 24.26 · 2 / 10 — the same tier meets 21.87
 model  = "claude-sonnet-5"
 effort = "low"
 
-[2025Q3]                         # 28.44 · 2 / 10 — low (24.74) misses 24.88 by 0.14
+[2025Q3]                         # 28.05 · 2 / 10 — low (24.26) misses 24.88 by 0.62
 model  = "claude-sonnet-5"
 effort = "medium"
 
-[2025Q4]                         # 32.03 · 2 / 10 — measured now (unscored on 2026-09-10); meets 30.45
+[2025Q4]                         # 31.66 · 2 / 10 — measured now (unscored on 2026-09-10); meets 30.45
 model  = "claude-sonnet-5"
 effort = "high"
 
-[2026Q1]                         # 39.79 · 5 / 25 — Sonnet 5 at max (38.36, 2 / 10) misses 38.98 by 0.62 and takes ~210 s to the first token
-model  = "claude-opus-5"
+[2026Q1]                         # 42.31 · 4 / 20 — Sonnet 5 at max (38.16, 2 / 10) misses 38.98 by 0.82 and takes ~210 s to the first token; Opus 5.5 at low is the next cheapest (Opus 5 at low, 39.35, costs 5 / 25)
+model  = "claude-opus-5-5"
 effort = "low"
 
-[2026Q2]                         # 50.70 · 5 / 25 — Fable 5.1 at high (51.21) also meets 49.70, at twice the price
-model  = "claude-opus-5"
+[2026Q2]                         # 51.24 · 4 / 20 — low (42.31) misses 49.70; Opus 5 at max (50.78, 5 / 25) and Fable 5.1 at high (51.15, 10 / 50) also meet it, dearer
+model  = "claude-opus-5-5"
+effort = "medium"
+
+[2026Q3]                         # 57.62 · 4 / 20 — the standard-setter itself: Claude's best. It meets its own bar by identity, with no margin, so AA re-measuring it lower breaks this rung — as Fable 5.1 broke it on 2026-09-29 (researcher__primary, gate tiers-0929)
+model  = "claude-opus-5-5"
 effort = "max"
 
-[2026Q3]                         # 53.37 · 10 / 50 — the standard-setter itself: Claude's best
-model  = "claude-fable-5-1"
+[best]                           # 57.62 (AA's "Default Fallback" variant of Opus 5.5) · 4 / 20 — by the index: Fable 5.1 at max is 53.35 at 10 / 50 (operator, 2026-09-29)
+model  = "claude-opus-5-5"
 effort = "max"
 
-[best]                           # 53.37 (AA's "Default Fallback" variant of Fable) · 10 / 50
-model  = "claude-fable-5-1"
-effort = "max"
-
-# Also rated (for the next re-derivation): Fable 5.1 xhigh 53.18 / high 51.21 /
-# medium 49.06 / low 47.04; Opus 5 xhigh 49.65 / high 48.24 / medium 45.06;
-# Sonnet 5 max 38.36 / xhigh 34.71 / non-reasoning 28.94 est.; Sonnet 4.6
-# non-reasoning low 23.30 est. (Anthropic still lists it Active, retirement not
-# sooner than 2027-02-17); Haiku 4.5 with thinking 17.59.
+# Also rated (for the next re-derivation): Opus 5.5 xhigh 55.99 / high 53.58;
+# Fable 5.1 max 53.35 / xhigh 53.20 / high 51.15 / medium 48.92 / low 46.82;
+# Opus 5 max 50.78 / xhigh 49.68 / high 48.12 / medium 44.83 / low 39.35;
+# Sonnet 5.5 (held, see the header) max 55.98 / xhigh 51.85 / high 46.74 /
+# medium 40.74 / low 35.84; Sonnet 5 max 38.16 / xhigh 34.38 / non-reasoning
+# 23.20 est.; Sonnet 4.6 max 30.06 / non-reasoning low 23.30 est. (Anthropic
+# still lists it Active, retirement not sooner than 2027-02-17); Haiku 4.5 with
+# thinking 16.88.

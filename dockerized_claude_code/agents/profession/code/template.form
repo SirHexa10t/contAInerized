@@ -36,7 +36,7 @@ default        = true
 locked         = true
 
 [rust]
-description    = "Rust toolchain (rustup + cargo, stable, minimal profile)"
+description    = "Rust toolchain (rustup + cargo + clippy, stable, minimal profile)"
 run_command    = "cargo"
 language       = "compiled · systems · memory-safe"
 approx_size_mb = 613

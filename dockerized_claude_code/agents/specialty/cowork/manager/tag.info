@@ -4,7 +4,7 @@ full_description  = "Makes this instance the HOST of multi-agent cowork groups: 
 warn              = true
 commands          = ["cowork"]   # /cowork — the file lives centrally in agents/_commands/
 
-[addendum]
+[[addendum]]
 title = "Hosting cowork groups"
 body  = """You can convene other agent instances into working groups. You talk to the HUB (the host-side router) by writing request files; it answers by pointing you at a reply file. Everything below happens inside /cowork/, the only directory you and the hub share.
 

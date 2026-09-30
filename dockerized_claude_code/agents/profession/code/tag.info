@@ -2,6 +2,15 @@ shortname         = "code"
 short_description = "coding toolchains"
 full_description  = "coding/programming-oriented; built with various programs and toolchains (Rust, Node, build-essential, CMake, uv)"
 
-[addendum]
+[[addendum]]
 title = "Credentials"
 body  = "The user has provided credentials for the following CLI tools, which are already installed and ready to use: {cred_clis}"
+
+[[addendum]]
+title = "Rust builds stay off the shared disk"
+body  = """A project directory here is mounted from the operator's own machine, which builds it too, so never build into a project's own `target/`. Cargo records each dependency's source path in its fingerprint, that path lives under `CARGO_HOME`, and the two machines have different cargo homes — so one build from here marks every registry and git dependency as changed for the operator's next build, and each crossing rebuilds the whole dependency graph.
+
+- **Send build output to this machine's own disk.** Prefix every cargo command — build, test, clippy, doc and run — with `CARGO_TARGET_DIR=$HOME/.cache/cargo-target/<project>`.
+- **Never set `target-dir` or `rustflags` in a repo's `.cargo/config.toml` for this.** That file is shared, so it would move or invalidate the operator's builds as well as your own.
+- **Never run `cargo clean` against the shared `target/`**, and do not change where the operator's own build scripts build.
+- **The operator can confirm a crossing.** `CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build` on their machine: a dependency rebuilt for `PathToSourceChanged` means a build from here reached the shared `target/`."""

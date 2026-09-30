@@ -111,9 +111,10 @@ _FOLLOW_NOTE = ("the model the engine's capability standard rates for this AI, a
                 "and whatever it rates next: the tier moves, the instance moves with it. Stores no `model`.")
 _PIN_NOTE = ("pin this model: the instance keeps it whatever the engine rates, replacing the engine's rated "
              "pairing — with no effort pinned it runs at the model's highest level; the engine's switches stay.")
-_EFFORT_NOTE = ("the level this instance runs at, ←/→ to move — the model's own range (models.list). The one "
-                "marked (default) stores nothing: the engine's rated level while the instance follows the "
-                "engine, the pinned model's highest once one is pinned. Any other pins that level.")
+_EFFORT_NOTE = ("the level this instance runs at, ←/→ to move — the model's own range (models.list). Under "
+                "\"follow the engine\" the one marked (default) is the engine's rated level and stores nothing, "
+                "so the instance keeps following the engine as it is re-rated; any other pins that level. Under "
+                "a pinned model the dotted level is stored, (default) — the model's highest — included.")
 _FOLLOW = "(follow)"      # a model id never holds a parenthesis, so these two keys cannot shadow a model's
 _EFFORT = "(effort)"
 
@@ -608,14 +609,18 @@ def prompt_tags(registry: Registry, current: AgentBuild, *,
     )
     # The one dotted bullet — always the dotted AI's, since a bullet requires
     # its AI: follow stores no model, any other its id. The effort row under
-    # it stores its pick; its (default) stores nothing.
+    # it stores its pick. Its (default) stores nothing under follow, which
+    # keeps following the engine's level; under a pinned model it is stored
+    # too, so a pin is a whole pair (operator, 2026-09-29).
     ai = registry.ai_for(build)
     if ai is not None:
         dotted = next(((key, model) for key, (owner, model) in _model_keys(registry).items()
                        if key in picked and owner is ai), None)
-        bullet = dotted[0] if dotted is not None else _follow_key(ai)
-        build = replace(build, model=dotted[1].id if dotted is not None else None,
-                        effort=result.choices.get(_effort_key(bullet)))
+        bullet, pinned = dotted if dotted is not None else (_follow_key(ai), None)
+        effort = result.choices.get(_effort_key(bullet))
+        if pinned is not None and effort is None:
+            effort = pinned.top_effort
+        build = replace(build, model=pinned.id if pinned is not None else None, effort=effort)
     # A harness that cannot run the picked AI is not stored: the instance
     # falls back to the AI's own harness (the form's warning zone said so).
     harness = registry.harness_for(build)

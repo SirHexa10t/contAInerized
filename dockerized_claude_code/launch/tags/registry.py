@@ -448,13 +448,25 @@ def _validate(reg: Registry, layers: dict[str, Layer], fragments: dict[str, Poli
                     f"— no {COMMANDS_DIR_NAME}/{command}.md; available: {available}")
 
     # addendum bodies only reference launcher-known placeholders — a typo'd
-    # `{cred_cils}` would otherwise crash compose at launch time.
+    # `{cred_cils}` would otherwise crash compose at launch time — and must
+    # RENDER: a bare `{}` names no field, so it passes the name check and
+    # still raises in `str.format` at launch; a lone brace does not even
+    # parse (strict-reviewer, gate addenda). Rendering each body here with a
+    # stand-in for every known value turns both into a scan error that names
+    # the file.
+    stand_ins = {name: "x" for name in KNOWN_PLACEHOLDERS}
     for tag in reg.get_all():
-        if tag.addendum is None:
-            continue
-        unknown = referenced_placeholders(tag.addendum[1]) - KNOWN_PLACEHOLDERS
-        if unknown:
-            raise TagError(
-                f"{tag.path}: [addendum] body references unknown placeholder(s) "
-                f"{sorted(unknown)} — known: {sorted(KNOWN_PLACEHOLDERS)}"
-            )
+        for title, body in tag.addendums:
+            where = f"{tag.path}: [[addendum]] {title!r}"
+            try:
+                unknown = referenced_placeholders(body) - KNOWN_PLACEHOLDERS
+                if not unknown:
+                    body.format(**stand_ins)
+            except (ValueError, IndexError, KeyError, AttributeError, TypeError) as error:
+                raise TagError(f"{where} body cannot be rendered ({error}) — write a literal brace "
+                               f"as {{{{ or }}}}") from None
+            if unknown:
+                raise TagError(
+                    f"{where} body references unknown placeholder(s) "
+                    f"{sorted(unknown)} — known: {sorted(KNOWN_PLACEHOLDERS)}"
+                )

@@ -58,7 +58,7 @@ live coworker: with the grants above and no {firewall}, it reached arbitrary
 hosts and installed packages off the network unsupervised. Keep {firewall}
 checked unless the group's work genuinely needs the open internet."""
 
-[addendum]
+[[addendum]]
 title = "Coworking"
 body  = """You may be working alongside other agent instances, coordinated by a host-side hub. A peer's message arrives as an ordinary prompt; your reply is captured and forwarded to that peer verbatim. Follow this protocol:
 

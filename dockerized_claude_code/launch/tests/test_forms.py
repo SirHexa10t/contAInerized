@@ -369,6 +369,16 @@ class TestPromptTags(unittest.TestCase):
                                        AgentBuild(engine="poet", ai="claude"))
                 self.assertEqual(build.model, model)
 
+    def test_a_pinned_model_stores_its_default_level_too(self):
+        # A pin is a whole pair (operator, 2026-09-29): the dot on "max
+        # (default)" writes `effort = "max"`; a model with no range writes none.
+        for model, level in (("claude-opus-5-5", "max"), ("claude-opus-4-5-20251101", "high"),
+                             ("claude-haiku-4-5-20251001", None)):
+            with self.subTest(model=model):
+                build = self._run_with(["poet", "claude", f"claude:{model}"], {f"claude:{model}:(effort)": None},
+                                       AgentBuild(engine="poet", ai="claude"))
+                self.assertEqual((build.model, build.effort), (model, level))
+
     def test_the_pick_under_the_dotted_bullet_is_stored(self):
         build = self._run_with(["poet", "claude", "claude:claude-opus-5-5"], {"claude:claude-opus-5-5:(effort)": "low"},
                                AgentBuild(engine="poet", ai="claude"))
@@ -473,7 +483,7 @@ class TestModelRows(unittest.TestCase):
         self.assertIn("follow the engine", self.text(follow))
         self.assertIn("Sonnet-5", self.text(follow, {"poet", "claude"}))          # poet → 2025Q3 → claude-sonnet-5
         self.assertIn("Haiku-4.5", self.text(follow, {"golem", "claude"}))        # golem → the Haiku ALIAS, resolved
-        self.assertIn("Fable-5.1", self.text(follow, {"thinker", "claude"}))
+        self.assertIn("Opus-5.5", self.text(follow, {"thinker", "claude"}))
 
     def test_a_live_stored_pin_is_prefilled_by_id_or_alias(self):
         for spelling in ("claude-haiku-4-5-20251001", "claude-haiku-4-5"):
@@ -493,7 +503,9 @@ class TestModelRows(unittest.TestCase):
         self.assertIn("the tier moves, the instance moves with it", rows["claude:(follow)"])
         self.assertIn("replacing the engine's rated pairing", rows["claude:claude-opus-5-5"])
         self.assertIn("runs at the model's highest level", rows["claude:claude-opus-5-5"])
-        self.assertIn("The one marked (default) stores nothing", rows["claude:claude-opus-5-5:(effort)"])
+        self.assertIn("the one marked (default) is the engine's rated level and stores nothing",
+                      rows["claude:claude-opus-5-5:(effort)"])
+        self.assertIn("Under a pinned model the dotted level is stored", rows["claude:claude-opus-5-5:(effort)"])
 
     def test_an_effort_row_offers_its_models_levels_with_the_default_tagged_not_added(self):
         # No "default" position (operator, 2026-09-29): the levels alone, the

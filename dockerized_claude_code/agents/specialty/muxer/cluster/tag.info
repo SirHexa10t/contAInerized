@@ -33,7 +33,7 @@ full_description  = "Marks this agent as a MEMBER of a cluster: several agents l
 # a cluster member that did not know it was one would introduce itself wrongly
 # and address nobody. See launch/cluster/state.py's FORCED_SPECIALTIES.
 
-[addendum]
+[[addendum]]
 title = "Cohabiting"
 body  = """You are one of several agents living in this container, all working the same project. Your siblings are peers — there is no manager and no hierarchy here.
 

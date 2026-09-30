@@ -16,13 +16,13 @@
 
 claude-fable-5-1             efforts=low,medium,high,xhigh,max                      # not sooner than 2027-09-01
 claude-fable-5               efforts=low,medium,high,xhigh,max                      # 2027-06-09
-claude-opus-5-5              efforts=low,medium,high,xhigh,max                      # 2027-09-22 — available, not yet a tier: unrated (efforts.tiers)
+claude-opus-5-5              efforts=low,medium,high,xhigh,max                      # 2027-09-22 — Claude's best since 2026-09-29 (efforts.tiers)
 claude-opus-5                efforts=low,medium,high,xhigh,max                      # 2027-07-24
 claude-opus-4-8              efforts=low,medium,high,xhigh,max                      # 2027-05-28
 claude-opus-4-7              efforts=low,medium,high,xhigh,max                      # 2027-04-16
 claude-opus-4-6              efforts=low,medium,high,max                            # 2027-02-05 — takes max but NOT xhigh (Anthropic's effort page)
 claude-opus-4-5-20251101     efforts=low,medium,high                                # 2026-11-24
-claude-sonnet-5-5            efforts=low,medium,high,xhigh,max                      # 2027-09-28 — released 2026-09-28; available, not yet a tier: unrated
+claude-sonnet-5-5            efforts=low,medium,high,xhigh,max                      # 2027-09-28 — released 2026-09-28; rated, held until AA measures it in full (efforts.tiers)
 claude-sonnet-5              efforts=low,medium,high,xhigh,max                      # 2027-06-30
 claude-sonnet-4-6            efforts=low,medium,high,max                            # 2027-02-17 — takes max but NOT xhigh
 claude-sonnet-4-5-20250929   efforts=-                                              # 2026-09-29 — the floor has passed, still Active (no notice); takes no effort level (absent from Anthropic's effort page)

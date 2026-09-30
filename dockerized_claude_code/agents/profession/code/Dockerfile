@@ -105,7 +105,7 @@ ARG INSTALL_RUST=1
 RUN : "${INSTALL_RUST}" "${FORCE_INSTALLS_REFRESH}" \
  && sed -i '/^rust$/d' /var/log/claude-agents/install_failures.log \
  && if [ "$INSTALL_RUST" = "1" ]; then \
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --component clippy \
         || { echo "rust" >> /var/log/claude-agents/install_failures.log; echo "  ⚠ rust install failed; continuing" >&2; }; \
     fi
 

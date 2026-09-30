@@ -8,7 +8,7 @@ short_description = "outbound whitelist"
 forbid_on         = ["member", "cluster"]
 full_description  = """Outbound network locked to a whitelist. An iptables deny-all firewall is applied at container start; only launcher-resolved addresses (Anthropic endpoints + user_extras/firewall_whitelist.txt) are reachable."""
 
-[addendum]
+[[addendum]]
 title = "Firewall"
 body  = """You are currently running with a firewall in place, a fact the user is aware of. Blocked outbound requests surface as `ECONNREFUSED` / `ConnectionRefused` / "Connection refused" from WebFetch, curl, npm install, git clone, etc. (immediate, not a timeout).
 

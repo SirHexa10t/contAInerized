@@ -38,6 +38,7 @@ import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 from typing import Any, ClassVar
 
 INFO_FILE = "tag.info"       # per-tag manifest (TOML) — presence marks a dir as an offered tag
@@ -190,10 +191,12 @@ class Tag:
                           of full_description when unset.
       full_description  — full prose; the form's body panel shows it while
                           the row is focused.
-      addendum          — optional (title, body) from the `[addendum]` table:
-                          a launch-time CLAUDE.md section injected while the
-                          tag is active. Bodies may use the placeholders
-                          documented in tags/addendums.py.
+      addendums         — the `[[addendum]]` tables, each an `Addendum`
+                          (title, body), in file order: launch-time CLAUDE.md sections injected
+                          while the tag is active. A tag may carry several
+                          (`[code]`: its credentials and its Rust build rule).
+                          Bodies may use the placeholders documented in
+                          tags/addendums.py.
       requires          — names of tags that must also be active — DERIVED
                           from tree position by the scanner, never authored.
       wants             — 1-directional (name, message) pairs: this tag
@@ -222,7 +225,7 @@ class Tag:
     shortname: str = ""
     short_description: str = ""
     full_description: str = ""
-    addendum: tuple[str, str] | None = None
+    addendums: tuple[Addendum, ...] = ()
     requires: frozenset[str] = frozenset()
     wants: tuple[tuple[str, str], ...] = ()
     commands: tuple[str, ...] = ()
@@ -397,22 +400,46 @@ def walk_tag_tree(root: Path) -> Iterator[tuple[Path, tuple[str, ...]]]:
     yield from rec(root, ())
 
 
-def _parse_addendum(info: dict[str, Any], tag_dir: Path) -> tuple[str, str] | None:
-    """Extract the optional `[addendum]` table as a (title, body) pair. Both
-    keys required, both strings; anything else is a `TagError`. Placeholder
-    validity (`{cred_clis}` etc.) is checked cross-kind in the registry
-    validator, against the set tags/addendums.py publishes."""
+class Addendum(NamedTuple):
+    """One addendum: a `title` (rendered `### <title>`) and a markdown `body`
+    (verbatim underneath). An empty `body` means inactive this launch —
+    filtered out before rendering. It lives here, in the leaf, so a tag can
+    hold its addendums as this type; tags/addendums.py imports it."""
+    title: str
+    body: str
+
+
+def _parse_addendums(info: dict[str, Any], tag_dir: Path) -> tuple[Addendum, ...]:
+    """Extract the optional `[[addendum]]` tables as (title, body) pairs, in
+    file order. ONE spelling: a single `[addendum]` table is refused with the
+    fix, since a tag may carry several and two ways to write one would be a
+    second spelling (operator, 2026-09-30, gate addenda). Every entry needs
+    both keys as non-empty strings, and titles are unique within the tag —
+    each renders as its own `### <title>`. Anything else is a `TagError`.
+    Placeholder validity (`{cred_clis}` etc.) is checked cross-kind in the
+    registry validator, against the set tags/addendums.py publishes."""
     raw = info.get("addendum")
     if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise TagError(f"{tag_dir}/{INFO_FILE}: [addendum] must be a table, got {type(raw).__name__}")
-    title, body = raw.get("title"), raw.get("body")
-    if not isinstance(title, str) or not title.strip():
-        raise TagError(f"{tag_dir}/{INFO_FILE}: [addendum] needs a non-empty string `title`")
-    if not isinstance(body, str) or not body.strip():
-        raise TagError(f"{tag_dir}/{INFO_FILE}: [addendum] needs a non-empty string `body`")
-    return (title.strip(), body.strip())
+        return ()
+    where = f"{tag_dir}/{INFO_FILE}"
+    if isinstance(raw, dict):
+        raise TagError(f"{where}: write [[addendum]], not [addendum] — a tag may carry several, "
+                       f"each its own [[addendum]] table")
+    if not isinstance(raw, list):
+        raise TagError(f"{where}: [[addendum]] must be an array of tables, got {type(raw).__name__}")
+    out: list[Addendum] = []
+    for number, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict):
+            raise TagError(f"{where}: [[addendum]] #{number} must be a table, got {type(entry).__name__}")
+        title, body = entry.get("title"), entry.get("body")
+        if not isinstance(title, str) or not title.strip():
+            raise TagError(f"{where}: [[addendum]] #{number} needs a non-empty string `title`")
+        if not isinstance(body, str) or not body.strip():
+            raise TagError(f"{where}: [[addendum]] #{number} needs a non-empty string `body`")
+        if any(title.strip() == seen.title for seen in out):
+            raise TagError(f"{where}: [[addendum]] #{number} repeats the title {title.strip()!r}")
+        out.append(Addendum(title.strip(), body.strip()))
+    return tuple(out)
 
 
 def common_fields(tag_dir: Path) -> dict[str, Any]:
@@ -432,7 +459,7 @@ def common_fields(tag_dir: Path) -> dict[str, Any]:
         "shortname": str(info.get("shortname", "") or tag_dir.name),
         "short_description": short,
         "full_description": full,
-        "addendum": _parse_addendum(info, tag_dir),
+        "addendums": _parse_addendums(info, tag_dir),
         "wants": parse_wants(info, tag_dir),
         "commands": parse_commands(info, tag_dir),
         "docker": parse_docker(tag_dir),

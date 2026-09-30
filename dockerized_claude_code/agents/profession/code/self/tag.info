@@ -3,7 +3,7 @@ short_description = "develops this launcher itself"
 full_description  = "Works on THIS project — the launcher's own repository (its Python packages, the agents/ tag tree, the tests, the docs). Bakes the launcher's dev toolchain into the image: the runtime deps its test suite imports (prompt_toolkit, rich) plus mypy, so `bash check.sh` passes out of the box instead of failing on imports after every relaunch (ruff already arrives with [code]). Ships the project's own maintenance commands. Built on [code]; pointless for an instance whose workspace is any other project."
 commands          = ["ai_project-test", "ai_project-update-models"]
 
-[addendum]
+[[addendum]]
 title = "Developing the launcher"
 body  = """Your workspace is the launcher project itself — the tool that built and launched you.
 

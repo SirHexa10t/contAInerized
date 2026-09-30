@@ -127,7 +127,7 @@ class TestRendering(unittest.TestCase):
         # by the researcher 2026-09-14); its thinking switch is the knob.
         claude = REGISTRY.ais["claude"]
         render = lambda name: render_tier(REGISTRY.harnesses["claude-code"], REGISTRY.engines[name].budget, claude).map
-        self.assertEqual(render("default"), {"ANTHROPIC_MODEL": "claude-fable-5-1", "CLAUDE_CODE_EFFORT_LEVEL": "max",
+        self.assertEqual(render("default"), {"ANTHROPIC_MODEL": "claude-opus-5-5", "CLAUDE_CODE_EFFORT_LEVEL": "max",
                                              "CLAUDE_CODE_ENABLE_THINKING": "1"})
         self.assertEqual(render("golem"), {
             "ANTHROPIC_MODEL": "claude-haiku-4-5",
@@ -138,7 +138,7 @@ class TestRendering(unittest.TestCase):
         self.assertEqual(render("poet"), {"ANTHROPIC_MODEL": "claude-sonnet-5", "CLAUDE_CODE_EFFORT_LEVEL": "medium",
                                           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "ENABLE_TOOL_SEARCH": "true",
                                           "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "18000"})
-        self.assertEqual(render("reliable")["ANTHROPIC_MODEL"], "claude-opus-5")
+        self.assertEqual(render("reliable")["ANTHROPIC_MODEL"], "claude-opus-5-5")
         self.assertEqual(render("quick")["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "21600")
 
     def test_unmapped_purposes_are_reported_never_invented(self):

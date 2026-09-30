@@ -3,7 +3,7 @@
 # standards are and how a tier is chosen (the cheapest live, rated
 # configuration that meets the standard, else the AI's best, flagged). Index
 # v4.3 (est. = AA's estimate) read 2026-09-14 from an AA model page's embedded
-# records; prices USD per 1M tokens in / out from docs.x.ai/developers/models
+# records, every figure below re-read 2026-09-29; prices USD per 1M tokens in / out from docs.x.ai/developers/models
 # (long-context requests, ≥ 200k prompt tokens, bill at double).
 #
 # Ids as xAI spells them (grok-4.6 — Artificial Analysis's slugs use dashes);
@@ -14,14 +14,17 @@
 # own: its models payload lists reasoningEffortOptions low / medium / high /
 # xhigh for 4.5 – 4.7 (grok-4.3 adds `none`; read 2026-09-28). Whether Grok
 # Build validates the word or passes it through ("effort level if supported")
-# is still unprobed. Grok's ceiling is 4.6 at 44.41, so 2026Q2 and 2026Q3
+# is still unprobed. Grok's ceiling is 4.7 at 46.45, so 2026Q2 and 2026Q3
 # fall short.
 # Ids verified 2026-09-25 against docs.x.ai/developers/models and its
 # retirement pages (`ai_project-update-models`): every pin is live and priced
-# as recorded below; nothing retired since 2026-05-15. AVAILABLE, NOT YET A
-# TIER: grok-4.7 (September 2026, xAI's new flagship at 4.6's price, 2 / 6),
-# without an Artificial Analysis index at this read — a tier must be RATED
-# (agents/ai/capability.standards), so the three rungs on 4.6 stay until it is.
+# as recorded below; nothing retired since 2026-05-15. grok-4.7 (released
+# 2026-09-21 per AA, xAI's flagship at 4.6's price, 2 / 6) is rated since
+# 2026-09-29 at high and xhigh — low and medium not yet — and answers 2026Q2,
+# 2026Q3 and best. HELD: grok-build-0.1 (1 / 2) would undercut every rung up
+# to 2025Q3, but AA only estimates it (27.17) and rates its vendor alias
+# grok-code-fast-1 as a separate model 13 points lower, so it waits for a
+# measured, unambiguous record (operator, 2026-09-29).
 # WHAT A LAUNCH RUNS (2026-09-29): an instance that FOLLOWS its engine runs its
 # tier's pair below, model AND effort. One that PINS a model runs that model
 # at its highest level unless it pins a level too (agents/ai/<ai>/models.list,
@@ -31,7 +34,7 @@
 [scale]
 efforts = ["low", "medium", "high", "xhigh"]
 
-[cheapest]                       # 14.61 est. · 1.25 / 2.5 — a non-reasoning model: thinking is off by nature, no effort applies. xAI prices it like grok-4.3 (AA shows 2 / 6, its reasoning sibling's price — the vendor's bill governs); grok-4.3's non-reasoning form (14.54) ties on price but has no id of its own, so the priced id with the higher index it is
+[cheapest]                       # 14.61 est. · 1.25 / 2.5 — a non-reasoning model: thinking is off by nature, no effort applies. xAI prices it like grok-4.3 (AA shows 2 / 6, its reasoning sibling's price — the vendor's bill governs); grok-4.3's non-reasoning form (13.99) ties on price but has no id of its own, so the priced id with the higher index it is
 model  = "grok-4.20-0309-non-reasoning"
 
 [2025Q1]                         # 24.30 est. · 1.25 / 2.5 — the cheapest rated configuration past 17.71
@@ -42,31 +45,32 @@ effort = "low"
 model  = "grok-4.3"
 effort = "low"
 
-[2025Q3]                         # 25.39 · 1.25 / 2.5 — medium (24.78 est.) misses 24.88 by 0.10
+[2025Q3]                         # 24.88 · 1.25 / 2.5 — exactly the bar, so a re-read may tip it; medium (24.78 est.) misses it by 0.10
 model  = "grok-4.3"
 effort = "high"
 
-[2025Q4]                         # 35.41 · 2 / 6 — 4.5 and 4.6 share a price; 4.6 at low is the lowest index meeting 30.45
+[2025Q4]                         # 35.12 · 2 / 6 — 4.5, 4.6 and 4.7 share a price; 4.6 at low is the lowest index meeting 30.45
 model  = "grok-4.6"
 effort = "low"
 
-[2026Q1]                         # 39.08 · 2 / 6 — the lowest index meeting 38.98 (4.6 at medium, 43.01, is the same price)
-model  = "grok-4.5"
-effort = "high"
-
-[2026Q2]                         # FALLS SHORT of 49.70: Grok's best, 44.27 (44.41 at high)
+[2026Q1]                         # 42.84 · 2 / 6 — 4.5 at high (38.81) now misses 38.98 by 0.17; 4.6 at medium is the lowest index meeting it at that price
 model  = "grok-4.6"
+effort = "medium"
+
+[2026Q2]                         # FALLS SHORT of 49.70: Grok's best, 46.45 (46.33 at high)
+model  = "grok-4.7"
 effort = "xhigh"
 
-[2026Q3]                         # FALLS SHORT of 53.37: Grok's best
-model  = "grok-4.6"
+[2026Q3]                         # FALLS SHORT of 57.62: Grok's best
+model  = "grok-4.7"
 effort = "xhigh"
 
-[best]                           # 44.27 · 2 / 6 — the vendor's top level; AA measures high (44.41) 0.14 above it, within noise
-model  = "grok-4.6"
+[best]                           # 46.45 · 2 / 6 — the vendor's top level, and AA's highest
+model  = "grok-4.7"
 effort = "xhigh"
 
-# Also rated: Grok 4.6 high 44.41 / medium 43.01; Grok 4.3 medium 24.78 est. /
-# non-reasoning 14.54; Grok 4.20 0309 reasoning 25.22 est. / v2 25.66 est.;
+# Also rated: Grok 4.7 high 46.33; Grok 4.6 high 44.31 / xhigh 44.20 / low
+# 35.12; Grok 4.5 high 38.81; Grok 4.3 medium 24.78 est. / non-reasoning
+# 13.99; Grok 4.20 0309 reasoning 25.22 est. / v2 25.66 est.;
 # Grok Build 0.1 27.17 est. (1 / 2, 256k). Grok 4 Fast (17.94 est.) is no
 # longer in xAI's line-up.

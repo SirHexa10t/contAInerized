@@ -32,7 +32,7 @@ full_description  = "Turns a cluster from neighbours into a team: members are OB
 #
 # NO `warn`: obliging consultation grants an instance no authority it lacked.
 
-[addendum]
+[[addendum]]
 title = "Consulting your siblings is mandatory here"
 body  = """This cluster runs on obliged consultation: you may not commit to a consequential decision alone. The rule and the verbs are in the "Cohabiting" section above — what THIS tag changes is that it is not optional, and that you will be reminded at every turn.
 

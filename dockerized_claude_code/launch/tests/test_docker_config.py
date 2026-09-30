@@ -643,7 +643,7 @@ class TestCoworkMountRealInstance(unittest.TestCase):
                               "Bash(diff:*)"}, allow)
         # And the addendum really does instruct those operations — if it stops
         # saying so, this floor needs rejustifying rather than quietly standing.
-        _, body = cowork.addendum
+        body = cowork.addendums[0].body
         self.assertIn("Copy what you take up", body)
 
     def test_fragment_omits_shell_twins_of_allowed_tools(self):

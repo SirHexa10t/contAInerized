@@ -248,7 +248,7 @@ Multi-agent manager
 tip: ctrl+v to paste image
     otherwise, just leave your images in /workspace/
     Not working in container... Workaround?
-    
+
 
 phone notifications when AI is done ( {auto} mode only? )
     "{notify}" mode?
@@ -281,7 +281,7 @@ hacker agent - look for vulnerabilities. Attempt their exploitation (proof of th
     don't write/update/change any files online
     just think and advise. Don't make changes.
     /workspace is made ro
-    
+
 
 
 
@@ -302,7 +302,7 @@ Add hooks:
 
 Add overwrite for credentials within project: if credentials folder exists in project, use it INSTEAD of in ~/.claude-agents
     Change credential folders from <service_name> to .<service_name>  ?
-        Would help with the format for overwriting these via project-dir files 
+        Would help with the format for overwriting these via project-dir files
 
 
 Check if man() needs an update
@@ -357,8 +357,8 @@ add another setup script/form (within Picker, like [code]'s definitions?) for th
                 regular users might not like Claude-Code's broken links on multiple lines of non-absurdly large terminal windows
         include the credentials for Claude Code?
             Move those credentials to the user-s folder?
-            
-    
+
+
 
 <-git> tag ; no push, no commit, no stage, no fetch; nothing. As if it's not a git remo
     Inherit from <-gpush> ?
@@ -371,10 +371,10 @@ future professions (require extra tooling); list above is more comrehensive:
         3D model creator/tweaker. Needs Blender, CAD, slicing software...
     Audio
         sound editor; should have tools (inluding AI tools?) that can identify/create/remove speech, create music, remix songs / tune them
-    
+
 
 Maybe indent the form items in inheritence after-all...
-    
+
 
 A dumping-area (all have access), where files can be copied into.
     Can we restrict execution in that dir?
@@ -431,7 +431,7 @@ next AI to implement:
         - concise args: if you need 2 fields from 2 objects for a total of 4 args, go all the way in one direction rather than remain ambiguous :
         -- Option 1: you may as well just receive the 2 objects in full
         -- Option 2: run as a math/util function that's blind to the existance of such objects, and only cares about those values
-        - does the function name make sense? 
+        - does the function name make sense?
         - does it make sense that the function returns its specific types? ('yes' if they're produced during the function's run)
         -- can the function return just one item and have the other items inferred from the returned one? Return more than one item if they're *complementary*, not derivative
         - does the function compute/fetch something that gets recomputed/refetched by following function calls? If so, consider passing the computing/fetching as an arg, outside the function, for the sake of efficiency (depends on your code layout...)
@@ -447,7 +447,7 @@ next AI to implement:
 
 
 `--list-instances` flag, listing available instances that can be input as arg. Should print list of 1 per line:
-    <instance_name>  ("INVALID"/"RUNNING"/"CURRENT DIR") ( <instance_path> ) 
+    <instance_name>  ("INVALID"/"RUNNING"/"CURRENT DIR") ( <instance_path> )
 
 
 Can we integrate a "find" feature? Maybe through {mux} ?
@@ -475,12 +475,6 @@ Write in README about the collaborative AI:
 
 
 
-
-
-
 CANCELLED:
     Activate spellcheck within claude code
         (no such feature)
-
-
-
